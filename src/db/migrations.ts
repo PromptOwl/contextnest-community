@@ -1,0 +1,309 @@
+import type Database from "better-sqlite3";
+
+export function runMigrations(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      name TEXT,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS nests (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      description TEXT,
+      visibility TEXT NOT NULL DEFAULT 'private'
+        CHECK(visibility IN ('private', 'public')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(user_id, slug)
+    );
+
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      key_hash TEXT UNIQUE NOT NULL,
+      key_prefix TEXT NOT NULL,
+      nest_id TEXT REFERENCES nests(id) ON DELETE CASCADE,
+      label TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
+    CREATE INDEX IF NOT EXISTS idx_keys_user ON api_keys(user_id);
+    CREATE INDEX IF NOT EXISTS idx_keys_hash ON api_keys(key_hash);
+
+    CREATE TABLE IF NOT EXISTS nest_collaborators (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      permission TEXT NOT NULL CHECK(permission IN ('read', 'write', 'admin')),
+      granted_by TEXT NOT NULL REFERENCES users(id),
+      granted_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_nest_collab_nest ON nest_collaborators(nest_id);
+    CREATE INDEX IF NOT EXISTS idx_nest_collab_user ON nest_collaborators(user_id);
+
+    -- License validation cache
+    CREATE TABLE IF NOT EXISTS license_cache (
+      key TEXT PRIMARY KEY,
+      tier TEXT NOT NULL,
+      org TEXT,
+      limits_json TEXT,
+      validated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Telemetry event log (batched and sent to PromptOwl)
+    CREATE TABLE IF NOT EXISTS telemetry_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event TEXT NOT NULL,
+      data_json TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      sent INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+
+  // ─── Governance tables (ported from PromptOwl models) ───
+
+  db.exec(`
+    -- Steward assignments (mirrors PromptOwl ContextSteward model)
+    -- scope+target combination determines what the steward governs
+    -- Resolution priority: document(1) > folder(2) > tag(3) > nest(4)
+    CREATE TABLE IF NOT EXISTS stewards (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      scope TEXT NOT NULL CHECK(scope IN ('document', 'folder', 'tag', 'nest')),
+      node_pattern TEXT,           -- glob for document/folder scope (e.g. "nodes/api-*")
+      tag_name TEXT,               -- for tag scope
+      user_email TEXT NOT NULL,
+      user_id TEXT REFERENCES users(id),
+      role TEXT NOT NULL DEFAULT 'reviewer'
+        CHECK(role IN ('editor', 'reviewer', 'admin')),
+      can_approve INTEGER NOT NULL DEFAULT 1,
+      can_reject INTEGER NOT NULL DEFAULT 1,
+      assigned_by TEXT NOT NULL,
+      assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+      is_active INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX IF NOT EXISTS idx_stewards_nest ON stewards(nest_id);
+    CREATE INDEX IF NOT EXISTS idx_stewards_email ON stewards(user_email);
+    CREATE INDEX IF NOT EXISTS idx_stewards_scope ON stewards(nest_id, scope);
+
+    -- Review requests (mirrors PromptOwl ReviewRequest model)
+    -- Only one pending review per node version (enforced in code)
+    CREATE TABLE IF NOT EXISTS review_requests (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      requested_by TEXT NOT NULL,    -- email
+      requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+      request_note TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'approved', 'rejected', 'cancelled')),
+      resolved_by TEXT,              -- email
+      resolved_at TEXT,
+      resolution_note TEXT,
+      is_override INTEGER NOT NULL DEFAULT 0,
+      priority TEXT NOT NULL DEFAULT 'normal'
+        CHECK(priority IN ('low', 'normal', 'high', 'urgent'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_reviews_nest ON review_requests(nest_id);
+    CREATE INDEX IF NOT EXISTS idx_reviews_node ON review_requests(nest_id, node_id);
+    CREATE INDEX IF NOT EXISTS idx_reviews_status ON review_requests(nest_id, status);
+
+    -- Node versions (tracks every edit, approved version pinning)
+    -- The actual content lives on disk via NestStorage; this tracks metadata.
+    CREATE TABLE IF NOT EXISTS node_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      content_hash TEXT NOT NULL,    -- SHA-256 of content for conflict detection
+      author TEXT NOT NULL,          -- email
+      status TEXT NOT NULL DEFAULT 'draft'
+        CHECK(status IN ('draft', 'pending_review', 'approved', 'rejected')),
+      change_note TEXT,
+      tags_json TEXT,                -- JSON array of tags for steward resolution
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(nest_id, node_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_versions_node ON node_versions(nest_id, node_id);
+
+    -- Approved version pinning (which version AI tools serve)
+    CREATE TABLE IF NOT EXISTS approved_versions (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      approved_version INTEGER NOT NULL,
+      approved_by TEXT NOT NULL,     -- email
+      approved_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (nest_id, node_id)
+    );
+  `);
+
+  // ─── Idempotent column adds (schema evolution) ───
+
+  // Per-nest stewardship toggle (default: off — new docs auto-approved)
+  const nestCols = (db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>).map((c) => c.name);
+  if (!nestCols.includes("stewardship_enabled")) {
+    db.exec("ALTER TABLE nests ADD COLUMN stewardship_enabled INTEGER NOT NULL DEFAULT 0");
+  }
+
+  // Admin flag on users (first PromptOwl-authed user becomes the server admin)
+  const userCols = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
+  if (!userCols.includes("is_admin")) {
+    db.exec("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0");
+  }
+
+  // ─── Versioned migrations ───
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      id TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  const hasMigration = (id: string): boolean =>
+    !!db
+      .prepare("SELECT id FROM schema_migrations WHERE id = ?")
+      .get(id);
+
+  const recordMigration = (id: string) =>
+    db
+      .prepare("INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)")
+      .run(id);
+
+  // 002: PromptOwl parity — role set, tag/email normalization, node_tag_index
+  if (!hasMigration("002_steward_parity")) {
+    db.transaction(() => {
+      // Rebuild stewards with new CHECK: role IN (editor|reviewer|viewer)
+      // and add node_tag_index for SQL-joined tag resolution.
+      db.exec(`
+        CREATE TABLE stewards_new (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          scope TEXT NOT NULL CHECK(scope IN ('document', 'folder', 'tag', 'nest')),
+          node_pattern TEXT,
+          tag_name TEXT,
+          user_email TEXT NOT NULL,
+          user_id TEXT REFERENCES users(id),
+          role TEXT NOT NULL DEFAULT 'reviewer'
+            CHECK(role IN ('editor', 'reviewer', 'viewer')),
+          can_approve INTEGER NOT NULL DEFAULT 1,
+          can_reject INTEGER NOT NULL DEFAULT 1,
+          assigned_by TEXT NOT NULL,
+          assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+          is_active INTEGER NOT NULL DEFAULT 1
+        );
+
+        -- Copy rows; map legacy 'admin' role to 'reviewer', normalize tag_name + email
+        INSERT INTO stewards_new
+          (id, nest_id, scope, node_pattern, tag_name, user_email, user_id,
+           role, can_approve, can_reject, assigned_by, assigned_at, is_active)
+        SELECT
+          id, nest_id, scope, node_pattern,
+          CASE
+            WHEN tag_name IS NULL THEN NULL
+            ELSE lower(ltrim(tag_name, '#'))
+          END,
+          lower(user_email),
+          user_id,
+          CASE role WHEN 'admin' THEN 'reviewer' ELSE role END,
+          can_approve, can_reject, assigned_by, assigned_at, is_active
+        FROM stewards;
+
+        DROP TABLE stewards;
+        ALTER TABLE stewards_new RENAME TO stewards;
+
+        CREATE INDEX idx_stewards_nest ON stewards(nest_id);
+        CREATE INDEX idx_stewards_email ON stewards(user_email);
+        CREATE INDEX idx_stewards_scope ON stewards(nest_id, scope);
+      `);
+
+      // Partial unique indexes — one record per (nest, scope, target, email).
+      db.exec(`
+        CREATE UNIQUE INDEX idx_stewards_uniq_nest
+          ON stewards(nest_id, user_email)
+          WHERE scope = 'nest' AND is_active = 1;
+
+        CREATE UNIQUE INDEX idx_stewards_uniq_document
+          ON stewards(nest_id, node_pattern, user_email)
+          WHERE scope = 'document' AND node_pattern IS NOT NULL AND is_active = 1;
+
+        CREATE UNIQUE INDEX idx_stewards_uniq_folder
+          ON stewards(nest_id, node_pattern, user_email)
+          WHERE scope = 'folder' AND node_pattern IS NOT NULL AND is_active = 1;
+
+        CREATE UNIQUE INDEX idx_stewards_uniq_tag
+          ON stewards(nest_id, tag_name, user_email)
+          WHERE scope = 'tag' AND tag_name IS NOT NULL AND is_active = 1;
+
+        -- Resolution support indexes
+        CREATE INDEX idx_stewards_tag_lookup
+          ON stewards(nest_id, tag_name)
+          WHERE scope = 'tag' AND is_active = 1;
+        CREATE INDEX idx_stewards_folder_lookup
+          ON stewards(nest_id, node_pattern)
+          WHERE scope = 'folder' AND is_active = 1;
+        CREATE INDEX idx_stewards_doc_lookup
+          ON stewards(nest_id, node_pattern)
+          WHERE scope = 'document' AND is_active = 1;
+      `);
+
+      // Tag index — node -> tag mapping for fast SQL-joined resolution.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS node_tag_index (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          tag_name TEXT NOT NULL,
+          PRIMARY KEY (nest_id, node_id, tag_name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_node_tag_by_tag
+          ON node_tag_index(nest_id, tag_name);
+      `);
+
+      // Backfill node_tag_index from existing node_versions.tags_json.
+      // For each (nest_id, node_id), take the most recent version's tags.
+      type VersionRow = { nest_id: string; node_id: string; tags_json: string | null };
+      const rows = db
+        .prepare(
+          `SELECT nv.nest_id, nv.node_id, nv.tags_json
+           FROM node_versions nv
+           JOIN (
+             SELECT nest_id, node_id, MAX(version) AS v
+             FROM node_versions
+             GROUP BY nest_id, node_id
+           ) latest
+             ON latest.nest_id = nv.nest_id
+            AND latest.node_id = nv.node_id
+            AND latest.v = nv.version`,
+        )
+        .all() as VersionRow[];
+
+      const insertTag = db.prepare(
+        "INSERT OR IGNORE INTO node_tag_index (nest_id, node_id, tag_name) VALUES (?, ?, ?)",
+      );
+      for (const row of rows) {
+        if (!row.tags_json) continue;
+        let tags: unknown;
+        try {
+          tags = JSON.parse(row.tags_json);
+        } catch {
+          continue;
+        }
+        if (!Array.isArray(tags)) continue;
+        for (const raw of tags) {
+          if (typeof raw !== "string") continue;
+          const norm = raw.trim().replace(/^#+/, "").toLowerCase();
+          if (norm) insertTag.run(row.nest_id, row.node_id, norm);
+        }
+      }
+
+      recordMigration("002_steward_parity");
+    })();
+  }
+}

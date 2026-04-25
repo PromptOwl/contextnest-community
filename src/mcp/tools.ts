@@ -1,0 +1,677 @@
+import type {
+  NestStorage,
+  GraphQueryEngine,
+  ContextNode,
+} from "@promptowl/contextnest-engine";
+import { serializeDocument } from "@promptowl/contextnest-engine";
+import * as stewardship from "../governance/stewardship-service.js";
+import * as reviews from "../governance/review-service.js";
+import * as versions from "../governance/version-service.js";
+import { loadStewardsConfig } from "../governance/stewards-parser.js";
+import { isStewardshipEnabled } from "../nests/service.js";
+import { syncNodeTags } from "../governance/tag-index-service.js";
+
+export interface McpToolContext {
+  storage: NestStorage;
+  queryEngine: GraphQueryEngine;
+  nestId: string;
+  userEmail: string;
+}
+
+export const TOOL_DEFINITIONS = [
+  {
+    name: "context_init",
+    description:
+      "Load the vault's CONTEXT.md which contains operating instructions and behavioral guidelines. Call this FIRST in every conversation.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "context_overview",
+    description:
+      "Get a complete map of the vault: total node count, types, tags, and a title+snippet for every node.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "context_search",
+    description:
+      "Full-text keyword search across all node content, titles, tags, and metadata.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: { type: "string", description: "Search terms" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "context_query",
+    description:
+      "Run a structured selector query. Supports: #tag, type:X, [[Title]], scope:X. Combine with +AND, |OR, -NOT.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: { type: "string", description: "Selector query" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "context_get",
+    description: "Get the FULL content of a specific node by title or ID.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node" },
+        id: { type: "string", description: "ID of the node" },
+      },
+    },
+  },
+  {
+    name: "context_list",
+    description:
+      "Browse vault contents with optional type, tag, or limit filters.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        type: { type: "string", description: "Filter by node type" },
+        tag: { type: "string", description: "Filter by tag" },
+        limit: { type: "number", description: "Max nodes to return" },
+      },
+    },
+  },
+  {
+    name: "context_resolve",
+    description:
+      "Full context resolution — run a selector and return complete node content, respecting a token budget.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        selector: {
+          type: "string",
+          description: "Selector query string",
+        },
+        max_tokens: {
+          type: "number",
+          description: "Approximate token budget (default: 8000)",
+        },
+      },
+      required: ["selector"],
+    },
+  },
+  {
+    name: "context_create",
+    description: "Create a new knowledge node in the vault.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Descriptive title" },
+        content: {
+          type: "string",
+          description: "Markdown content body",
+        },
+        type: {
+          type: "string",
+          description: "Node type (default: document)",
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Tags",
+        },
+        scope: { type: "string", description: "Visibility scope" },
+      },
+      required: ["title", "content"],
+    },
+  },
+  {
+    name: "context_update",
+    description:
+      "Update an existing node — append, replace content, add tags.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: {
+          type: "string",
+          description: "Title of node to update",
+        },
+        content: {
+          type: "string",
+          description: "New content (replaces)",
+        },
+        append: { type: "string", description: "Content to append" },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "Tags to add",
+        },
+        scope: { type: "string", description: "New scope" },
+      },
+      required: ["title"],
+    },
+  },
+
+  // ─── Governance Tools ───────────────────────────────────────────────
+
+  {
+    name: "context_stewards",
+    description:
+      "Show who the data stewards are for a specific node, or list all stewards for the vault. Stewards are the people who approve or reject changes before they go live.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: {
+          type: "string",
+          description: "Title of node to resolve stewards for (optional — omit for all stewards)",
+        },
+      },
+    },
+  },
+  {
+    name: "context_review_queue",
+    description:
+      "Show documents pending review. These need a steward to approve or reject them before they become available to AI.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        status: {
+          type: "string",
+          description: "Filter by status: pending (default), approved, rejected, cancelled",
+        },
+      },
+    },
+  },
+  {
+    name: "context_submit_review",
+    description:
+      "Submit a node for steward review. The node will be marked as pending review and stewards will be notified.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node to submit" },
+        note: { type: "string", description: "Optional note for the reviewer" },
+        priority: { type: "string", description: "Priority: low, normal (default), high, urgent" },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "context_approve",
+    description:
+      "Approve a node that is pending review. Only stewards with approval permission can do this. The approved version becomes available to AI queries.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node to approve" },
+        note: { type: "string", description: "Optional approval note" },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "context_reject",
+    description:
+      "Reject a node that is pending review with a required note explaining what needs to change. Only stewards can reject.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node to reject" },
+        note: { type: "string", description: "Required: explain what needs to change" },
+      },
+      required: ["title", "note"],
+    },
+  },
+  {
+    name: "context_versions",
+    description:
+      "Show the version history of a node — all edits, who made them, their approval status, and which version is currently approved for AI use.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node" },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "context_assign_steward",
+    description:
+      "Assign a data steward to govern a scope (nest, tag, folder pattern, or specific document). Stewards review and approve changes before they go live.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        email: { type: "string", description: "Email of the person to assign as steward" },
+        scope: { type: "string", description: "Scope: nest (all docs), tag, folder, or document" },
+        target: { type: "string", description: "Scope target: tag name (e.g. #architecture), folder pattern (e.g. nodes/api-*), or document title" },
+        role: { type: "string", description: "Role: reviewer (default), editor, or viewer" },
+      },
+      required: ["email", "scope"],
+    },
+  },
+];
+
+export async function handleToolCall(
+  toolName: string,
+  args: Record<string, any>,
+  ctx: McpToolContext,
+): Promise<string> {
+  const { storage, queryEngine, nestId, userEmail } = ctx;
+
+  switch (toolName) {
+    case "context_init": {
+      const content = await storage.readContextMd();
+      if (!content)
+        return "No CONTEXT.md found. Use context_overview to see what's available.";
+      return `# Vault Instructions (CONTEXT.md)\n\n${content}`;
+    }
+
+    case "context_overview": {
+      const docs = await storage.discoverDocuments();
+      const types: Record<string, number> = {};
+      const tags: Record<string, number> = {};
+      for (const n of docs) {
+        const t = n.frontmatter.type || "document";
+        types[t] = (types[t] || 0) + 1;
+        for (const tag of n.frontmatter.tags || []) tags[tag] = (tags[tag] || 0) + 1;
+      }
+      const typeList = Object.entries(types).sort((a, b) => b[1] - a[1]).map(([t, c]) => `  ${t}: ${c}`).join("\n");
+      const tagList = Object.entries(tags).sort((a, b) => b[1] - a[1]).map(([t, c]) => `  ${t}: ${c}`).join("\n");
+      const nodeList = docs
+        .map(
+          (n, i) =>
+            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).slice(0, 4).join(" ")}\n   ${(n.body || "").slice(0, 120).replace(/\n/g, " ")}`,
+        )
+        .join("\n\n");
+      return `# Vault Overview\n**Total nodes:** ${docs.length}\n\n## Types\n${typeList}\n\n## Tags\n${tagList}\n\n## All Nodes\n\n${nodeList}`;
+    }
+
+    case "context_search": {
+      const docs = await storage.discoverDocuments();
+      const terms = (args.query || "").toLowerCase().split(/\s+/).filter(Boolean);
+      const matches = docs.filter((n) => {
+        const hay = [n.frontmatter.title, n.body || "", n.frontmatter.type || "", ...(n.frontmatter.tags || [])].join(" ").toLowerCase();
+        return terms.every((t: string) => hay.includes(t));
+      });
+      if (!matches.length) return `No nodes matched search: "${args.query}"`;
+      const results = matches
+        .map(
+          (n, i) =>
+            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}\n   ${(n.body || "").slice(0, 200).replace(/\n/g, " ")}`,
+        )
+        .join("\n\n");
+      return `Found ${matches.length} node(s) matching "${args.query}":\n\n${results}`;
+    }
+
+    case "context_query": {
+      const result = await queryEngine.query(args.query, { hops: 2 });
+      const nodes = result.documents;
+      if (!nodes.length) return `No nodes matched: ${args.query}`;
+      const list = nodes
+        .map(
+          (n, i) =>
+            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}`,
+        )
+        .join("\n\n");
+      return `Found ${nodes.length} node(s) for \`${args.query}\`:\n\n${list}`;
+    }
+
+    case "context_get": {
+      const docs = await storage.discoverDocuments();
+      let node: ContextNode | undefined;
+      if (args.title) {
+        node = docs.find(
+          (n) =>
+            n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+        );
+      } else if (args.id) {
+        node = docs.find((n) => n.id === args.id);
+      }
+      if (!node) return `Node not found: ${args.title || args.id}`;
+      const meta = [
+        `**Title:** ${node.frontmatter.title}`,
+        `**Type:** ${node.frontmatter.type || "document"}`,
+        node.frontmatter.tags?.length
+          ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      return `${meta}\n\n---\n\n${node.body || "(no content)"}`;
+    }
+
+    case "context_list": {
+      let docs = await storage.discoverDocuments();
+      if (args.type)
+        docs = docs.filter((n) => n.frontmatter.type === args.type);
+      if (args.tag) {
+        const tag = args.tag.startsWith("#") ? args.tag : `#${args.tag}`;
+        docs = docs.filter((n) => n.frontmatter.tags?.includes(tag));
+      }
+      docs = docs.slice(0, args.limit || 50);
+      if (!docs.length) return "No nodes found with the given filters.";
+      const list = docs
+        .map(
+          (n, i) =>
+            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}]`,
+        )
+        .join("\n");
+      return `${docs.length} node(s):\n\n${list}`;
+    }
+
+    case "context_resolve": {
+      const result = await queryEngine.query(args.selector, { hops: 2 });
+      const maxTokens = args.max_tokens || 8000;
+      const approxChars = maxTokens * 4;
+      let total = 0;
+      const resolved: string[] = [];
+      for (const n of result.documents) {
+        const entry = `## ${n.frontmatter.title}\n\n${n.body || ""}`;
+        if (total + entry.length > approxChars) break;
+        resolved.push(entry);
+        total += entry.length;
+      }
+      return resolved.join("\n\n---\n\n") || "No nodes resolved.";
+    }
+
+    case "context_create": {
+      const slug = args.title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "");
+      const id = `nodes/${slug}`;
+      const now = new Date().toISOString();
+      const tags = (args.tags || []).map((t: string) =>
+        t.startsWith("#") ? t : `#${t}`,
+      );
+
+      // Match the REST POST /nodes behavior: draft when stewardship is
+      // enabled, auto-approve when ungoverned.
+      const hasStewards = isStewardshipEnabled(nestId);
+      const initialStatus = hasStewards ? "draft" : "approved";
+
+      const node: ContextNode = {
+        id,
+        filePath: "",
+        frontmatter: {
+          title: args.title,
+          type: args.type || "document",
+          tags,
+          status: initialStatus as any,
+          version: 1,
+          created_at: now,
+          updated_at: now,
+          metadata: { owners: ["*"], scope: args.scope || "team" },
+        },
+        body: args.content,
+        rawContent: "",
+      };
+      await storage.writeDocument(id, serializeDocument(node));
+
+      // Tag index + version history — the REST path does both.
+      syncNodeTags(nestId, id, tags);
+      versions.createVersion({
+        nestId,
+        nodeId: id,
+        version: 1,
+        content: args.content,
+        author: userEmail,
+        status: initialStatus as "draft" | "approved",
+        tags,
+      });
+      if (initialStatus === "approved") {
+        versions.setApprovedVersion(nestId, id, 1, userEmail);
+      }
+
+      return `Created node: **${args.title}** (${id}) — status: ${initialStatus}`;
+    }
+
+    case "context_update": {
+      const docs = await storage.discoverDocuments();
+      const node = docs.find(
+        (n) =>
+          n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+      );
+      if (!node) return `Node not found: ${args.title}`;
+
+      let body = node.body || "";
+      if (args.content !== undefined) body = args.content;
+      if (args.append) body = body + "\n\n" + args.append;
+
+      let tags = node.frontmatter.tags || [];
+      if (args.tags) {
+        const newTags = args.tags.map((t: string) =>
+          t.startsWith("#") ? t : `#${t}`,
+        );
+        tags = [...new Set([...tags, ...newTags])];
+      }
+
+      const updated: ContextNode = {
+        ...node,
+        body,
+        frontmatter: {
+          ...node.frontmatter,
+          tags,
+          updated_at: new Date().toISOString(),
+        },
+      };
+      await storage.writeDocument(node.id, serializeDocument(updated));
+      return `Updated node: **${node.frontmatter.title}**`;
+    }
+
+    // ─── Governance Tool Handlers ──────────────────────────────────────
+
+    case "context_stewards": {
+      if (args.title) {
+        // Resolve stewards for a specific node
+        const docs = await storage.discoverDocuments();
+        const node = docs.find(
+          (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+        );
+        const nodeId = node?.id || "";
+        const resolved = stewardship.resolveStewardsForNode(ctx.nestId, nodeId);
+
+        if (resolved.length === 0) {
+          return `No stewards configured for "${args.title}". Changes are auto-approved.`;
+        }
+
+        const list = resolved
+          .map(
+            (r, i) =>
+              `${i + 1}. **${r.steward.userEmail}** — ${r.steward.role} (${r.source})${r.steward.canApprove ? " ✓ can approve" : ""}`,
+          )
+          .join("\n");
+        return `# Stewards for "${args.title}"\n\n${list}`;
+      }
+
+      // List all stewards for the nest
+      const allStewards = stewardship.getStewardsForNest(ctx.nestId);
+      if (allStewards.length === 0) {
+        return "No stewards configured. All changes are auto-approved.\n\nTo configure stewards, add a `stewards.yaml` file to the vault root, or use `context_assign_steward`.";
+      }
+
+      const byScope: Record<string, typeof allStewards> = {};
+      for (const s of allStewards) {
+        const key = s.scope === "nest"
+          ? "Nest-level"
+          : s.scope === "tag"
+            ? `Tag: ${s.tagName}`
+            : s.scope === "folder"
+              ? `Folder: ${s.nodePattern}`
+              : `Document: ${s.nodePattern}`;
+        (byScope[key] = byScope[key] || []).push(s);
+      }
+
+      const sections = Object.entries(byScope)
+        .map(
+          ([scope, stewards]) =>
+            `## ${scope}\n${stewards.map((s) => `- **${s.userEmail}** (${s.role})${s.canApprove ? " — can approve" : ""}`).join("\n")}`,
+        )
+        .join("\n\n");
+
+      return `# Data Stewards\n\n${sections}`;
+    }
+
+    case "context_review_queue": {
+      const status = args.status || "pending";
+      const result = reviews.getReviewQueue({
+        nestId: ctx.nestId,
+        status: status as any,
+      });
+
+      if (result.requests.length === 0) {
+        return status === "pending"
+          ? "No documents pending review. All caught up!"
+          : `No reviews with status "${status}".`;
+      }
+
+      const list = result.requests
+        .map(
+          (r, i) =>
+            `${i + 1}. **${r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
+        )
+        .join("\n\n");
+
+      return `# Review Queue (${status})\n**${result.total} item(s)**\n\n${list}`;
+    }
+
+    case "context_submit_review": {
+      const docs = await storage.discoverDocuments();
+      const node = docs.find(
+        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+      );
+      if (!node) return `Node not found: ${args.title}`;
+
+      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
+      if (currentVersion === 0) return `No versions found for "${args.title}"`;
+
+      try {
+        const request = reviews.submitForReview({
+          nestId: ctx.nestId,
+          nodeId: node.id,
+          version: currentVersion,
+          requestedBy: ctx.userEmail,
+          note: args.note,
+          priority: args.priority as any,
+        });
+
+        const resolved = stewardship.resolveStewardsForNode(
+          ctx.nestId,
+          node.id,
+        );
+
+        const stewardList = resolved.length > 0
+          ? `\n\n**Stewards who can review:**\n${resolved.map((r) => `- ${r.steward.userEmail} (${r.source})`).join("\n")}`
+          : "";
+
+        return `Submitted "${args.title}" v${currentVersion} for review (${request.priority} priority).${stewardList}`;
+      } catch (err: any) {
+        return `Failed to submit: ${err.message}`;
+      }
+    }
+
+    case "context_approve": {
+      const docs = await storage.discoverDocuments();
+      const node = docs.find(
+        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+      );
+      if (!node) return `Node not found: ${args.title}`;
+
+      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
+
+      try {
+        const request = reviews.approve({
+          nestId: ctx.nestId,
+          nodeId: node.id,
+          version: currentVersion,
+          approvedBy: ctx.userEmail,
+          note: args.note,
+        });
+
+        return `Approved "${args.title}" v${currentVersion}. This version is now live for AI queries.${args.note ? `\nNote: ${args.note}` : ""}`;
+      } catch (err: any) {
+        return `Cannot approve: ${err.message}`;
+      }
+    }
+
+    case "context_reject": {
+      const docs = await storage.discoverDocuments();
+      const node = docs.find(
+        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+      );
+      if (!node) return `Node not found: ${args.title}`;
+
+      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
+
+      try {
+        const request = reviews.reject({
+          nestId: ctx.nestId,
+          nodeId: node.id,
+          version: currentVersion,
+          rejectedBy: ctx.userEmail,
+          note: args.note,
+        });
+
+        return `Rejected "${args.title}" v${currentVersion}.\nReason: ${args.note}`;
+      } catch (err: any) {
+        return `Cannot reject: ${err.message}`;
+      }
+    }
+
+    case "context_versions": {
+      const docs = await storage.discoverDocuments();
+      const node = docs.find(
+        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+      );
+      if (!node) return `Node not found: ${args.title}`;
+
+      const allVersions = versions.getVersions(ctx.nestId, node.id);
+      const approved = versions.getApprovedVersion(ctx.nestId, node.id);
+
+      if (allVersions.length === 0) {
+        return `No version history for "${args.title}".`;
+      }
+
+      const list = allVersions
+        .map(
+          (v) =>
+            `- **v${v.version}** ${v.status}${v.version === approved ? " (AI-active)" : ""} — by ${v.editedBy} at ${v.editedAt}${v.changeNote ? ` "${v.changeNote}"` : ""}`,
+        )
+        .join("\n");
+
+      return `# Version History: ${args.title}\n**Current:** v${allVersions[0]?.version || 0} | **AI-active:** ${approved ? `v${approved}` : "none"}\n\n${list}`;
+    }
+
+    case "context_assign_steward": {
+      const scope = args.scope as "nest" | "tag" | "folder" | "document";
+      if (!["nest", "tag", "folder", "document"].includes(scope)) {
+        return `Invalid scope "${args.scope}". Use: nest, tag, folder, or document.`;
+      }
+
+      try {
+        stewardship.assignSteward({
+          nestId: ctx.nestId,
+          scope,
+          nodePattern: scope === "folder" || scope === "document" ? args.target : undefined,
+          tagName: scope === "tag" ? args.target : undefined,
+          userEmail: args.email,
+          role: (args.role as any) || "reviewer",
+          canApprove: true,
+          canReject: true,
+          assignedBy: ctx.userEmail,
+          assignedAt: new Date().toISOString(),
+          isActive: true,
+        });
+
+        const targetDesc = scope === "nest"
+          ? "all documents"
+          : `${scope}: ${args.target}`;
+
+        return `Assigned **${args.email}** as ${args.role || "reviewer"} for ${targetDesc}.`;
+      } catch (err: any) {
+        return `Failed to assign steward: ${err.message}`;
+      }
+    }
+
+    default:
+      return `Unknown tool: ${toolName}`;
+  }
+}

@@ -1,0 +1,125 @@
+import { Hono } from "hono";
+import type { AuthEnv } from "../auth/middleware.js";
+import { resolveNestPermission } from "../shared/access.js";
+import {
+  createNest,
+  listNests,
+  listSharedNests,
+  getNest,
+  deleteNest,
+  isStewardshipEnabled,
+  setStewardshipEnabled,
+} from "./service.js";
+import { ValidationError, NotFoundError } from "../shared/errors.js";
+import { getDb } from "../db/client.js";
+import { config } from "../config.js";
+
+const ANON_USER_ID = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * Effective permission for a nest, honoring open-mode + anon-owned nests.
+ *
+ * In open mode, the access-control middleware grants everyone "owner" at
+ * the route level, but per-handler checks run resolveNestPermission fresh
+ * against the DB. If the caller has a stale Bearer token (non-anon user),
+ * the DB check says "none" and the handler 404s even though the middleware
+ * let the request through. Symptom: toggling stewardship on an anon-owned
+ * nest silently fails when a real-user token is present in localStorage.
+ *
+ * Rule: in open mode, anon-owned nests are the ungoverned commons —
+ * anyone is effectively the owner.
+ */
+function effectivePermission(nestId: string, userId: string) {
+  if (config.AUTH_MODE === "open") {
+    const db = getDb();
+    const nest = db
+      .prepare("SELECT user_id FROM nests WHERE id = ?")
+      .get(nestId) as { user_id: string } | undefined;
+    if (nest && nest.user_id === ANON_USER_ID) return "owner" as const;
+  }
+  return resolveNestPermission(nestId, userId);
+}
+
+export const nestRoutes = new Hono<AuthEnv>();
+
+// GET /nests
+nestRoutes.get("/", async (c) => {
+  const userId = c.get("userId");
+  const owned = listNests(userId);
+  const shared = listSharedNests(userId);
+  return c.json({ nests: [...owned, ...shared] });
+});
+
+// POST /nests
+nestRoutes.post("/", async (c) => {
+  const body = await c.req.json<{ name?: string; description?: string }>();
+  if (!body.name) {
+    throw new ValidationError("name is required");
+  }
+
+  const nest = await createNest(c.get("userId"), body.name, body.description);
+  return c.json({ nest }, 201);
+});
+
+// GET /nests/:nestId
+nestRoutes.get("/:nestId", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const permission = effectivePermission(nestId, c.get("userId"));
+  if (permission === "none") {
+    throw new NotFoundError("Nest not found");
+  }
+
+  const nest = getNest(nestId);
+  return c.json({ nest, permission });
+});
+
+// DELETE /nests/:nestId
+nestRoutes.delete("/:nestId", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const permission = effectivePermission(nestId, c.get("userId"));
+  if (permission !== "owner") {
+    throw new NotFoundError("Nest not found");
+  }
+
+  await deleteNest(nestId);
+  return c.json({ deleted: true });
+});
+
+// GET /nests/:nestId/settings — read nest settings (stewardship enabled, etc.)
+nestRoutes.get("/:nestId/settings", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const permission = effectivePermission(nestId, c.get("userId"));
+  if (permission === "none") {
+    throw new NotFoundError("Nest not found");
+  }
+  return c.json({
+    stewardship_enabled: isStewardshipEnabled(nestId),
+  });
+});
+
+// PATCH /nests/:nestId/settings — update settings (admin-only)
+nestRoutes.patch("/:nestId/settings", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+
+  // Must be server admin OR nest owner
+  const db = getDb();
+  const userRow = db
+    .prepare("SELECT is_admin FROM users WHERE id = ?")
+    .get(userId) as { is_admin: number } | undefined;
+  const isServerAdmin = !!userRow?.is_admin;
+  const permission = effectivePermission(nestId, userId);
+
+  if (!isServerAdmin && permission !== "owner") {
+    return c.json({ error: "Admin only" }, 403);
+  }
+
+  const body = await c.req.json<{ stewardship_enabled?: boolean }>();
+  if (typeof body.stewardship_enabled === "boolean") {
+    setStewardshipEnabled(nestId, body.stewardship_enabled);
+  }
+
+  return c.json({
+    stewardship_enabled: isStewardshipEnabled(nestId),
+  });
+});
