@@ -16,20 +16,20 @@ import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Shield, AlertCircle, Loader2, ExternalLink, Copy, Check } from "lucide-react";
 import * as api from "../lib/api";
+import { useAuth } from "../auth/AuthContext";
 
 interface AdminLoginModalProps {
   alreadyClaimed: boolean;
   existingAdmin: string | null;
   onClose: () => void;
-  onLoggedIn: () => void;
 }
 
 export function AdminLoginModal({
   alreadyClaimed,
   existingAdmin,
   onClose,
-  onLoggedIn,
 }: AdminLoginModalProps) {
+  const { loginSuccess } = useAuth();
   const [mode, setMode] = useState<"promptowl" | "password">("promptowl");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -53,14 +53,22 @@ export function AdminLoginModal({
       const device = await api.startDeviceAuth();
       setDeviceUrl(device.verificationUrl);
       setDeviceCode(device.deviceCode);
-      window.open(device.verificationUrl, "_blank");
+      window.open(device.verificationUrl, "_blank", "noopener,noreferrer");
 
       for (let i = 0; i < 180; i++) {
         await new Promise((r) => setTimeout(r, 2000));
         const poll = await api.pollDeviceAuth(device.deviceCode, device.clientSecret);
         if (poll.status === "approved" && poll.token) {
-          await api.exchangePromptOwlToken(poll.token);
-          onLoggedIn();
+          const exchange = await api.exchangePromptOwlToken(poll.token);
+          loginSuccess(
+            exchange.user
+              ? {
+                  email: exchange.user.email,
+                  is_admin: !!exchange.user.is_admin,
+                }
+              : undefined,
+          );
+          onClose();
           return;
         }
         if (poll.status === "expired") {
@@ -85,7 +93,8 @@ export function AdminLoginModal({
     setLoading(true);
     try {
       await api.login(email, password);
-      onLoggedIn();
+      loginSuccess();
+      onClose();
     } catch (err: any) {
       setError(err.message);
       setLoading(false);

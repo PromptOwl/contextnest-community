@@ -1,11 +1,9 @@
 import React, { useState } from "react";
 import * as api from "../lib/api";
+import { useAuth } from "../auth/AuthContext";
 
-interface LoginProps {
-  onLogin: () => void;
-}
-
-export function Login({ onLogin }: LoginProps) {
+export function Login() {
+  const { loginSuccess } = useAuth();
   const [mode, setMode] = useState<"login" | "register" | "promptowl">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -29,11 +27,16 @@ export function Login({ onLogin }: LoginProps) {
     setLoading(true);
     try {
       if (mode === "register") {
-        await api.register(email, password, name);
+        const res = await api.register(email, password, name);
+        loginSuccess(
+          res.user
+            ? { email: res.user.email, is_admin: !!res.user.is_admin }
+            : undefined,
+        );
       } else {
         await api.login(email, password);
+        loginSuccess();
       }
-      onLogin();
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -48,15 +51,22 @@ export function Login({ onLogin }: LoginProps) {
       const device = await api.startDeviceAuth();
       setDeviceUrl(device.verificationUrl);
       setDeviceCode(device.deviceCode);
-      window.open(device.verificationUrl, "_blank");
+      window.open(device.verificationUrl, "_blank", "noopener,noreferrer");
 
       // Poll for approval
       for (let i = 0; i < 180; i++) {
         await new Promise((r) => setTimeout(r, 2000));
         const poll = await api.pollDeviceAuth(device.deviceCode, device.clientSecret);
         if (poll.status === "approved" && poll.token) {
-          await api.exchangePromptOwlToken(poll.token);
-          onLogin();
+          const exchange = await api.exchangePromptOwlToken(poll.token);
+          loginSuccess(
+            exchange.user
+              ? {
+                  email: exchange.user.email,
+                  is_admin: !!exchange.user.is_admin,
+                }
+              : undefined,
+          );
           return;
         }
         if (poll.status === "expired") {
@@ -97,7 +107,12 @@ export function Login({ onLogin }: LoginProps) {
           <div className="rounded-md border bg-muted/40 p-3 space-y-2">
             <p className="text-xs text-muted-foreground">
               A new tab opened at{" "}
-              <a href={deviceUrl} target="_blank" className="text-primary underline">
+              <a
+                href={deviceUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-primary underline"
+              >
                 PromptOwl
               </a>
               . If it asks for a verification code, use this:

@@ -1,5 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
-import * as api from "./lib/api";
+import { useState } from "react";
 import { Login } from "./components/Login";
 import { Dashboard } from "./components/Dashboard";
 import { NestView } from "./components/NestView";
@@ -9,57 +8,25 @@ import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { useAuth } from "./auth/AuthContext";
 
 type View =
   | { page: "dashboard" }
   | { page: "nest"; nestId: string; nestName: string }
   | { page: "teammates" };
 
-interface AdminStatus {
-  claimed: boolean;
-  admin: { email: string; name: string | null } | null;
-  me: { email: string; is_admin: boolean } | null;
-}
-
 export default function App() {
-  const [authMode, setAuthMode] = useState<"open" | "key" | null>(null);
-  const [authenticated, setAuthenticated] = useState(false);
+  const {
+    authMode,
+    adminStatus,
+    authenticated,
+    isAdmin,
+    loading,
+    error,
+    logout,
+  } = useAuth();
   const [view, setView] = useState<View>({ page: "dashboard" });
-  const [error, setError] = useState<string | null>(null);
-  const [adminStatus, setAdminStatus] = useState<AdminStatus | null>(null);
   const [showAdminLogin, setShowAdminLogin] = useState(false);
-
-  const refreshAdminStatus = useCallback(async () => {
-    try {
-      const s = await api.getAdminStatus();
-      setAdminStatus(s);
-    } catch {}
-  }, []);
-
-  useEffect(() => {
-    api
-      .getHealth()
-      .then((h) => {
-        setAuthMode(h.auth_mode as any);
-        if (h.auth_mode === "open" || api.hasToken()) {
-          setAuthenticated(true);
-        }
-      })
-      .catch(() => setError("Cannot connect to server"));
-    refreshAdminStatus();
-  }, [refreshAdminStatus]);
-
-  const handleLogout = () => {
-    api.clearToken();
-    setAuthenticated(authMode === "open");
-    refreshAdminStatus();
-  };
-
-  const handleAdminLogin = () => {
-    setShowAdminLogin(false);
-    refreshAdminStatus();
-    if (authMode === "key") setAuthenticated(true);
-  };
 
   if (error) {
     return (
@@ -74,7 +41,7 @@ export default function App() {
     );
   }
 
-  if (authMode === null) {
+  if (loading || authMode === null) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="animate-pulse text-muted-foreground">Connecting...</div>
@@ -83,10 +50,8 @@ export default function App() {
   }
 
   if (!authenticated && authMode === "key") {
-    return <Login onLogin={() => setAuthenticated(true)} />;
+    return <Login />;
   }
-
-  const isAdmin = !!adminStatus?.me?.is_admin;
 
   return (
     <div className="min-h-screen bg-background">
@@ -136,7 +101,7 @@ export default function App() {
 
             {/* Login / Logout */}
             {adminStatus?.me ? (
-              <Button variant="ghost" size="sm" onClick={handleLogout}>
+              <Button variant="ghost" size="sm" onClick={logout}>
                 Logout
               </Button>
             ) : (
@@ -166,7 +131,6 @@ export default function App() {
           <NestView
             nestId={view.nestId}
             nestName={view.nestName}
-            isAdmin={isAdmin}
             onBack={() => setView({ page: "dashboard" })}
           />
         )}
@@ -180,7 +144,6 @@ export default function App() {
           alreadyClaimed={!!adminStatus?.claimed}
           existingAdmin={adminStatus?.admin?.email || null}
           onClose={() => setShowAdminLogin(false)}
-          onLoggedIn={handleAdminLogin}
         />
       )}
     </div>

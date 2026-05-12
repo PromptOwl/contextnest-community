@@ -1,4 +1,26 @@
-import { join } from "path";
+import { join, dirname } from "path";
+import { existsSync } from "fs";
+import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+
+// ── .env loading ────────────────────────────────────────────────────────
+// Load .env before any getter reads process.env. Try cwd first (typical
+// dev: `npm run dev` from project root), then fall back to the directory
+// next to the compiled entrypoint (packaged `node dist/index.js` runs).
+// override: true so .env wins over stale OS-level vars.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const envCandidates = [
+  join(process.cwd(), ".env"),
+  join(__dirname, "..", ".env"),
+];
+const envFileLoaded = envCandidates.find((p) => existsSync(p)) || null;
+if (envFileLoaded) {
+  dotenv.config({ path: envFileLoaded, override: true });
+}
+console.log(
+  `[config] dotenv: ${envFileLoaded ? `loaded ${envFileLoaded}` : "no .env file found"}`,
+);
 
 function dataRoot() {
   return process.env.DATA_ROOT || join(process.cwd(), "data");

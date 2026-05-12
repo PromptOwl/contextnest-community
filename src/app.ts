@@ -23,12 +23,20 @@ import { isSuspended, getSuspensionReason } from "./auth/license.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
+import { existsSync } from "node:fs";
 
-// Resolve UI static files relative to this bundled module, not CWD.
-// At runtime this file is dist/index.js, so the UI lives at dist/web3.
-// serveStatic wants a path relative to CWD, so compute that from the
-// absolute path on the fly.
-const UI_DIR_ABS = join(dirname(fileURLToPath(import.meta.url)), "web3");
+// Resolve UI static files. In built mode this file lives at dist/index.js,
+// so siblings of __dirname include dist/web3. In dev (`tsx src/index.ts`)
+// __dirname is src/, which has no web3 — fall back to <cwd>/dist/web3
+// (vite build output) so `npm run dev` serves the freshly-built bundle.
+// serveStatic wants a path relative to CWD.
+const HERE = dirname(fileURLToPath(import.meta.url));
+const UI_DIR_CANDIDATES = [
+  join(HERE, "web3"),
+  join(process.cwd(), "dist", "web3"),
+];
+const UI_DIR_ABS =
+  UI_DIR_CANDIDATES.find((p) => existsSync(p)) || UI_DIR_CANDIDATES[0];
 const UI_DIR_REL = relative(process.cwd(), UI_DIR_ABS) || ".";
 
 // In open mode, assign the anonymous admin user to every request.

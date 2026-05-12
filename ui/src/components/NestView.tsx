@@ -29,15 +29,16 @@ import {
   type Steward, type ReviewRequest, type Version,
   type DocumentLifecycleStatus,
 } from "./governance";
+import { useAuth } from "../auth/AuthContext";
 
 interface NestViewProps {
   nestId: string;
   nestName: string;
-  isAdmin?: boolean;
   onBack: () => void;
 }
 
-export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
+export function NestView({ nestId, nestName, onBack }: NestViewProps) {
+  const { isAdmin } = useAuth();
   const [nodes, setNodes] = useState<any[]>([]);
   const [stewards, setStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
@@ -125,19 +126,7 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
   };
 
   const handleAssignSteward = async (data: any) => {
-    const token = localStorage.getItem("cnst_token");
-    const res = await fetch(`/nests/${nestId}/stewards`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify(data),
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || "Failed to assign");
-    }
+    await api.assignSteward(nestId, data);
     fetchData();
   };
 

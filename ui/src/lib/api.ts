@@ -21,6 +21,17 @@ export function hasToken(): boolean {
   return !!getToken();
 }
 
+/**
+ * Read the caller's own API key (the same one already stored in this
+ * browser's localStorage from login). Used by UIs like the Connect
+ * modal that need to surface the key for the user to copy elsewhere
+ * (MCP config, Hootie, CLI). Only call from local UI — never embed in
+ * cross-origin contexts.
+ */
+export function getCurrentToken(): string | null {
+  return getToken();
+}
+
 async function request<T = any>(
   path: string,
   options: RequestInit = {},
@@ -38,6 +49,15 @@ async function request<T = any>(
   const data = await res.json();
 
   if (!res.ok) {
+    // 401 means the stored token is invalid/expired. Drop it so a stale
+    // key can't keep being reused, and notify the auth context to reset
+    // session state (re-render to logged-out without a manual refresh).
+    if (res.status === 401 && getToken()) {
+      clearToken();
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new Event("auth:unauthorized"));
+      }
+    }
     throw new Error(data.error || `Request failed: ${res.status}`);
   }
   return data;
@@ -232,6 +252,13 @@ export async function syncStewards(nestId: string) {
   });
 }
 
+export async function assignSteward(nestId: string, data: any) {
+  return request(`/nests/${nestId}/stewards`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
 export async function getNodeStewards(nestId: string, nodeId: string) {
   return request<{ stewards: any[] }>(
     `/nests/${nestId}/nodes/${nodeId}/stewards`,
@@ -240,7 +267,7 @@ export async function getNodeStewards(nestId: string, nodeId: string) {
 
 export async function getReviewQueue(nestId: string, status = "pending") {
   return request<{ requests: any[]; total: number }>(
-    `/nests/${nestId}/review-queue?status=${status}`,
+    `/nests/${nestId}/review-queue?status=${encodeURIComponent(status)}`,
   );
 }
 
