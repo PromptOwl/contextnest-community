@@ -1,6 +1,7 @@
 import { createMiddleware } from "hono/factory";
 import { getDb } from "../db/client.js";
 import { hashApiKey, parseBearerToken } from "./keys.js";
+import { getSessionIdFromRequest, resolveSession } from "./sessions.js";
 
 import type { NestPermission } from "../shared/access.js";
 
@@ -12,29 +13,50 @@ export type AuthEnv = {
   };
 };
 
+/**
+ * Two transports accepted:
+ *
+ *   1. Browser session cookie (`cnst_session=...`). Preferred for the
+ *      web UI — httpOnly so JS can never read it. Resolved via the
+ *      `sessions` table; expiry is enforced server-side.
+ *
+ *   2. Bearer API key (`Authorization: Bearer cnst_*`). For external
+ *      clients (Hootie, Claude Desktop, ctx CLI, MCP). One per user.
+ *
+ * Cookie wins when both are present — same-origin browser requests will
+ * usually send both, and the cookie is the safer credential to trust.
+ */
 export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
-  const key = parseBearerToken(c.req.header("Authorization"));
-  if (!key) {
-    return c.json({ error: "Missing or invalid API key" }, 401);
-  }
-
-  const keyHash = hashApiKey(key);
   const db = getDb();
 
-  const record = db
-    .prepare("SELECT user_id, nest_id FROM api_keys WHERE key_hash = ?")
-    .get(keyHash) as { user_id: string; nest_id: string | null } | undefined;
-
-  if (!record) {
-    return c.json({ error: "Invalid API key" }, 401);
+  // 1. Cookie session
+  const sessionId = getSessionIdFromRequest(c);
+  if (sessionId) {
+    const userId = resolveSession(sessionId);
+    if (userId) {
+      c.set("userId", userId);
+      c.set("nestScope", null);
+      return next();
+    }
   }
 
-  // Fire-and-forget: update last_used_at
-  db.prepare(
-    "UPDATE api_keys SET last_used_at = datetime('now') WHERE key_hash = ?",
-  ).run(keyHash);
+  // 2. Bearer API key
+  const key = parseBearerToken(c.req.header("Authorization"));
+  if (key) {
+    const keyHash = hashApiKey(key);
+    const record = db
+      .prepare("SELECT user_id, nest_id FROM api_keys WHERE key_hash = ?")
+      .get(keyHash) as { user_id: string; nest_id: string | null } | undefined;
 
-  c.set("userId", record.user_id);
-  c.set("nestScope", record.nest_id);
-  await next();
+    if (record) {
+      db.prepare(
+        "UPDATE api_keys SET last_used_at = datetime('now') WHERE key_hash = ?",
+      ).run(keyHash);
+      c.set("userId", record.user_id);
+      c.set("nestScope", record.nest_id);
+      return next();
+    }
+  }
+
+  return c.json({ error: "Missing or invalid credentials" }, 401);
 });

@@ -5,9 +5,17 @@ import { NestView } from "./components/NestView";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useAuth } from "./auth/AuthContext";
 
 type View =
@@ -70,40 +78,22 @@ export default function App() {
           </button>
 
           <div className="flex items-center gap-2">
-            {/* Mode indicator */}
-            {authMode === "open" && !isAdmin && (
+            {/* Mode indicator — only when not logged-in (logged-in
+                users see open-mode context inside the dropdown) */}
+            {authMode === "open" && !adminStatus?.me && (
               <span className="hidden md:inline-flex items-center gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded">
                 <Info className="h-3 w-3" />
                 Open mode
               </span>
             )}
 
-            {/* Admin badge + teammates button */}
-            {isAdmin && (
-              <>
-                <Badge
-                  variant="outline"
-                  className="gap-1 border-blue-200 bg-blue-50 text-blue-700"
-                >
-                  <Shield className="h-3 w-3" />
-                  Admin: {adminStatus?.me?.email}
-                </Badge>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setView({ page: "teammates" })}
-                >
-                  <Users className="h-3.5 w-3.5 mr-1" />
-                  Teammates
-                </Button>
-              </>
-            )}
-
-            {/* Login / Logout */}
             {adminStatus?.me ? (
-              <Button variant="ghost" size="sm" onClick={logout}>
-                Logout
-              </Button>
+              <UserMenu
+                me={adminStatus.me}
+                isAdmin={isAdmin}
+                onTeammates={() => setView({ page: "teammates" })}
+                onLogout={logout}
+              />
             ) : (
               <Button
                 variant="outline"
@@ -147,5 +137,80 @@ export default function App() {
         />
       )}
     </div>
+  );
+}
+
+interface UserMenuProps {
+  me: { email: string; name: string | null; is_admin: boolean };
+  isAdmin: boolean;
+  onTeammates: () => void;
+  onLogout: () => void;
+}
+
+function UserMenu({ me, isAdmin, onTeammates, onLogout }: UserMenuProps) {
+  const displayName = me.name?.trim() || me.email;
+  const initial = displayName.charAt(0);
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="group h-9 gap-2 px-2"
+          data-testid="user-menu-trigger"
+        >
+          <Avatar className="h-[1.8rem] w-[1.8rem] rounded-sm shrink-0">
+            <AvatarFallback className="rounded-sm">{initial}</AvatarFallback>
+          </Avatar>
+          <span className="hidden sm:inline max-w-[140px] truncate text-sm font-medium">
+            {displayName}
+          </span>
+          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-56">
+        <div className="flex items-center gap-2 p-2">
+          <Avatar className="h-8 w-8 rounded-sm shrink-0">
+            <AvatarFallback className="rounded-sm">{initial}</AvatarFallback>
+          </Avatar>
+          <div className="grid gap-0.5 leading-none min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold truncate">{displayName}</span>
+              {isAdmin && (
+                <Badge
+                  variant="outline"
+                  className="gap-1 border-blue-200 bg-blue-50 text-blue-700 text-[10px] px-1.5 py-0"
+                >
+                  <Shield className="h-2.5 w-2.5" />
+                  Admin
+                </Badge>
+              )}
+            </div>
+            <div className="text-sm text-muted-foreground truncate">
+              {me.email}
+            </div>
+          </div>
+        </div>
+        {isAdmin && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onTeammates} className="cursor-pointer">
+              <Users className="h-3.5 w-3.5 mr-2" />
+              Teammates
+            </DropdownMenuItem>
+          </>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onSelect={onLogout}
+          className="cursor-pointer text-red-600 focus:text-red-700"
+          data-testid="user-menu-logout"
+        >
+          <LogOut className="h-3.5 w-3.5 mr-2" />
+          Logout
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

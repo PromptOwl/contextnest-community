@@ -1,35 +1,31 @@
 /**
  * API client for the community server REST endpoints.
- * Handles auth token management and request formatting.
+ *
+ * Browser auth uses an httpOnly session cookie set by the server on
+ * /auth/login, /auth/register, /auth/promptowl. JS cannot read the
+ * cookie value — the browser auto-attaches it to same-origin requests
+ * via `credentials: "include"`. Token-style helpers (setToken,
+ * getCurrentToken, etc.) intentionally do NOT exist on this client.
+ *
+ * External clients (Hootie, Claude Desktop, ctx CLI, MCP) still use
+ * Authorization: Bearer cnst_* — those keys are minted on demand via
+ * /auth/keys and shown to the user once via the Connect modal.
  */
 
 const API_BASE = "";
-
-function getToken(): string | null {
-  return localStorage.getItem("cnst_token");
-}
-
-export function setToken(token: string) {
-  localStorage.setItem("cnst_token", token);
-}
-
-export function clearToken() {
-  localStorage.removeItem("cnst_token");
-}
-
-export function hasToken(): boolean {
-  return !!getToken();
-}
+const STALE_LOCAL_STORAGE_KEY = "cnst_token";
 
 /**
- * Read the caller's own API key (the same one already stored in this
- * browser's localStorage from login). Used by UIs like the Connect
- * modal that need to surface the key for the user to copy elsewhere
- * (MCP config, Hootie, CLI). Only call from local UI — never embed in
- * cross-origin contexts.
+ * One-time cleanup for users upgrading from the localStorage token era.
+ * The browser session is now cookie-based, so any leftover cnst_token
+ * key is dead weight at best and a security smell at worst — drop it.
  */
-export function getCurrentToken(): string | null {
-  return getToken();
+export function clearLegacyLocalStorage() {
+  try {
+    localStorage.removeItem(STALE_LOCAL_STORAGE_KEY);
+  } catch {
+    // Private mode / disabled storage — nothing to clean up.
+  }
 }
 
 async function request<T = any>(
@@ -40,47 +36,60 @@ async function request<T = any>(
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
-  const token = getToken();
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
 
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
-  const data = await res.json();
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+    // Send + receive the httpOnly session cookie. Same-origin only — the
+    // browser will not attach our cookie to cross-origin requests, so
+    // CSRF via random websites is blocked by the browser itself.
+    credentials: "include",
+  });
+
+  // Some endpoints return empty body (e.g. 204 No Content).
+  const text = await res.text();
+  const data = text ? (JSON.parse(text) as any) : ({} as any);
 
   if (!res.ok) {
-    // 401 means the stored token is invalid/expired. Drop it so a stale
-    // key can't keep being reused, and notify the auth context to reset
-    // session state (re-render to logged-out without a manual refresh).
-    if (res.status === 401 && getToken()) {
-      clearToken();
+    // 401 = the server says we're not logged in. Drop any legacy
+    // localStorage entry and signal the auth context to reset UI state
+    // (re-render to logged-out without a manual page refresh).
+    if (res.status === 401) {
+      clearLegacyLocalStorage();
       if (typeof window !== "undefined") {
         window.dispatchEvent(new Event("auth:unauthorized"));
       }
     }
     throw new Error(data.error || `Request failed: ${res.status}`);
   }
-  return data;
+  return data as T;
 }
 
 // ─── Auth ───────────────────────────────────────────────────────────────
 
+export interface AuthedUser {
+  id: string;
+  email: string;
+  name: string | null;
+  is_admin: boolean;
+}
+
 export async function login(email: string, password: string) {
-  const data = await request<{ api_key: string }>("/auth/login", {
+  return request<{ user: AuthedUser }>("/auth/login", {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });
-  setToken(data.api_key);
-  return data;
 }
 
 export async function register(email: string, password: string, name?: string) {
-  const data = await request<{ api_key: string; user: any }>("/auth/register", {
+  return request<{ user: AuthedUser }>("/auth/register", {
     method: "POST",
     body: JSON.stringify({ email, password, name }),
   });
-  setToken(data.api_key);
-  return data;
+}
+
+export async function logout() {
+  return request<{ ok: boolean }>("/auth/logout", { method: "POST" });
 }
 
 export async function startDeviceAuth() {
@@ -98,12 +107,10 @@ export async function pollDeviceAuth(code: string, clientSecret: string) {
 }
 
 export async function exchangePromptOwlToken(token: string) {
-  const data = await request<{ api_key: string; user: any }>(
-    "/auth/promptowl",
-    { method: "POST", body: JSON.stringify({ token }) },
-  );
-  setToken(data.api_key);
-  return data;
+  return request<{ user: AuthedUser }>("/auth/promptowl", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
 }
 
 // ─── Health ─────────────────────────────────────────────────────────────
@@ -122,7 +129,7 @@ export async function getAdminStatus() {
   return request<{
     claimed: boolean;
     admin: { email: string; name: string | null } | null;
-    me: { email: string; is_admin: boolean } | null;
+    me: { email: string; name: string | null; is_admin: boolean } | null;
   }>("/auth/admin-status");
 }
 
@@ -148,6 +155,46 @@ export async function inviteTeammate(email: string, label?: string) {
   }>("/auth/invite", {
     method: "POST",
     body: JSON.stringify({ email, label }),
+  });
+}
+
+// ─── External-client API keys (one per user) ───────────────────────────
+
+export interface ApiKeyMeta {
+  id: string;
+  key_prefix: string;
+  nest_id: string | null;
+  label: string | null;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export async function listApiKeys() {
+  return request<{ keys: ApiKeyMeta[] }>("/auth/keys");
+}
+
+/**
+ * Mint the caller's external-client API key. Returns 409 if a key
+ * already exists — UI should prompt the user to rotate instead.
+ */
+export async function createApiKey(opts?: { label?: string; nest_id?: string }) {
+  return request<{ api_key: string; key_prefix: string }>("/auth/keys", {
+    method: "POST",
+    body: JSON.stringify(opts || {}),
+  });
+}
+
+/** Rotate the caller's existing key — atomic DELETE + INSERT. */
+export async function rotateApiKey(opts?: { label?: string; nest_id?: string }) {
+  return request<{ api_key: string; key_prefix: string }>("/auth/keys/rotate", {
+    method: "POST",
+    body: JSON.stringify(opts || {}),
+  });
+}
+
+export async function deleteApiKey(keyId: string) {
+  return request<{ deleted: boolean }>(`/auth/keys/${encodeURIComponent(keyId)}`, {
+    method: "DELETE",
   });
 }
 

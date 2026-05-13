@@ -1,12 +1,15 @@
 /**
- * AuthContext — single source of truth for auth state.
+ * AuthContext — single source of truth for browser auth state.
  *
- * Holds authMode (from /health), adminStatus (from /auth/admin-status),
- * authenticated flag, and exposes loginSuccess / logout / refresh actions.
+ * Auth is cookie-based: the server sets an httpOnly session cookie on
+ * /auth/login, /auth/register, /auth/promptowl. JS cannot read the
+ * cookie value; the browser auto-attaches it to same-origin requests.
+ * This context derives auth state from `/auth/admin-status` (the only
+ * way the client can see "am I logged in").
  *
- * Stale-fetch protection: every refresh bumps a sequence number. Only the
- * latest fetch may write state. Prevents an older in-flight /admin-status
- * from clobbering a newer optimistic update on login.
+ * Stale-fetch protection: every refresh bumps a sequence number. Only
+ * the latest fetch may write state. Prevents an older in-flight call
+ * from clobbering newer state on rapid login/logout cycles.
  */
 import {
   createContext,
@@ -20,13 +23,23 @@ import {
 import * as api from "../lib/api";
 
 type AuthMode = "open" | "key" | null;
-type Me = { email: string; is_admin: boolean } | null;
+type Me = {
+  email: string;
+  name: string | null;
+  is_admin: boolean;
+} | null;
 
 export interface AdminStatus {
   claimed: boolean;
   admin: { email: string; name: string | null } | null;
   me: Me;
 }
+
+export type LoginSuccessUser = {
+  email: string;
+  name?: string | null;
+  is_admin: boolean;
+};
 
 export interface AuthContextValue {
   authMode: AuthMode;
@@ -36,8 +49,8 @@ export interface AuthContextValue {
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
-  loginSuccess: (user?: { email: string; is_admin: boolean }) => void;
-  logout: () => void;
+  loginSuccess: (user?: LoginSuccessUser) => void;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -51,15 +64,36 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const seqRef = useRef(0);
 
+  // Derive `authenticated` from whether the server says we have a user.
+  // In open mode the server treats every caller as the anonymous admin,
+  // so we always render the dashboard regardless of cookie state.
+  const deriveAuthenticated = useCallback(
+    (mode: AuthMode, me: Me): boolean => {
+      if (mode === "open") return true;
+      return !!me;
+    },
+    [],
+  );
+
   const refresh = useCallback(async () => {
     const mySeq = ++seqRef.current;
     try {
       const s = await api.getAdminStatus();
-      if (seqRef.current === mySeq) setAdminStatus(s);
-    } catch {}
-  }, []);
+      if (seqRef.current !== mySeq) return;
+      setAdminStatus(s);
+      // Don't downgrade open-mode to false even if /admin-status returns
+      // me:null — authMode is the gate for that.
+      setAuthenticated(authMode === "open" ? true : !!s.me);
+    } catch {
+      /* silent; surfaced via error state elsewhere */
+    }
+  }, [authMode]);
 
   useEffect(() => {
+    // Clear any token left over from the localStorage era. Cookie-based
+    // sessions replaced it; lingering localStorage is dead weight.
+    api.clearLegacyLocalStorage();
+
     let cancelled = false;
     (async () => {
       try {
@@ -67,8 +101,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
         if (cancelled) return;
         const mode = h.auth_mode as AuthMode;
         setAuthMode(mode);
-        setAuthenticated(mode === "open" || api.hasToken());
-        await refresh();
+
+        const status = await api.getAdminStatus();
+        if (cancelled) return;
+        setAdminStatus(status);
+        setAuthenticated(deriveAuthenticated(mode, status.me));
       } catch {
         if (!cancelled) setError("Cannot connect to server");
       } finally {
@@ -78,11 +115,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
     return () => {
       cancelled = true;
     };
-  }, [refresh]);
+  }, [deriveAuthenticated]);
 
-  // Listen for 401s from any api.request — the token has already been
-  // cleared in the api layer; reset UI state so the user is bounced back
-  // to the login gate without a manual refresh.
+  // Listen for 401s from any api.request — the server says our session
+  // is invalid. Reset state so the user is bounced back to the login
+  // gate without a manual refresh.
   useEffect(() => {
     const onUnauth = () => {
       ++seqRef.current;
@@ -94,32 +131,45 @@ export function AuthProvider({ children }: PropsWithChildren) {
   }, [authMode]);
 
   const loginSuccess = useCallback(
-    (user?: { email: string; is_admin: boolean }) => {
+    (user?: LoginSuccessUser) => {
       const mySeq = ++seqRef.current;
       if (user) {
+        const name = user.name ?? null;
         setAdminStatus((prev) => ({
           claimed: prev?.claimed ?? true,
-          admin: prev?.admin ?? { email: user.email, name: null },
-          me: { email: user.email, is_admin: user.is_admin },
+          admin: prev?.admin ?? { email: user.email, name },
+          me: { email: user.email, name, is_admin: user.is_admin },
         }));
+        setAuthenticated(true);
       }
-      if (authMode === "key") setAuthenticated(true);
+      // Reconcile from server in the background — guarded by seq so a
+      // stale response can't overwrite this optimistic flip.
       (async () => {
         try {
           const s = await api.getAdminStatus();
-          if (seqRef.current === mySeq) setAdminStatus(s);
-        } catch {}
+          if (seqRef.current === mySeq) {
+            setAdminStatus(s);
+            setAuthenticated(deriveAuthenticated(authMode, s.me));
+          }
+        } catch {
+          /* silent */
+        }
       })();
     },
-    [authMode],
+    [authMode, deriveAuthenticated],
   );
 
-  const logout = useCallback(() => {
-    api.clearToken();
+  const logout = useCallback(async () => {
+    ++seqRef.current;
+    try {
+      await api.logout();
+    } catch {
+      // Even if the server call fails, treat the client as logged out —
+      // the cookie may already be invalid and we don't want a stuck UI.
+    }
     setAuthenticated(authMode === "open");
     setAdminStatus((prev) => (prev ? { ...prev, me: null } : prev));
-    refresh();
-  }, [authMode, refresh]);
+  }, [authMode]);
 
   const isAdmin = !!adminStatus?.me?.is_admin;
 

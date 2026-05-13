@@ -48,12 +48,13 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   await next();
 });
 
-// In key mode, try Bearer token first. If present, validate it.
-// If absent, fall through to open behavior (so open mode clients still work).
+// In key mode, try a real credential (cookie session OR Bearer key) first.
+// If present, validate via the real auth middleware. If absent, fall back
+// to open behavior so anonymous open-mode clients still work.
 const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
-  const header = c.req.header("Authorization");
-  if (header?.startsWith("Bearer cnst_")) {
-    // Delegate to the real auth middleware
+  const hasBearer = c.req.header("Authorization")?.startsWith("Bearer cnst_");
+  const hasCookie = !!c.req.header("Cookie")?.includes("cnst_session=");
+  if (hasBearer || hasCookie) {
     return authMiddleware(c, next);
   }
 
@@ -64,7 +65,7 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     return next();
   }
 
-  return c.json({ error: "Missing or invalid API key" }, 401);
+  return c.json({ error: "Missing or invalid credentials" }, 401);
 });
 
 export function createApp(): Hono<AuthEnv> {

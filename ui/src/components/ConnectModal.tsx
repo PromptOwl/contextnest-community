@@ -1,8 +1,19 @@
 /**
- * ConnectModal — shows copy-paste snippets for connecting clients to a nest.
- * Hootie, Claude Desktop (MCP), and the ctx CLI.
+ * ConnectModal — copy-paste snippets for connecting external clients
+ * (Hootie, Claude Desktop, ctx CLI, raw MCP) to a nest.
+ *
+ * Key-secrecy model: this dialog NEVER renders the plaintext api_key in
+ * its snippets — every snippet shows a placeholder that the user must
+ * substitute manually after copying. The plaintext is shown exactly
+ * once, in the separate KeyRevealModal that pops up after Generate /
+ * Rotate. Once that modal closes the plaintext is dropped from React
+ * state forever (server stores only sha256, so neither side can recover
+ * it later — only Rotate to mint a fresh one).
+ *
+ * Snippets are therefore reusable copy templates — copy them as often
+ * as you like; they leak no secret.
  */
-import React, { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -12,7 +23,20 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Copy, Check, ExternalLink, Terminal, Monitor, Bot } from "lucide-react";
+import {
+  Copy,
+  Check,
+  Terminal,
+  Monitor,
+  Bot,
+  AlertCircle,
+  Key,
+  Loader2,
+  RefreshCw,
+  ShieldAlert,
+} from "lucide-react";
+import * as api from "../lib/api";
+import { useAuth } from "../auth/AuthContext";
 
 interface ConnectModalProps {
   isOpen: boolean;
@@ -21,16 +45,121 @@ interface ConnectModalProps {
   nestName: string;
 }
 
-export function ConnectModal({ isOpen, onClose, nestId, nestName }: ConnectModalProps) {
+const KEY_PLACEHOLDER = "<paste-your-api-key-here>";
+
+export function ConnectModal({
+  isOpen,
+  onClose,
+  nestId,
+  nestName,
+}: ConnectModalProps) {
+  const { authenticated, authMode } = useAuth();
   const serverUrl =
-    typeof window !== "undefined" ? window.location.origin : "http://localhost:3838";
+    typeof window !== "undefined"
+      ? window.location.origin
+      : "http://localhost:3838";
   const mcpUrl = `${serverUrl}/nests/${nestId}/mcp`;
+
+  const [hasExistingKey, setHasExistingKey] = useState<boolean | null>(null);
+  const [existingPrefix, setExistingPrefix] = useState<string | null>(null);
+
+  // Plaintext lives ONLY inside the reveal popup. Closing the popup
+  // wipes it. Snippets in this dialog never see the real value.
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const [revealKind, setRevealKind] = useState<"generated" | "rotated" | null>(
+    null,
+  );
+
+  const [busy, setBusy] = useState<"loading" | "mint" | "rotate" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Probe key state when dialog opens / reopens.
+  useEffect(() => {
+    if (!isOpen) {
+      setError(null);
+      return;
+    }
+    if (!authenticated || authMode === "open") {
+      setHasExistingKey(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setBusy("loading");
+      try {
+        const { keys } = await api.listApiKeys();
+        if (cancelled) return;
+        const head = keys[0];
+        setHasExistingKey(!!head);
+        setExistingPrefix(head?.key_prefix ?? null);
+      } catch (err: any) {
+        if (!cancelled) {
+          setError(err.message);
+          setHasExistingKey(false);
+        }
+      } finally {
+        if (!cancelled) setBusy(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, authenticated, authMode]);
+
+  const generateKey = async () => {
+    setError(null);
+    setBusy("mint");
+    try {
+      const { api_key, key_prefix } = await api.createApiKey({
+        nest_id: nestId,
+        label: `connect:${slugify(nestName)}`,
+      });
+      setExistingPrefix(key_prefix);
+      setHasExistingKey(true);
+      setRevealKind("generated");
+      setRevealedKey(api_key);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const rotateKey = async () => {
+    setError(null);
+    setBusy("rotate");
+    try {
+      const { api_key, key_prefix } = await api.rotateApiKey({
+        nest_id: nestId,
+        label: `connect:${slugify(nestName)}`,
+      });
+      setExistingPrefix(key_prefix);
+      setHasExistingKey(true);
+      setRevealKind("rotated");
+      setRevealedKey(api_key);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const closeReveal = () => {
+    // Drop plaintext from memory. Once gone, only Rotate can mint a new
+    // one — the old one stays valid server-side until then.
+    setRevealedKey(null);
+    setRevealKind(null);
+  };
 
   const claudeConfig = JSON.stringify(
     {
       mcpServers: {
         [slugify(nestName)]: {
+          type: "http",
           url: mcpUrl,
+          headers: {
+            Authorization: `Bearer ${KEY_PLACEHOLDER}`,
+          },
         },
       },
     },
@@ -38,135 +167,377 @@ export function ConnectModal({ isOpen, onClose, nestId, nestName }: ConnectModal
     2,
   );
 
-  const ctxCommand = `ctx --server ${serverUrl} --nest ${nestId} query "type:document"`;
+  const ctxCommand = `ctx --server ${serverUrl} --nest ${nestId} --key ${KEY_PLACEHOLDER} query "type:document"`;
+
+  const showOpenModeBanner = authMode === "open";
+  const showLoginBanner = !authenticated && authMode === "key";
 
   return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[640px] max-h-[85vh] flex flex-col">
+    <>
+      <Dialog open={isOpen} onOpenChange={onClose}>
+        <DialogContent className="sm:max-w-[640px] max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Connect to {nestName}</DialogTitle>
+            <DialogDescription>
+              Point your tools at this nest to read, write, and query context.
+            </DialogDescription>
+          </DialogHeader>
+
+          {showLoginBanner && (
+            <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span>
+                You're not logged in. Login from the header to generate an API
+                key for external clients.
+              </span>
+            </div>
+          )}
+
+          {showOpenModeBanner && (
+            <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span>
+                Server is in <strong>open</strong> mode — anyone on the network
+                can read/write without a key. The snippets below omit the
+                Authorization header.
+              </span>
+            </div>
+          )}
+
+          {error && (
+            <div className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-900">
+              <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {authenticated && !showOpenModeBanner && (
+            <div className="rounded-md border bg-card p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm">
+                  <Key className="h-3.5 w-3.5" />
+                  <span className="font-medium">External-client API key</span>
+                </div>
+                {hasExistingKey ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={rotateKey}
+                    disabled={busy !== null}
+                  >
+                    {busy === "rotate" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <>
+                        <RefreshCw className="h-3.5 w-3.5 mr-1" />
+                        Rotate
+                      </>
+                    )}
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm"
+                    onClick={generateKey}
+                    disabled={busy !== null}
+                  >
+                    {busy === "mint" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      "Generate Key"
+                    )}
+                  </Button>
+                )}
+              </div>
+
+              {hasExistingKey && (
+                <p className="text-xs text-muted-foreground">
+                  You have a key on file (
+                  <code className="font-mono">{existingPrefix}</code>). The
+                  plaintext can't be retrieved — click <strong>Rotate</strong>{" "}
+                  to mint a fresh one (the old key is invalidated immediately).
+                </p>
+              )}
+              {!hasExistingKey && (
+                <p className="text-xs text-muted-foreground">
+                  No key yet. Generate one to use the snippets below. You'll
+                  see the plaintext exactly once.
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="flex-1 overflow-y-auto">
+            <Tabs defaultValue="hootie" className="w-full">
+              <TabsList className="grid w-full grid-cols-4">
+                <TabsTrigger value="hootie">
+                  <Bot className="h-3.5 w-3.5 mr-1" />
+                  Hootie
+                </TabsTrigger>
+                <TabsTrigger value="claude">
+                  <Monitor className="h-3.5 w-3.5 mr-1" />
+                  Claude
+                </TabsTrigger>
+                <TabsTrigger value="mcp">MCP</TabsTrigger>
+                <TabsTrigger value="cli">
+                  <Terminal className="h-3.5 w-3.5 mr-1" />
+                  CLI
+                </TabsTrigger>
+              </TabsList>
+
+              {/* Hootie */}
+              <TabsContent value="hootie" className="space-y-4 pt-4">
+                <div>
+                  <p className="text-sm mb-3">
+                    In Hootie, open{" "}
+                    <strong>
+                      Settings → ContextNest Vault → Remote Server
+                    </strong>{" "}
+                    and paste:
+                  </p>
+                  <Snippet label="Server URL" value={serverUrl} />
+                  {!showOpenModeBanner && (
+                    <Snippet
+                      label="API Key (paste your generated key)"
+                      value={KEY_PLACEHOLDER}
+                    />
+                  )}
+                </div>
+                <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
+                  <li>Open Hootie</li>
+                  <li>Click the gear icon (Settings)</li>
+                  <li>Scroll to ContextNest Vault</li>
+                  <li>Switch tab to "Remote Server"</li>
+                  <li>
+                    Paste the URL{!showOpenModeBanner && " + your API Key"}{" "}
+                    above, click Test Vault
+                  </li>
+                </ol>
+              </TabsContent>
+
+              {/* Claude Desktop */}
+              <TabsContent value="claude" className="space-y-4 pt-4">
+                <div>
+                  <p className="text-sm mb-3">
+                    Add this to your{" "}
+                    <code className="text-xs bg-muted px-1 py-0.5 rounded">
+                      claude_desktop_config.json
+                    </code>
+                    {!showOpenModeBanner && (
+                      <>
+                        {" "}
+                        (replace{" "}
+                        <code className="text-[11px] bg-muted px-1 rounded">
+                          {KEY_PLACEHOLDER}
+                        </code>{" "}
+                        with your generated key):
+                      </>
+                    )}
+                  </p>
+                  <Snippet label="Config" value={claudeConfig} multiline />
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Location:{" "}
+                    <code className="text-[10px]">
+                      %APPDATA%\Claude\claude_desktop_config.json
+                    </code>{" "}
+                    (Windows) or{" "}
+                    <code className="text-[10px]">
+                      ~/Library/Application
+                      Support/Claude/claude_desktop_config.json
+                    </code>{" "}
+                    (Mac)
+                  </p>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Restart Claude Desktop after editing. The nest's 16 context
+                  tools will appear in the tools panel.
+                </p>
+              </TabsContent>
+
+              {/* Raw MCP */}
+              <TabsContent value="mcp" className="space-y-4 pt-4">
+                <div>
+                  <p className="text-sm mb-3">
+                    Streamable HTTP MCP endpoint with 16 tools (9 content + 7
+                    governance).
+                    {!showOpenModeBanner && (
+                      <>
+                        {" "}
+                        Pass your API key in an{" "}
+                        <code className="text-[11px] bg-muted px-1 rounded">
+                          Authorization
+                        </code>{" "}
+                        header.
+                      </>
+                    )}
+                  </p>
+                  <Snippet label="MCP Endpoint" value={mcpUrl} />
+                  {!showOpenModeBanner && (
+                    <Snippet
+                      label="Authorization header"
+                      value={`Bearer ${KEY_PLACEHOLDER}`}
+                    />
+                  )}
+                </div>
+                <div className="text-xs text-muted-foreground space-y-2">
+                  <p className="font-medium">Available tools:</p>
+                  <div className="grid grid-cols-2 gap-x-4 font-mono text-[11px]">
+                    <span>context_init</span>
+                    <span>context_stewards</span>
+                    <span>context_overview</span>
+                    <span>context_review_queue</span>
+                    <span>context_search</span>
+                    <span>context_submit_review</span>
+                    <span>context_query</span>
+                    <span>context_approve</span>
+                    <span>context_get</span>
+                    <span>context_reject</span>
+                    <span>context_list</span>
+                    <span>context_versions</span>
+                    <span>context_resolve</span>
+                    <span>context_assign_steward</span>
+                    <span>context_create</span>
+                    <span>context_update</span>
+                  </div>
+                </div>
+              </TabsContent>
+
+              {/* CLI */}
+              <TabsContent value="cli" className="space-y-4 pt-4">
+                <div>
+                  <p className="text-sm mb-3">
+                    Use{" "}
+                    <code className="text-xs bg-muted px-1 py-0.5 rounded">
+                      ctx
+                    </code>{" "}
+                    pointed at this server:
+                  </p>
+                  <Snippet label="Example query" value={ctxCommand} />
+                </div>
+                <div className="text-xs text-muted-foreground space-y-2">
+                  <p className="font-medium">Common commands:</p>
+                  <div className="space-y-1 font-mono text-[11px]">
+                    <div>
+                      ctx --server {serverUrl} --nest {nestId}
+                      {!showOpenModeBanner && ` --key ${KEY_PLACEHOLDER}`}{" "}
+                      query "#architecture"
+                    </div>
+                    <div>
+                      ctx --server {serverUrl} --nest {nestId}
+                      {!showOpenModeBanner && ` --key ${KEY_PLACEHOLDER}`} add
+                      "My Doc" content.md
+                    </div>
+                    <div>
+                      ctx --server {serverUrl} --nest {nestId}
+                      {!showOpenModeBanner && ` --key ${KEY_PLACEHOLDER}`}{" "}
+                      publish
+                    </div>
+                  </div>
+                  <p className="pt-2">
+                    Install:{" "}
+                    <code className="text-[11px] bg-muted px-1 py-0.5 rounded">
+                      npm i -g @promptowl/contextnest-cli
+                    </code>
+                  </p>
+                </div>
+              </TabsContent>
+            </Tabs>
+          </div>
+
+          <div className="border-t pt-3">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span>Nest ID:</span>
+              <code className="flex-1 bg-muted px-2 py-1 rounded text-[11px] font-mono truncate">
+                {nestId}
+              </code>
+              <CopyButton value={nestId} />
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {revealedKey && revealKind && (
+        <KeyRevealModal
+          apiKey={revealedKey}
+          kind={revealKind}
+          onClose={closeReveal}
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * Standalone modal that surfaces a freshly minted / rotated plaintext
+ * key. The plaintext is a prop and lives only for this modal's lifetime
+ * — closing the modal drops it from state in the parent.
+ *
+ * Copy is intentionally not lockout-limited: the value is already in
+ * the user's clipboard after one click, and forcing them to rotate
+ * just to retry copying is hostile. The real guarantee is that once
+ * this modal closes the plaintext is gone (server only ever stored
+ * sha256).
+ */
+function KeyRevealModal({
+  apiKey,
+  kind,
+  onClose,
+}: {
+  apiKey: string;
+  kind: "generated" | "rotated";
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(apiKey);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {}
+  };
+  return (
+    <Dialog open onOpenChange={onClose}>
+      <DialogContent className="sm:max-w-[480px]">
         <DialogHeader>
-          <DialogTitle>Connect to {nestName}</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            <ShieldAlert className="h-4 w-4 text-amber-700" />
+            {kind === "generated" ? "API key generated" : "API key rotated"}
+          </DialogTitle>
           <DialogDescription>
-            Point your tools at this nest to read, write, and query context.
+            This key is shown <strong>only once</strong>. Copy it now and store
+            it somewhere safe (password manager, secrets vault). It cannot be
+            retrieved again — if you lose it, rotate to mint a new one.
+            {kind === "rotated" && (
+              <>
+                {" "}
+                Your previous key has been invalidated and will stop working
+                immediately.
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex-1 overflow-y-auto">
-          <Tabs defaultValue="hootie" className="w-full">
-            <TabsList className="grid w-full grid-cols-4">
-              <TabsTrigger value="hootie">
-                <Bot className="h-3.5 w-3.5 mr-1" />
-                Hootie
-              </TabsTrigger>
-              <TabsTrigger value="claude">
-                <Monitor className="h-3.5 w-3.5 mr-1" />
-                Claude
-              </TabsTrigger>
-              <TabsTrigger value="mcp">MCP</TabsTrigger>
-              <TabsTrigger value="cli">
-                <Terminal className="h-3.5 w-3.5 mr-1" />
-                CLI
-              </TabsTrigger>
-            </TabsList>
-
-            {/* Hootie */}
-            <TabsContent value="hootie" className="space-y-4 pt-4">
-              <div>
-                <p className="text-sm mb-3">
-                  In Hootie, open <strong>Settings → ContextNest Vault → Remote Server</strong> and paste:
-                </p>
-                <Snippet label="Server URL" value={serverUrl} />
-                <Snippet label="API Key" value="(leave blank — open mode)" dim />
-              </div>
-              <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
-                <li>Open Hootie</li>
-                <li>Click the gear icon (Settings)</li>
-                <li>Scroll to ContextNest Vault</li>
-                <li>Switch tab to "Remote Server"</li>
-                <li>Paste the URL above, click Test Vault</li>
-              </ol>
-            </TabsContent>
-
-            {/* Claude Desktop */}
-            <TabsContent value="claude" className="space-y-4 pt-4">
-              <div>
-                <p className="text-sm mb-3">
-                  Add this to your <code className="text-xs bg-muted px-1 py-0.5 rounded">claude_desktop_config.json</code>:
-                </p>
-                <Snippet label="Config" value={claudeConfig} multiline />
-                <p className="text-xs text-muted-foreground mt-2">
-                  Location: <code className="text-[10px]">%APPDATA%\Claude\claude_desktop_config.json</code> (Windows) or <code className="text-[10px]">~/Library/Application Support/Claude/claude_desktop_config.json</code> (Mac)
-                </p>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Restart Claude Desktop after editing. The nest's 16 context tools will appear in the tools panel.
-              </p>
-            </TabsContent>
-
-            {/* Raw MCP */}
-            <TabsContent value="mcp" className="space-y-4 pt-4">
-              <div>
-                <p className="text-sm mb-3">
-                  This nest exposes a Streamable HTTP MCP endpoint with 16 tools (9 content + 7 governance):
-                </p>
-                <Snippet label="MCP Endpoint" value={mcpUrl} />
-              </div>
-              <div className="text-xs text-muted-foreground space-y-2">
-                <p className="font-medium">Available tools:</p>
-                <div className="grid grid-cols-2 gap-x-4 font-mono text-[11px]">
-                  <span>context_init</span>
-                  <span>context_stewards</span>
-                  <span>context_overview</span>
-                  <span>context_review_queue</span>
-                  <span>context_search</span>
-                  <span>context_submit_review</span>
-                  <span>context_query</span>
-                  <span>context_approve</span>
-                  <span>context_get</span>
-                  <span>context_reject</span>
-                  <span>context_list</span>
-                  <span>context_versions</span>
-                  <span>context_resolve</span>
-                  <span>context_assign_steward</span>
-                  <span>context_create</span>
-                  <span>context_update</span>
-                </div>
-              </div>
-            </TabsContent>
-
-            {/* CLI */}
-            <TabsContent value="cli" className="space-y-4 pt-4">
-              <div>
-                <p className="text-sm mb-3">
-                  Use <code className="text-xs bg-muted px-1 py-0.5 rounded">ctx</code> pointed at this server:
-                </p>
-                <Snippet label="Example query" value={ctxCommand} />
-              </div>
-              <div className="text-xs text-muted-foreground space-y-2">
-                <p className="font-medium">Common commands:</p>
-                <div className="space-y-1 font-mono text-[11px]">
-                  <div>ctx --server {serverUrl} --nest {nestId} query "#architecture"</div>
-                  <div>ctx --server {serverUrl} --nest {nestId} add "My Doc" content.md</div>
-                  <div>ctx --server {serverUrl} --nest {nestId} publish</div>
-                </div>
-                <p className="pt-2">
-                  Install:{" "}
-                  <code className="text-[11px] bg-muted px-1 py-0.5 rounded">
-                    npm i -g @promptowl/contextnest-cli
-                  </code>
-                </p>
-              </div>
-            </TabsContent>
-          </Tabs>
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <code className="flex-1 bg-muted px-3 py-2 rounded text-xs font-mono break-all">
+              {apiKey}
+            </code>
+            <Button size="sm" variant="outline" onClick={copy}>
+              {copied ? (
+                <Check className="h-3.5 w-3.5 text-green-600" />
+              ) : (
+                <Copy className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Paste it into Hootie / Claude Desktop / CLI wherever the snippets
+            in the Connect dialog show{" "}
+            <code className="text-[11px]">{KEY_PLACEHOLDER}</code>.
+          </p>
         </div>
 
-        <div className="border-t pt-3">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span>Nest ID:</span>
-            <code className="flex-1 bg-muted px-2 py-1 rounded text-[11px] font-mono truncate">
-              {nestId}
-            </code>
-            <CopyButton value={nestId} />
-          </div>
+        <div className="flex justify-end pt-2">
+          <Button onClick={onClose}>I've saved it — close</Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -177,12 +548,10 @@ function Snippet({
   label,
   value,
   multiline,
-  dim,
 }: {
   label: string;
   value: string;
   multiline?: boolean;
-  dim?: boolean;
 }) {
   return (
     <div className="mb-3">
@@ -195,7 +564,7 @@ function Snippet({
           multiline ? "p-3" : "px-3 py-2"
         } bg-muted rounded text-xs font-mono ${
           multiline ? "whitespace-pre overflow-x-auto" : "truncate"
-        } ${dim ? "text-muted-foreground italic" : ""}`}
+        }`}
       >
         {value}
       </pre>
@@ -224,8 +593,10 @@ function CopyButton({ value }: { value: string }) {
 }
 
 function slugify(s: string) {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "") || "nest";
+  return (
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "nest"
+  );
 }

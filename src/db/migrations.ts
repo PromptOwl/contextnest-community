@@ -306,4 +306,62 @@ export function runMigrations(db: Database.Database): void {
       recordMigration("002_steward_parity");
     })();
   }
+
+  // 003: Sessions + single-key-per-user.
+  //
+  // Switching auth model: web sessions move to httpOnly cookies (new
+  // `sessions` table). api_keys collapses to AT MOST ONE row per user —
+  // the user's external-client credential, shown only at generate/rotate
+  // time. Browser auth never reads/writes the api_key plaintext.
+  //
+  // Migration steps:
+  //   1. Create `sessions` table.
+  //   2. Collapse historic api_keys to one row per user (keep most
+  //      recently used or created). Drops dozens of accumulated rows.
+  //   3. Add UNIQUE index on api_keys.user_id so future writes can't
+  //      accidentally create a second row.
+  if (!hasMigration("003_sessions_and_single_api_key")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+          user_agent TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+      `);
+
+      // Keep the row most likely to be "active" (last_used_at, falling
+      // back to created_at) per user; drop the rest.
+      db.exec(`
+        DELETE FROM api_keys
+        WHERE id IN (
+          SELECT id FROM (
+            SELECT
+              id,
+              ROW_NUMBER() OVER (
+                PARTITION BY user_id
+                ORDER BY
+                  COALESCE(last_used_at, '') DESC,
+                  created_at DESC,
+                  id DESC
+              ) AS rn
+            FROM api_keys
+          )
+          WHERE rn > 1
+        );
+      `);
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_unique
+          ON api_keys(user_id);
+      `);
+
+      recordMigration("003_sessions_and_single_api_key");
+    })();
+  }
 }

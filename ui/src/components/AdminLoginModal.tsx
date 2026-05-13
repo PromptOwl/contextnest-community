@@ -64,6 +64,7 @@ export function AdminLoginModal({
             exchange.user
               ? {
                   email: exchange.user.email,
+                  name: exchange.user.name,
                   is_admin: !!exchange.user.is_admin,
                 }
               : undefined,
@@ -92,8 +93,16 @@ export function AdminLoginModal({
     setError(null);
     setLoading(true);
     try {
-      await api.login(email, password);
-      loginSuccess();
+      const res = await api.login(email, password);
+      loginSuccess(
+        res.user
+          ? {
+              email: res.user.email,
+              name: res.user.name,
+              is_admin: !!res.user.is_admin,
+            }
+          : undefined,
+      );
       onClose();
     } catch (err: any) {
       setError(err.message);

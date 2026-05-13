@@ -26,17 +26,19 @@ export function Login() {
     setError(null);
     setLoading(true);
     try {
-      if (mode === "register") {
-        const res = await api.register(email, password, name);
-        loginSuccess(
-          res.user
-            ? { email: res.user.email, is_admin: !!res.user.is_admin }
-            : undefined,
-        );
-      } else {
-        await api.login(email, password);
-        loginSuccess();
-      }
+      const res =
+        mode === "register"
+          ? await api.register(email, password, name)
+          : await api.login(email, password);
+      loginSuccess(
+        res.user
+          ? {
+              email: res.user.email,
+              name: res.user.name,
+              is_admin: !!res.user.is_admin,
+            }
+          : undefined,
+      );
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -63,6 +65,7 @@ export function Login() {
             exchange.user
               ? {
                   email: exchange.user.email,
+                  name: exchange.user.name,
                   is_admin: !!exchange.user.is_admin,
                 }
               : undefined,
