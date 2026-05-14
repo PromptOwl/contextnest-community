@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Login } from "./components/Login";
 import { Dashboard } from "./components/Dashboard";
 import { NestView } from "./components/NestView";
+import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
 import hootieIcon from "./assets/hootie.svg";
@@ -21,6 +22,12 @@ import { useAuth } from "./auth/AuthContext";
 type View =
   | { page: "dashboard" }
   | { page: "nest"; nestId: string; nestName: string }
+  | {
+      page: "document";
+      nestId: string;
+      nestName: string;
+      nodeId: string | "new";
+    }
   | { page: "teammates" };
 
 export default function App() {
@@ -35,6 +42,22 @@ export default function App() {
   } = useAuth();
   const [view, setView] = useState<View>({ page: "dashboard" });
   const [showAdminLogin, setShowAdminLogin] = useState(false);
+
+  // Reset to the dashboard whenever the signed-in user changes. App
+  // doesn't unmount across logout/login so `view` would otherwise
+  // carry the prior session's selected nest into the next user's
+  // session — that lets user B land directly inside user A's nest
+  // even when they lack access (server still 403s, but UX is wrong).
+  // Tracking the previous email (incl. logged-out → null) catches
+  // logout, login, and user-switch in one effect.
+  const currentUserEmail = adminStatus?.me?.email ?? null;
+  const prevUserEmailRef = useRef<string | null>(currentUserEmail);
+  useEffect(() => {
+    if (prevUserEmailRef.current !== currentUserEmail) {
+      prevUserEmailRef.current = currentUserEmail;
+      setView({ page: "dashboard" });
+    }
+  }, [currentUserEmail]);
 
   if (error) {
     return (
@@ -122,6 +145,47 @@ export default function App() {
             nestId={view.nestId}
             nestName={view.nestName}
             onBack={() => setView({ page: "dashboard" })}
+            onOpenDocument={(nodeId) =>
+              setView({
+                page: "document",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                nodeId,
+              })
+            }
+          />
+        )}
+        {view.page === "document" && (
+          <DocumentEditor
+            nestId={view.nestId}
+            nestName={view.nestName}
+            nodeId={view.nodeId}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+              })
+            }
+            onSaved={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+              })
+            }
+            onNavigateDocument={(linkNestId, linkNodeId) =>
+              // Cross-nest links don't carry the target nest's name —
+              // we keep the current nestName as a best-effort label.
+              // The DocumentEditor reloads from the server anyway.
+              setView({
+                page: "document",
+                nestId: linkNestId,
+                nestName:
+                  linkNestId === view.nestId ? view.nestName : "Document",
+                nodeId: linkNodeId,
+              })
+            }
           />
         )}
         {view.page === "teammates" && (

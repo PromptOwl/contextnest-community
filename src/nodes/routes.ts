@@ -24,7 +24,10 @@ function toNodeResponse(node: ContextNode) {
     title: node.frontmatter.title,
     type: node.frontmatter.type || "document",
     tags: node.frontmatter.tags || [],
-    status: node.frontmatter.status || "draft",
+    // Widen to string so callers can layer review-workflow states like
+    // "pending_review" / "rejected" on top of the on-disk frontmatter
+    // status. The engine's Status enum only knows draft/approved.
+    status: (node.frontmatter.status || "draft") as string,
     version: node.frontmatter.version || 1,
     author: node.frontmatter.author,
     description: node.frontmatter.description,
@@ -41,9 +44,17 @@ nodeRoutes.get("/", async (c) => {
   const documents = await storage.discoverDocuments();
   const userEmail = resolveCallerEmail(c.get("userId"));
   const accessible = filterAccessible(nestId, userEmail, documents);
+
   return c.json({
     count: accessible.length,
-    nodes: accessible.map(toNodeResponse),
+    nodes: accessible.map((doc) => {
+      const r = toNodeResponse(doc);
+      // Workflow status is computed entirely from the DB so the .md
+      // frontmatter stays stable across draft → pending → approved
+      // cycles. See getDisplayStatus() for the resolution order.
+      r.status = versions.getDisplayStatus(nestId, r.id);
+      return r;
+    }),
   });
 });
 
@@ -63,7 +74,7 @@ nodeRoutes.post("/", async (c) => {
   }
 
   const nestId = c.req.param("nestId")!;
-  const { storage } = engineCache.get(nestId);
+  const { storage, versions: versionManager } = engineCache.get(nestId);
 
   const slug = body.title
     .toLowerCase()
@@ -106,6 +117,16 @@ nodeRoutes.post("/", async (c) => {
 
   // Track version
   const authorEmail = getUserEmail(c);
+
+  // Engine-native version snapshot to .versions/{slug}/ (history.yaml +
+  // v1.md keyframe). Wrapped so a versioning failure can't roll back
+  // the document write the user already saw succeed.
+  try {
+    await versionManager.createVersion(node, authorEmail);
+  } catch (err) {
+    console.error("VersionManager.createVersion failed (node create)", err);
+  }
+
   versions.createVersion({
     nestId,
     nodeId: id,
@@ -207,19 +228,25 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     );
   }
 
+  let node;
   try {
-    const node = await storage.readDocument(nodeId);
-    return c.json({ node: toNodeResponse(node) });
+    node = await storage.readDocument(nodeId);
   } catch {
     throw new NotFoundError(`Node not found: ${nodeId}`);
   }
+  const response = toNodeResponse(node);
+  // Resolved-from-DB workflow status; on-disk frontmatter status is
+  // ignored entirely so the file never gets rewritten on workflow
+  // transitions.
+  response.status = versions.getDisplayStatus(nestId, nodeId);
+  return c.json({ node: response });
 });
 
 // PATCH /nests/:nestId/nodes/:nodeId{.+}
 nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const { storage } = engineCache.get(nestId);
+  const { storage, versions: versionManager } = engineCache.get(nestId);
   const body = await c.req.json<{
     content?: string;
     append?: string;
@@ -308,6 +335,20 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   const currentTags = (node.frontmatter.tags || []) as string[];
   // Keep tag index in sync with the latest frontmatter tags.
   syncNodeTags(nestId, nodeId, currentTags);
+
+  // Engine-native version snapshot — appends history.yaml + writes a
+  // keyframe at the configured interval so older approved bodies stay
+  // recoverable via reconstructVersion() even after the author edits
+  // past them on disk. Failure here is logged but doesn't abort the
+  // edit; the SQLite governance row below is the canonical record.
+  try {
+    await versionManager.createVersion(node, authorEmail, {
+      note: body.changeNote,
+    });
+  } catch (err) {
+    console.error("VersionManager.createVersion failed (node patch)", err);
+  }
+
   versions.createVersion({
     nestId,
     nodeId,
@@ -318,6 +359,18 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     tags: currentTags,
     changeNote: body.changeNote,
   });
+
+  // Editing past a pending review withdraws it — the steward's queue
+  // entry referenced the old version, which is now stale. The new
+  // version starts a fresh draft cycle; author re-submits when ready.
+  // Server enforces this even though the UI also locks editing during
+  // pending: API clients (MCP, CLI) hit the same code path.
+  const { cancelReview, getPendingReview } = await import(
+    "../governance/review-service.js"
+  );
+  if (getPendingReview(nestId, nodeId)) {
+    cancelReview({ nestId, nodeId, cancelledBy: authorEmail });
+  }
 
   // If no stewards, auto-approve the new version
   if (!hasStewards) {
@@ -340,6 +393,25 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
   }
 
   removeNodeFromTagIndex(nestId, nodeId);
+
+  // Purge governance rows tied to this node id. Without this, recreating
+  // a doc with the same title (→ same slug → same node id) hits a UNIQUE
+  // constraint on node_versions(nest_id, node_id, version) because the
+  // old version rows still exist. We also drop pending/historic review
+  // requests and the approved-version pin so the recreated doc starts
+  // from a clean slate.
+  const db = getDb();
+  db.transaction(() => {
+    db.prepare(
+      "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
+    ).run(nestId, nodeId);
+    db.prepare(
+      "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
+    ).run(nestId, nodeId);
+    db.prepare(
+      "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
+    ).run(nestId, nodeId);
+  })();
 
   trackEvent("node.delete", { nestId, nodeId });
 

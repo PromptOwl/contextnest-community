@@ -202,13 +202,96 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/assets/*", serveStatic({ root: UI_DIR_REL }));
   app.get("*", serveStatic({ root: UI_DIR_REL, path: "index.html" }));
 
-  // Error handler
+  // Error handler — translate common low-level errors into messages
+  // the UI can show as-is so users don't see "Internal server error"
+  // for predictable failure modes (constraint violations, missing rows,
+  // disk/path errors). Anything truly unexpected still falls through
+  // to the 500.
   app.onError((err, c) => {
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);
     }
+
+    const e = err as { code?: string; message?: string };
+    const code = e.code;
+    const msg = e.message || "";
+
+    // SQLite constraint errors — surface a clear conflict instead of 500.
+    if (code === "SQLITE_CONSTRAINT_UNIQUE") {
+      let friendly =
+        "That conflicts with existing data. Please change a value and try again.";
+      if (msg.includes("node_versions")) {
+        friendly =
+          "A version record for this node already exists. The document may have been recreated with the same name — pick a different title or remove the old node first.";
+      } else if (msg.includes("review_requests")) {
+        friendly = "A review request for this node already exists.";
+      } else if (msg.includes("nests")) {
+        friendly = "A nest with that name already exists.";
+      } else if (msg.includes("users")) {
+        friendly = "An account with that email already exists.";
+      } else if (msg.includes("stewards")) {
+        friendly = "That steward is already assigned with the same scope.";
+      }
+      return c.json({ error: friendly }, 409);
+    }
+    if (code === "SQLITE_CONSTRAINT_FOREIGNKEY") {
+      return c.json(
+        {
+          error:
+            "Required related record is missing. Ensure the parent resource still exists.",
+        },
+        409,
+      );
+    }
+    if (code === "SQLITE_CONSTRAINT_CHECK") {
+      return c.json(
+        {
+          error:
+            "Provided value isn't allowed for one of the fields. Double-check your input.",
+        },
+        400,
+      );
+    }
+    if (code === "SQLITE_CONSTRAINT_NOTNULL") {
+      return c.json(
+        { error: "A required field is missing. Please fill it in and retry." },
+        400,
+      );
+    }
+
+    // Node filesystem errors when reading/writing nest folders.
+    if (code === "ENOENT") {
+      return c.json(
+        { error: "The requested file or folder doesn't exist." },
+        404,
+      );
+    }
+    if (code === "EACCES" || code === "EPERM") {
+      return c.json(
+        { error: "Server doesn't have permission to access that file." },
+        500,
+      );
+    }
+    if (code === "ENOSPC") {
+      return c.json(
+        { error: "Out of disk space on the server. Free up space and retry." },
+        507,
+      );
+    }
+
+    // JSON / body parse failures — Hono surfaces SyntaxError.
+    if (err instanceof SyntaxError && msg.toLowerCase().includes("json")) {
+      return c.json({ error: "Request body isn't valid JSON." }, 400);
+    }
+
     console.error("Unhandled error:", err);
-    return c.json({ error: "Internal server error" }, 500);
+    return c.json(
+      {
+        error:
+          "Something went wrong on the server. Try again — if it keeps failing, check the server log.",
+      },
+      500,
+    );
   });
 
   return app;

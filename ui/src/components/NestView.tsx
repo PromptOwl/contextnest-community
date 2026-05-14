@@ -7,6 +7,7 @@ import * as api from "../lib/api";
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
+  Pencil, Trash2,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
@@ -35,10 +36,17 @@ interface NestViewProps {
   nestId: string;
   nestName: string;
   onBack: () => void;
+  onOpenDocument: (nodeId: string | "new") => void;
 }
 
-export function NestView({ nestId, nestName, onBack }: NestViewProps) {
-  const { isAdmin } = useAuth();
+export function NestView({
+  nestId,
+  nestName,
+  onBack,
+  onOpenDocument,
+}: NestViewProps) {
+  const { isAdmin, adminStatus } = useAuth();
+  const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   const [nodes, setNodes] = useState<any[]>([]);
   const [stewards, setStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
@@ -58,7 +66,6 @@ export function NestView({ nestId, nestName, onBack }: NestViewProps) {
     approvedVersion: number | null;
     currentVersion: number;
   }>({ versions: [], approvedVersion: null, currentVersion: 0 });
-  const [showCreate, setShowCreate] = useState(false);
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
 
@@ -96,6 +103,20 @@ export function NestView({ nestId, nestName, onBack }: NestViewProps) {
     return true;
   });
 
+  // Map nodeId → submitter so the per-row Review button can hide on
+  // docs the current user submitted (separation-of-duties: authors must
+  // not approve their own work). The server already rejects the call,
+  // but hiding the affordance keeps the UI honest.
+  const submitterByNode = new Map<string, string>();
+  for (const r of reviewQueue) {
+    submitterByNode.set(r.nodeId, r.requestedBy.toLowerCase());
+  }
+  // Review queue panel: filter out own-submitted requests so the user
+  // doesn't see (and can't accidentally open) reviews they can't action.
+  const reviewableQueue = reviewQueue.filter(
+    (r) => r.requestedBy.toLowerCase() !== currentEmail,
+  );
+
   const openVersions = async (node: any) => {
     setVersionNode(node);
     try {
@@ -128,6 +149,22 @@ export function NestView({ nestId, nestName, onBack }: NestViewProps) {
   const handleAssignSteward = async (data: any) => {
     await api.assignSteward(nestId, data);
     fetchData();
+  };
+
+  const handleDeleteNode = async (node: any) => {
+    // Plain confirm — destructive, irreversible. Promoting to a fancy
+    // AlertDialog when the rest of the destructive surfaces (nest
+    // delete, key revoke) standardise on one is a follow-up.
+    const ok = window.confirm(
+      `Delete "${node.title}"? This cannot be undone.`,
+    );
+    if (!ok) return;
+    try {
+      await api.deleteNode(nestId, node.id);
+      fetchData();
+    } catch (err: any) {
+      window.alert(err?.message || "Failed to delete document");
+    }
   };
 
   return (
@@ -163,7 +200,7 @@ export function NestView({ nestId, nestName, onBack }: NestViewProps) {
               </Button>
             </>
           )}
-          <Button onClick={() => setShowCreate(true)}>
+          <Button onClick={() => onOpenDocument("new")}>
             <Plus className="h-4 w-4 mr-2" />
             New Document
           </Button>
@@ -284,7 +321,9 @@ export function NestView({ nestId, nestName, onBack }: NestViewProps) {
                   {filtered.map((node) => (
                     <div
                       key={node.id}
-                      className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 transition-colors group"
+                      onClick={() => onOpenDocument(node.id)}
+                      className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer"
+                      data-testid={`document-row-${node.id}`}
                     >
                       <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
                       <div className="flex-1 min-w-0">
@@ -307,25 +346,49 @@ export function NestView({ nestId, nestName, onBack }: NestViewProps) {
                           )}
                         </div>
                       </div>
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <div
+                        className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         {stewardshipEnabled && node.status === "draft" && (
                           <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
                             <Send className="h-3.5 w-3.5 mr-1" />
                             Submit
                           </Button>
                         )}
-                        {stewardshipEnabled && node.status === "pending_review" && (
+                        {stewardshipEnabled &&
+                          node.status === "pending_review" &&
+                          submitterByNode.get(node.id) !== currentEmail && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setReviewNode(node)}
+                              className="border-green-200 text-green-700 hover:bg-green-50"
+                            >
+                              Review
+                            </Button>
+                          )}
+                        {node.status !== "pending_review" && (
                           <Button
-                            variant="outline"
+                            variant="ghost"
                             size="sm"
-                            onClick={() => setReviewNode(node)}
-                            className="border-green-200 text-green-700 hover:bg-green-50"
+                            onClick={() => onOpenDocument(node.id)}
+                            title="Edit"
                           >
-                            Review
+                            <Pencil className="h-3.5 w-3.5" />
                           </Button>
                         )}
-                        <Button variant="ghost" size="sm" onClick={() => openVersions(node)}>
+                        <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
                           <History className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDeleteNode(node)}
+                          title="Delete"
+                          className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
                         </Button>
                       </div>
                     </div>
@@ -375,7 +438,7 @@ export function NestView({ nestId, nestName, onBack }: NestViewProps) {
               </Card>
 
               <ReviewQueue
-                requests={reviewQueue}
+                requests={reviewableQueue}
                 loading={loading}
                 onRefresh={fetchData}
                 onSelect={(req) => {
@@ -505,14 +568,6 @@ export function NestView({ nestId, nestName, onBack }: NestViewProps) {
         />
       )}
 
-      {showCreate && (
-        <CreateDocumentModal
-          nestId={nestId}
-          onClose={() => setShowCreate(false)}
-          onCreated={() => { setShowCreate(false); fetchData(); }}
-        />
-      )}
-
       {showAssignSteward && (
         <StewardAssignmentModal
           isOpen={showAssignSteward}
@@ -559,82 +614,6 @@ export function NestView({ nestId, nestName, onBack }: NestViewProps) {
 }
 
 // ─── Sub-modals ─────────────────────────────────────────────────
-
-function CreateDocumentModal({
-  nestId,
-  onClose,
-  onCreated,
-}: {
-  nestId: string;
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [title, setTitle] = useState("");
-  const [content, setContent] = useState("");
-  const [tags, setTags] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!title.trim() || !content.trim()) return;
-    setLoading(true);
-    try {
-      await api.createNode(nestId, {
-        title,
-        content,
-        tags: tags.split(",").map((t) => t.trim()).filter(Boolean),
-      });
-      onCreated();
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[600px]">
-        <DialogHeader>
-          <DialogTitle>New Document</DialogTitle>
-        </DialogHeader>
-        <form onSubmit={handleCreate} className="space-y-4">
-          <div className="space-y-2">
-            <Label>Title</Label>
-            <Input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Document title"
-              autoFocus
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Content</Label>
-            <Textarea
-              value={content}
-              onChange={(e) => setContent(e.target.value)}
-              placeholder="Markdown content..."
-              rows={10}
-              className="font-mono text-sm"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Tags</Label>
-            <Input
-              value={tags}
-              onChange={(e) => setTags(e.target.value)}
-              placeholder="Comma-separated (e.g., architecture, api)"
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={onClose} type="button">Cancel</Button>
-            <Button type="submit" disabled={loading || !title || !content}>
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
 
 function ReviewDocumentModal({
   node,
