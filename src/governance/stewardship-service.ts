@@ -115,7 +115,65 @@ export function listStewards(params: {
  * Inserts one row per user — partial unique indexes enforce idempotency.
  * Returns the inserted rows (existing rows for a duplicate email are skipped).
  */
-export function createStewardRecord(params: {
+// Steward role → nest collaborator permission. Editors get write so they can
+// modify documents in the UI; reviewers/viewers only need read because their
+// approve/reject path goes through the stewardship API, not direct edits.
+function rolePermission(role: StewardRole | undefined): "read" | "write" {
+  return role === "editor" ? "write" : "read";
+}
+
+// Ensure the steward email is a real user in the system AND a collaborator on
+// the nest. Without this, an assigned steward cannot see the nest in their
+// list (listSharedNests JOINs nest_collaborators), so the assignment is
+// invisible to them. Mirrors the placeholder-user pattern used in
+// sharing-routes.ts when sharing by email.
+async function ensureCollaborator(
+  nestId: string,
+  email: string,
+  permission: "read" | "write" | "admin",
+  grantedBy: string,
+): Promise<void> {
+  const db = getDb();
+  let userRow = db
+    .prepare("SELECT id FROM users WHERE email = ?")
+    .get(email) as { id: string } | undefined;
+
+  if (!userRow) {
+    const { hashPassword } = await import("../auth/keys.js");
+    const newId = uuid();
+    db.prepare(
+      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
+    ).run(newId, email, null, await hashPassword(uuid()));
+    userRow = { id: newId };
+  }
+
+  const nestRow = db
+    .prepare("SELECT user_id FROM nests WHERE id = ?")
+    .get(nestId) as { user_id: string } | undefined;
+  if (nestRow && nestRow.user_id === userRow.id) return; // owner; no collab row needed
+
+  const existing = db
+    .prepare(
+      "SELECT id FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
+    )
+    .get(nestId, userRow.id) as { id: string } | undefined;
+  if (existing) return;
+
+  // granted_by FK -> users(id). The route passes the assigner's email, so
+  // translate to user id; fall back to the nest owner if the email isn't
+  // registered (e.g. open-mode "admin@localhost").
+  const granterRow = db
+    .prepare("SELECT id FROM users WHERE email = ?")
+    .get(grantedBy) as { id: string } | undefined;
+  const granterId = granterRow?.id ?? nestRow?.user_id;
+  if (!granterId) return; // nest gone; nothing to grant against
+
+  db.prepare(
+    "INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by) VALUES (?, ?, ?, ?, ?)",
+  ).run(uuid(), nestId, userRow.id, permission, granterId);
+}
+
+export async function createStewardRecord(params: {
   nestId: string;
   scope: StewardshipScope;
   documentId?: string;
@@ -128,7 +186,7 @@ export function createStewardRecord(params: {
     canReject?: boolean;
   }>;
   assignedBy: string;
-}): Steward[] {
+}): Promise<Steward[]> {
   if (params.users.length === 0) {
     throw new Error("At least one user is required");
   }
@@ -200,6 +258,13 @@ export function createStewardRecord(params: {
       isActive: true,
     });
     results.push(created);
+
+    await ensureCollaborator(
+      params.nestId,
+      email,
+      rolePermission(user.role),
+      params.assignedBy,
+    );
   }
 
   // If adding any stewards, ensure governed mode is on.
@@ -278,7 +343,10 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
         WHERE s.nest_id = ? AND s.is_active = 1 AND s.scope = 'folder'
           AND s.node_pattern IS NOT NULL
           AND instr(s.node_pattern, '*') = 0
-          AND ? LIKE s.node_pattern || '/%'
+          AND (
+            ? LIKE s.node_pattern || '/%'
+            OR s.node_pattern = ?
+          )
       UNION ALL
       SELECT s.*, 3 AS priority, ('tag: ' || s.tag_name) AS match_source
         FROM stewards s
@@ -294,7 +362,12 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
       ORDER BY priority ASC, user_email ASC
       `,
     )
-    .all(nestId, nodeId, nestId, nodeId, nestId, nodeId, nestId) as Row[];
+    .all(
+      nestId, nodeId,                  // document branch
+      nestId, nodeId, nestId,          // folder branch (path-prefix OR whole-nest folder)
+      nestId, nodeId,                  // tag branch
+      nestId,                          // nest branch
+    ) as Row[];
 
   const resolved: ResolvedSteward[] = rows.map((row) => ({
     steward: rowToSteward(row),

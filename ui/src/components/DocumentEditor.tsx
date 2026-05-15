@@ -27,8 +27,9 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
-import { SubmitForReviewModal } from "./governance";
+import { SubmitForReviewModal, ReviewActions } from "./governance";
 import { DocumentPickerModal } from "./DocumentPickerModal";
+import { useAuth } from "../auth/AuthContext";
 
 interface DocumentEditorProps {
   nestId: string;
@@ -50,6 +51,9 @@ export function DocumentEditor({
   onNavigateDocument,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
+  const { adminStatus } = useAuth();
+  const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
+  const [canReviewHerePerm, setCanReviewHerePerm] = useState(false);
 
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -86,6 +90,33 @@ export function DocumentEditor({
       cancelled = true;
     };
   }, [nestId]);
+
+  // Approve/reject is reviewer-only by product rule (editors/viewers/owners
+  // get hidden, even though server still enforces). Resolve from this
+  // node's stewards so a per-document reviewer is honored even when the
+  // user has no nest-wide row.
+  useEffect(() => {
+    if (isNew || !nodeId || !currentEmail) {
+      setCanReviewHerePerm(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { stewards } = await api.getNodeStewards(nestId, nodeId);
+        if (cancelled) return;
+        const mine = (stewards as any[]).find(
+          (s) => (s.email || "").toLowerCase() === currentEmail,
+        );
+        setCanReviewHerePerm(!!mine && mine.role === "reviewer" && mine.canApprove);
+      } catch {
+        if (!cancelled) setCanReviewHerePerm(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isNew, nestId, nodeId, currentEmail]);
 
   const loadNode = useCallback(async () => {
     if (isNew) return;
@@ -184,6 +215,23 @@ export function DocumentEditor({
     await loadNode();
   };
 
+  // Reviewer actions surfaced inline so an assigned steward doesn't need to
+  // bounce back to the nest list to action the document they just opened.
+  // Server enforces permission; we just expose the affordance when the doc
+  // is awaiting review.
+  const handleApprove = async (note?: string) => {
+    if (isNew) return;
+    await api.approveNode(nestId, nodeId, note);
+    await loadNode();
+  };
+  const handleReject = async (note: string) => {
+    if (isNew) return;
+    await api.rejectNode(nestId, nodeId, note);
+    await loadNode();
+  };
+  const canReviewHere =
+    !isNew && status === "pending_review" && canReviewHerePerm;
+
   // Submit-for-Review only makes sense on an existing draft when the
   // nest has stewardship enabled. Pending/approved/rejected docs hide
   // the button (re-submit on edit creates a new draft → button returns).
@@ -251,6 +299,14 @@ export function DocumentEditor({
               <Send className="h-4 w-4 mr-2" />
               Submit for Review
             </Button>
+          )}
+          {canReviewHere && (
+            <ReviewActions
+              documentTitle={title}
+              version={baseVersion ?? 1}
+              onApprove={handleApprove}
+              onReject={handleReject}
+            />
           )}
           {!isLocked && (
             <Button

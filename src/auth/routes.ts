@@ -105,19 +105,32 @@ authRoutes.post("/register", async (c) => {
 
   const db = getDb();
   const existing = db
-    .prepare("SELECT id FROM users WHERE email = ?")
-    .get(body.email);
-  if (existing) {
-    throw new ValidationError("Email already registered");
-  }
+    .prepare("SELECT id, is_invited FROM users WHERE email = ?")
+    .get(body.email) as { id: string; is_invited: number } | undefined;
 
-  const userId = uuid();
+  let userId: string;
   const passwordHash = await hashPassword(body.password);
-  db.prepare(
-    "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
-  ).run(userId, body.email, body.name || null, passwordHash);
 
-  trackEvent("user.register", { userId, email: body.email });
+  if (existing && existing.is_invited === 1) {
+    // Claim flow: an admin invited / shared / steward-assigned this email
+    // before the person registered. Adopt the existing row so all
+    // downstream FK links (api_keys, nest_collaborators, stewards) keep
+    // working — just swap in the user-chosen password and clear the
+    // pending flag.
+    userId = existing.id;
+    db.prepare(
+      "UPDATE users SET password_hash = ?, name = COALESCE(?, name), is_invited = 0 WHERE id = ?",
+    ).run(passwordHash, body.name || null, userId);
+    trackEvent("user.register", { userId, email: body.email, claimed: true });
+  } else if (existing) {
+    throw new ValidationError("Email already registered");
+  } else {
+    userId = uuid();
+    db.prepare(
+      "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+    ).run(userId, body.email, body.name || null, passwordHash);
+    trackEvent("user.register", { userId, email: body.email });
+  }
 
   // Web session — browser auth lives in an httpOnly cookie. We do NOT
   // mint an external api_key here. The user can mint one on demand from
@@ -576,7 +589,7 @@ authRoutes.post("/invite", async (c) => {
     const userId = uuid();
     const placeholderHash = await hashPassword(uuid());
     db.prepare(
-      "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
     ).run(userId, body.email, null, placeholderHash);
     user = { id: userId, email: body.email };
   }
@@ -625,7 +638,7 @@ authRoutes.get("/teammates", async (c) => {
 
   const teammates = db
     .prepare(
-      `SELECT u.id, u.email, u.name,
+      `SELECT u.id, u.email, u.name, u.is_invited,
          (SELECT COUNT(*) FROM api_keys WHERE user_id = u.id) as key_count,
          (SELECT MAX(last_used_at) FROM api_keys WHERE user_id = u.id) as last_active
        FROM users u
@@ -636,6 +649,7 @@ authRoutes.get("/teammates", async (c) => {
     id: string;
     email: string;
     name: string | null;
+    is_invited: number;
     key_count: number;
     last_active: string | null;
   }>;
@@ -657,11 +671,14 @@ authRoutes.get("/teammates", async (c) => {
     )
     .all() as Array<{ email: string }>;
 
+  // Sort admins first; underlying SQL is_admin column is unreliable
+  // (license-derived), so resolve in JS after the map.
+  const enriched = teammates
+    .map((t) => ({ ...t, is_admin: isLicenseAdminEmail(t.email) }))
+    .sort((a, b) => Number(b.is_admin) - Number(a.is_admin));
+
   return c.json({
-    teammates: teammates.map((t) => ({
-      ...t,
-      is_admin: isLicenseAdminEmail(t.email),
-    })),
+    teammates: enriched,
     pending_stewards: pendingStewards.map((p) => p.email),
   });
 });

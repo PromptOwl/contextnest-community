@@ -24,6 +24,10 @@ export interface Version {
   editedAt: string;
   changeNote?: string;
   status: "draft" | "pending_review" | "approved" | "rejected";
+  /** Email of the steward who approved or rejected this version, when one
+   *  has resolved a review. Drives the "approved by …" hint in the row. */
+  resolvedBy?: string;
+  resolutionStatus?: "approved" | "rejected" | string;
 }
 
 interface VersionHistoryProps {
@@ -87,12 +91,32 @@ export function VersionHistory({
     );
   }
 
+  const currentVersionStatus = versions.find(
+    (v) => v.version === currentVersion,
+  )?.status;
+  const statusBadgeColor =
+    currentVersionStatus === "approved"
+      ? "bg-green-100 text-green-800 border-green-200"
+      : currentVersionStatus === "rejected"
+        ? "bg-red-100 text-red-800 border-red-200"
+        : currentVersionStatus === "pending_review"
+          ? "bg-amber-100 text-amber-800 border-amber-200"
+          : "bg-muted text-muted-foreground";
+
   return (
     <Card className={className}>
       <CardHeader className="pb-3">
         <CardTitle className="text-sm font-medium flex items-center gap-2">
           <History className="h-4 w-4" />
           Version History
+          {currentVersionStatus && (
+            <Badge
+              variant="outline"
+              className={`text-[10px] ${statusBadgeColor}`}
+            >
+              {currentVersionStatus.replace("_", " ")}
+            </Badge>
+          )}
           <Badge variant="secondary" className="text-[10px] ml-auto">
             v{currentVersion}
           </Badge>
@@ -128,6 +152,16 @@ export function VersionHistory({
                         {formatDate(version.editedAt)} · {version.editedBy}
                         {version.changeNote && ` · ${version.changeNote}`}
                       </div>
+                      {version.resolvedBy && (
+                        <div className="text-xs text-muted-foreground truncate">
+                          {version.resolutionStatus === "rejected"
+                            ? "Rejected by"
+                            : "Approved by"}{" "}
+                          <span className="font-medium">
+                            {version.resolvedBy}
+                          </span>
+                        </div>
+                      )}
                     </div>
                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                       {version.content && (

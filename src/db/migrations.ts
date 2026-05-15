@@ -158,6 +158,13 @@ export function runMigrations(db: Database.Database): void {
   if (!userCols.includes("is_admin")) {
     db.exec("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0");
   }
+  // Pending-claim flag — set to 1 when admin invites by email / shares
+  // a nest / assigns a steward and the row was created server-side with
+  // a random password. Register endpoint flips this to 0 when the real
+  // user claims the email with their own password.
+  if (!userCols.includes("is_invited")) {
+    db.exec("ALTER TABLE users ADD COLUMN is_invited INTEGER NOT NULL DEFAULT 0");
+  }
 
   // ─── Versioned migrations ───
   db.exec(`

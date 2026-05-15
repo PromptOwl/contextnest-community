@@ -49,7 +49,7 @@ governanceRoutes.post("/stewards", async (c) => {
 
   // New shape: users[] array
   if (Array.isArray(body.users)) {
-    const created = stewardship.createStewardRecord({
+    const created = await stewardship.createStewardRecord({
       nestId,
       scope: body.scope,
       documentId: body.documentId,
@@ -65,7 +65,7 @@ governanceRoutes.post("/stewards", async (c) => {
   if (!body.email) {
     throw new ValidationError("users[] or email is required");
   }
-  const created = stewardship.createStewardRecord({
+  const created = await stewardship.createStewardRecord({
     nestId,
     scope: body.scope,
     documentId: body.scope === "document" ? body.nodePattern : undefined,

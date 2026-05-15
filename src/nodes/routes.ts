@@ -197,8 +197,38 @@ nodeRoutes.get("/:nodeId{.+?}/versions", async (c) => {
   const allVersions = getVersions(nestId, nodeId);
   const approved = getApprovedVersion(nestId, nodeId);
 
+  // Enrich each version with the resolver (approver/rejecter) so the UI
+  // can show "approved by X" next to the row. We pull the latest
+  // resolution per version from review_requests; node_versions itself
+  // doesn't carry approver email.
+  const db = getDb();
+  const resolutions = db
+    .prepare(
+      `SELECT version, status, resolved_by, resolved_at
+         FROM review_requests
+        WHERE nest_id = ? AND node_id = ?
+          AND status IN ('approved', 'rejected')
+          AND resolved_by IS NOT NULL
+        ORDER BY resolved_at DESC`,
+    )
+    .all(nestId, nodeId) as Array<{
+      version: number;
+      status: string;
+      resolved_by: string;
+    }>;
+  const byVersion = new Map<number, { status: string; resolvedBy: string }>();
+  for (const r of resolutions) {
+    if (!byVersion.has(r.version)) {
+      byVersion.set(r.version, { status: r.status, resolvedBy: r.resolved_by });
+    }
+  }
+  const enriched = allVersions.map((v) => {
+    const r = byVersion.get(v.version);
+    return r ? { ...v, resolvedBy: r.resolvedBy, resolutionStatus: r.status } : v;
+  });
+
   return c.json({
-    versions: allVersions,
+    versions: enriched,
     approvedVersion: approved,
     currentVersion: allVersions[0]?.version || 0,
   });
