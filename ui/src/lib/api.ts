@@ -342,6 +342,12 @@ export async function assignSteward(nestId: string, data: any) {
   });
 }
 
+export async function removeSteward(nestId: string, stewardId: string) {
+  return request(`/nests/${nestId}/stewards/${stewardId}`, {
+    method: "DELETE",
+  });
+}
+
 export async function getNodeStewards(nestId: string, nodeId: string) {
   return request<{ stewards: any[] }>(
     `/nests/${nestId}/nodes/${nodeId}/stewards`,

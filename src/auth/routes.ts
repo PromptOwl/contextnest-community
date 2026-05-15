@@ -573,11 +573,23 @@ authRoutes.post("/invite", async (c) => {
 
   const callerId = resolveCallerUserId(c);
   if (!callerId) {
-    return c.json({ error: "Admin authentication required" }, 401);
+    return c.json(
+      {
+        error:
+          "Authentication required. Sign in with the admin account that owns the installed PromptOwl license to invite teammates.",
+      },
+      401,
+    );
   }
   const db = getDb();
   if (!isLicenseAdminUserId(callerId)) {
-    return c.json({ error: "Admin only" }, 403);
+    return c.json(
+      {
+        error:
+          "Only the license-admin user can invite teammates. Contact the admin who installed the PromptOwl license on this server to issue invitations.",
+      },
+      403,
+    );
   }
 
   // Find or create user by email
@@ -628,12 +640,24 @@ authRoutes.post("/invite", async (c) => {
 authRoutes.get("/teammates", async (c) => {
   const callerId = resolveCallerUserId(c);
   if (!callerId) {
-    return c.json({ error: "Admin authentication required" }, 401);
+    return c.json(
+      {
+        error:
+          "Authentication required. Sign in with the admin account that owns the installed PromptOwl license to view teammates.",
+      },
+      401,
+    );
   }
 
   const db = getDb();
   if (!isLicenseAdminUserId(callerId)) {
-    return c.json({ error: "Admin only" }, 403);
+    return c.json(
+      {
+        error:
+          "Only the license-admin user can view the teammates list. Contact the admin who installed the PromptOwl license on this server.",
+      },
+      403,
+    );
   }
 
   const teammates = db

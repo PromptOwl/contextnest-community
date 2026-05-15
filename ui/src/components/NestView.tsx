@@ -200,6 +200,19 @@ export function NestView({
     fetchData();
   };
 
+  const handleRemoveSteward = async (stewardId: string) => {
+    const ok = window.confirm(
+      "Remove this steward? They will lose approval rights immediately. The user account and any documents stay intact.",
+    );
+    if (!ok) return;
+    try {
+      await api.removeSteward(nestId, stewardId);
+      fetchData();
+    } catch (err: any) {
+      window.alert(err?.message || "Failed to remove steward");
+    }
+  };
+
   const handleAssignSteward = async (data: any) => {
     // Modal returns scope + generic `target`. Backend's legacy shape expects
     // scope-specific fields: nodePattern (document/folder) or tagName (tag).
@@ -589,6 +602,7 @@ export function NestView({
                     }
                     showScope
                     onAddSteward={() => setShowAssignSteward(true)}
+                    onRemove={handleRemoveSteward}
                   />
                 )}
               </CardContent>

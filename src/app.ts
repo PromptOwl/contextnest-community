@@ -308,7 +308,14 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     if (permissionLevel(permission) < permissionLevel(required)) {
-      return c.json({ error: "Insufficient permissions" }, 403);
+      return c.json(
+        {
+          error: `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,
+          required_permission: required,
+          your_permission: permission,
+        },
+        403,
+      );
     }
 
     c.set("nestPermission", permission);

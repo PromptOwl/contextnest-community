@@ -108,7 +108,13 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
   const permission = effectivePermission(nestId, userId);
 
   if (!isServerAdmin && permission !== "owner") {
-    return c.json({ error: "Admin only" }, 403);
+    return c.json(
+      {
+        error:
+          "Only the nest owner or the server license-admin can update nest settings.",
+      },
+      403,
+    );
   }
 
   const body = await c.req.json<{ stewardship_enabled?: boolean }>();
