@@ -1,6 +1,5 @@
 import { Hono } from "hono";
 import { createMiddleware } from "hono/factory";
-import { logger } from "hono/logger";
 import { cors } from "hono/cors";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
@@ -19,7 +18,12 @@ import { AppError } from "./shared/errors.js";
 import { config } from "./config.js";
 import { getDb } from "./db/client.js";
 import { ensureAnonymousUser } from "./auth/anonymous.js";
-import { isSuspended, getSuspensionReason } from "./auth/license.js";
+import {
+  isSuspended,
+  getSuspensionReason,
+  getCurrentLicense,
+  installLicenseKey,
+} from "./auth/license.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
@@ -71,8 +75,8 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 export function createApp(): Hono<AuthEnv> {
   const app = new Hono<AuthEnv>();
 
-  // Global middleware
-  app.use("*", logger());
+  // Hono request logger disabled — keep terminal clean. Re-enable by
+  // restoring `app.use("*", logger())` if request tracing is needed.
   // CORS allowlist — see config.CORS_ORIGINS. In key mode we default to a
   // locked-down localhost-only list and set credentials:true so Bearer
   // tokens work. In open mode there are no credentials to exfiltrate, so
@@ -115,8 +119,91 @@ export function createApp(): Hono<AuthEnv> {
     }),
   );
 
+  // Admin-features gate: teammate management and governance routes are
+  // blocked until a valid license is installed. Login/register/device/
+  // promptowl/admin-status stay public so users can sign in and reach
+  // the setup flow.
+  app.use("/auth/invite", async (c, next) => {
+    if (!getCurrentLicense()?.valid) {
+      return c.json(
+        {
+          error: "License required",
+          reason:
+            "Install a valid PromptOwl license key before inviting teammates.",
+        },
+        503,
+      );
+    }
+    return next();
+  });
+  app.use("/auth/teammates", async (c, next) => {
+    if (!getCurrentLicense()?.valid) {
+      return c.json(
+        {
+          error: "License required",
+          reason:
+            "Install a valid PromptOwl license key to view teammates.",
+        },
+        503,
+      );
+    }
+    return next();
+  });
+
   // Auth routes (always available — admin can create keys even in open mode)
   app.route("/auth", authRoutes);
+
+  // ─── License setup endpoints (public — needed before unlock) ──────────
+  app.get("/license/status", (c) => {
+    const lic = getCurrentLicense();
+    return c.json({
+      valid: !!lic?.valid,
+      tier: lic?.tier || "none",
+      org: lic?.org || null,
+      owner_email: lic?.ownerEmail || null,
+      suspended: !!lic?.suspended,
+      suspended_reason: lic?.suspendedReason || null,
+      limits: lic?.limits || null,
+    });
+  });
+
+  app.post("/license/install", async (c) => {
+    let body: { key?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const key = body?.key?.trim();
+    if (!key || !key.startsWith("pk_")) {
+      return c.json(
+        { error: "Invalid license key. Must start with pk_." },
+        400,
+      );
+    }
+    try {
+      const info = await installLicenseKey(key);
+      if (!info.valid) {
+        return c.json(
+          {
+            valid: false,
+            error:
+              "License key was saved but PromptOwl rejected it. Verify the key is correct and active.",
+          },
+          400,
+        );
+      }
+      return c.json({
+        valid: true,
+        tier: info.tier,
+        org: info.org,
+        limits: info.limits,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to install key";
+      return c.json({ error: msg }, 500);
+    }
+  });
 
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
@@ -148,6 +235,43 @@ export function createApp(): Hono<AuthEnv> {
         },
         503,
       );
+    }
+
+    // License gate: block writes until a valid PromptOwl key is
+    // installed via /license/install. Reads stay open for plain
+    // node/nest browsing — but governance endpoints (stewards,
+    // review-queue, approve/reject, version history, capability
+    // checks) are admin features and stay locked regardless of HTTP
+    // method.
+    {
+      const path = c.req.path;
+      const isGovernance =
+        path.includes("/stewards") ||
+        path.includes("/review-queue") ||
+        path.includes("/versions") ||
+        path.includes("/reviews") ||
+        path.includes("/submit-review") ||
+        path.includes("/cancel-review") ||
+        path.includes("/approve") ||
+        path.includes("/reject") ||
+        path.includes("/can-access") ||
+        path.includes("/can-approve") ||
+        path.includes("/can-edit");
+      const needsLicense = c.req.method !== "GET" || isGovernance;
+      if (needsLicense) {
+        const lic = getCurrentLicense();
+        if (!lic?.valid) {
+          return c.json(
+            {
+              error: "License required",
+              reason:
+                "Install a PromptOwl license key via the setup screen or POST /license/install.",
+              setup_url: "/setup",
+            },
+            503,
+          );
+        }
+      }
     }
 
     // In open mode, everyone gets owner-level access

@@ -3,7 +3,7 @@ import { serve } from "@hono/node-server";
 import { config } from "./config.js";
 import { createApp } from "./app.js";
 import { getDb } from "./db/client.js";
-import { validateLicense } from "./auth/license.js";
+import { validateLicense, startLicenseWatcher } from "./auth/license.js";
 import { startTelemetryLoop, trackEvent } from "./telemetry/tracker.js";
 import { loadAccessConfig } from "./governance/access-service.js";
 
@@ -23,17 +23,23 @@ async function main() {
   if (!license.valid) {
     console.warn(`
   WARNING: No valid PromptOwl license key found.
-  The server will run, but some features may be limited.
+  Server boots in SETUP MODE — writes return 503 and admin features
+  (stewards, teammates, governance) are locked until a key is installed.
 
-  To register:
+  To activate:
     1. Sign up at https://app.promptowl.ai
-    2. Go to Settings > License Keys
-    3. Create a Community Server key
-    4. Set PROMPTOWL_KEY=pk_... in your environment
+    2. Open Overview > Community License
+    3. Generate a key
+    4. Paste it into the setup screen (UI) or POST /license/install,
+       or set PROMPTOWL_KEY=pk_... in your environment and restart.
 `);
   }
 
   const app = createApp();
+
+  // Start long-poll watcher so deactivations/revocations from PromptOwl
+  // propagate within seconds instead of next restart.
+  startLicenseWatcher();
 
   // Start telemetry
   startTelemetryLoop();

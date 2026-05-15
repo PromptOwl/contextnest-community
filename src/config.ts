@@ -44,6 +44,14 @@ export const config = {
   get PROMPTOWL_KEY() {
     return process.env.PROMPTOWL_KEY || "";
   },
+  /**
+   * Path to the .env file the server reads its config from. Used by
+   * the license install flow to persist PROMPTOWL_KEY alongside any
+   * existing env vars, instead of a separate sidecar file.
+   */
+  get ENV_FILE_PATH() {
+    return process.env.ENV_FILE_PATH || join(process.cwd(), ".env");
+  },
   get TELEMETRY_ENABLED() {
     return process.env.TELEMETRY_ENABLED !== "false";
   },

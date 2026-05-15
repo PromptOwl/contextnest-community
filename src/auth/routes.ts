@@ -23,6 +23,11 @@ import {
 import { ValidationError } from "../shared/errors.js";
 import { config } from "../config.js";
 import { trackEvent } from "../telemetry/tracker.js";
+import {
+  getCurrentLicense,
+  isLicenseAdminEmail,
+  isLicenseAdminUserId,
+} from "./license.js";
 import { tryConsume } from "../shared/rate-limit.js";
 
 // Auth-endpoint rate limits. Keyed on IP for anonymous attempts + email
@@ -122,7 +127,12 @@ authRoutes.post("/register", async (c) => {
 
   return c.json(
     {
-      user: { id: userId, email: body.email, name: body.name || null, is_admin: false },
+      user: {
+        id: userId,
+        email: body.email,
+        name: body.name || null,
+        is_admin: isLicenseAdminEmail(body.email),
+      },
     },
     201,
   );
@@ -196,7 +206,7 @@ authRoutes.post("/login", async (c) => {
       id: user.id,
       email: user.email,
       name: user.name,
-      is_admin: !!user.is_admin,
+      is_admin: isLicenseAdminEmail(user.email),
     },
   });
 });
@@ -423,29 +433,31 @@ authRoutes.post("/promptowl", async (c) => {
     trackEvent("user.login", { userId: user.id, method: "promptowl" });
   }
 
-  // ─── Admin claim ───
-  // If no admin has claimed this server yet, the first PromptOwl-authed user
-  // becomes the admin. Atomic conditional UPDATE.
-  let isAdmin = false;
-  const claim = db.transaction((userId: string): boolean => {
-    const result = db
-      .prepare(
-        `UPDATE users SET is_admin = 1
-         WHERE id = ?
-           AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin = 1)`,
-      )
-      .run(userId);
-    return result.changes > 0;
-  });
+  // ─── Admin derivation ───
+  // Admin is whoever owns the currently-installed license, not a
+  // sticky DB flag. This means transferring the license to a new
+  // PromptOwl account immediately demotes the old admin and promotes
+  // the new owner — no manual DB cleanup required.
+  let claimBlocked:
+    | { reason: "license_required" }
+    | { reason: "email_mismatch"; license_owner_email: string | null }
+    | null = null;
 
-  if (claim(user.id)) {
+  const lic = getCurrentLicense();
+  let isAdmin = false;
+  if (!lic?.valid) {
+    claimBlocked = { reason: "license_required" };
+  } else if (
+    lic.ownerEmail &&
+    lic.ownerEmail.toLowerCase() === me.email.toLowerCase()
+  ) {
     isAdmin = true;
     trackEvent("admin.claim", { userId: user.id, email: user.email });
   } else {
-    const userRow = db
-      .prepare("SELECT is_admin FROM users WHERE id = ?")
-      .get(user.id) as { is_admin: number } | undefined;
-    isAdmin = !!userRow?.is_admin;
+    claimBlocked = {
+      reason: "email_mismatch",
+      license_owner_email: lic.ownerEmail,
+    };
   }
 
   const sessionId = createSession(user.id, c.req.header("User-Agent"));
@@ -458,15 +470,25 @@ authRoutes.post("/promptowl", async (c) => {
       name: user.name,
       is_admin: isAdmin,
     },
+    ...(claimBlocked ? { claim_blocked: claimBlocked } : {}),
   });
 });
 
 // GET /auth/admin-status — does this server have an admin? Who am I?
 authRoutes.get("/admin-status", async (c) => {
   const db = getDb();
-  const admin = db
-    .prepare("SELECT email, name FROM users WHERE is_admin = 1 LIMIT 1")
-    .get() as { email: string; name: string | null } | undefined;
+  // Admin = current license owner. If the owner has never logged in to
+  // this server we still report the email so the UI knows who CAN
+  // claim, but `name` only resolves when a matching users row exists.
+  const lic = getCurrentLicense();
+  const ownerEmail = lic?.valid ? lic.ownerEmail : null;
+  let admin: { email: string; name: string | null } | null = null;
+  if (ownerEmail) {
+    const ownerRow = db
+      .prepare("SELECT name FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1")
+      .get(ownerEmail) as { name: string | null } | undefined;
+    admin = { email: ownerEmail, name: ownerRow?.name ?? null };
+  }
 
   // Optional auth — surface the caller's identity if a session cookie
   // or Bearer key is present; tolerate anonymous callers.
@@ -478,18 +500,22 @@ authRoutes.get("/admin-status", async (c) => {
   } | null = null;
   if (callerId) {
     const row = db
-      .prepare("SELECT email, name, is_admin FROM users WHERE id = ?")
+      .prepare("SELECT email, name FROM users WHERE id = ?")
       .get(callerId) as
-      | { email: string; name: string | null; is_admin: number }
+      | { email: string; name: string | null }
       | undefined;
     if (row) {
-      me = { email: row.email, name: row.name, is_admin: !!row.is_admin };
+      me = {
+        email: row.email,
+        name: row.name,
+        is_admin: isLicenseAdminEmail(row.email),
+      };
     }
   }
 
   return c.json({
     claimed: !!admin,
-    admin: admin ? { email: admin.email, name: admin.name } : null,
+    admin,
     me,
   });
 });
@@ -537,11 +563,7 @@ authRoutes.post("/invite", async (c) => {
     return c.json({ error: "Admin authentication required" }, 401);
   }
   const db = getDb();
-  const caller = db
-    .prepare("SELECT is_admin FROM users WHERE id = ?")
-    .get(callerId) as { is_admin: number } | undefined;
-
-  if (!caller || !caller.is_admin) {
+  if (!isLicenseAdminUserId(callerId)) {
     return c.json({ error: "Admin only" }, 403);
   }
 
@@ -597,28 +619,23 @@ authRoutes.get("/teammates", async (c) => {
   }
 
   const db = getDb();
-  const caller = db
-    .prepare("SELECT is_admin FROM users WHERE id = ?")
-    .get(callerId) as { is_admin: number } | undefined;
-
-  if (!caller || !caller.is_admin) {
+  if (!isLicenseAdminUserId(callerId)) {
     return c.json({ error: "Admin only" }, 403);
   }
 
   const teammates = db
     .prepare(
-      `SELECT u.id, u.email, u.name, u.is_admin,
+      `SELECT u.id, u.email, u.name,
          (SELECT COUNT(*) FROM api_keys WHERE user_id = u.id) as key_count,
          (SELECT MAX(last_used_at) FROM api_keys WHERE user_id = u.id) as last_active
        FROM users u
        WHERE u.id != '00000000-0000-0000-0000-000000000000'
-       ORDER BY u.is_admin DESC, u.created_at DESC`,
+       ORDER BY u.created_at DESC`,
     )
     .all() as Array<{
     id: string;
     email: string;
     name: string | null;
-    is_admin: number;
     key_count: number;
     last_active: string | null;
   }>;
@@ -643,7 +660,7 @@ authRoutes.get("/teammates", async (c) => {
   return c.json({
     teammates: teammates.map((t) => ({
       ...t,
-      is_admin: !!t.is_admin,
+      is_admin: isLicenseAdminEmail(t.email),
     })),
     pending_stewards: pendingStewards.map((p) => p.email),
   });

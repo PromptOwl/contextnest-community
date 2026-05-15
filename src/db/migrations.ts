@@ -364,4 +364,20 @@ export function runMigrations(db: Database.Database): void {
       recordMigration("003_sessions_and_single_api_key");
     })();
   }
+
+  // 004: license_cache.owner_email — bind admin claim to the PromptOwl
+  // account that minted the license key.
+  if (!hasMigration("004_license_cache_owner_email")) {
+    db.transaction(() => {
+      const cols = (
+        db.prepare("PRAGMA table_info(license_cache)").all() as Array<{
+          name: string;
+        }>
+      ).map((c) => c.name);
+      if (!cols.includes("owner_email")) {
+        db.exec("ALTER TABLE license_cache ADD COLUMN owner_email TEXT");
+      }
+      recordMigration("004_license_cache_owner_email");
+    })();
+  }
 }

@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Login } from "./components/Login";
 import { Dashboard } from "./components/Dashboard";
 import { NestView } from "./components/NestView";
 import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
+import { LicenseSetupPage } from "./components/LicenseSetupPage";
+import { getLicenseStatus, type LicenseStatus } from "./lib/api";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -42,6 +44,41 @@ export default function App() {
   } = useAuth();
   const [view, setView] = useState<View>({ page: "dashboard" });
   const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(
+    null,
+  );
+  const [licenseLoading, setLicenseLoading] = useState(true);
+
+  const refreshLicense = useCallback(async () => {
+    try {
+      const status = await getLicenseStatus();
+      setLicenseStatus(status);
+    } catch {
+      // Endpoint unreachable — fall through to normal app; the rest of the
+      // UI will surface a connection error on its own fetches.
+      setLicenseStatus(null);
+    } finally {
+      setLicenseLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshLicense();
+    // Server-side watcher revokes sessions within seconds of a
+    // deactivation, so the next API call this tab makes returns 401
+    // and `auth:unauthorized` is the real-time signal that bounces us
+    // to the setup screen. The 15-minute interval is a safety net for
+    // idle tabs that aren't issuing any other requests.
+    const interval = setInterval(refreshLicense, 15 * 60 * 1000);
+    const onUnauth = () => {
+      refreshLicense();
+    };
+    window.addEventListener("auth:unauthorized", onUnauth);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("auth:unauthorized", onUnauth);
+    };
+  }, [refreshLicense]);
 
   // Reset to the dashboard whenever the signed-in user changes. App
   // doesn't unmount across logout/login so `view` would otherwise
@@ -72,12 +109,18 @@ export default function App() {
     );
   }
 
-  if (loading || authMode === null) {
+  if (loading || authMode === null || licenseLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="animate-pulse text-muted-foreground">Connecting...</div>
       </div>
     );
+  }
+
+  // Setup gate: no valid license = force operator through install
+  // before anything else loads.
+  if (licenseStatus && !licenseStatus.valid) {
+    return <LicenseSetupPage onActivated={refreshLicense} />;
   }
 
   if (!authenticated && authMode === "key") {

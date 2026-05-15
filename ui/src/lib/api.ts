@@ -106,8 +106,15 @@ export async function pollDeviceAuth(code: string, clientSecret: string) {
   );
 }
 
+export type ClaimBlocked =
+  | { reason: "license_required" }
+  | { reason: "email_mismatch"; license_owner_email: string | null };
+
 export async function exchangePromptOwlToken(token: string) {
-  return request<{ user: AuthedUser }>("/auth/promptowl", {
+  return request<{
+    user: AuthedUser;
+    claim_blocked?: ClaimBlocked;
+  }>("/auth/promptowl", {
     method: "POST",
     body: JSON.stringify({ token }),
   });
@@ -121,6 +128,35 @@ export async function getHealth() {
     auth_mode: string;
     suspended_reason?: string;
   }>("/health");
+}
+
+// ─── License ───────────────────────────────────────────────────────────
+
+export interface LicenseStatus {
+  valid: boolean;
+  tier: string;
+  org: string | null;
+  owner_email: string | null;
+  suspended: boolean;
+  suspended_reason: string | null;
+  limits: { maxNests: number; maxUsers: number } | null;
+}
+
+export async function getLicenseStatus() {
+  return request<LicenseStatus>("/license/status");
+}
+
+export async function installLicense(key: string) {
+  return request<{
+    valid: boolean;
+    tier?: string;
+    org?: string | null;
+    limits?: { maxNests: number; maxUsers: number } | null;
+    error?: string;
+  }>("/license/install", {
+    method: "POST",
+    body: JSON.stringify({ key }),
+  });
 }
 
 // ─── Admin / Teammates ─────────────────────────────────────────────────
