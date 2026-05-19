@@ -8,7 +8,7 @@
 
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
-import { ValidationError } from "../shared/errors.js";
+import { ValidationError, ConflictError } from "../shared/errors.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
@@ -49,7 +49,7 @@ governanceRoutes.post("/stewards", async (c) => {
 
   // New shape: users[] array
   if (Array.isArray(body.users)) {
-    const created = stewardship.createStewardRecord({
+    const created = await stewardship.createStewardRecord({
       nestId,
       scope: body.scope,
       documentId: body.documentId,
@@ -65,7 +65,7 @@ governanceRoutes.post("/stewards", async (c) => {
   if (!body.email) {
     throw new ValidationError("users[] or email is required");
   }
-  const created = stewardship.createStewardRecord({
+  const created = await stewardship.createStewardRecord({
     nestId,
     scope: body.scope,
     documentId: body.scope === "document" ? body.nodePattern : undefined,
@@ -184,14 +184,26 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
 
   const userEmail = getUserEmail(c);
 
-  const request = reviews.submitForReview({
-    nestId,
-    nodeId,
-    version: currentVersion,
-    requestedBy: userEmail,
-    note: body.note,
-    priority: body.priority as any,
-  });
+  let request;
+  try {
+    request = reviews.submitForReview({
+      nestId,
+      nodeId,
+      version: currentVersion,
+      requestedBy: userEmail,
+      note: body.note,
+      priority: body.priority as any,
+    });
+  } catch (err) {
+    // The service throws a plain Error for duplicate submissions —
+    // translate the known message into a 409 so the client can react
+    // without surfacing a generic 500 to the user.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/already pending/i.test(msg)) {
+      throw new ConflictError(msg);
+    }
+    throw err;
+  }
 
   const resolved = stewardship.resolveStewardsForNode(nestId, nodeId);
 

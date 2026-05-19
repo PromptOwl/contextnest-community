@@ -7,6 +7,7 @@ import * as api from "../lib/api";
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
+  Pencil, Trash2,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
@@ -21,6 +22,10 @@ import {
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Tabs, TabsList, TabsTrigger, TabsContent,
+} from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import {
@@ -29,15 +34,24 @@ import {
   type Steward, type ReviewRequest, type Version,
   type DocumentLifecycleStatus,
 } from "./governance";
+import { useAuth } from "../auth/AuthContext";
+import { MarkdownEditor } from "./MarkdownEditor";
 
 interface NestViewProps {
   nestId: string;
   nestName: string;
-  isAdmin?: boolean;
   onBack: () => void;
+  onOpenDocument: (nodeId: string | "new") => void;
 }
 
-export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
+export function NestView({
+  nestId,
+  nestName,
+  onBack,
+  onOpenDocument,
+}: NestViewProps) {
+  const { isAdmin, adminStatus } = useAuth();
+  const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   const [nodes, setNodes] = useState<any[]>([]);
   const [stewards, setStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
@@ -57,7 +71,6 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
     approvedVersion: number | null;
     currentVersion: number;
   }>({ versions: [], approvedVersion: null, currentVersion: 0 });
-  const [showCreate, setShowCreate] = useState(false);
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
 
@@ -95,12 +108,75 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
     return true;
   });
 
+  // Caller's steward rows in this nest. Used to gate write affordances:
+  // owner/admin (no steward row, or isAdmin) get full controls; an
+  // assigned 'editor' steward keeps edit/submit; 'reviewer'/'viewer'
+  // stewards see only read + review actions. Server still enforces.
+  const myStewards = stewards.filter(
+    (s) => s.userEmail.toLowerCase() === currentEmail,
+  );
+  const isStewardOnly = !isAdmin && myStewards.length > 0;
+  const canEditDocs =
+    !isStewardOnly || myStewards.some((s) => s.role === "editor");
+  // Approve/reject is reviewer-only by product rule. Editors, viewers, and
+  // nest owners (no steward row) cannot action a review even though server
+  // would still enforce; hide the affordance to keep UI honest.
+  const canReviewDocs = myStewards.some(
+    (s) => s.role === "reviewer" && s.canApprove,
+  );
+
+  // Map nodeId → submitter so the per-row Review button can hide on
+  // docs the current user submitted (separation-of-duties: authors must
+  // not approve their own work). The server already rejects the call,
+  // but hiding the affordance keeps the UI honest.
+  const submitterByNode = new Map<string, string>();
+  for (const r of reviewQueue) {
+    submitterByNode.set(r.nodeId, r.requestedBy.toLowerCase());
+  }
+  // Eligibility check: does the caller hold a steward row whose scope
+  // covers this node AND has canApprove? Mirrors server resolution
+  // (document > folder > tag > nest), but client-side so the queue can
+  // be filtered without N extra round-trips.
+  const canReviewNode = (node: { id: string; tags?: string[] }) => {
+    if (!node) return false;
+    return myStewards.some((s) => {
+      if (!s.canApprove) return false;
+      if (s.scope === "nest") return true;
+      if (s.scope === "document") return s.nodePattern === node.id;
+      if (s.scope === "folder") {
+        return (
+          s.nodePattern === nestId ||
+          (s.nodePattern && node.id.startsWith(s.nodePattern + "/"))
+        );
+      }
+      if (s.scope === "tag") {
+        const target = (s.tagName || "").toLowerCase().replace(/^#+/, "");
+        return (node.tags || [])
+          .map((t) => t.toLowerCase().replace(/^#+/, ""))
+          .includes(target);
+      }
+      return false;
+    });
+  };
+
+  // Review queue: only the assigned reviewer for the node sees the
+  // request. Owners and server admins do NOT get a free pass — the
+  // queue is purely a reviewer worklist; owners use the audit/version
+  // panels for visibility instead. Drops own-submitted requests too
+  // (separation of duties).
+  const reviewableQueue = reviewQueue.filter((r) => {
+    if (r.requestedBy.toLowerCase() === currentEmail) return false;
+    const node = nodes.find((n) => n.id === r.nodeId);
+    if (!node) return false;
+    return canReviewNode(node);
+  });
+
   const openVersions = async (node: any) => {
     setVersionNode(node);
     try {
       const data = await api.getNodeVersions(nestId, node.id);
       setVersionData(data);
-    } catch {}
+    } catch { }
   };
 
   const handleApprove = async (note?: string) => {
@@ -124,21 +200,47 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
     fetchData();
   };
 
-  const handleAssignSteward = async (data: any) => {
-    const token = localStorage.getItem("cnst_token");
-    const res = await fetch(`/nests/${nestId}/stewards`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify(data),
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || "Failed to assign");
+  const handleRemoveSteward = async (stewardId: string) => {
+    const ok = window.confirm(
+      "Remove this steward? They will lose approval rights immediately. The user account and any documents stay intact.",
+    );
+    if (!ok) return;
+    try {
+      await api.removeSteward(nestId, stewardId);
+      fetchData();
+    } catch (err: any) {
+      window.alert(err?.message || "Failed to remove steward");
     }
+  };
+
+  const handleAssignSteward = async (data: any) => {
+    // Modal returns scope + generic `target`. Backend's legacy shape expects
+    // scope-specific fields: nodePattern (document/folder) or tagName (tag).
+    const { target, ...rest } = data;
+    const payload: any = { ...rest };
+    if (data.scope === "document" || data.scope === "folder") {
+      payload.nodePattern = target;
+    } else if (data.scope === "tag") {
+      payload.tagName = target;
+    }
+    await api.assignSteward(nestId, payload);
     fetchData();
+  };
+
+  const handleDeleteNode = async (node: any) => {
+    // Plain confirm — destructive, irreversible. Promoting to a fancy
+    // AlertDialog when the rest of the destructive surfaces (nest
+    // delete, key revoke) standardise on one is a follow-up.
+    const ok = window.confirm(
+      `Delete "${node.title}"? This cannot be undone.`,
+    );
+    if (!ok) return;
+    try {
+      await api.deleteNode(nestId, node.id);
+      fetchData();
+    } catch (err: any) {
+      window.alert(err?.message || "Failed to delete document");
+    }
   };
 
   return (
@@ -174,7 +276,7 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
               </Button>
             </>
           )}
-          <Button onClick={() => setShowCreate(true)}>
+          <Button onClick={() => onOpenDocument("new")}>
             <Plus className="h-4 w-4 mr-2" />
             New Document
           </Button>
@@ -185,11 +287,10 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
           In ungoverned mode every doc is auto-approved so the pending/review
           columns are always zero and just add noise. */}
       <div
-        className={`grid grid-cols-1 gap-4 mb-6 ${
-          stewardshipEnabled
-            ? "md:grid-cols-4"
-            : "md:grid-cols-1 max-w-sm"
-        }`}
+        className={`grid grid-cols-1 gap-4 mb-6 ${stewardshipEnabled
+          ? "md:grid-cols-4"
+          : "md:grid-cols-1 max-w-sm"
+          }`}
       >
         <Card>
           <CardHeader className="pb-2">
@@ -247,9 +348,28 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
         )}
       </div>
 
-      {/* Two-column layout — PromptOwl ContextDashboard */}
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-8">
-        <div className="space-y-4">
+      {/* Tabbed layout — Documents / Review Queue / Stewards.
+          When stewardship is off the latter two tabs are hidden because
+          their data is empty by definition. */}
+      <Tabs defaultValue="documents" className="w-full">
+        <TabsList className="mb-4">
+          <TabsTrigger value="documents">Documents</TabsTrigger>
+          {stewardshipEnabled && (
+            <TabsTrigger value="review" className="gap-2">
+              Review Queue
+              {reviewableQueue.length > 0 && (
+                <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                  {reviewableQueue.length}
+                </Badge>
+              )}
+            </TabsTrigger>
+          )}
+          {stewardshipEnabled && (
+            <TabsTrigger value="stewards">Stewards</TabsTrigger>
+          )}
+        </TabsList>
+
+        <TabsContent value="documents" className="space-y-4">
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between gap-2">
@@ -295,7 +415,9 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
                   {filtered.map((node) => (
                     <div
                       key={node.id}
-                      className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 transition-colors group"
+                      onClick={() => onOpenDocument(node.id)}
+                      className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer"
+                      data-testid={`document-row-${node.id}`}
                     >
                       <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
                       <div className="flex-1 min-w-0">
@@ -318,26 +440,53 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
                           )}
                         </div>
                       </div>
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        {stewardshipEnabled && node.status === "draft" && (
+                      <div
+                        className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {stewardshipEnabled && node.status === "draft" && canEditDocs && (
                           <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
                             <Send className="h-3.5 w-3.5 mr-1" />
                             Submit
                           </Button>
                         )}
-                        {stewardshipEnabled && node.status === "pending_review" && (
+                        {stewardshipEnabled &&
+                          node.status === "pending_review" &&
+                          submitterByNode.get(node.id) !== currentEmail &&
+                          canReviewDocs && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setReviewNode(node)}
+                              className="border-green-200 text-green-700 hover:bg-green-50"
+                            >
+                              Review
+                            </Button>
+                          )}
+                        {node.status !== "pending_review" && canEditDocs && (
                           <Button
-                            variant="outline"
+                            variant="ghost"
                             size="sm"
-                            onClick={() => setReviewNode(node)}
-                            className="border-green-200 text-green-700 hover:bg-green-50"
+                            onClick={() => onOpenDocument(node.id)}
+                            title="Edit"
                           >
-                            Review
+                            <Pencil className="h-3.5 w-3.5" />
                           </Button>
                         )}
-                        <Button variant="ghost" size="sm" onClick={() => openVersions(node)}>
+                        <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
                           <History className="h-3.5 w-3.5" />
                         </Button>
+                        {canEditDocs && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleDeleteNode(node)}
+                            title="Delete"
+                            className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -345,156 +494,157 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
               )}
             </CardContent>
           </Card>
-        </div>
+        </TabsContent>
 
-        {/* Right sidebar */}
-        <div className="space-y-4">
-          {stewardshipEnabled ? (
-            <>
-              {/* First-time explainer — appears above the review queue so
-                  the mental model is established before users see the lists. */}
-              <Card className="border-blue-200 bg-blue-50/40">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <Shield className="h-4 w-4 text-blue-700" />
-                    How stewardship works
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="text-xs text-muted-foreground space-y-2 leading-relaxed">
-                  <p>
-                    <strong className="text-foreground">New documents start as drafts.</strong>{" "}
-                    They're not available to AI queries until a steward approves them.
-                  </p>
-                  <p>
-                    <strong className="text-foreground">Stewards</strong> are
-                    people you name to govern content by scope. Resolution
-                    priority (first match wins):
-                  </p>
-                  <ol className="list-decimal list-inside ml-2 space-y-0.5">
-                    <li><strong>Document</strong> — this exact doc</li>
-                    <li><strong>Folder</strong> — everything under a path</li>
-                    <li><strong>Tag</strong> — everything with #tag</li>
-                    <li><strong>Nest</strong> — anything not matched above</li>
-                  </ol>
-                  <p>
-                    <strong className="text-foreground">Reviewers</strong> can
-                    approve/reject; <strong className="text-foreground">editors</strong> can edit;{" "}
-                    <strong className="text-foreground">viewers</strong> have read access.
-                    Authors can't approve their own work.
-                  </p>
-                </CardContent>
-              </Card>
+        {stewardshipEnabled && (
+          <TabsContent value="review" className="space-y-4">
+            <ReviewQueue
+              requests={reviewableQueue}
+              loading={loading}
+              onRefresh={fetchData}
+              onSelect={(req) => {
+                const node = nodes.find((n) => n.id === req.nodeId);
+                if (node) setReviewNode(node);
+              }}
+            />
+          </TabsContent>
+        )}
 
-              <ReviewQueue
-                requests={reviewQueue}
-                loading={loading}
-                onRefresh={fetchData}
-                onSelect={(req) => {
-                  const node = nodes.find((n) => n.id === req.nodeId);
-                  if (node) setReviewNode(node);
-                }}
-              />
+        {stewardshipEnabled && (
+          <TabsContent value="stewards" className="space-y-4">
+            <Card className="border-blue-200 bg-blue-50/40">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-blue-700" />
+                  How stewardship works
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="text-xs text-muted-foreground space-y-2 leading-relaxed">
+                <p>
+                  <strong className="text-foreground">New documents start as drafts.</strong>{" "}
+                  They're not available to AI queries until a steward approves them.
+                </p>
+                <p>
+                  <strong className="text-foreground">Stewards</strong> are
+                  people you name to govern content by scope. Resolution
+                  priority (first match wins):
+                </p>
+                <ol className="list-decimal list-inside ml-2 space-y-0.5">
+                  <li><strong>Document</strong> — this exact doc</li>
+                  <li><strong>Folder</strong> — everything under a path</li>
+                  <li><strong>Tag</strong> — everything with #tag</li>
+                  <li><strong>Nest</strong> — anything not matched above</li>
+                </ol>
+                <p>
+                  <strong className="text-foreground">Reviewers</strong> can
+                  approve/reject; <strong className="text-foreground">editors</strong> can edit;{" "}
+                  <strong className="text-foreground">viewers</strong> have read access.
+                  Authors can't approve their own work.
+                </p>
+              </CardContent>
+            </Card>
 
-              <Card>
-                <CardHeader className="pb-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <CardTitle className="text-lg">Stewards</CardTitle>
-                      <CardDescription>
-                        {stewards.length === 0
-                          ? "Nobody's governing content yet"
-                          : "Who governs what"}
-                      </CardDescription>
-                    </div>
-                    {stewards.length > 0 && (
-                      <div className="flex items-center gap-2">
-                        {(["all", "document", "folder", "tag", "nest"] as const).map(
-                          (s) => (
-                            <button
-                              key={s}
-                              onClick={() => setStewardScope(s)}
-                              className={`text-xs px-2 py-1 rounded border ${
-                                stewardScope === s
-                                  ? "bg-primary text-primary-foreground border-primary"
-                                  : "bg-background text-muted-foreground border-border hover:bg-secondary"
-                              }`}
-                            >
-                              {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
-                            </button>
-                          ),
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  {stewards.length === 0 ? (
-                    <div className="text-sm space-y-3 py-2">
-                      <p className="text-muted-foreground leading-relaxed">
-                        Without stewards, every draft needs the nest owner to
-                        approve. Add an editor/reviewer to delegate approvals
-                        for a tag, folder, or specific doc.
-                      </p>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="w-full"
-                        onClick={() => setShowAssignSteward(true)}
-                      >
-                        <Shield className="h-3.5 w-3.5 mr-2" />
-                        Assign your first steward
-                      </Button>
-                    </div>
-                  ) : (
-                    <StewardList
-                      stewards={
-                        stewardScope === "all"
-                          ? stewards
-                          : stewards.filter((s) => s.scope === stewardScope)
-                      }
-                      showScope
-                      onAddSteward={() => setShowAssignSteward(true)}
-                    />
-                  )}
-                </CardContent>
-              </Card>
-            </>
-          ) : (
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  <Shield className="h-4 w-4" />
-                  Stewardship is off
-                </CardTitle>
-                <CardDescription>
-                  New documents are auto-approved and immediately AI-ready.
-                </CardDescription>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <CardTitle className="text-lg">Stewards</CardTitle>
+                    <CardDescription>
+                      {stewards.length === 0
+                        ? "Nobody's governing content yet"
+                        : "Who governs what"}
+                    </CardDescription>
+                  </div>
+                  {stewards.length > 0 && (
+                    <div className="flex items-center gap-2">
+                      {(["all", "document", "folder", "tag", "nest"] as const).map(
+                        (s) => (
+                          <button
+                            key={s}
+                            onClick={() => setStewardScope(s)}
+                            className={`text-xs px-2 py-1 rounded border ${stewardScope === s
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : "bg-background text-muted-foreground border-border hover:bg-secondary"
+                              }`}
+                          >
+                            {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
+                          </button>
+                        ),
+                      )}
+                    </div>
+                  )}
+                </div>
               </CardHeader>
               <CardContent>
-                <p className="text-xs text-muted-foreground mb-3">
-                  Enable stewardship to require steward approval before documents become AI-ready.
-                  Versioning stays on either way.
-                </p>
-                {isAdmin ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="w-full"
-                    onClick={() => setShowSettings(true)}
-                  >
-                    <SettingsIcon className="h-3.5 w-3.5 mr-2" />
-                    Open Settings
-                  </Button>
+                {stewards.length === 0 ? (
+                  <div className="text-sm space-y-3 py-2">
+                    <p className="text-muted-foreground leading-relaxed">
+                      Without stewards, every draft needs the nest owner to
+                      approve. Add an editor/reviewer to delegate approvals
+                      for a tag, folder, or specific doc.
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      onClick={() => setShowAssignSteward(true)}
+                    >
+                      <Shield className="h-3.5 w-3.5 mr-2" />
+                      Assign your first steward
+                    </Button>
+                  </div>
                 ) : (
-                  <p className="text-xs text-muted-foreground italic">
-                    Only the server admin can enable stewardship.
-                  </p>
+                  <StewardList
+                    stewards={
+                      stewardScope === "all"
+                        ? stewards
+                        : stewards.filter((s) => s.scope === stewardScope)
+                    }
+                    showScope
+                    onAddSteward={() => setShowAssignSteward(true)}
+                    onRemove={handleRemoveSteward}
+                  />
                 )}
               </CardContent>
             </Card>
-          )}
-        </div>
-      </div>
+          </TabsContent>
+        )}
+      </Tabs>
+
+      {!stewardshipEnabled && (
+        <Card className="mt-4">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Shield className="h-4 w-4" />
+              Stewardship is off
+            </CardTitle>
+            <CardDescription>
+              New documents are auto-approved and immediately AI-ready.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-xs text-muted-foreground mb-3">
+              Enable stewardship to require steward approval before documents become AI-ready.
+              Versioning stays on either way.
+            </p>
+            {isAdmin ? (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={() => setShowSettings(true)}
+              >
+                <SettingsIcon className="h-3.5 w-3.5 mr-2" />
+                Open Settings
+              </Button>
+            ) : (
+              <p className="text-xs text-muted-foreground italic">
+                Only the server admin can enable stewardship.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Modals */}
       {showConnect && (
@@ -516,18 +666,11 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
         />
       )}
 
-      {showCreate && (
-        <CreateDocumentModal
-          nestId={nestId}
-          onClose={() => setShowCreate(false)}
-          onCreated={() => { setShowCreate(false); fetchData(); }}
-        />
-      )}
-
       {showAssignSteward && (
         <StewardAssignmentModal
           isOpen={showAssignSteward}
           onClose={() => setShowAssignSteward(false)}
+          nestId={nestId}
           onSubmit={handleAssignSteward}
         />
       )}
@@ -571,82 +714,6 @@ export function NestView({ nestId, nestName, isAdmin, onBack }: NestViewProps) {
 
 // ─── Sub-modals ─────────────────────────────────────────────────
 
-function CreateDocumentModal({
-  nestId,
-  onClose,
-  onCreated,
-}: {
-  nestId: string;
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [title, setTitle] = useState("");
-  const [content, setContent] = useState("");
-  const [tags, setTags] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!title.trim() || !content.trim()) return;
-    setLoading(true);
-    try {
-      await api.createNode(nestId, {
-        title,
-        content,
-        tags: tags.split(",").map((t) => t.trim()).filter(Boolean),
-      });
-      onCreated();
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[600px]">
-        <DialogHeader>
-          <DialogTitle>New Document</DialogTitle>
-        </DialogHeader>
-        <form onSubmit={handleCreate} className="space-y-4">
-          <div className="space-y-2">
-            <Label>Title</Label>
-            <Input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Document title"
-              autoFocus
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Content</Label>
-            <Textarea
-              value={content}
-              onChange={(e) => setContent(e.target.value)}
-              placeholder="Markdown content..."
-              rows={10}
-              className="font-mono text-sm"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Tags</Label>
-            <Input
-              value={tags}
-              onChange={(e) => setTags(e.target.value)}
-              placeholder="Comma-separated (e.g., architecture, api)"
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={onClose} type="button">Cancel</Button>
-            <Button type="submit" disabled={loading || !title || !content}>
-              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 function ReviewDocumentModal({
   node,
   onApprove,
@@ -664,10 +731,16 @@ function ReviewDocumentModal({
         <DialogHeader>
           <DialogTitle>{node.title}</DialogTitle>
         </DialogHeader>
-        <div className="flex-1 overflow-y-auto bg-muted/30 p-4 rounded-md">
-          <pre className="text-sm whitespace-pre-wrap font-mono">
-            {node.content || "(no content)"}
-          </pre>
+        <div className="flex-1 overflow-y-auto rounded-md">
+          {node.content ? (
+            <MarkdownEditor
+              content={node.content}
+              onChange={() => { }}
+              editable={false}
+            />
+          ) : (
+            <p className="text-sm text-muted-foreground p-4">(no content)</p>
+          )}
         </div>
         <DialogFooter>
           <ReviewActions

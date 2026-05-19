@@ -1,6 +1,7 @@
 import type {
   NestStorage,
   GraphQueryEngine,
+  VersionManager,
   ContextNode,
 } from "@promptowl/contextnest-engine";
 import { serializeDocument } from "@promptowl/contextnest-engine";
@@ -14,6 +15,7 @@ import { syncNodeTags } from "../governance/tag-index-service.js";
 export interface McpToolContext {
   storage: NestStorage;
   queryEngine: GraphQueryEngine;
+  versionManager: VersionManager;
   nestId: string;
   userEmail: string;
 }
@@ -249,12 +251,33 @@ export const TOOL_DEFINITIONS = [
   },
 ];
 
+// Resolve the LLM-visible body for a node. When the nest enforces
+// stewardship, the LLM must NEVER see post-approval edits — return the
+// reconstructed approved version. Without stewardship, the latest
+// on-disk body is fine (every save is auto-approved). Returns null
+// when stewardship is on but the node has no approved version yet, so
+// callers can skip it instead of leaking draft content.
+async function resolveLlmBody(
+  ctx: McpToolContext,
+  node: ContextNode,
+): Promise<string | null> {
+  if (!isStewardshipEnabled(ctx.nestId)) return node.body || "";
+  const approved = versions.getApprovedVersion(ctx.nestId, node.id);
+  if (approved == null) return null;
+  try {
+    return await ctx.versionManager.reconstructVersion(node.id, approved);
+  } catch (err) {
+    console.error("reconstructVersion failed", node.id, approved, err);
+    return null;
+  }
+}
+
 export async function handleToolCall(
   toolName: string,
   args: Record<string, any>,
   ctx: McpToolContext,
 ): Promise<string> {
-  const { storage, queryEngine, nestId, userEmail } = ctx;
+  const { storage, queryEngine, versionManager, nestId, userEmail } = ctx;
 
   switch (toolName) {
     case "context_init": {
@@ -287,15 +310,29 @@ export async function handleToolCall(
     case "context_search": {
       const docs = await storage.discoverDocuments();
       const terms = (args.query || "").toLowerCase().split(/\s+/).filter(Boolean);
-      const matches = docs.filter((n) => {
-        const hay = [n.frontmatter.title, n.body || "", n.frontmatter.type || "", ...(n.frontmatter.tags || [])].join(" ").toLowerCase();
+      // Resolve approved bodies up front so search hits only matter
+      // when they're in content the LLM is allowed to see. Under
+      // stewardship, draft text on disk is invisible to search.
+      const enriched = await Promise.all(
+        docs.map(async (n) => ({ node: n, body: await resolveLlmBody(ctx, n) })),
+      );
+      const visible = enriched.filter((e) => e.body !== null);
+      const matches = visible.filter(({ node: n, body }) => {
+        const hay = [
+          n.frontmatter.title,
+          body || "",
+          n.frontmatter.type || "",
+          ...(n.frontmatter.tags || []),
+        ]
+          .join(" ")
+          .toLowerCase();
         return terms.every((t: string) => hay.includes(t));
       });
       if (!matches.length) return `No nodes matched search: "${args.query}"`;
       const results = matches
         .map(
-          (n, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}\n   ${(n.body || "").slice(0, 200).replace(/\n/g, " ")}`,
+          ({ node: n, body }, i) =>
+            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}\n   ${(body || "").slice(0, 200).replace(/\n/g, " ")}`,
         )
         .join("\n\n");
       return `Found ${matches.length} node(s) matching "${args.query}":\n\n${results}`;
@@ -326,6 +363,10 @@ export async function handleToolCall(
         node = docs.find((n) => n.id === args.id);
       }
       if (!node) return `Node not found: ${args.title || args.id}`;
+      const body = await resolveLlmBody(ctx, node);
+      if (body === null) {
+        return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;
+      }
       const meta = [
         `**Title:** ${node.frontmatter.title}`,
         `**Type:** ${node.frontmatter.type || "document"}`,
@@ -335,7 +376,7 @@ export async function handleToolCall(
       ]
         .filter(Boolean)
         .join("\n");
-      return `${meta}\n\n---\n\n${node.body || "(no content)"}`;
+      return `${meta}\n\n---\n\n${body || "(no content)"}`;
     }
 
     case "context_list": {
@@ -345,6 +386,13 @@ export async function handleToolCall(
       if (args.tag) {
         const tag = args.tag.startsWith("#") ? args.tag : `#${args.tag}`;
         docs = docs.filter((n) => n.frontmatter.tags?.includes(tag));
+      }
+      // Hide unapproved docs from the LLM-facing list under stewardship —
+      // a listing that includes them would imply they're available.
+      if (isStewardshipEnabled(nestId)) {
+        docs = docs.filter(
+          (n) => versions.getApprovedVersion(nestId, n.id) != null,
+        );
       }
       docs = docs.slice(0, args.limit || 50);
       if (!docs.length) return "No nodes found with the given filters.";
@@ -408,6 +456,11 @@ export async function handleToolCall(
 
       // Tag index + version history — the REST path does both.
       syncNodeTags(nestId, id, tags);
+      try {
+        await versionManager.createVersion(node, userEmail);
+      } catch (err) {
+        console.error("VersionManager.createVersion failed (mcp create)", err);
+      }
       versions.createVersion({
         nestId,
         nodeId: id,
@@ -444,16 +497,54 @@ export async function handleToolCall(
         tags = [...new Set([...tags, ...newTags])];
       }
 
+      // Bump version so the engine + governance row align.
+      const prevVersion = versions.getCurrentVersion(nestId, node.id);
+      const newVersion = prevVersion + 1;
+      const hasStewards = isStewardshipEnabled(nestId);
       const updated: ContextNode = {
         ...node,
         body,
         frontmatter: {
           ...node.frontmatter,
           tags,
+          version: newVersion,
           updated_at: new Date().toISOString(),
         },
       };
       await storage.writeDocument(node.id, serializeDocument(updated));
+
+      try {
+        await versionManager.createVersion(updated, userEmail);
+      } catch (err) {
+        console.error("VersionManager.createVersion failed (mcp update)", err);
+      }
+
+      syncNodeTags(nestId, node.id, tags);
+      versions.createVersion({
+        nestId,
+        nodeId: node.id,
+        version: newVersion,
+        content: body,
+        author: userEmail,
+        status: hasStewards ? "draft" : "approved",
+        tags,
+      });
+
+      // Withdraw any pending review so the steward queue stays accurate
+      // — the request pointed at the old version, which no longer
+      // matches what's on disk. New version starts a fresh draft cycle.
+      if (reviews.getPendingReview(nestId, node.id)) {
+        reviews.cancelReview({
+          nestId,
+          nodeId: node.id,
+          cancelledBy: userEmail,
+        });
+      }
+
+      if (!hasStewards) {
+        versions.setApprovedVersion(nestId, node.id, newVersion, userEmail);
+      }
+
       return `Updated node: **${node.frontmatter.title}**`;
     }
 

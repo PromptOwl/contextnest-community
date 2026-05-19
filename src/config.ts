@@ -1,4 +1,26 @@
-import { join } from "path";
+import { join, dirname } from "path";
+import { existsSync } from "fs";
+import { fileURLToPath } from "url";
+import dotenv from "dotenv";
+
+// ── .env loading ────────────────────────────────────────────────────────
+// Load .env before any getter reads process.env. Try cwd first (typical
+// dev: `npm run dev` from project root), then fall back to the directory
+// next to the compiled entrypoint (packaged `node dist/index.js` runs).
+// override: true so .env wins over stale OS-level vars.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const envCandidates = [
+  join(process.cwd(), ".env"),
+  join(__dirname, "..", ".env"),
+];
+const envFileLoaded = envCandidates.find((p) => existsSync(p)) || null;
+if (envFileLoaded) {
+  dotenv.config({ path: envFileLoaded, override: true });
+}
+console.log(
+  `[config] dotenv: ${envFileLoaded ? `loaded ${envFileLoaded}` : "no .env file found"}`,
+);
 
 function dataRoot() {
   return process.env.DATA_ROOT || join(process.cwd(), "data");
@@ -21,6 +43,14 @@ export const config = {
   },
   get PROMPTOWL_KEY() {
     return process.env.PROMPTOWL_KEY || "";
+  },
+  /**
+   * Path to the .env file the server reads its config from. Used by
+   * the license install flow to persist PROMPTOWL_KEY alongside any
+   * existing env vars, instead of a separate sidecar file.
+   */
+  get ENV_FILE_PATH() {
+    return process.env.ENV_FILE_PATH || join(process.cwd(), ".env");
   },
   get TELEMETRY_ENABLED() {
     return process.env.TELEMETRY_ENABLED !== "false";

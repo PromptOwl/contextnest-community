@@ -30,6 +30,7 @@ interface Teammate {
   email: string;
   name: string | null;
   is_admin: boolean;
+  is_invited?: number | boolean;
   key_count: number;
   last_active: string | null;
 }
@@ -140,6 +141,15 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                           Admin
                         </Badge>
                       )}
+                      {!!t.is_invited && (
+                        <Badge
+                          variant="outline"
+                          className="border-amber-200 bg-amber-50 text-amber-700"
+                          title="Invited but not yet registered. They must complete registration with this email to claim the account."
+                        >
+                          Invited
+                        </Badge>
+                      )}
                     </div>
                     <div className="text-xs text-muted-foreground flex items-center gap-3">
                       <span>{t.email}</span>
@@ -147,8 +157,12 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                       <span>
                         {t.key_count} key{t.key_count !== 1 ? "s" : ""}
                       </span>
-                      <span>·</span>
-                      <span>last active {formatDate(t.last_active)}</span>
+                      {t.last_active && (
+                        <>
+                          <span>·</span>
+                          <span>last active {formatDate(t.last_active)}</span>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>

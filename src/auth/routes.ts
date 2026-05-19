@@ -10,9 +10,24 @@ import {
   parseBearerToken,
 } from "./keys.js";
 import { authMiddleware, type AuthEnv } from "./middleware.js";
+import {
+  buildClearSessionCookie,
+  buildSessionCookie,
+  createSession,
+  deleteAllSessionsForUser,
+  deleteSession,
+  getSessionIdFromRequest,
+  isSecureRequest,
+  resolveSession,
+} from "./sessions.js";
 import { ValidationError } from "../shared/errors.js";
 import { config } from "../config.js";
 import { trackEvent } from "../telemetry/tracker.js";
+import {
+  getCurrentLicense,
+  isLicenseAdminEmail,
+  isLicenseAdminUserId,
+} from "./license.js";
 import { tryConsume } from "../shared/rate-limit.js";
 
 // Auth-endpoint rate limits. Keyed on IP for anonymous attempts + email
@@ -29,6 +44,44 @@ function clientIp(c: any): string {
   const realIp = c.req.header("x-real-ip");
   if (realIp) return realIp.trim();
   return "unknown";
+}
+
+/**
+ * Resolve the caller's userId from either an httpOnly session cookie
+ * (preferred, used by the web UI) or a Bearer API key (used by external
+ * clients). Returns null if neither is present or valid. Used by
+ * endpoints that need optional auth (e.g. /admin-status) and by manual
+ * admin checks below that pre-date the middleware factor-out.
+ */
+function resolveCallerUserId(c: any): string | null {
+  const sessionId = getSessionIdFromRequest(c);
+  if (sessionId) {
+    const uid = resolveSession(sessionId);
+    if (uid) return uid;
+  }
+  const key = parseBearerToken(c.req.header("Authorization"));
+  if (key) {
+    const db = getDb();
+    const row = db
+      .prepare("SELECT user_id FROM api_keys WHERE key_hash = ?")
+      .get(hashApiKey(key)) as { user_id: string } | undefined;
+    if (row) return row.user_id;
+  }
+  return null;
+}
+
+function setSessionCookie(c: any, sessionId: string) {
+  c.header(
+    "Set-Cookie",
+    buildSessionCookie(sessionId, { secure: isSecureRequest(c) }),
+  );
+}
+
+function clearSessionCookie(c: any) {
+  c.header(
+    "Set-Cookie",
+    buildClearSessionCookie({ secure: isSecureRequest(c) }),
+  );
 }
 
 export const authRoutes = new Hono<AuthEnv>();
@@ -52,30 +105,47 @@ authRoutes.post("/register", async (c) => {
 
   const db = getDb();
   const existing = db
-    .prepare("SELECT id FROM users WHERE email = ?")
-    .get(body.email);
-  if (existing) {
+    .prepare("SELECT id, is_invited FROM users WHERE email = ?")
+    .get(body.email) as { id: string; is_invited: number } | undefined;
+
+  let userId: string;
+  const passwordHash = await hashPassword(body.password);
+
+  if (existing && existing.is_invited === 1) {
+    // Claim flow: an admin invited / shared / steward-assigned this email
+    // before the person registered. Adopt the existing row so all
+    // downstream FK links (api_keys, nest_collaborators, stewards) keep
+    // working — just swap in the user-chosen password and clear the
+    // pending flag.
+    userId = existing.id;
+    db.prepare(
+      "UPDATE users SET password_hash = ?, name = COALESCE(?, name), is_invited = 0 WHERE id = ?",
+    ).run(passwordHash, body.name || null, userId);
+    trackEvent("user.register", { userId, email: body.email, claimed: true });
+  } else if (existing) {
     throw new ValidationError("Email already registered");
+  } else {
+    userId = uuid();
+    db.prepare(
+      "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+    ).run(userId, body.email, body.name || null, passwordHash);
+    trackEvent("user.register", { userId, email: body.email });
   }
 
-  const userId = uuid();
-  const passwordHash = await hashPassword(body.password);
-  db.prepare(
-    "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
-  ).run(userId, body.email, body.name || null, passwordHash);
-
-  const apiKey = generateApiKey();
-  const keyId = uuid();
-  db.prepare(
-    "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, label) VALUES (?, ?, ?, ?, ?)",
-  ).run(keyId, userId, hashApiKey(apiKey), getKeyPrefix(apiKey), "default");
-
-  trackEvent("user.register", { userId, email: body.email });
+  // Web session — browser auth lives in an httpOnly cookie. We do NOT
+  // mint an external api_key here. The user can mint one on demand from
+  // the Connect modal via /auth/keys.
+  const sessionId = createSession(userId, c.req.header("User-Agent"));
+  setSessionCookie(c, sessionId);
 
   return c.json(
     {
-      user: { id: userId, email: body.email, name: body.name || null },
-      api_key: apiKey,
+      user: {
+        id: userId,
+        email: body.email,
+        name: body.name || null,
+        is_admin: isLicenseAdminEmail(body.email),
+      },
     },
     201,
   );
@@ -86,7 +156,6 @@ authRoutes.post("/login", async (c) => {
   const body = await c.req.json<{
     email?: string;
     password?: string;
-    label?: string;
   }>();
 
   if (!body.email || !body.password) {
@@ -107,10 +176,16 @@ authRoutes.post("/login", async (c) => {
   const db = getDb();
   const user = db
     .prepare(
-      "SELECT id, email, name, password_hash FROM users WHERE email = ?",
+      "SELECT id, email, name, password_hash, is_admin FROM users WHERE email = ?",
     )
     .get(body.email) as
-    | { id: string; email: string; name: string | null; password_hash: string }
+    | {
+        id: string;
+        email: string;
+        name: string | null;
+        password_hash: string;
+        is_admin: number;
+      }
     | undefined;
 
   const check = user
@@ -134,35 +209,64 @@ authRoutes.post("/login", async (c) => {
     }
   }
 
-  const apiKey = generateApiKey();
-  const keyId = uuid();
-  db.prepare(
-    "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, label) VALUES (?, ?, ?, ?, ?)",
-  ).run(
-    keyId,
-    user.id,
-    hashApiKey(apiKey),
-    getKeyPrefix(apiKey),
-    body.label || "login",
-  );
-
   trackEvent("user.login", { userId: user.id });
 
-  return c.json({ api_key: apiKey });
+  const sessionId = createSession(user.id, c.req.header("User-Agent"));
+  setSessionCookie(c, sessionId);
+
+  return c.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      is_admin: isLicenseAdminEmail(user.email),
+    },
+  });
 });
 
-// POST /auth/keys — generate additional API key (authenticated)
+// POST /auth/logout — clear the current browser session
+authRoutes.post("/logout", async (c) => {
+  const sessionId = getSessionIdFromRequest(c);
+  if (sessionId) deleteSession(sessionId);
+  clearSessionCookie(c);
+  return c.json({ ok: true });
+});
+
+// ─── External-client API key (one per user) ──────────────────────────────
+
+// POST /auth/keys — mint the user's single external-client API key.
+//
+// Returns 409 if a key already exists. Use /auth/keys/rotate to replace
+// an existing key. The plaintext is shown ONCE on creation and never
+// retrievable again — server stores only sha256(key).
 authRoutes.post("/keys", authMiddleware, async (c) => {
-  const body = await c.req.json<{ label?: string; nest_id?: string }>();
+  const body = await c.req.json<{ label?: string; nest_id?: string }>().catch(
+    () => ({}) as { label?: string; nest_id?: string },
+  );
   const db = getDb();
+  const userId = c.get("userId");
+
+  const existing = db
+    .prepare("SELECT key_prefix FROM api_keys WHERE user_id = ?")
+    .get(userId) as { key_prefix: string } | undefined;
+
+  if (existing) {
+    return c.json(
+      {
+        error: "An API key already exists for this user. Rotate it instead.",
+        key_prefix: existing.key_prefix,
+      },
+      409,
+    );
+  }
+
   const apiKey = generateApiKey();
   const keyId = uuid();
-
   db.prepare(
     "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, nest_id, label) VALUES (?, ?, ?, ?, ?, ?)",
   ).run(
     keyId,
-    c.get("userId"),
+    userId,
     hashApiKey(apiKey),
     getKeyPrefix(apiKey),
     body.nest_id || null,
@@ -175,7 +279,42 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
   );
 });
 
-// GET /auth/keys — list API keys (authenticated)
+// POST /auth/keys/rotate — atomically replace the caller's existing key.
+//
+// One row per user (DB UNIQUE), so we DELETE + INSERT inside a
+// transaction to preserve that invariant. New plaintext returned once.
+authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
+  const body = await c.req.json<{ label?: string; nest_id?: string }>().catch(
+    () => ({}) as { label?: string; nest_id?: string },
+  );
+  const db = getDb();
+  const userId = c.get("userId");
+
+  const apiKey = generateApiKey();
+  const keyId = uuid();
+
+  const prior = db
+    .prepare("SELECT label, nest_id FROM api_keys WHERE user_id = ?")
+    .get(userId) as { label: string | null; nest_id: string | null } | undefined;
+
+  db.transaction(() => {
+    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(userId);
+    db.prepare(
+      "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, nest_id, label) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(
+      keyId,
+      userId,
+      hashApiKey(apiKey),
+      getKeyPrefix(apiKey),
+      body.nest_id ?? prior?.nest_id ?? null,
+      body.label ?? prior?.label ?? null,
+    );
+  })();
+
+  return c.json({ api_key: apiKey, key_prefix: getKeyPrefix(apiKey) });
+});
+
+// GET /auth/keys — return the caller's key metadata (no plaintext).
 authRoutes.get("/keys", authMiddleware, async (c) => {
   const db = getDb();
   const keys = db
@@ -186,7 +325,7 @@ authRoutes.get("/keys", authMiddleware, async (c) => {
   return c.json({ keys });
 });
 
-// DELETE /auth/keys/:keyId
+// DELETE /auth/keys/:keyId — revoke the caller's external key.
 authRoutes.delete("/keys/:keyId", authMiddleware, async (c) => {
   const db = getDb();
   const result = db
@@ -249,7 +388,7 @@ authRoutes.get("/device/poll", async (c) => {
   return c.json(data, res.status as any);
 });
 
-// POST /auth/promptowl — exchange PromptOwl token for cnst_* API key
+// POST /auth/promptowl — exchange PromptOwl token for a browser session
 authRoutes.post("/promptowl", async (c) => {
   if (!tryConsume(`promptowl:ip:${clientIp(c)}`, DEVICE_LIMIT)) {
     return c.json({ error: "Too many exchange attempts, try again later" }, 429);
@@ -307,110 +446,150 @@ authRoutes.post("/promptowl", async (c) => {
     trackEvent("user.login", { userId: user.id, method: "promptowl" });
   }
 
-  // ─── Admin claim ───
-  // If no admin has claimed this server yet, the first PromptOwl-authed user
-  // becomes the admin. Subsequent PromptOwl logins are regular users.
-  // Atomic via a single conditional UPDATE — two concurrent claims can't
-  // both succeed because the WHERE clause only matches when no admin
-  // currently exists. Wrap in a transaction for durability.
-  let isAdmin = false;
-  const claim = db.transaction((userId: string): boolean => {
-    const result = db
-      .prepare(
-        `UPDATE users SET is_admin = 1
-         WHERE id = ?
-           AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin = 1)`,
-      )
-      .run(userId);
-    return result.changes > 0;
-  });
+  // ─── Admin derivation ───
+  // Admin is whoever owns the currently-installed license, not a
+  // sticky DB flag. This means transferring the license to a new
+  // PromptOwl account immediately demotes the old admin and promotes
+  // the new owner — no manual DB cleanup required.
+  let claimBlocked:
+    | { reason: "license_required" }
+    | { reason: "email_mismatch"; license_owner_email: string | null }
+    | null = null;
 
-  if (claim(user.id)) {
+  const lic = getCurrentLicense();
+  let isAdmin = false;
+  if (!lic?.valid) {
+    claimBlocked = { reason: "license_required" };
+  } else if (
+    lic.ownerEmail &&
+    lic.ownerEmail.toLowerCase() === me.email.toLowerCase()
+  ) {
     isAdmin = true;
     trackEvent("admin.claim", { userId: user.id, email: user.email });
   } else {
-    const userRow = db
-      .prepare("SELECT is_admin FROM users WHERE id = ?")
-      .get(user.id) as { is_admin: number } | undefined;
-    isAdmin = !!userRow?.is_admin;
+    claimBlocked = {
+      reason: "email_mismatch",
+      license_owner_email: lic.ownerEmail,
+    };
   }
 
-  const apiKey = generateApiKey();
-  const keyId = uuid();
-  db.prepare(
-    "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, label) VALUES (?, ?, ?, ?, ?)",
-  ).run(
-    keyId,
-    user.id,
-    hashApiKey(apiKey),
-    getKeyPrefix(apiKey),
-    "promptowl",
-  );
+  const sessionId = createSession(user.id, c.req.header("User-Agent"));
+  setSessionCookie(c, sessionId);
 
   return c.json({
-    api_key: apiKey,
     user: {
       id: user.id,
       email: user.email,
       name: user.name,
       is_admin: isAdmin,
     },
+    ...(claimBlocked ? { claim_blocked: claimBlocked } : {}),
   });
 });
 
 // GET /auth/admin-status — does this server have an admin? Who am I?
 authRoutes.get("/admin-status", async (c) => {
   const db = getDb();
-  const admin = db
-    .prepare("SELECT email, name FROM users WHERE is_admin = 1 LIMIT 1")
-    .get() as { email: string; name: string | null } | undefined;
+  // Admin = current license owner. If the owner has never logged in to
+  // this server we still report the email so the UI knows who CAN
+  // claim, but `name` only resolves when a matching users row exists.
+  const lic = getCurrentLicense();
+  const ownerEmail = lic?.valid ? lic.ownerEmail : null;
+  let admin: { email: string; name: string | null } | null = null;
+  if (ownerEmail) {
+    const ownerRow = db
+      .prepare("SELECT name FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1")
+      .get(ownerEmail) as { name: string | null } | undefined;
+    admin = { email: ownerEmail, name: ownerRow?.name ?? null };
+  }
 
-  // Check if the caller is authed — if so, return their admin status too
-  const callerKey = parseBearerToken(c.req.header("Authorization"));
-  let me: { email: string; is_admin: boolean } | null = null;
-  if (callerKey) {
-    const keyHash = hashApiKey(callerKey);
+  // Optional auth — surface the caller's identity if a session cookie
+  // or Bearer key is present; tolerate anonymous callers.
+  const callerId = resolveCallerUserId(c);
+  let me: {
+    email: string;
+    name: string | null;
+    is_admin: boolean;
+  } | null = null;
+  if (callerId) {
     const row = db
-      .prepare(
-        `SELECT u.email, u.is_admin FROM api_keys k
-         JOIN users u ON u.id = k.user_id
-         WHERE k.key_hash = ?`,
-      )
-      .get(keyHash) as { email: string; is_admin: number } | undefined;
+      .prepare("SELECT email, name FROM users WHERE id = ?")
+      .get(callerId) as
+      | { email: string; name: string | null }
+      | undefined;
     if (row) {
-      me = { email: row.email, is_admin: !!row.is_admin };
+      me = {
+        email: row.email,
+        name: row.name,
+        is_admin: isLicenseAdminEmail(row.email),
+      };
     }
   }
 
   return c.json({
     claimed: !!admin,
-    admin: admin ? { email: admin.email, name: admin.name } : null,
+    admin,
     me,
   });
 });
 
-// POST /auth/invite — admin-only, create an API key for a teammate by email
+// POST /auth/password — change own password and invalidate all sessions
+authRoutes.post("/password", authMiddleware, async (c) => {
+  const body = await c.req.json<{ current?: string; next?: string }>();
+  if (!body.current || !body.next) {
+    throw new ValidationError("current and next are required");
+  }
+  if (body.next.length < 8) {
+    throw new ValidationError("new password must be at least 8 characters");
+  }
+
+  const db = getDb();
+  const userId = c.get("userId");
+  const user = db
+    .prepare("SELECT password_hash FROM users WHERE id = ?")
+    .get(userId) as { password_hash: string } | undefined;
+  if (!user) return c.json({ error: "User not found" }, 404);
+
+  const check = await verifyPassword(body.current, user.password_hash);
+  if (!check.ok) return c.json({ error: "Invalid current password" }, 401);
+
+  const newHash = await hashPassword(body.next);
+  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
+    newHash,
+    userId,
+  );
+  // Force logout everywhere so a stolen session cookie from a prior
+  // compromise is immediately invalidated by the password change.
+  deleteAllSessionsForUser(userId);
+  clearSessionCookie(c);
+
+  return c.json({ ok: true });
+});
+
+// POST /auth/invite — admin-only, create a user + API key for them by email
 authRoutes.post("/invite", async (c) => {
   const body = await c.req.json<{ email?: string; label?: string }>();
   if (!body.email) throw new ValidationError("email is required");
 
-  // Must be admin
-  const inviteKey = parseBearerToken(c.req.header("Authorization"));
-  if (!inviteKey) {
-    return c.json({ error: "Admin authentication required" }, 401);
+  const callerId = resolveCallerUserId(c);
+  if (!callerId) {
+    return c.json(
+      {
+        error:
+          "Authentication required. Sign in with the admin account that owns the installed PromptOwl license to invite teammates.",
+      },
+      401,
+    );
   }
   const db = getDb();
-  const keyHash = hashApiKey(inviteKey);
-  const caller = db
-    .prepare(
-      `SELECT u.id, u.is_admin FROM api_keys k
-       JOIN users u ON u.id = k.user_id
-       WHERE k.key_hash = ?`,
-    )
-    .get(keyHash) as { id: string; is_admin: number } | undefined;
-
-  if (!caller || !caller.is_admin) {
-    return c.json({ error: "Admin only" }, 403);
+  if (!isLicenseAdminUserId(callerId)) {
+    return c.json(
+      {
+        error:
+          "Only the license-admin user can invite teammates. Contact the admin who installed the PromptOwl license on this server to issue invitations.",
+      },
+      403,
+    );
   }
 
   // Find or create user by email
@@ -422,18 +601,30 @@ authRoutes.post("/invite", async (c) => {
     const userId = uuid();
     const placeholderHash = await hashPassword(uuid());
     db.prepare(
-      "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
     ).run(userId, body.email, null, placeholderHash);
     user = { id: userId, email: body.email };
   }
 
+  // Single api_key per user — if invitee already has one, we replace it
+  // so the admin can hand a fresh plaintext to the teammate. The prior
+  // key is invalidated atomically.
   const apiKey = generateApiKey();
   const keyId = uuid();
-  db.prepare(
-    "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, label) VALUES (?, ?, ?, ?, ?)",
-  ).run(keyId, user.id, hashApiKey(apiKey), getKeyPrefix(apiKey), body.label || "teammate");
+  db.transaction(() => {
+    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(user!.id);
+    db.prepare(
+      "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, label) VALUES (?, ?, ?, ?, ?)",
+    ).run(
+      keyId,
+      user!.id,
+      hashApiKey(apiKey),
+      getKeyPrefix(apiKey),
+      body.label || "teammate",
+    );
+  })();
 
-  trackEvent("admin.invite", { adminId: caller.id, email: body.email });
+  trackEvent("admin.invite", { adminId: callerId, email: body.email });
 
   return c.json(
     {
@@ -447,39 +638,42 @@ authRoutes.post("/invite", async (c) => {
 
 // GET /auth/teammates — admin-only, list all users + their keys
 authRoutes.get("/teammates", async (c) => {
-  const teammatesKey = parseBearerToken(c.req.header("Authorization"));
-  if (!teammatesKey) {
-    return c.json({ error: "Admin authentication required" }, 401);
+  const callerId = resolveCallerUserId(c);
+  if (!callerId) {
+    return c.json(
+      {
+        error:
+          "Authentication required. Sign in with the admin account that owns the installed PromptOwl license to view teammates.",
+      },
+      401,
+    );
   }
 
   const db = getDb();
-  const keyHash = hashApiKey(teammatesKey);
-  const caller = db
-    .prepare(
-      `SELECT u.is_admin FROM api_keys k
-       JOIN users u ON u.id = k.user_id
-       WHERE k.key_hash = ?`,
-    )
-    .get(keyHash) as { is_admin: number } | undefined;
-
-  if (!caller || !caller.is_admin) {
-    return c.json({ error: "Admin only" }, 403);
+  if (!isLicenseAdminUserId(callerId)) {
+    return c.json(
+      {
+        error:
+          "Only the license-admin user can view the teammates list. Contact the admin who installed the PromptOwl license on this server.",
+      },
+      403,
+    );
   }
 
   const teammates = db
     .prepare(
-      `SELECT u.id, u.email, u.name, u.is_admin,
+      `SELECT u.id, u.email, u.name, u.is_invited,
          (SELECT COUNT(*) FROM api_keys WHERE user_id = u.id) as key_count,
          (SELECT MAX(last_used_at) FROM api_keys WHERE user_id = u.id) as last_active
        FROM users u
        WHERE u.id != '00000000-0000-0000-0000-000000000000'
-       ORDER BY u.is_admin DESC, u.created_at DESC`,
+       ORDER BY u.created_at DESC`,
     )
     .all() as Array<{
     id: string;
     email: string;
     name: string | null;
-    is_admin: number;
+    is_invited: number;
     key_count: number;
     last_active: string | null;
   }>;
@@ -501,11 +695,14 @@ authRoutes.get("/teammates", async (c) => {
     )
     .all() as Array<{ email: string }>;
 
+  // Sort admins first; underlying SQL is_admin column is unreliable
+  // (license-derived), so resolve in JS after the map.
+  const enriched = teammates
+    .map((t) => ({ ...t, is_admin: isLicenseAdminEmail(t.email) }))
+    .sort((a, b) => Number(b.is_admin) - Number(a.is_admin));
+
   return c.json({
-    teammates: teammates.map((t) => ({
-      ...t,
-      is_admin: !!t.is_admin,
-    })),
+    teammates: enriched,
     pending_stewards: pendingStewards.map((p) => p.email),
   });
 });

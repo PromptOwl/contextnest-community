@@ -12,6 +12,9 @@ export function getDb(): Database.Database {
     db = new Database(config.DATABASE_PATH);
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
+    // Wait up to 5s for a competing writer (external DB tool, parallel
+    // request) to release the lock instead of throwing SQLITE_BUSY immediately.
+    db.pragma("busy_timeout = 5000");
     runMigrations(db);
   }
   return db;

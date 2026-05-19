@@ -47,6 +47,7 @@ function createMcpServerForNest(nestId: string, userEmail: string): McpServer {
       const text = await handleToolCall(tool.name, args, {
         storage: engine.storage,
         queryEngine: engine.query,
+        versionManager: engine.versions,
         nestId,
         userEmail,
       });

@@ -190,6 +190,58 @@ export function getNodeTags(nestId: string, nodeId: string): string[] {
   }
 }
 
+// ─── Display Status ─────────────────────────────────────────────────────
+//
+// Single source of truth for the workflow state shown in the UI. The .md
+// frontmatter `status:` field is intentionally NOT consulted — it would
+// get rewritten on every workflow transition, churning the on-disk file
+// and bloating git diffs. Compute from DB instead so the file stays
+// stable across draft → pending → approved cycles.
+
+export function getDisplayStatus(
+  nestId: string,
+  nodeId: string,
+): "draft" | "pending_review" | "approved" | "rejected" {
+  const db = getDb();
+
+  // 1. Any pending review wins — even if the current version row says
+  // something else, an open review request is the live workflow state.
+  const pending = db
+    .prepare(
+      "SELECT 1 FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' LIMIT 1",
+    )
+    .get(nestId, nodeId) as { 1: number } | undefined;
+  if (pending) return "pending_review";
+
+  // 2. Otherwise look at the current (latest) version's recorded status.
+  const current = db
+    .prepare(
+      `SELECT version, status FROM node_versions
+       WHERE nest_id = ? AND node_id = ?
+       ORDER BY version DESC LIMIT 1`,
+    )
+    .get(nestId, nodeId) as
+    | { version: number; status: string }
+    | undefined;
+  if (!current) return "draft";
+
+  // 3. "approved" only when the latest version is the one pinned in
+  // approved_versions. After an author edits past an approved version,
+  // the new (latest) version is a draft even though an older approved
+  // version is still serving LLM traffic — display reflects the latest.
+  if (current.status === "approved") {
+    const approved = db
+      .prepare(
+        "SELECT approved_version FROM approved_versions WHERE nest_id = ? AND node_id = ?",
+      )
+      .get(nestId, nodeId) as { approved_version: number } | undefined;
+    if (approved?.approved_version === current.version) return "approved";
+    return "draft";
+  }
+  if (current.status === "rejected") return "rejected";
+  return "draft";
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 function rowToVersion(row: any): DocumentVersion {

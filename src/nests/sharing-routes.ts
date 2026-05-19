@@ -43,11 +43,12 @@ sharingRoutes.post("/collaborators", async (c) => {
       | undefined;
 
     if (!user) {
-      // Create a placeholder user (they'll claim the account via PromptOwl login)
+      // Create a placeholder user (they'll claim the account by registering
+      // with the same email — see /auth/register claim flow).
       const { hashPassword } = await import("../auth/keys.js");
       userId = uuid();
       db.prepare(
-        "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+        "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
       ).run(userId, body.email, null, await hashPassword(uuid()));
     } else {
       userId = user.id;

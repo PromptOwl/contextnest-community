@@ -1,0 +1,364 @@
+/* Markdown editor decoration styles. Mirrors TheOwl/data-room so
+   wiki-link/task/mention syntax renders identically across products. */
+
+.wiki-bracket-hidden {
+  font-size: 0;
+  color: transparent;
+  user-select: none;
+}
+
+.wiki-link {
+  cursor: pointer;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.wiki-link:hover {
+  text-decoration: underline;
+}
+
+.wiki-link-exists {
+  color: rgb(37, 99, 235);
+  text-decoration: underline;
+  text-decoration-style: solid;
+  text-underline-offset: 2px;
+}
+
+.wiki-link-broken {
+  color: rgb(147, 51, 234);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  font-style: italic;
+}
+
+.dark .wiki-link-exists {
+  color: rgb(96, 165, 250);
+}
+
+.dark .wiki-link-broken {
+  color: rgb(192, 132, 252);
+}
+
+.mention {
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.mention:hover {
+  text-decoration: underline;
+}
+
+.mention-user {
+  color: rgb(147, 51, 234);
+  background-color: rgba(147, 51, 234, 0.1);
+}
+
+.mention-user:hover {
+  background-color: rgba(147, 51, 234, 0.2);
+}
+
+.dark .mention-user {
+  color: rgb(192, 132, 252);
+}
+
+.task-checkbox {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 2px;
+  user-select: none;
+}
+
+.task-unchecked {
+  color: rgb(107, 114, 128);
+  background-color: rgba(107, 114, 128, 0.1);
+}
+
+.task-unchecked:hover {
+  background-color: rgba(107, 114, 128, 0.2);
+}
+
+.task-checked {
+  color: rgb(34, 197, 94);
+  background-color: rgba(34, 197, 94, 0.1);
+}
+
+.task-checked:hover {
+  background-color: rgba(34, 197, 94, 0.2);
+}
+
+.ProseMirror p.is-editor-empty:first-child::before {
+  color: hsl(var(--muted-foreground));
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+/* Tailwind's preflight strips list-style on `ul, ol`; the typography
+   plugin re-adds them inside `.prose` but only at the default size —
+   `prose-sm` drops the markers. Force them back inside the editor so
+   bulleted/numbered lists actually look like lists while editing. */
+.ProseMirror ul {
+  list-style: disc outside;
+  padding-left: 1.5rem;
+}
+
+.ProseMirror ol {
+  list-style: decimal outside;
+  padding-left: 1.5rem;
+}
+
+.ProseMirror ul ul {
+  list-style: circle outside;
+}
+
+.ProseMirror ul ul ul {
+  list-style: square outside;
+}
+
+.ProseMirror li {
+  margin: 0.25rem 0;
+}
+
+.ProseMirror li > p {
+  margin: 0;
+}
+
+/* Task lists from @tiptap/extension-task-list use checkbox inputs; the
+   default Tailwind reset hides the bullet but keeps padding — strip
+   padding so they line up with the inline `[ ]` decoration form. */
+.ProseMirror ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0;
+}
+
+.ProseMirror ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+/* Tailwind preflight collapses h1/h2/h3 to the parent font-size so the
+   toolbar buttons would visually do nothing without explicit overrides.
+   Sizes picked to match TheOwl/data-room editor so the two products
+   render headings identically. */
+.ProseMirror h1 {
+  font-size: 1.875rem;
+  line-height: 2.25rem;
+  font-weight: 700;
+  margin: 1.5rem 0 1rem;
+}
+
+.ProseMirror h2 {
+  font-size: 1.5rem;
+  line-height: 2rem;
+  font-weight: 600;
+  margin: 1.25rem 0 0.75rem;
+}
+
+.ProseMirror h3 {
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+  font-weight: 600;
+  margin: 1rem 0 0.5rem;
+}
+
+.ProseMirror p {
+  margin: 0.5rem 0;
+}
+
+.ProseMirror strong {
+  font-weight: 700;
+}
+
+.ProseMirror em {
+  font-style: italic;
+}
+
+.ProseMirror s {
+  text-decoration: line-through;
+}
+
+/* Blockquote — left border + muted italic, matches TheOwl. */
+.ProseMirror blockquote {
+  border-left: 4px solid hsl(var(--muted-foreground) / 0.3);
+  padding-left: 1rem;
+  font-style: italic;
+  margin: 1rem 0;
+  color: hsl(var(--muted-foreground));
+}
+
+/* Inline + block code. `pre code` strips the inline pill so it doesn't
+   double up inside fenced blocks. */
+.ProseMirror code {
+  background-color: hsl(var(--muted));
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+  font-size: 0.875rem;
+}
+
+.ProseMirror pre {
+  background-color: hsl(var(--muted));
+  padding: 1rem;
+  border-radius: 0.375rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+}
+
+.ProseMirror pre code {
+  background-color: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+
+/* Regular `<a>` links inserted via the toolbar URL prompt. Wiki-link
+   decorations have their own colour rules above. */
+.ProseMirror a {
+  color: rgb(37, 99, 235);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.ProseMirror a:hover {
+  color: rgb(29, 78, 216);
+}
+
+.dark .ProseMirror a {
+  color: rgb(96, 165, 250);
+}
+
+.dark .ProseMirror a:hover {
+  color: rgb(147, 197, 253);
+}
+
+.ProseMirror hr {
+  border: 0;
+  border-top: 1px solid hsl(var(--border));
+  margin: 1.5rem 0;
+}
+
+.ProseMirror:focus {
+  outline: none;
+}
+
+/* Tailwind preflight collapses h1/h2/h3 to the parent font-size so the
+   toolbar buttons would visually do nothing without explicit overrides.
+   Sizes picked to match TheOwl/data-room editor so the two products
+   render headings identically. */
+.ProseMirror h1 {
+  font-size: 1.875rem;
+  line-height: 2.25rem;
+  font-weight: 700;
+  margin: 1.5rem 0 1rem;
+}
+
+.ProseMirror h2 {
+  font-size: 1.5rem;
+  line-height: 2rem;
+  font-weight: 600;
+  margin: 1.25rem 0 0.75rem;
+}
+
+.ProseMirror h3 {
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+  font-weight: 600;
+  margin: 1rem 0 0.5rem;
+}
+
+.ProseMirror p {
+  margin: 0.5rem 0;
+}
+
+.ProseMirror strong {
+  font-weight: 700;
+}
+
+.ProseMirror em {
+  font-style: italic;
+}
+
+.ProseMirror s {
+  text-decoration: line-through;
+}
+
+/* Blockquote — left border + muted italic, matches TheOwl. */
+.ProseMirror blockquote {
+  border-left: 4px solid hsl(var(--muted-foreground) / 0.3);
+  padding-left: 1rem;
+  font-style: italic;
+  margin: 1rem 0;
+  color: hsl(var(--muted-foreground));
+}
+
+/* Inline + block code. `pre code` strips the inline pill so it doesn't
+   double up inside fenced blocks. */
+.ProseMirror code {
+  background-color: hsl(var(--muted));
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+  font-size: 0.875rem;
+}
+
+.ProseMirror pre {
+  background-color: hsl(var(--muted));
+  padding: 1rem;
+  border-radius: 0.375rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+}
+
+.ProseMirror pre code {
+  background-color: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+
+/* Regular `<a>` links inserted via the toolbar URL prompt. Wiki-link
+   decorations have their own colour rules above. */
+.ProseMirror a {
+  color: rgb(37, 99, 235);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.ProseMirror a:hover {
+  color: rgb(29, 78, 216);
+}
+
+.dark .ProseMirror a {
+  color: rgb(96, 165, 250);
+}
+
+.dark .ProseMirror a:hover {
+  color: rgb(147, 197, 253);
+}
+
+.ProseMirror hr {
+  border: 0;
+  border-top: 1px solid hsl(var(--border));
+  margin: 1.5rem 0;
+}
+
+.ProseMirror:focus {
+  outline: none;
+}

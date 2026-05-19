@@ -13,6 +13,7 @@ import {
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import { isLicenseAdminUserId } from "../auth/license.js";
 
 const ANON_USER_ID = "00000000-0000-0000-0000-000000000000";
 
@@ -103,15 +104,17 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
   const userId = c.get("userId");
 
   // Must be server admin OR nest owner
-  const db = getDb();
-  const userRow = db
-    .prepare("SELECT is_admin FROM users WHERE id = ?")
-    .get(userId) as { is_admin: number } | undefined;
-  const isServerAdmin = !!userRow?.is_admin;
+  const isServerAdmin = isLicenseAdminUserId(userId);
   const permission = effectivePermission(nestId, userId);
 
   if (!isServerAdmin && permission !== "owner") {
-    return c.json({ error: "Admin only" }, 403);
+    return c.json(
+      {
+        error:
+          "Only the nest owner or the server license-admin can update nest settings.",
+      },
+      403,
+    );
   }
 
   const body = await c.req.json<{ stewardship_enabled?: boolean }>();
