@@ -3,13 +3,24 @@ import { serve } from "@hono/node-server";
 import { config } from "./config.js";
 import { createApp } from "./app.js";
 import { getDb } from "./db/client.js";
+import { backfillNodeVersionsFromHistory } from "./db/backfill.js";
 import { validateLicense, startLicenseWatcher } from "./auth/license.js";
 import { startTelemetryLoop, trackEvent } from "./telemetry/tracker.js";
 import { loadAccessConfig } from "./governance/access-service.js";
+import { startDriftScanner } from "./governance/external-edit-service.js";
 
 async function main() {
   // Initialize SQLite
-  getDb();
+  const db = getDb();
+
+  // One-shot: catch historic nests up where engine history.yaml ran
+  // ahead of node_versions (pre-fix steward approvals). Gated by
+  // schema_migrations so it only runs once per deployment.
+  try {
+    await backfillNodeVersionsFromHistory(db);
+  } catch (err) {
+    console.error("[backfill] node_versions backfill failed:", err);
+  }
 
   // Load access control config (if present)
   const accessCfg = loadAccessConfig();
@@ -40,6 +51,13 @@ async function main() {
   // Start long-poll watcher so deactivations/revocations from PromptOwl
   // propagate within seconds instead of next restart.
   startLicenseWatcher();
+
+  // Periodic drift scanner: detects out-of-band file edits and stages
+  // them as suggestions for approval (bridge-function-spec Story 3.1).
+  const driftScanIntervalMs = Number(process.env.DRIFT_SCAN_INTERVAL_MS) || 30_000;
+  if (driftScanIntervalMs > 0) {
+    startDriftScanner(driftScanIntervalMs);
+  }
 
   // Start telemetry
   startTelemetryLoop();

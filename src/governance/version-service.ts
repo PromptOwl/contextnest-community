@@ -13,6 +13,20 @@ export function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+/**
+ * Author prefix for version rows minted by the auto-publish bump (engine
+ * `publishDocument` side-effect, not a user-driven edit). Used to exclude
+ * those rows from current-version + conflict-detection queries so the UI's
+ * X-Base-Version stays aligned with the user's last saved version even
+ * after publish bumps the engine version on disk.
+ */
+export const SYSTEM_AUTHOR_PREFIX = "system:auto-publish:";
+
+/** Wrap a real user email as a system-author marker. */
+export function systemAuthor(email: string): string {
+  return `${SYSTEM_AUTHOR_PREFIX}${email}`;
+}
+
 // ─── Create Version ─────────────────────────────────────────────────────
 
 export function createVersion(params: {
@@ -89,9 +103,11 @@ export function getCurrentVersion(
   const db = getDb();
   const row = db
     .prepare(
-      "SELECT MAX(version) as v FROM node_versions WHERE nest_id = ? AND node_id = ?",
+      `SELECT MAX(version) as v FROM node_versions
+        WHERE nest_id = ? AND node_id = ?
+          AND author NOT LIKE ?`,
     )
-    .get(nestId, nodeId) as { v: number | null };
+    .get(nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`) as { v: number | null };
   return row?.v || 0;
 }
 
@@ -141,9 +157,14 @@ export function checkConflict(
   const db = getDb();
   const current = db
     .prepare(
-      "SELECT version, content_hash, author, created_at FROM node_versions WHERE nest_id = ? AND node_id = ? ORDER BY version DESC LIMIT 1",
+      `SELECT version, content_hash, author, created_at
+         FROM node_versions
+        WHERE nest_id = ? AND node_id = ?
+          AND author NOT LIKE ?
+        ORDER BY version DESC
+        LIMIT 1`,
     )
-    .get(nestId, nodeId) as
+    .get(nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`) as
     | {
         version: number;
         content_hash: string;

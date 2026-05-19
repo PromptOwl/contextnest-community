@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { serializeDocument } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
+import { safePublishDocument } from "../governance/safe-publish.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
@@ -15,6 +16,10 @@ import {
   filterAccessible,
 } from "../governance/access-guard.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import {
+  scanDocumentForDrift,
+  getPendingChange,
+} from "../governance/external-edit-service.js";
 
 export const nodeRoutes = new Hono<AuthEnv>();
 
@@ -34,6 +39,7 @@ function toNodeResponse(node: ContextNode) {
     created_at: node.frontmatter.created_at,
     updated_at: node.frontmatter.updated_at,
     content: node.body,
+    pendingChange: node.pendingChange ?? undefined,
   };
 }
 
@@ -45,14 +51,31 @@ nodeRoutes.get("/", async (c) => {
   const userEmail = resolveCallerEmail(c.get("userId"));
   const accessible = filterAccessible(nestId, userEmail, documents);
 
+  const pendingByDoc = new Map<string, Awaited<ReturnType<typeof getPendingChange>>>();
+  await Promise.all(
+    accessible.map(async (doc) => {
+      try {
+        pendingByDoc.set(doc.id, await getPendingChange(nestId, doc.id));
+      } catch {
+        pendingByDoc.set(doc.id, null);
+      }
+    }),
+  );
+
   return c.json({
     count: accessible.length,
     nodes: accessible.map((doc) => {
       const r = toNodeResponse(doc);
-      // Workflow status is computed entirely from the DB so the .md
-      // frontmatter stays stable across draft → pending → approved
-      // cycles. See getDisplayStatus() for the resolution order.
-      r.status = versions.getDisplayStatus(nestId, r.id);
+      const pending = pendingByDoc.get(doc.id);
+      if (pending) {
+        r.pendingChange = pending;
+        r.status = "external_edit_pending";
+      } else {
+        // Workflow status is computed entirely from the DB so the .md
+        // frontmatter stays stable across draft → pending → approved
+        // cycles. See getDisplayStatus() for the resolution order.
+        r.status = versions.getDisplayStatus(nestId, r.id);
+      }
       return r;
     }),
   });
@@ -89,7 +112,7 @@ nodeRoutes.post("/", async (c) => {
   const hasStewards = isStewardshipEnabled(nestId);
   const initialStatus = hasStewards ? "draft" : "approved";
 
-  const node: ContextNode = {
+  let node: ContextNode = {
     id,
     filePath: "",
     frontmatter: {
@@ -137,9 +160,36 @@ nodeRoutes.post("/", async (c) => {
     tags,
   });
 
-  // If auto-approved (no stewards), pin as approved version
+  // If auto-approved (no stewards), pin as approved version + run engine
+  // publish so the on-disk file gets a checksum + status:published.
+  // Without this, drift detection can't fire on subsequent local edits
+  // (detectDrift returns drifted=false when frontmatter.checksum is absent).
+  //
+  // The engine bumps version (v1 → v2) as a side effect; we record that
+  // bump under a `system:auto-publish:` author marker so it's invisible
+  // to UI conflict detection. UI keeps seeing v1 (user version), sends
+  // X-Base-Version: 1 on the next save, and checkConflict passes.
   if (initialStatus === "approved") {
-    versions.setApprovedVersion(nestId, id, 1, authorEmail);
+    try {
+      const result = await safePublishDocument(storage, id, {
+        editedBy: authorEmail,
+        note: "Auto-approved on create (no stewards configured)",
+      });
+      const engineVersion = result.node.frontmatter.version || 2;
+      versions.createVersion({
+        nestId,
+        nodeId: id,
+        version: engineVersion,
+        content: result.node.body || "",
+        author: versions.systemAuthor(authorEmail),
+        status: "approved",
+        tags,
+      });
+      versions.setApprovedVersion(nestId, id, 1, authorEmail);
+    } catch (err) {
+      console.error("publishDocument failed (node create auto-approve)", err);
+      versions.setApprovedVersion(nestId, id, 1, authorEmail);
+    }
   }
 
   trackEvent("node.create", { nestId, nodeId: id });
@@ -260,15 +310,30 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
 
   let node;
   try {
-    node = await storage.readDocument(nodeId);
+    // verifyChecksum=true triggers drift detection on read; on drift the
+    // engine returns the last-approved canonical body with pendingChange
+    // attached (hootie-inbox-spec §4.2). We then stage the drift as a
+    // suggestion so the next pendingChange lookup resolves a real id.
+    node = await storage.readDocument(nodeId, { verifyChecksum: true });
   } catch {
     throw new NotFoundError(`Node not found: ${nodeId}`);
+  }
+  if (node.pendingChange) {
+    try {
+      await scanDocumentForDrift(nestId, nodeId, userEmail || "system:read");
+      const refreshed = await getPendingChange(nestId, nodeId);
+      if (refreshed) node.pendingChange = refreshed;
+    } catch (err) {
+      console.error("[external-edit] stage-on-read failed:", err);
+    }
   }
   const response = toNodeResponse(node);
   // Resolved-from-DB workflow status; on-disk frontmatter status is
   // ignored entirely so the file never gets rewritten on workflow
   // transitions.
-  response.status = versions.getDisplayStatus(nestId, nodeId);
+  response.status = node.pendingChange
+    ? "external_edit_pending"
+    : versions.getDisplayStatus(nestId, nodeId);
   return c.json({ node: response });
 });
 
@@ -402,9 +467,37 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     cancelReview({ nestId, nodeId, cancelledBy: authorEmail });
   }
 
-  // If no stewards, auto-approve the new version
+  // If no stewards, auto-approve the new version + run engine publish so
+  // the on-disk file gets a fresh checksum. Without this, drift detection
+  // stays blind to subsequent local edits.
+  //
+  // Engine bumps version (e.g. v2 → v3) as a side effect; we record that
+  // bump under a `system:auto-publish:` author marker so UI conflict
+  // detection ignores it. UI keeps seeing newVersion (the user-side bump
+  // it just made), sends X-Base-Version: newVersion next time, and
+  // checkConflict matches against the same user-version row.
   if (!hasStewards) {
-    versions.setApprovedVersion(nestId, nodeId, newVersion, authorEmail);
+    try {
+      const result = await safePublishDocument(storage, nodeId, {
+        editedBy: authorEmail,
+        note: body.changeNote || "Auto-approved on edit (no stewards)",
+      });
+      const engineVersion = result.node.frontmatter.version || newVersion + 1;
+      versions.createVersion({
+        nestId,
+        nodeId,
+        version: engineVersion,
+        content: result.node.body || "",
+        author: versions.systemAuthor(authorEmail),
+        status: "approved",
+        tags: currentTags,
+        changeNote: body.changeNote,
+      });
+      versions.setApprovedVersion(nestId, nodeId, newVersion, authorEmail);
+    } catch (err) {
+      console.error("publishDocument failed (node patch auto-approve)", err);
+      versions.setApprovedVersion(nestId, nodeId, newVersion, authorEmail);
+    }
   }
 
   return c.json({ node: toNodeResponse(node), version: newVersion });

@@ -406,6 +406,89 @@ export async function getNodeReviews(nestId: string, nodeId: string) {
   return request<{ reviews: any[] }>(`/nests/${nestId}/nodes/${nodeId}/reviews`);
 }
 
+// ─── External edits (direct filesystem edits awaiting approval) ──────────
+
+export interface ExternalEditEntry {
+  suggestion_id: string;
+  nest_id: string;
+  document_id: string;
+  source: string;
+  detected_at: string;
+  actor: string;
+  target_hash: string;
+  proposed_hash: string;
+  note?: string;
+  patch?: string;
+}
+
+export interface PendingChange {
+  suggestion_id: string;
+  detected_at: string;
+  source: string;
+  proposed_hash: string;
+}
+
+export async function listExternalEdits(nestId: string, refresh = false) {
+  const qs = refresh ? "?refresh=true" : "";
+  return request<{ entries: ExternalEditEntry[]; total: number }>(
+    `/nests/${nestId}/external-edits${qs}`,
+  );
+}
+
+export async function scanExternalEdits(nestId: string) {
+  return request<{ scanned: number; staged: number }>(
+    `/nests/${nestId}/external-edits/scan`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export async function getNodePendingExternalEdit(
+  nestId: string,
+  nodeId: string,
+) {
+  return request<{ pending: PendingChange | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/external-edits`,
+  );
+}
+
+export async function getExternalEditDetail(
+  nestId: string,
+  nodeId: string,
+  suggestionId: string,
+) {
+  return request<{ entry: ExternalEditEntry }>(
+    `/nests/${nestId}/nodes/${nodeId}/external-edits/${suggestionId}`,
+  );
+}
+
+export async function approveExternalEdit(
+  nestId: string,
+  nodeId: string,
+  suggestionId: string,
+  comment?: string,
+) {
+  return request<{
+    approved: true;
+    version: number;
+    chainEvent: string;
+  }>(
+    `/nests/${nestId}/nodes/${nodeId}/external-edits/${suggestionId}/approve`,
+    { method: "POST", body: JSON.stringify({ comment }) },
+  );
+}
+
+export async function rejectExternalEdit(
+  nestId: string,
+  nodeId: string,
+  suggestionId: string,
+  reason: string,
+) {
+  return request<{ rejected: true; chainEvent: string }>(
+    `/nests/${nestId}/nodes/${nodeId}/external-edits/${suggestionId}/reject`,
+    { method: "POST", body: JSON.stringify({ reason }) },
+  );
+}
+
 // ─── Sharing ────────────────────────────────────────────────────────────
 
 export async function listCollaborators(nestId: string) {

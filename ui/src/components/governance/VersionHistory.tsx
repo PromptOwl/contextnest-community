@@ -148,12 +148,12 @@ export function VersionHistory({
                           </span>
                         )}
                       </div>
-                      <div className="text-xs text-muted-foreground truncate">
+                      <div className="text-xs text-muted-foreground break-words">
                         {formatDate(version.editedAt)} · {version.editedBy}
                         {version.changeNote && ` · ${version.changeNote}`}
                       </div>
                       {version.resolvedBy && (
-                        <div className="text-xs text-muted-foreground truncate">
+                        <div className="text-xs text-muted-foreground break-words">
                           {version.resolutionStatus === "rejected"
                             ? "Rejected by"
                             : "Approved by"}{" "}

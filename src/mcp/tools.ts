@@ -669,7 +669,7 @@ export async function handleToolCall(
       const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
 
       try {
-        const request = reviews.approve({
+        const request = await reviews.approve({
           nestId: ctx.nestId,
           nodeId: node.id,
           version: currentVersion,

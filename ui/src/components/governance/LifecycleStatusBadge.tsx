@@ -4,13 +4,14 @@
 import React from "react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { FileEdit, Clock, CheckCircle2, XCircle } from "lucide-react";
+import { FileEdit, Clock, CheckCircle2, XCircle, FileWarning } from "lucide-react";
 
 export type DocumentLifecycleStatus =
   | "draft"
   | "pending_review"
   | "approved"
-  | "rejected";
+  | "rejected"
+  | "external_edit_pending";
 
 interface LifecycleStatusBadgeProps {
   status: DocumentLifecycleStatus;
@@ -48,6 +49,11 @@ const statusConfig: Record<
     label: "Rejected",
     icon: XCircle,
     className: "bg-red-100 text-red-700 border-red-200",
+  },
+  external_edit_pending: {
+    label: "External Edit",
+    icon: FileWarning,
+    className: "bg-orange-100 text-orange-700 border-orange-200",
   },
 };
 

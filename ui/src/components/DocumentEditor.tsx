@@ -27,7 +27,12 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
-import { SubmitForReviewModal, ReviewActions } from "./governance";
+import {
+  SubmitForReviewModal,
+  ReviewActions,
+  ExternalEditBanner,
+} from "./governance";
+import type { PendingChange } from "../lib/api";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
 
@@ -61,6 +66,7 @@ export function DocumentEditor({
   const [tagInput, setTagInput] = useState("");
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
+  const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDocPicker, setShowDocPicker] = useState(false);
@@ -128,6 +134,7 @@ export function DocumentEditor({
       setTags(Array.isArray(node?.tags) ? node.tags : []);
       setBaseVersion(node?.version);
       setStatus(node?.status ?? null);
+      setPendingChange((node as any)?.pendingChange ?? null);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -339,6 +346,18 @@ export function DocumentEditor({
         </div>
       ) : (
         <div className="space-y-4">
+          {!isNew && pendingChange && (
+            <ExternalEditBanner
+              nestId={nestId}
+              nodeId={nodeId}
+              pending={pendingChange}
+              onResolved={() => {
+                setPendingChange(null);
+                loadNode();
+              }}
+            />
+          )}
+
           {isLocked && (
             <Alert>
               <AlertCircle className="h-4 w-4" />
@@ -478,6 +497,10 @@ function StatusBadge({ status }: { status: string }) {
     rejected: {
       label: "Rejected",
       cls: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
+    },
+    external_edit_pending: {
+      label: "External edit",
+      cls: "bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300",
     },
   };
   const info = map[status];

@@ -2,12 +2,12 @@
  * NestView — governance dashboard for a single nest.
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
-import React, { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import * as api from "../lib/api";
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
-  Pencil, Trash2,
+  Pencil, Trash2, FileWarning,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
@@ -26,8 +26,6 @@ import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
 import {
   StewardList, StewardAssignmentModal, ReviewQueue, ReviewActions,
   SubmitForReviewModal, VersionHistory, LifecycleStatusBadge,
@@ -55,6 +53,8 @@ export function NestView({
   const [nodes, setNodes] = useState<any[]>([]);
   const [stewards, setStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
+  const [externalEdits, setExternalEdits] = useState<api.ExternalEditEntry[]>([]);
+  const [externalEditsLoading, setExternalEditsLoading] = useState(false);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [stewardScope, setStewardScope] = useState<
@@ -80,17 +80,31 @@ export function NestView({
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, settingsData] = await Promise.all([
-      api.listNodes(nestId).catch(() => ({ nodes: [] })),
-      api.listStewards(nestId).catch(() => ({ stewards: [] })),
-      api.getReviewQueue(nestId).catch(() => ({ requests: [], total: 0 })),
-      api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
-    ]);
+    const [nodesData, stewardsData, queueData, settingsData, externalData] =
+      await Promise.all([
+        api.listNodes(nestId).catch(() => ({ nodes: [] })),
+        api.listStewards(nestId).catch(() => ({ stewards: [] })),
+        api.getReviewQueue(nestId).catch(() => ({ requests: [], total: 0 })),
+        api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
+        api.listExternalEdits(nestId).catch(() => ({ entries: [], total: 0 })),
+      ]);
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
     setStewardshipEnabled(settingsData.stewardship_enabled);
+    setExternalEdits(externalData.entries);
     setLoading(false);
+  }, [nestId]);
+
+  const refreshExternalEdits = useCallback(async () => {
+    setExternalEditsLoading(true);
+    try {
+      await api.scanExternalEdits(nestId).catch(() => null);
+      const { entries } = await api.listExternalEdits(nestId);
+      setExternalEdits(entries);
+    } finally {
+      setExternalEditsLoading(false);
+    }
   }, [nestId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
@@ -364,6 +378,17 @@ export function NestView({
               )}
             </TabsTrigger>
           )}
+          <TabsTrigger value="external-edits" className="gap-2">
+            External Edits
+            {externalEdits.length > 0 && (
+              <Badge
+                variant="secondary"
+                className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
+              >
+                {externalEdits.length}
+              </Badge>
+            )}
+          </TabsTrigger>
           {stewardshipEnabled && (
             <TabsTrigger value="stewards">Stewards</TabsTrigger>
           )}
@@ -509,6 +534,83 @@ export function NestView({
             />
           </TabsContent>
         )}
+
+        <TabsContent value="external-edits" className="space-y-4">
+          <Card>
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <FileWarning className="h-4 w-4 text-orange-600" />
+                    External Edits
+                  </CardTitle>
+                  <CardDescription>
+                    Files edited directly on disk, awaiting your approval.
+                  </CardDescription>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={refreshExternalEdits}
+                  disabled={externalEditsLoading}
+                  className="h-8 w-8"
+                  data-testid="external-edits-refresh"
+                >
+                  {externalEditsLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {externalEdits.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-8 text-center">
+                  <CheckCircle2 className="h-10 w-10 text-green-500 mb-3" />
+                  <p className="text-sm font-medium">No pending external edits</p>
+                  <p className="text-xs text-muted-foreground">
+                    All files on disk match their last approved state.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {externalEdits.map((entry) => (
+                    <div
+                      key={entry.suggestion_id}
+                      className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors"
+                      onClick={() => onOpenDocument(entry.document_id)}
+                      data-testid={`external-edit-row-${entry.suggestion_id}`}
+                    >
+                      <FileWarning className="h-5 w-5 text-orange-600 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium truncate">
+                            {entry.document_id}
+                          </span>
+                          <Badge
+                            variant="secondary"
+                            className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
+                          >
+                            {entry.source}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                          <Clock className="h-3 w-3" />
+                          <span>
+                            {new Date(entry.detected_at).toLocaleString()}
+                          </span>
+                          <span>•</span>
+                          <span>by {entry.actor}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
 
         {stewardshipEnabled && (
           <TabsContent value="stewards" className="space-y-4">

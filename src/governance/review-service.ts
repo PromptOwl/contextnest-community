@@ -7,7 +7,10 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { engineCache } from "../nodes/engine.js";
+import { safePublishDocument } from "./safe-publish.js";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
+import * as versions from "./version-service.js";
 import type {
   ReviewRequest,
   ReviewRequestPriority,
@@ -65,14 +68,14 @@ export function submitForReview(params: {
 // ─── Approve ────────────────────────────────────────────────────────────
 // Ported from PromptOwl approveVersion()
 
-export function approve(params: {
+export async function approve(params: {
   nestId: string;
   nodeId: string;
   version: number;
   approvedBy: string;
   note?: string;
   override?: boolean;
-}): ReviewRequest {
+}): Promise<ReviewRequest> {
   const db = getDb();
 
   // Find pending review
@@ -121,6 +124,53 @@ export function approve(params: {
     `INSERT OR REPLACE INTO approved_versions (nest_id, node_id, approved_version, approved_by)
      VALUES (?, ?, ?, ?)`,
   ).run(params.nestId, params.nodeId, params.version, params.approvedBy);
+
+  // Run engine publish so the on-disk file gets frontmatter.checksum +
+  // status:published. Without this, drift detection silently no-ops on
+  // subsequent local edits (see integrity.ts:133 — no checksum = drifted:false).
+  //
+  // Engine bumps the on-disk version (N → N+1) and appends an entry to
+  // history.yaml. Mirror that entry into node_versions so the DB's view
+  // of "latest version" stays in lockstep with the file. Without this
+  // mirror, the next GET returns frontmatter.version = N+1, the UI sends
+  // X-Base-Version: N+1, and checkConflict (which reads node_versions)
+  // sees the DB stuck at N and 409s on every save.
+  try {
+    const { storage } = engineCache.get(params.nestId);
+    const result = await safePublishDocument(storage, params.nodeId, {
+      editedBy: params.approvedBy,
+      note: params.note || `Approved review request ${pending.id}`,
+    });
+    const engineVersion = result.versionEntry.version;
+    if (engineVersion !== params.version) {
+      const node = result.node;
+      const tags = (node.frontmatter.tags || []) as string[];
+      versions.createVersion({
+        nestId: params.nestId,
+        nodeId: params.nodeId,
+        version: engineVersion,
+        content: node.body || "",
+        author: params.approvedBy,
+        status: "approved",
+        tags,
+        changeNote: params.note || `Approved review request ${pending.id}`,
+      });
+      // Re-pin to the engine-bumped version so getDisplayStatus() resolves
+      // the latest row (N+1) as "approved" rather than falling through to
+      // "draft" because approved_version still pointed at N.
+      versions.setApprovedVersion(
+        params.nestId,
+        params.nodeId,
+        engineVersion,
+        params.approvedBy,
+      );
+    }
+  } catch (err) {
+    console.error(
+      `publishDocument failed for ${params.nestId}/${params.nodeId} on approve:`,
+      err,
+    );
+  }
 
   return getReviewRequest(pending.id)!;
 }
