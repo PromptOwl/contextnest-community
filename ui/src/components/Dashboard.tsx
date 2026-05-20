@@ -3,8 +3,9 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
+import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield,
 } from "lucide-react";
 
 const ANON_USER_ID = "00000000-0000-0000-0000-000000000000";
@@ -14,17 +15,34 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 interface DashboardProps {
   onSelectNest: (nestId: string, name: string) => void;
 }
 
 export function Dashboard({ onSelectNest }: DashboardProps) {
+  const { adminStatus } = useAuth();
+  const currentUserEmail = adminStatus?.me?.email ?? null;
   const [nests, setNests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Pending target sits in state so the modal can render the nest name in
+  // the confirmation copy without prop-drilling through a separate child.
+  const [deleteTarget, setDeleteTarget] = useState<
+    { id: string; name: string } | null
+  >(null);
 
   const serverUrl =
     typeof window !== "undefined" ? window.location.origin : "http://localhost:3838";
@@ -39,7 +57,11 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
     }
   };
 
-  useEffect(() => { fetchNests(); }, []);
+  // Re-fetch whenever the signed-in user changes. In open mode the
+  // Dashboard stays mounted across login (authenticated never flips),
+  // so without this the list keeps showing the anonymous-admin view
+  // until the page is manually reloaded.
+  useEffect(() => { fetchNests(); }, [currentUserEmail]);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -49,6 +71,26 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
       setNewName(""); setNewDesc(""); setShowCreate(false);
       fetchNests();
     } catch {}
+  };
+
+  const requestDelete = (nestId: string, nestName: string) => {
+    setDeleteError(null);
+    setDeleteTarget({ id: nestId, name: nestName });
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    const { id } = deleteTarget;
+    setDeletingId(id);
+    try {
+      await api.deleteNest(id);
+      setDeleteTarget(null);
+      await fetchNests();
+    } catch (err: any) {
+      setDeleteError(err?.message || "Failed to delete nest");
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   return (
@@ -162,65 +204,234 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {nests.map((nest) => {
-            const isAnonymous = nest.user_id === ANON_USER_ID;
-            return (
-              <button
-                key={nest.id}
-                onClick={() => onSelectNest(nest.id, nest.name)}
-                className={`text-left p-4 rounded-lg border bg-card hover:bg-secondary/50 transition-colors ${
-                  isAnonymous
-                    ? "border-dashed border-amber-300"
-                    : "border-border"
-                }`}
-              >
-                <div className="flex items-start gap-3">
-                  <div
-                    className={`p-2 rounded-md ${
-                      isAnonymous ? "bg-amber-100" : "bg-primary/10"
-                    }`}
-                  >
-                    {isAnonymous ? (
-                      <Globe className="h-5 w-5 text-amber-700" />
-                    ) : (
-                      <FileText className="h-5 w-5 text-primary" />
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <h3 className="font-medium truncate">{nest.name}</h3>
-                    {nest.description && (
-                      <p className="text-sm text-muted-foreground truncate mt-0.5">
-                        {nest.description}
-                      </p>
-                    )}
-                    <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground flex-wrap">
-                      {isAnonymous && (
-                        <span
-                          className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200"
-                          title="Owned by the anonymous admin — no stewardship applied"
-                        >
-                          Ungoverned
-                        </span>
+        <>
+          {deleteError && (
+            <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-900">
+              {deleteError}
+            </div>
+          )}
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {nests.map((nest) => {
+              const isAnonymous = nest.user_id === ANON_USER_ID;
+              const isDeleting = deletingId === nest.id;
+              const openNest = () => onSelectNest(nest.id, nest.name);
+              // Server now stamps `permission` + `is_owner` on each nest.
+              // Fall back to legacy behaviour (treat as owner) when the
+              // field is absent so older API responses don't strip
+              // ownership during a rolling deploy.
+              const permission: string = nest.permission ?? "owner";
+              const isOwner: boolean = nest.is_owner ?? permission === "owner";
+              const isShared = !isOwner;
+              const roleLabel =
+                permission === "admin"
+                  ? "Admin"
+                  : permission === "write"
+                    ? "Editor"
+                    : permission === "read"
+                      ? "Viewer"
+                      : null;
+              const RoleIcon =
+                permission === "admin"
+                  ? Shield
+                  : permission === "write"
+                    ? Pencil
+                    : permission === "read"
+                      ? Eye
+                      : null;
+              return (
+                <div
+                  key={nest.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={openNest}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openNest();
+                    }
+                  }}
+                  className={`relative text-left p-4 rounded-lg border bg-card hover:bg-secondary/50 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                    isAnonymous
+                      ? "border-dashed border-amber-300"
+                      : "border-border"
+                  } ${isDeleting ? "opacity-50 pointer-events-none" : ""}`}
+                >
+                  {/* Delete — owner only. Server also enforces this; the
+                      UI gate keeps the affordance off cards the user can't
+                      act on so shared/reviewer/viewer nests don't show a
+                      teasing Trash icon. */}
+                  {isOwner && (
+                    <button
+                      type="button"
+                      aria-label={`Delete nest ${nest.name}`}
+                      title="Delete nest"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        requestDelete(nest.id, nest.name);
+                      }}
+                      disabled={isDeleting}
+                      className="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                    >
+                      {isDeleting ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-3.5 w-3.5" />
                       )}
-                      <span
-                        className={`px-1.5 py-0.5 rounded ${
-                          nest.visibility === "public"
-                            ? "bg-green-100 text-green-700"
-                            : "bg-secondary text-secondary-foreground"
-                        }`}
-                      >
-                        {nest.visibility}
-                      </span>
-                      <span>{new Date(nest.created_at).toLocaleDateString()}</span>
+                    </button>
+                  )}
+
+                  <div className="flex items-start gap-3 pr-7">
+                    <div
+                      className={`p-2 rounded-md ${
+                        isAnonymous ? "bg-amber-100" : "bg-primary/10"
+                      }`}
+                    >
+                      {isAnonymous ? (
+                        <Globe className="h-5 w-5 text-amber-700" />
+                      ) : (
+                        <FileText className="h-5 w-5 text-primary" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="font-medium truncate">{nest.name}</h3>
+                      {nest.description && (
+                        <p className="text-sm text-muted-foreground truncate mt-0.5">
+                          {nest.description}
+                        </p>
+                      )}
+                      {isShared && (
+                        <p
+                          className="flex items-center gap-1 mt-1 text-xs text-blue-700 truncate"
+                          title={
+                            nest.owner_email
+                              ? `Shared by ${nest.owner_email}`
+                              : "Shared with you"
+                          }
+                        >
+                          <Users className="h-3 w-3 shrink-0" />
+                          <span className="truncate">
+                            Shared by{" "}
+                            <span className="font-medium">
+                              {nest.owner_email || "unknown user"}
+                            </span>
+                          </span>
+                        </p>
+                      )}
+                      <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground flex-wrap">
+                        {isAnonymous && (
+                          <span
+                            className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200"
+                            title="Owned by the anonymous admin — no stewardship applied"
+                          >
+                            Ungoverned
+                          </span>
+                        )}
+                        {isShared && roleLabel && RoleIcon && (
+                          <span
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border ${
+                              permission === "read"
+                                ? "bg-slate-50 text-slate-700 border-slate-200"
+                                : permission === "write"
+                                  ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                                  : "bg-purple-50 text-purple-700 border-purple-200"
+                            }`}
+                            title={
+                              permission === "read"
+                                ? "View only — you can read but not edit"
+                                : permission === "write"
+                                  ? "Editor — you can read and edit documents"
+                                  : "Admin — full access except deleting the nest"
+                            }
+                          >
+                            <RoleIcon className="h-3 w-3" />
+                            {roleLabel}
+                          </span>
+                        )}
+                        <span
+                          className={`px-1.5 py-0.5 rounded ${
+                            nest.visibility === "public"
+                              ? "bg-green-100 text-green-700"
+                              : "bg-secondary text-secondary-foreground"
+                          }`}
+                        >
+                          {nest.visibility}
+                        </span>
+                        <span>{new Date(nest.created_at).toLocaleDateString()}</span>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </button>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        </>
       )}
+
+      <Dialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && deletingId === null) setDeleteTarget(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-700">
+              <Trash2 className="h-4 w-4" />
+              Delete nest
+            </DialogTitle>
+            <DialogDescription>
+              You're about to permanently delete{" "}
+              <strong className="text-foreground">
+                {deleteTarget?.name}
+              </strong>
+              . This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-900 space-y-1">
+            <p className="font-medium">This will remove:</p>
+            <ul className="list-disc list-inside space-y-0.5">
+              <li>All documents and version history</li>
+              <li>Stewardship assignments and review-queue entries</li>
+              <li>Collaborator access and linked API keys</li>
+              <li>The nest folder on disk</li>
+            </ul>
+          </div>
+
+          {deleteError && (
+            <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-900">
+              {deleteError}
+            </div>
+          )}
+
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+              disabled={deletingId !== null}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmDelete}
+              disabled={deletingId !== null}
+            >
+              {deletingId !== null ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-3.5 w-3.5 mr-2" />
+                  Delete nest
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
