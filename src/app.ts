@@ -188,7 +188,7 @@ export function createApp(): Hono<AuthEnv> {
           {
             valid: false,
             error:
-              "License key was saved but PromptOwl rejected it. Verify the key is correct and active.",
+              "PromptOwl rejected this license key. It wasn't saved. Verify the key is correct and active, then try again.",
           },
           400,
         );

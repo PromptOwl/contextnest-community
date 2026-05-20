@@ -167,7 +167,7 @@ export default function App() {
                 onClick={() => setShowAdminLogin(true)}
               >
                 <Shield className="h-3.5 w-3.5 mr-1" />
-                {adminStatus?.claimed ? "Login" : "Claim as Admin"}
+                Login
               </Button>
             )}
           </div>
@@ -238,7 +238,6 @@ export default function App() {
 
       {showAdminLogin && (
         <AdminLoginModal
-          alreadyClaimed={!!adminStatus?.claimed}
           existingAdmin={adminStatus?.admin?.email || null}
           onClose={() => setShowAdminLogin(false)}
         />

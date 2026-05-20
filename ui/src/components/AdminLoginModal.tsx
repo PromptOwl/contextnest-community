@@ -1,6 +1,7 @@
 /**
- * AdminLoginModal — login flow for both open mode (claim admin) and key mode.
- * Supports PromptOwl device auth + email/password fallback.
+ * AdminLoginModal — login flow. Supports PromptOwl device auth +
+ * email/password fallback. Admin role is gated by the installed
+ * Community License key, so there is no in-app "claim" flow.
  */
 import React, { useState } from "react";
 import {
@@ -20,13 +21,11 @@ import type { ClaimBlocked } from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 
 interface AdminLoginModalProps {
-  alreadyClaimed: boolean;
   existingAdmin: string | null;
   onClose: () => void;
 }
 
 export function AdminLoginModal({
-  alreadyClaimed,
   existingAdmin,
   onClose,
 }: AdminLoginModalProps) {
@@ -132,14 +131,12 @@ export function AdminLoginModal({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Shield className="h-4 w-4" />
-            {alreadyClaimed ? "Login" : "Claim as Admin"}
+            Login
           </DialogTitle>
           <DialogDescription>
-            {alreadyClaimed
-              ? existingAdmin
-                ? `This server is administered by ${existingAdmin}. Login to manage settings and teammates.`
-                : "Login with your account."
-              : "The first PromptOwl-authenticated user becomes this server's admin. Admins can enable stewardship, invite teammates, and manage settings."}
+            {existingAdmin
+              ? `This server is administered by ${existingAdmin}. Login to manage settings and teammates.`
+              : "Login with your account."}
           </DialogDescription>
         </DialogHeader>
 
