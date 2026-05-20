@@ -104,14 +104,41 @@ export function getNest(nestId: string): Nest | null {
 export async function deleteNest(nestId: string): Promise<void> {
   const db = getDb();
 
-  db.prepare("DELETE FROM api_keys WHERE nest_id = ?").run(nestId);
-  db.prepare("DELETE FROM nests WHERE id = ?").run(nestId);
+  // Foreign-key CASCADE handles most of this (see migrations.ts) but the
+  // explicit deletes inside a single transaction give us two guarantees:
+  //   1. Behaviour stays correct even if a future migration drops a CASCADE
+  //      clause or a connection forgets to enable `foreign_keys = ON`.
+  //   2. The whole wipe is atomic — a crash mid-delete can't leave dangling
+  //      stewards / versions / review rows pointing at a removed nest.
+  const wipe = db.transaction((id: string) => {
+    db.prepare("DELETE FROM approved_versions WHERE nest_id = ?").run(id);
+    db.prepare("DELETE FROM node_versions WHERE nest_id = ?").run(id);
+    db.prepare("DELETE FROM review_requests WHERE nest_id = ?").run(id);
+    db.prepare("DELETE FROM stewards WHERE nest_id = ?").run(id);
+    db.prepare("DELETE FROM nest_collaborators WHERE nest_id = ?").run(id);
+    // node_tag_index is FK-cascaded too, but explicit keeps the contract
+    // visible. Wrapped in try/catch because the table is only created by
+    // the tag-index migration — older DBs predate it.
+    try {
+      db.prepare("DELETE FROM node_tag_index WHERE nest_id = ?").run(id);
+    } catch {
+      // Table not present on legacy DBs — fine, nothing to clean.
+    }
+    db.prepare("DELETE FROM api_keys WHERE nest_id = ?").run(id);
+    db.prepare("DELETE FROM nests WHERE id = ?").run(id);
+  });
+  wipe(nestId);
 
+  // Best-effort filesystem cleanup — the engine's NestStorage writes
+  // YAML/markdown into <DATA_ROOT>/nests/<nestId>. Removing this folder
+  // is the on-disk counterpart to the DB wipe above. Failure here is
+  // non-fatal: the DB rows are already gone, so the nest is unreachable
+  // from the app either way; an orphaned directory is harmless.
   const path = nestPath(nestId);
   try {
     rmSync(path, { recursive: true, force: true });
-  } catch {
-    // Directory may not exist
+  } catch (err) {
+    console.warn(`[nests] failed to remove nest directory ${path}:`, err);
   }
 
   trackEvent("nest.delete", { nestId });

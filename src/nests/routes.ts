@@ -48,7 +48,32 @@ nestRoutes.get("/", async (c) => {
   const userId = c.get("userId");
   const owned = listNests(userId);
   const shared = listSharedNests(userId);
-  return c.json({ nests: [...owned, ...shared] });
+  // Annotate each row with the caller's effective permission so the UI
+  // can render an accurate share line and gate destructive actions
+  // (delete) on owner-only without an extra round-trip per card.
+  // `effectivePermission` already handles the open-mode anon nest case
+  // where everyone is the owner. For shared nests we also resolve the
+  // owner's email so the card can show "shared by …" instead of a
+  // bare badge.
+  const db = getDb();
+  const ownerEmailStmt = db.prepare(
+    "SELECT email FROM users WHERE id = ?",
+  );
+  const annotate = (n: { id: string; user_id: string }) => {
+    const permission = effectivePermission(n.id, userId);
+    const is_owner = permission === "owner";
+    let owner_email: string | null = null;
+    if (!is_owner && n.user_id !== ANON_USER_ID) {
+      const row = ownerEmailStmt.get(n.user_id) as
+        | { email?: string }
+        | undefined;
+      owner_email = row?.email ?? null;
+    }
+    return { ...n, permission, is_owner, owner_email };
+  };
+  return c.json({
+    nests: [...owned.map(annotate), ...shared.map(annotate)],
+  });
 });
 
 // POST /nests
