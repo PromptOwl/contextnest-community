@@ -235,8 +235,9 @@ export async function approveExternalEdit(input: {
   comment?: string;
 }) {
   const { storage } = engineCache.get(input.nestId);
+  let result;
   try {
-    return await approveSuggestion({
+    result = await approveSuggestion({
       storage,
       rbac: communityRbac,
       documentId: input.documentId,
@@ -252,6 +253,38 @@ export async function approveExternalEdit(input: {
     );
     throw err;
   }
+
+  // Engine wrote the new version to disk + history.yaml but the
+  // governance node_versions row was skipped — UI version history and
+  // approved-version pin would drift behind disk. Mirror the engine
+  // entry into SQLite so /versions, getCurrentVersion, and
+  // setApprovedVersion all see the external edit.
+  try {
+    const node = await storage.readDocument(input.documentId);
+    const versionNum = result.versionEntry.version;
+    const tags = (node.frontmatter.tags || []) as string[];
+    const { createVersion, setApprovedVersion } = await import(
+      "./version-service.js"
+    );
+    createVersion({
+      nestId: input.nestId,
+      nodeId: input.documentId,
+      version: versionNum,
+      content: node.body || "",
+      author: input.actor,
+      status: "published",
+      tags,
+      changeNote: input.comment || "External edit approved",
+    });
+    setApprovedVersion(input.nestId, input.documentId, versionNum, input.actor);
+  } catch (err) {
+    console.error(
+      `[external-edit] failed to mirror approved version into node_versions for ${input.nestId}/${input.documentId}:`,
+      err,
+    );
+  }
+
+  return result;
 }
 
 /**

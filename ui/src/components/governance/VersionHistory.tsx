@@ -23,7 +23,7 @@ export interface Version {
   editedBy: string;
   editedAt: string;
   changeNote?: string;
-  status: "draft" | "pending_review" | "approved" | "rejected";
+  status: "draft" | "pending_review" | "approved" | "published" | "rejected";
   /** Email of the steward who approved or rejected this version, when one
    *  has resolved a review. Drives the "approved by …" hint in the row. */
   resolvedBy?: string;
@@ -128,7 +128,7 @@ export function VersionHistory({
             No version history
           </div>
         ) : (
-          <ScrollArea className="max-h-[240px]">
+          <ScrollArea className="h-[60vh] max-h-[480px] pr-2">
             <div className="space-y-1">
               {versions.map((version) => {
                 const isApproved = version.version === approvedVersion;

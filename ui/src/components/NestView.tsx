@@ -798,11 +798,12 @@ export function NestView({
 
       {versionNode && (
         <Dialog open onOpenChange={() => setVersionNode(null)}>
-          <DialogContent className="sm:max-w-[600px]">
+          <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-hidden flex flex-col">
             <DialogHeader>
               <DialogTitle>{versionNode.title}</DialogTitle>
             </DialogHeader>
             <VersionHistory
+              className="flex-1 min-h-0 overflow-hidden"
               versions={versionData.versions}
               currentVersion={versionData.currentVersion}
               approvedVersion={versionData.approvedVersion}

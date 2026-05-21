@@ -10,6 +10,7 @@ export type DocumentLifecycleStatus =
   | "draft"
   | "pending_review"
   | "approved"
+  | "published"
   | "rejected"
   | "external_edit_pending";
 
@@ -45,6 +46,11 @@ const statusConfig: Record<
     icon: CheckCircle2,
     className: "bg-green-100 text-green-700 border-green-200",
   },
+  published: {
+    label: "Published",
+    icon: CheckCircle2,
+    className: "bg-green-100 text-green-700 border-green-200",
+  },
   rejected: {
     label: "Rejected",
     icon: XCircle,
@@ -69,7 +75,7 @@ export function LifecycleStatusBadge({
   const Icon = config.icon;
 
   const showVersionInfo =
-    status === "approved" &&
+    (status === "approved" || status === "published") &&
     approvedVersion &&
     currentVersion &&
     approvedVersion < currentVersion;

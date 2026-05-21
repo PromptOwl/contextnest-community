@@ -5,11 +5,16 @@
  * PromptOwl can subscribe to this layer by implementing the same adapter interfaces.
  */
 
-// Document lifecycle states
+// Document lifecycle states. `published` is the terminal state for
+// auto-publish (no-stewards) saves — engine has bumped frontmatter on
+// disk and the row points at the live published version. `approved` is
+// kept for legacy data + the stewards approval workflow until that
+// flow is folded into `published` too.
 export type DocumentLifecycleStatus =
   | "draft"
   | "pending_review"
   | "approved"
+  | "published"
   | "rejected";
 
 // Stewardship scope types (resolution priority: document > folder > tag > nest)

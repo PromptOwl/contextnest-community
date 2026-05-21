@@ -195,7 +195,7 @@ export function DocumentEditor({
         const newId = res?.node?.id;
         onSaved?.(newId ?? "");
       } else {
-        await api.updateNode(
+        const res = await api.updateNode(
           nestId,
           nodeId,
           {
@@ -205,6 +205,14 @@ export function DocumentEditor({
           },
           baseVersion,
         );
+        // Server publishes through the engine which bumps the version
+        // beyond what UI knew. Pick up the new number so the next save
+        // sends a matching X-Base-Version and doesn't 409.
+        const nextVersion =
+          (res as any)?.version ?? (res as any)?.node?.version;
+        if (typeof nextVersion === "number") {
+          setBaseVersion(nextVersion);
+        }
         onSaved?.(nodeId);
       }
     } catch (err: any) {
@@ -492,6 +500,10 @@ function StatusBadge({ status }: { status: string }) {
     },
     approved: {
       label: "Approved",
+      cls: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
+    },
+    published: {
+      label: "Published",
       cls: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
     },
     rejected: {

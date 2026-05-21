@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { ANON_USER_ID } from "../shared/constants.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -385,6 +386,57 @@ export function runMigrations(db: Database.Database): void {
         db.exec("ALTER TABLE license_cache ADD COLUMN owner_email TEXT");
       }
       recordMigration("004_license_cache_owner_email");
+    })();
+  }
+
+  // 005: anon-owned (ungoverned) nests default to public visibility.
+  // Old rows were created with the schema default 'private', which hid
+  // them from regular users in key mode even though the listNests path
+  // still returned them — inconsistent state. One-shot backfill aligns
+  // existing data with the new createNest default. Admin can flip
+  // individual nests back to private via PATCH /nests/:id/visibility.
+  if (!hasMigration("005_anon_nest_public_default")) {
+    db.transaction(() => {
+      db.prepare(
+        "UPDATE nests SET visibility = 'public' WHERE user_id = ? AND visibility = 'private'",
+      ).run(ANON_USER_ID);
+      recordMigration("005_anon_nest_public_default");
+    })();
+  }
+
+  // 006: add 'published' to node_versions.status CHECK. The no-stewards
+  // save flow used to write two rows per edit (one 'approved' user row +
+  // a system-author row mirroring the engine's publish bump). New flow
+  // writes a single 'published' row at the engine's bumped version, so
+  // governance numbering stays in lockstep with the on-disk frontmatter.
+  // SQLite can't ALTER a CHECK in place — rebuild the table.
+  if (!hasMigration("006_node_versions_published_status")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE node_versions_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          content_hash TEXT NOT NULL,
+          author TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft'
+            CHECK(status IN ('draft', 'pending_review', 'approved', 'published', 'rejected')),
+          change_note TEXT,
+          tags_json TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(nest_id, node_id, version)
+        );
+        INSERT INTO node_versions_new
+          (id, nest_id, node_id, version, content_hash, author, status, change_note, tags_json, created_at)
+        SELECT
+          id, nest_id, node_id, version, content_hash, author, status, change_note, tags_json, created_at
+        FROM node_versions;
+        DROP TABLE node_versions;
+        ALTER TABLE node_versions_new RENAME TO node_versions;
+        CREATE INDEX idx_versions_node ON node_versions(nest_id, node_id);
+      `);
+      recordMigration("006_node_versions_published_status");
     })();
   }
 }

@@ -222,7 +222,7 @@ export function getNodeTags(nestId: string, nodeId: string): string[] {
 export function getDisplayStatus(
   nestId: string,
   nodeId: string,
-): "draft" | "pending_review" | "approved" | "rejected" {
+): "draft" | "pending_review" | "approved" | "published" | "rejected" {
   const db = getDb();
 
   // 1. Any pending review wins — even if the current version row says
@@ -246,17 +246,19 @@ export function getDisplayStatus(
     | undefined;
   if (!current) return "draft";
 
-  // 3. "approved" only when the latest version is the one pinned in
-  // approved_versions. After an author edits past an approved version,
-  // the new (latest) version is a draft even though an older approved
-  // version is still serving LLM traffic — display reflects the latest.
-  if (current.status === "approved") {
+  // 3. Terminal "published" / "approved" only when the latest version is
+  // the one pinned in approved_versions. After an author edits past it,
+  // the new (latest) version is a draft even though an older row is
+  // still serving LLM traffic — display reflects the latest row.
+  if (current.status === "published" || current.status === "approved") {
     const approved = db
       .prepare(
         "SELECT approved_version FROM approved_versions WHERE nest_id = ? AND node_id = ?",
       )
       .get(nestId, nodeId) as { approved_version: number } | undefined;
-    if (approved?.approved_version === current.version) return "approved";
+    if (approved?.approved_version === current.version) {
+      return current.status === "published" ? "published" : "approved";
+    }
     return "draft";
   }
   if (current.status === "rejected") return "rejected";

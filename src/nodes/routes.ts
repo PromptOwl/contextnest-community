@@ -112,6 +112,12 @@ nodeRoutes.post("/", async (c) => {
   const hasStewards = isStewardshipEnabled(nestId);
   const initialStatus = hasStewards ? "draft" : "approved";
 
+  // For no-stewards: start at v=0 so the engine's publish bump lands at
+  // v=1 (engine does currentVersion+1). Otherwise v=1 → publish writes
+  // v=2 and the first version the user sees in history is v=2.
+  // Stewards path keeps v=1 since no publish runs on create.
+  const initialVersion = hasStewards ? 1 : 0;
+
   let node: ContextNode = {
     id,
     filePath: "",
@@ -120,7 +126,7 @@ nodeRoutes.post("/", async (c) => {
       type: (body.type as any) || "document",
       tags,
       status: (body.status as any) || initialStatus,
-      version: 1,
+      version: initialVersion,
       created_at: now,
       updated_at: now,
       metadata: {
@@ -141,54 +147,60 @@ nodeRoutes.post("/", async (c) => {
   // Track version
   const authorEmail = getUserEmail(c);
 
-  // Engine-native version snapshot to .versions/{slug}/ (history.yaml +
-  // v1.md keyframe). Wrapped so a versioning failure can't roll back
-  // the document write the user already saw succeed.
-  try {
-    await versionManager.createVersion(node, authorEmail);
-  } catch (err) {
-    console.error("VersionManager.createVersion failed (node create)", err);
-  }
-
-  versions.createVersion({
-    nestId,
-    nodeId: id,
-    version: 1,
-    content: body.content,
-    author: authorEmail,
-    status: initialStatus as any,
-    tags,
-  });
-
-  // If auto-approved (no stewards), pin as approved version + run engine
-  // publish so the on-disk file gets a checksum + status:published.
-  // Without this, drift detection can't fire on subsequent local edits
-  // (detectDrift returns drifted=false when frontmatter.checksum is absent).
-  //
-  // The engine bumps version (v1 → v2) as a side effect; we record that
-  // bump under a `system:auto-publish:` author marker so it's invisible
-  // to UI conflict detection. UI keeps seeing v1 (user version), sends
-  // X-Base-Version: 1 on the next save, and checkConflict passes.
-  if (initialStatus === "approved") {
+  if (hasStewards) {
+    // Stewards-on: engine writes a v=1 keyframe so future reviewer
+    // approval / publish has a base to diff against. governance row
+    // mirrors at v=1 status='draft'. No publish until reviewer approves.
+    try {
+      await versionManager.createVersion(node, authorEmail);
+    } catch (err) {
+      console.error("VersionManager.createVersion failed (node create)", err);
+    }
+    versions.createVersion({
+      nestId,
+      nodeId: id,
+      version: 1,
+      content: body.content,
+      author: authorEmail,
+      status: "draft",
+      tags,
+    });
+  } else {
+    // No-stewards: publish immediately so the engine bumps frontmatter
+    // + writes a fresh keyframe. Single governance row at the bumped
+    // version with status='published' keeps DB and disk in lockstep —
+    // the prior dual-write (user 'approved' + system 'auto-publish')
+    // collided with the next user edit on UNIQUE(node, version).
     try {
       const result = await safePublishDocument(storage, id, {
         editedBy: authorEmail,
-        note: "Auto-approved on create (no stewards configured)",
+        note: "Auto-published on create (no stewards configured)",
       });
-      const engineVersion = result.node.frontmatter.version || 2;
+      const publishedVersion = result.node.frontmatter.version || 2;
       versions.createVersion({
         nestId,
         nodeId: id,
-        version: engineVersion,
+        version: publishedVersion,
         content: result.node.body || "",
-        author: versions.systemAuthor(authorEmail),
-        status: "approved",
+        author: authorEmail,
+        status: "published",
         tags,
       });
-      versions.setApprovedVersion(nestId, id, 1, authorEmail);
+      versions.setApprovedVersion(nestId, id, publishedVersion, authorEmail);
+      node = result.node;
     } catch (err) {
-      console.error("publishDocument failed (node create auto-approve)", err);
-      versions.setApprovedVersion(nestId, id, 1, authorEmail);
+      console.error("publishDocument failed (node create auto-publish)", err);
+      // Fallback: record the user's v=1 write as a draft so the doc is
+      // not invisible to governance. Reviewer/admin can re-publish later.
+      versions.createVersion({
+        nestId,
+        nodeId: id,
+        version: 1,
+        content: body.content,
+        author: authorEmail,
+        status: "draft",
+        tags,
+      });
     }
   }
 
@@ -403,57 +415,9 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     };
   }
 
-  // Bump version number
-  const currentVersion = versions.getCurrentVersion(nestId, nodeId);
-  const newVersion = currentVersion + 1;
-  node = {
-    ...node,
-    frontmatter: {
-      ...node.frontmatter,
-      version: newVersion,
-      updated_at: new Date().toISOString(),
-    },
-  };
-
-  // Strip undefined frontmatter values
-  const fm = Object.fromEntries(
-    Object.entries(node.frontmatter).filter(([, v]) => v !== undefined),
-  );
-  node = { ...node, frontmatter: fm as any };
-
-  const serialized = serializeDocument(node);
-  await storage.writeDocument(nodeId, serialized);
-
-  // Track the new version
   const authorEmail = getUserEmail(c);
   const hasStewards = isStewardshipEnabled(nestId);
   const currentTags = (node.frontmatter.tags || []) as string[];
-  // Keep tag index in sync with the latest frontmatter tags.
-  syncNodeTags(nestId, nodeId, currentTags);
-
-  // Engine-native version snapshot — appends history.yaml + writes a
-  // keyframe at the configured interval so older approved bodies stay
-  // recoverable via reconstructVersion() even after the author edits
-  // past them on disk. Failure here is logged but doesn't abort the
-  // edit; the SQLite governance row below is the canonical record.
-  try {
-    await versionManager.createVersion(node, authorEmail, {
-      note: body.changeNote,
-    });
-  } catch (err) {
-    console.error("VersionManager.createVersion failed (node patch)", err);
-  }
-
-  versions.createVersion({
-    nestId,
-    nodeId,
-    version: newVersion,
-    content: node.body || "",
-    author: authorEmail,
-    status: hasStewards ? "draft" : "approved",
-    tags: currentTags,
-    changeNote: body.changeNote,
-  });
 
   // Editing past a pending review withdraws it — the steward's queue
   // entry referenced the old version, which is now stale. The new
@@ -467,40 +431,105 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     cancelReview({ nestId, nodeId, cancelledBy: authorEmail });
   }
 
-  // If no stewards, auto-approve the new version + run engine publish so
-  // the on-disk file gets a fresh checksum. Without this, drift detection
-  // stays blind to subsequent local edits.
-  //
-  // Engine bumps version (e.g. v2 → v3) as a side effect; we record that
-  // bump under a `system:auto-publish:` author marker so UI conflict
-  // detection ignores it. UI keeps seeing newVersion (the user-side bump
-  // it just made), sends X-Base-Version: newVersion next time, and
-  // checkConflict matches against the same user-version row.
-  if (!hasStewards) {
+  let responseVersion: number;
+  if (hasStewards) {
+    // Stewards-on: bump version explicitly, write through engine
+    // history, record a draft row. Reviewer publishes later.
+    const currentVersion = versions.getCurrentVersion(nestId, nodeId);
+    const newVersion = currentVersion + 1;
+    node = {
+      ...node,
+      frontmatter: {
+        ...node.frontmatter,
+        version: newVersion,
+        updated_at: new Date().toISOString(),
+        // Strip the stale published-state checksum — the body just
+        // changed, so leaving the old hash would make the next GET (with
+        // verifyChecksum: true) flag the file as an external edit even
+        // though *this* app wrote it. Engine treats absent checksum as
+        // "no baseline" and skips drift detection until publish runs.
+        checksum: undefined,
+      },
+    };
+    const fm = Object.fromEntries(
+      Object.entries(node.frontmatter).filter(([, v]) => v !== undefined),
+    );
+    node = { ...node, frontmatter: fm as any };
+
+    await storage.writeDocument(nodeId, serializeDocument(node));
+    syncNodeTags(nestId, nodeId, currentTags);
+
+    try {
+      await versionManager.createVersion(node, authorEmail, {
+        note: body.changeNote,
+      });
+    } catch (err) {
+      console.error("VersionManager.createVersion failed (node patch)", err);
+    }
+
+    versions.createVersion({
+      nestId,
+      nodeId,
+      version: newVersion,
+      content: node.body || "",
+      author: authorEmail,
+      status: "draft",
+      tags: currentTags,
+      changeNote: body.changeNote,
+    });
+    responseVersion = newVersion;
+  } else {
+    // No stewards: skip the user-side version bump + the standalone
+    // engine history entry. publishDocument handles both — it reads
+    // disk, bumps version once, writes file + records the diff entry.
+    // ONE governance row per save at the engine's bumped version with
+    // status='published' keeps DB and disk in lockstep.
+    node = {
+      ...node,
+      frontmatter: {
+        ...node.frontmatter,
+        updated_at: new Date().toISOString(),
+        // Drop the prior published-state checksum before the interim
+        // write — publish recomputes it from the new body, but if
+        // publish errors out the file would otherwise be left with new
+        // body + stale checksum and drift on next read.
+        checksum: undefined,
+      },
+    };
+    const fm = Object.fromEntries(
+      Object.entries(node.frontmatter).filter(([, v]) => v !== undefined),
+    );
+    node = { ...node, frontmatter: fm as any };
+
+    await storage.writeDocument(nodeId, serializeDocument(node));
+    syncNodeTags(nestId, nodeId, currentTags);
+
+    let publishedVersion = (node.frontmatter.version || 0) + 1;
     try {
       const result = await safePublishDocument(storage, nodeId, {
         editedBy: authorEmail,
-        note: body.changeNote || "Auto-approved on edit (no stewards)",
+        note: body.changeNote || "Auto-published on edit (no stewards)",
       });
-      const engineVersion = result.node.frontmatter.version || newVersion + 1;
-      versions.createVersion({
-        nestId,
-        nodeId,
-        version: engineVersion,
-        content: result.node.body || "",
-        author: versions.systemAuthor(authorEmail),
-        status: "approved",
-        tags: currentTags,
-        changeNote: body.changeNote,
-      });
-      versions.setApprovedVersion(nestId, nodeId, newVersion, authorEmail);
+      publishedVersion = result.node.frontmatter.version || publishedVersion;
+      node = result.node;
     } catch (err) {
-      console.error("publishDocument failed (node patch auto-approve)", err);
-      versions.setApprovedVersion(nestId, nodeId, newVersion, authorEmail);
+      console.error("publishDocument failed (node patch auto-publish)", err);
     }
+    versions.createVersion({
+      nestId,
+      nodeId,
+      version: publishedVersion,
+      content: node.body || "",
+      author: authorEmail,
+      status: "published",
+      tags: currentTags,
+      changeNote: body.changeNote,
+    });
+    versions.setApprovedVersion(nestId, nodeId, publishedVersion, authorEmail);
+    responseVersion = publishedVersion;
   }
 
-  return c.json({ node: toNodeResponse(node), version: newVersion });
+  return c.json({ node: toNodeResponse(node), version: responseVersion });
 });
 
 // DELETE /nests/:nestId/nodes/:nodeId{.+}

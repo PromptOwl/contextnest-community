@@ -1,8 +1,6 @@
 import bcrypt from "bcryptjs";
 import { getDb } from "../db/client.js";
-
-const ANON_USER_ID = "00000000-0000-0000-0000-000000000000";
-const ANON_EMAIL = "admin@localhost";
+import { ANON_USER_ID, ANON_EMAIL } from "../shared/constants.js";
 
 /**
  * Ensure the anonymous/admin user exists in the database.
