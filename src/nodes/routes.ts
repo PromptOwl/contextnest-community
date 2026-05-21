@@ -243,7 +243,6 @@ nodeRoutes.get("/:nodeId{.+?}/stewards", async (c) => {
       scope: r.steward.scope,
       source: r.source,
       priority: r.priority,
-      canApprove: r.steward.canApprove,
     })),
     fallbackToOwner,
     ownerEmail,

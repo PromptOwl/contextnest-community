@@ -15,7 +15,6 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -29,7 +28,6 @@ import {
   UserPlus,
   AlertCircle,
   Tag,
-  Folder,
   FileText,
   Building2,
 } from "lucide-react";
@@ -47,8 +45,6 @@ interface StewardAssignmentModalProps {
     scope: StewardshipScope;
     target?: string;
     role: StewardRole;
-    canApprove: boolean;
-    canReject: boolean;
   }) => Promise<void>;
 }
 
@@ -58,7 +54,6 @@ const scopeConfig: Record<
 > = {
   nest: { label: "Entire Nest", icon: Building2, placeholder: "" },
   tag: { label: "Tag", icon: Tag, placeholder: "e.g., #architecture" },
-  folder: { label: "Folder", icon: Folder, placeholder: "e.g., nodes/api-*" },
   document: { label: "Document", icon: FileText, placeholder: "e.g., nodes/getting-started" },
 };
 
@@ -72,45 +67,27 @@ export function StewardAssignmentModal({
   const [scope, setScope] = useState<StewardshipScope>("tag");
   const [target, setTarget] = useState("");
   const [role, setRole] = useState<StewardRole>("reviewer");
-  const [canApprove, setCanApprove] = useState(true);
-  const [canReject, setCanReject] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nodes, setNodes] = useState<Array<{ id: string; title: string }>>([]);
-  const [folderOptions, setFolderOptions] = useState<
-    Array<{ id: string; name: string }>
-  >([]);
   const [optionsLoading, setOptionsLoading] = useState(false);
 
-  // Fetch the right list when scope flips to document or folder. Documents
-  // come from the current nest's nodes API. Folders are user-level (nests)
-  // because there is no per-nest folder concept in this product — each nest
-  // acts as a top-level folder for its documents.
+  // Fetch the document list when scope flips to "document".
   useEffect(() => {
     if (!isOpen) return;
-    if (scope !== "document" && scope !== "folder") return;
+    if (scope !== "document") return;
     if (optionsLoading) return;
     let cancelled = false;
     setOptionsLoading(true);
-    const fetcher =
-      scope === "document"
-        ? api.listNodes(nestId).then((res) => ({ kind: "document" as const, res }))
-        : api.listNests().then((res) => ({ kind: "folder" as const, res }));
-    fetcher
-      .then((payload) => {
+    api
+      .listNodes(nestId)
+      .then((res) => {
         if (cancelled) return;
-        if (payload.kind === "document") {
-          const list = Array.isArray(payload.res?.nodes) ? payload.res.nodes : [];
-          setNodes(list as Array<{ id: string; title: string }>);
-        } else {
-          const list = Array.isArray(payload.res?.nests) ? payload.res.nests : [];
-          setFolderOptions(
-            list.map((n: any) => ({ id: n.id, name: n.name })),
-          );
-        }
+        const list = Array.isArray(res?.nodes) ? res.nodes : [];
+        setNodes(list as Array<{ id: string; title: string }>);
       })
       .catch((err) => {
-        console.error("[StewardAssignmentModal] options fetch failed", err);
+        console.error("[StewardAssignmentModal] documents fetch failed", err);
       })
       .finally(() => {
         if (!cancelled) setOptionsLoading(false);
@@ -142,8 +119,6 @@ export function StewardAssignmentModal({
         scope,
         target: scope === "nest" ? undefined : target.trim(),
         role,
-        canApprove,
-        canReject,
       });
       handleClose();
     } catch (err) {
@@ -159,11 +134,8 @@ export function StewardAssignmentModal({
       setScope("tag");
       setTarget("");
       setRole("reviewer");
-      setCanApprove(true);
-      setCanReject(true);
       setError(null);
       setNodes([]);
-      setFolderOptions([]);
       onClose();
     }
   };
@@ -252,7 +224,7 @@ export function StewardAssignmentModal({
                   onChange={(e) => setTarget(e.target.value)}
                   disabled={loading}
                 />
-              ) : scope === "document" ? (
+              ) : (
                 <Select
                   value={target}
                   onValueChange={setTarget}
@@ -282,39 +254,12 @@ export function StewardAssignmentModal({
                     ))}
                   </SelectContent>
                 </Select>
-              ) : (
-                <Select
-                  value={target}
-                  onValueChange={setTarget}
-                  disabled={loading || optionsLoading}
-                >
-                  <SelectTrigger id="target">
-                    <SelectValue
-                      placeholder={
-                        optionsLoading
-                          ? "Loading folders..."
-                          : folderOptions.length === 0
-                            ? "No folders available"
-                            : "Select a folder"
-                      }
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {folderOptions.map((f) => (
-                      <SelectItem key={f.id} value={f.id}>
-                        {f.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
               )}
 
               <p className="text-xs text-muted-foreground">
                 {scope === "tag"
                   ? "Steward approves any document with this tag."
-                  : scope === "folder"
-                    ? "All documents inside this folder are governed."
-                    : "Steward governs this specific document."}
+                  : "Steward governs this specific document."}
               </p>
             </div>
           )}
@@ -336,33 +281,6 @@ export function StewardAssignmentModal({
                 <SelectItem value="viewer">Viewer — read-only access</SelectItem>
               </SelectContent>
             </Select>
-          </div>
-
-          {/* Permissions */}
-          <div className="space-y-3">
-            <Label>Permissions</Label>
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="can-approve"
-                checked={canApprove}
-                onCheckedChange={(c) => setCanApprove(!!c)}
-                disabled={loading}
-              />
-              <Label htmlFor="can-approve" className="font-normal cursor-pointer">
-                Can approve documents
-              </Label>
-            </div>
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="can-reject"
-                checked={canReject}
-                onCheckedChange={(c) => setCanReject(!!c)}
-                disabled={loading}
-              />
-              <Label htmlFor="can-reject" className="font-normal cursor-pointer">
-                Can reject/request changes
-              </Label>
-            </div>
           </div>
         </div>
 

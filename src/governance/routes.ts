@@ -39,14 +39,19 @@ governanceRoutes.get("/stewards", async (c) => {
 
 // POST /nests/:nestId/stewards
 // Accepts two shapes:
-//   1) Multi-user: { scope, documentId?|folderPath?|tagName?, users: [{email, role, canApprove, canReject}] }
-//   2) Legacy single-user (fallback): { scope, email, role, canApprove, canReject, nodePattern?, tagName? }
+//   1) Multi-user: { scope, documentId?|tagName?, users: [{email, role}] }
+//   2) Legacy single-user (fallback): { scope, email, role, nodePattern?, tagName? }
 governanceRoutes.post("/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
   const body = await c.req.json<any>();
   const assignedBy = getUserEmail(c);
 
   if (!body.scope) throw new ValidationError("scope is required");
+  if (body.scope === "folder") {
+    throw new ValidationError(
+      "folder scope is no longer supported — use 'nest' or 'document'",
+    );
+  }
 
   // New shape: users[] array
   if (Array.isArray(body.users)) {
@@ -54,7 +59,6 @@ governanceRoutes.post("/stewards", async (c) => {
       nestId,
       scope: body.scope,
       documentId: body.documentId,
-      folderPath: body.folderPath,
       tagName: body.tagName,
       users: body.users,
       assignedBy,
@@ -70,14 +74,11 @@ governanceRoutes.post("/stewards", async (c) => {
     nestId,
     scope: body.scope,
     documentId: body.scope === "document" ? body.nodePattern : undefined,
-    folderPath: body.scope === "folder" ? body.nodePattern : undefined,
     tagName: body.scope === "tag" ? body.tagName : undefined,
     users: [
       {
         email: body.email,
         role: body.role,
-        canApprove: body.canApprove,
-        canReject: body.canReject,
       },
     ],
     assignedBy,
@@ -162,7 +163,6 @@ governanceNodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
       scope: r.steward.scope,
       source: r.source,
       priority: r.priority,
-      canApprove: r.steward.canApprove,
     })),
     fallbackToOwner,
     ownerEmail,

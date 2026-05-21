@@ -58,7 +58,7 @@ export function NestView({
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [stewardScope, setStewardScope] = useState<
-    "all" | "document" | "folder" | "tag" | "nest"
+    "all" | "document" | "tag" | "nest"
   >("all");
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -135,9 +135,7 @@ export function NestView({
   // Approve/reject is reviewer-only by product rule. Editors, viewers, and
   // nest owners (no steward row) cannot action a review even though server
   // would still enforce; hide the affordance to keep UI honest.
-  const canReviewDocs = myStewards.some(
-    (s) => s.role === "reviewer" && s.canApprove,
-  );
+  const canReviewDocs = myStewards.some((s) => s.role === "reviewer");
 
   // Map nodeId → submitter so the per-row Review button can hide on
   // docs the current user submitted (separation-of-duties: authors must
@@ -147,22 +145,16 @@ export function NestView({
   for (const r of reviewQueue) {
     submitterByNode.set(r.nodeId, r.requestedBy.toLowerCase());
   }
-  // Eligibility check: does the caller hold a steward row whose scope
-  // covers this node AND has canApprove? Mirrors server resolution
-  // (document > folder > tag > nest), but client-side so the queue can
-  // be filtered without N extra round-trips.
+  // Eligibility check: does the caller hold a reviewer steward row whose
+  // scope covers this node? Mirrors server resolution (document > tag >
+  // nest), but client-side so the queue can be filtered without N extra
+  // round-trips.
   const canReviewNode = (node: { id: string; tags?: string[] }) => {
     if (!node) return false;
     return myStewards.some((s) => {
-      if (!s.canApprove) return false;
+      if (s.role !== "reviewer") return false;
       if (s.scope === "nest") return true;
       if (s.scope === "document") return s.nodePattern === node.id;
-      if (s.scope === "folder") {
-        return (
-          s.nodePattern === nestId ||
-          (s.nodePattern && node.id.startsWith(s.nodePattern + "/"))
-        );
-      }
       if (s.scope === "tag") {
         const target = (s.tagName || "").toLowerCase().replace(/^#+/, "");
         return (node.tags || [])
@@ -229,10 +221,10 @@ export function NestView({
 
   const handleAssignSteward = async (data: any) => {
     // Modal returns scope + generic `target`. Backend's legacy shape expects
-    // scope-specific fields: nodePattern (document/folder) or tagName (tag).
+    // scope-specific fields: nodePattern (document) or tagName (tag).
     const { target, ...rest } = data;
     const payload: any = { ...rest };
-    if (data.scope === "document" || data.scope === "folder") {
+    if (data.scope === "document") {
       payload.nodePattern = target;
     } else if (data.scope === "tag") {
       payload.tagName = target;
@@ -633,7 +625,6 @@ export function NestView({
                 </p>
                 <ol className="list-decimal list-inside ml-2 space-y-0.5">
                   <li><strong>Document</strong> — this exact doc</li>
-                  <li><strong>Folder</strong> — everything under a path</li>
                   <li><strong>Tag</strong> — everything with #tag</li>
                   <li><strong>Nest</strong> — anything not matched above</li>
                 </ol>
@@ -659,7 +650,7 @@ export function NestView({
                   </div>
                   {stewards.length > 0 && (
                     <div className="flex items-center gap-2">
-                      {(["all", "document", "folder", "tag", "nest"] as const).map(
+                      {(["all", "document", "tag", "nest"] as const).map(
                         (s) => (
                           <button
                             key={s}
@@ -683,7 +674,7 @@ export function NestView({
                     <p className="text-muted-foreground leading-relaxed">
                       Without stewards, every draft needs the nest owner to
                       approve. Add an editor/reviewer to delegate approvals
-                      for a tag, folder, or specific doc.
+                      for a tag or specific doc.
                     </p>
                     <Button
                       variant="outline"

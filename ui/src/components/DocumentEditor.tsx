@@ -114,7 +114,7 @@ export function DocumentEditor({
         const mine = (stewards as any[]).find(
           (s) => (s.email || "").toLowerCase() === currentEmail,
         );
-        setCanReviewHerePerm(!!mine && mine.role === "reviewer" && mine.canApprove);
+        setCanReviewHerePerm(!!mine && mine.role === "reviewer");
       } catch {
         if (!cancelled) setCanReviewHerePerm(false);
       }

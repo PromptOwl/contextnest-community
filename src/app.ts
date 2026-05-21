@@ -288,11 +288,11 @@ export function createApp(): Hono<AuthEnv> {
     let required: NestPermission = "read";
     const path = c.req.path;
     // Stewardship endpoints run their own per-row permission checks
-    // (canApprove / canReject / steward role). Bumping every non-GET to
-    // "write" here blocks reviewers — who legitimately have read-only
-    // collaborator access plus an approve-bearing steward row — before
-    // their handler can even decide. Let read-permission users through
-    // for these paths and trust the handler.
+    // (steward role). Bumping every non-GET to "write" here blocks
+    // reviewers — who legitimately have read-only collaborator access
+    // plus a reviewer steward row — before their handler can even
+    // decide. Let read-permission users through for these paths and
+    // trust the handler.
     const isStewardActionPath =
       path.includes("/approve") ||
       path.includes("/reject") ||
