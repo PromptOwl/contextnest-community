@@ -269,6 +269,23 @@ export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
 }
 
+export async function setNestVisibility(
+  nestId: string,
+  visibility: "private" | "public",
+) {
+  return request<{ visibility: "private" | "public" }>(
+    `/nests/${nestId}/visibility`,
+    { method: "PATCH", body: JSON.stringify({ visibility }) },
+  );
+}
+
+export async function getNest(nestId: string) {
+  return request<{
+    nest: { id: string; name: string; visibility: "private" | "public" };
+    permission: string;
+  }>(`/nests/${nestId}`);
+}
+
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
 export async function listNodes(nestId: string) {

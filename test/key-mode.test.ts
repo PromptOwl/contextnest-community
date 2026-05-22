@@ -266,4 +266,77 @@ describe("sharing in key mode", () => {
     expect(status).toBe(200);
     expect(data.count).toBe(1);
   });
+
+  // ── Per-vault public unauth read (CU-86ahmvmcu) ───────────────────
+  // The existing "public nest is readable by anyone" above tests an
+  // *authenticated* stranger. The product request is for genuinely
+  // unauthenticated reads of public nests — direct-URL access without a
+  // login. flexAuthMiddleware used to 401 every credential-less request
+  // in key mode; these tests pin the new behavior.
+
+  it("public nest sub-routes are readable WITHOUT any credentials", async () => {
+    // Nest was already made public by the previous test. Hit it with no
+    // Authorization header at all.
+    const { status, data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      // no apiKey — fully anonymous
+    );
+    expect(status).toBe(200);
+    expect(data.count).toBe(1);
+  });
+
+  it("private nest sub-routes 404 for unauthenticated callers", async () => {
+    // Flip back to private and try again with no credentials.
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/visibility`,
+      { visibility: "private" },
+      owner.apiKey,
+    );
+    const { status } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+    );
+    // 404 hides existence (not 401), matching the same behavior
+    // authenticated-but-unauthorized callers get.
+    expect(status).toBe(404);
+
+    // Restore for any downstream assumptions.
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/visibility`,
+      { visibility: "public" },
+      owner.apiKey,
+    );
+  });
+
+  it("admin endpoints (/collaborators, /visibility) stay 401 for unauth even on public nests", async () => {
+    const { status: collabStatus } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "intruder@test.com", permission: "admin" },
+    );
+    expect(collabStatus).toBe(401);
+
+    const { status: visStatus } = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/visibility`,
+      { visibility: "private" },
+    );
+    expect(visStatus).toBe(401);
+  });
+
+  it("GET /nests list still requires credentials (no anon discovery leak)", async () => {
+    const { status } = await jsonRequest(app, "GET", "/nests");
+    expect(status).toBe(401);
+  });
 });
