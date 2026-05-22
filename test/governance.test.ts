@@ -220,8 +220,12 @@ tags:
       dev.apiKey,
     );
     expect(status).toBe(200);
-    expect(data.approvedVersion).toBe(1);
-    expect(data.versions[0].status).toBe("approved");
+    // approve() runs safePublishDocument, which bumps engine version 1→2 and
+    // re-pins approved_version to the bumped value (see review-service.ts).
+    // versions[0] is the new v=2 row, written by approve() with
+    // status='published' so the DB mirrors the engine's terminal state.
+    expect(data.approvedVersion).toBe(2);
+    expect(data.versions[0].status).toBe("published");
   });
 
   it("review history is recorded", async () => {
@@ -494,7 +498,10 @@ describe("governance: open mode without stewards = auto-approve", () => {
       },
     );
     expect(status).toBe(201);
-    expect(data.node.status).toBe("approved");
+    // No-stewards path auto-publishes via engine, which writes
+    // frontmatter.status = 'published' (distinct from steward-approved
+    // 'approved'). See nodes/routes.ts auto-publish branch.
+    expect(data.node.status).toBe("published");
     expect(data.stewards).toBeUndefined();
   });
 
@@ -508,7 +515,8 @@ describe("governance: open mode without stewards = auto-approve", () => {
       `/nests/${nestId}/nodes/nodes/quick-note/versions`,
     );
     expect(data.approvedVersion).toBe(1);
-    expect(data.versions[0].status).toBe("approved");
+    // Auto-publish writes versions row with status='published'.
+    expect(data.versions[0].status).toBe("published");
   });
 
   it("updates to auto-approved nodes are also auto-approved", async () => {

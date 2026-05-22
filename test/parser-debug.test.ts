@@ -29,13 +29,13 @@ nest:
 tags:
   architecture:
     - email: jane@acme.com, role: reviewer, can_approve: true
-folders:
-  nodes/api-*:
+documents:
+  nodes/getting-started:
     - email: bob@acme.com, role: reviewer, can_approve: true
 `);
     expect(config.nest!.length).toBe(1);
     expect(Object.keys(config.tags!)).toContain("architecture");
-    expect(Object.keys(config.folders!)).toContain("nodes/api-*");
+    expect(Object.keys(config.documents!)).toContain("nodes/getting-started");
   });
 
   it("parses tag with # prefix", () => {

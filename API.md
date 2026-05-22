@@ -258,12 +258,10 @@ Write permission. Hidden in UI for reviewer/viewer; server still enforces.
   "id": "...",
   "userEmail": "rev@x.com",
   "userId": "...",
-  "scope": "document" | "folder" | "tag" | "nest",
+  "scope": "document" | "tag" | "nest",
   "nodePattern": "nodes/foo" | "<nestId>" | null,
   "tagName": "api" | null,
-  "role": "editor" | "reviewer" | "viewer",
-  "canApprove": true,
-  "canReject": true
+  "role": "editor" | "reviewer" | "viewer"
 }] }
 ```
 
@@ -276,8 +274,6 @@ Write permission. Hidden in UI for reviewer/viewer; server still enforces.
   "scope": "document",
   "email": "rev@x.com",
   "role": "reviewer",
-  "canApprove": true,
-  "canReject": true,
   "nodePattern": "nodes/foo"
 }
 ```
@@ -286,22 +282,21 @@ Field selection by scope:
 | scope | required field | meaning |
 |---|---|---|
 | `document` | `nodePattern` | exact node id |
-| `folder` | `nodePattern` | path prefix (`nodes/api`) **or** the nest UUID (whole-nest folder) |
 | `tag` | `tagName` | bare tag, no `#` |
 | `nest` | — | covers every node in the nest |
 
 **Multi-user shape:**
 ```json
 {
-  "scope": "folder",
-  "folderPath": "nodes/api",
+  "scope": "tag",
+  "tagName": "api",
   "users": [
-    { "email": "r1@x.com", "role": "reviewer", "canApprove": true, "canReject": true },
-    { "email": "r2@x.com", "role": "editor",   "canApprove": false, "canReject": false }
+    { "email": "r1@x.com", "role": "reviewer" },
+    { "email": "r2@x.com", "role": "editor" }
   ]
 }
 ```
-For document scope use `documentId`; for tag use `tagName`; for nest no target.
+For document scope use `documentId`; for nest no target. Sending `scope: "folder"` returns **400** — folder scope was removed.
 
 **Side effects on POST:**
 1. Auto-flips `nests.stewardship_enabled = 1` on the nest.
@@ -319,7 +314,7 @@ Re-imports stewards from `<nest>/.context/stewards.yaml` if present.
 Response: `{ "synced": N }`.
 
 ### GET `/nests/:nestId/nodes/:nodeId/stewards`
-Resolved stewards for one node (priority `document(1) > folder(2) > tag(3) > nest(4)`).
+Resolved stewards for one node (priority `document(1) > tag(2) > nest(3)`).
 ```json
 {
   "nodeId": "nodes/foo",
@@ -328,8 +323,7 @@ Resolved stewards for one node (priority `document(1) > folder(2) > tag(3) > nes
     "role": "reviewer",
     "scope": "document",
     "source": "document: nodes/foo",
-    "priority": 1,
-    "canApprove": true
+    "priority": 1
   }],
   "fallbackToOwner": false,
   "ownerEmail": null
@@ -340,7 +334,7 @@ Resolved stewards for one node (priority `document(1) > folder(2) > tag(3) > nes
 `{ "allowed": true, "reason": "...", "role": "reviewer" | null }`
 
 ### GET `/nests/:nestId/nodes/:nodeId/can-approve`
-Same shape. Reflects `canApprove` flag of the matched steward row.
+Same shape. Allowed iff the caller has a matched steward row with `role: reviewer` covering this node.
 
 ### GET `/nests/:nestId/nodes/:nodeId/can-edit`
 Same shape. Reflects nest collaborator permission OR steward `editor` role.
@@ -359,7 +353,7 @@ Sets node status → `pending_review`. UI locks editing.
 ```json
 { "note": "lgtm", "override": false }
 ```
-- Server checks caller has a steward row covering this node with `can_approve = 1`. **403 `Insufficient permissions`** otherwise.
+- Server checks caller has a steward row covering this node with `role = 'reviewer'`. **403 `Insufficient permissions`** otherwise.
 - Nest middleware allows `read`-perm collaborators through this path; per-row stewardship enforces real authorization.
 - `override: true` only honored for the super-admin license owner.
 
@@ -369,7 +363,7 @@ Response: `{ "review": { "id": "...", "status": "approved", ... } }`.
 ```json
 { "note": "needs change X" }
 ```
-`note` required. Same permission gating as approve (`can_reject`).
+`note` required. Same permission gating as approve (`role = 'reviewer'`).
 
 ### POST `/nests/:nestId/nodes/:nodeId/cancel-review`
 Cancels the pending review. Returns node to `draft`.
@@ -510,7 +504,7 @@ License gate: any non-GET request OR any governance path requires a valid Prompt
 2. `POST /nests` → grab `nestId`.
 3. `PATCH /nests/:nestId/settings` → `{ "stewardship_enabled": true }`.
 4. `POST /nests/:nestId/nodes` → grab `node.id`.
-5. `POST /nests/:nestId/stewards` → `{ scope:"document", email:"rev@x.com", role:"reviewer", canApprove:true, canReject:true, nodePattern:"<node.id>" }`.
+5. `POST /nests/:nestId/stewards` → `{ scope:"document", email:"rev@x.com", role:"reviewer", nodePattern:"<node.id>" }`.
 6. As `rev@x.com` → `POST /auth/register` (claims placeholder) → cookie stored.
 7. `GET /nests` as reviewer → nest visible (proves auto-collab worked).
 8. `GET /nests/:nestId/nodes` as reviewer → only the assigned doc visible (proves stewardship filter).

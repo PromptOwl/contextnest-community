@@ -19,16 +19,33 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { toast } from "sonner";
 import { useAuth } from "./auth/AuthContext";
 
 type View =
   | { page: "dashboard" }
-  | { page: "nest"; nestId: string; nestName: string }
+  | {
+      page: "nest";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    }
   | {
       page: "document";
       nestId: string;
       nestName: string;
       nodeId: string | "new";
+      isOwner: boolean;
+      isAnonOwned: boolean;
     }
   | { page: "teammates" };
 
@@ -48,6 +65,25 @@ export default function App() {
     null,
   );
   const [licenseLoading, setLicenseLoading] = useState(true);
+  // Logout flow: confirm dialog → call logout() → sonner success toast.
+  // The Toaster portal lives at the root of the tree (rendered below)
+  // so the toast survives the view swap that logout triggers (Login
+  // screen mounts when authenticated flips false in key mode).
+  const [logoutConfirm, setLogoutConfirm] = useState(false);
+  const [logoutPending, setLogoutPending] = useState(false);
+
+  const requestLogout = useCallback(() => setLogoutConfirm(true), []);
+
+  const confirmLogout = useCallback(async () => {
+    setLogoutPending(true);
+    try {
+      await logout();
+      setLogoutConfirm(false);
+      toast.success("Logged out successfully");
+    } finally {
+      setLogoutPending(false);
+    }
+  }, [logout]);
 
   const refreshLicense = useCallback(async () => {
     try {
@@ -123,8 +159,57 @@ export default function App() {
     return <LicenseSetupPage onActivated={refreshLicense} />;
   }
 
+  // Logout chrome (confirm dialog + success toast) lives at the top of
+  // the render tree so it survives the unmount/remount that happens when
+  // logout flips `authenticated` and the app swaps to <Login />.
+  const logoutChrome = (
+    <>
+      <Dialog
+        open={logoutConfirm}
+        onOpenChange={(open) => {
+          if (!open && !logoutPending) setLogoutConfirm(false);
+        }}
+      >
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <LogOut className="h-4 w-4 text-muted-foreground" />
+              Log out?
+            </DialogTitle>
+            <DialogDescription>
+              You'll be signed out of this browser. Any unsaved edits in
+              other tabs may be lost — save your work first.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setLogoutConfirm(false)}
+              disabled={logoutPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmLogout}
+              disabled={logoutPending}
+            >
+              {logoutPending ? "Logging out..." : "Log out"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+    </>
+  );
+
   if (!authenticated && authMode === "key") {
-    return <Login />;
+    return (
+      <>
+        <Login />
+        {logoutChrome}
+      </>
+    );
   }
 
   return (
@@ -158,7 +243,7 @@ export default function App() {
                 me={adminStatus.me}
                 isAdmin={isAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
-                onLogout={logout}
+                onLogout={requestLogout}
               />
             ) : (
               <Button
@@ -167,7 +252,7 @@ export default function App() {
                 onClick={() => setShowAdminLogin(true)}
               >
                 <Shield className="h-3.5 w-3.5 mr-1" />
-                {adminStatus?.claimed ? "Login" : "Claim as Admin"}
+                Login
               </Button>
             )}
           </div>
@@ -178,8 +263,14 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-4 py-6">
         {view.page === "dashboard" && (
           <Dashboard
-            onSelectNest={(id, name) =>
-              setView({ page: "nest", nestId: id, nestName: name })
+            onSelectNest={(id, name, isOwner, isAnonOwned) =>
+              setView({
+                page: "nest",
+                nestId: id,
+                nestName: name,
+                isOwner,
+                isAnonOwned,
+              })
             }
           />
         )}
@@ -187,6 +278,8 @@ export default function App() {
           <NestView
             nestId={view.nestId}
             nestName={view.nestName}
+            isOwner={view.isOwner}
+            isAnonOwned={view.isAnonOwned}
             onBack={() => setView({ page: "dashboard" })}
             onOpenDocument={(nodeId) =>
               setView({
@@ -194,6 +287,8 @@ export default function App() {
                 nestId: view.nestId,
                 nestName: view.nestName,
                 nodeId,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
               })
             }
           />
@@ -208,6 +303,8 @@ export default function App() {
                 page: "nest",
                 nestId: view.nestId,
                 nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
               })
             }
             onSaved={() =>
@@ -215,18 +312,24 @@ export default function App() {
                 page: "nest",
                 nestId: view.nestId,
                 nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
               })
             }
             onNavigateDocument={(linkNestId, linkNodeId) =>
-              // Cross-nest links don't carry the target nest's name —
-              // we keep the current nestName as a best-effort label.
-              // The DocumentEditor reloads from the server anyway.
+              // Cross-nest links don't carry the target nest's name or
+              // ownership — keep current values as a best-effort and let
+              // DocumentEditor reload. Delete affordance in NestView
+              // will be hidden for cross-nest hops it can't verify.
               setView({
                 page: "document",
                 nestId: linkNestId,
                 nestName:
                   linkNestId === view.nestId ? view.nestName : "Document",
                 nodeId: linkNodeId,
+                isOwner: linkNestId === view.nestId ? view.isOwner : false,
+                isAnonOwned:
+                  linkNestId === view.nestId ? view.isAnonOwned : false,
               })
             }
           />
@@ -238,11 +341,11 @@ export default function App() {
 
       {showAdminLogin && (
         <AdminLoginModal
-          alreadyClaimed={!!adminStatus?.claimed}
           existingAdmin={adminStatus?.admin?.email || null}
           onClose={() => setShowAdminLogin(false)}
         />
       )}
+      {logoutChrome}
     </div>
   );
 }

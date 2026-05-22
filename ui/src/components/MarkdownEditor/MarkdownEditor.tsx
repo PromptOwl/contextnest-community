@@ -172,13 +172,15 @@ export const MarkdownEditor = forwardRef<
   // (because `getHTML()` normalises slightly differently from React's
   // stored value), nuking the selection and making toolbar toggles act
   // on whatever the cursor landed on rather than the original range.
-  // The `false` second arg further blocks the resulting `onUpdate`
-  // event from firing back into onChange and looping.
+  // The `emitUpdate: false` option further blocks the resulting
+  // `onUpdate` event from firing back into onChange and looping.
+  // (TipTap v3 replaced the boolean second arg with a SetContentOptions
+  // object; passing `false` directly is a compile error.)
   useEffect(() => {
     if (!editor) return;
     if (editor.isFocused) return;
     if (content === editor.getHTML()) return;
-    editor.commands.setContent(content, false);
+    editor.commands.setContent(content, { emitUpdate: false });
   }, [content, editor]);
 
   useImperativeHandle(

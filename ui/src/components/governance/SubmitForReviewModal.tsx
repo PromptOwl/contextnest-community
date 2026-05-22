@@ -70,10 +70,11 @@ export function SubmitForReviewModal({
     <Dialog open={isOpen} onOpenChange={handleClose}>
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
-          <DialogTitle>Submit for Review</DialogTitle>
+          <DialogTitle>Publish &ldquo;{documentTitle}&rdquo; (requires approval)</DialogTitle>
           <DialogDescription>
-            Submit &ldquo;{documentTitle}&rdquo; (v{currentVersion}) for steward approval.
-            Once approved, this version will be available as AI context.
+            Publishing in this nest goes through stewardship. Version {currentVersion}
+            will move to <strong>pending review</strong>; once a steward approves it,
+            this version becomes the AI-readable copy.
           </DialogDescription>
         </DialogHeader>
 
@@ -127,7 +128,7 @@ export function SubmitForReviewModal({
             ) : (
               <Send className="h-4 w-4 mr-2" />
             )}
-            Submit for Review
+            Submit for approval
           </Button>
         </DialogFooter>
       </DialogContent>
