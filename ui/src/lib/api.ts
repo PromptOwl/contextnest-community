@@ -269,6 +269,10 @@ export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
 }
 
+export async function getServerStats() {
+  return request<{ nests: number; documents: number; users: number }>("/stats");
+}
+
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
 export async function listNodes(nestId: string) {
