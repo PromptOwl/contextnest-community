@@ -27,9 +27,20 @@ import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
+import { DocumentViewer } from "./DocumentViewer";
 import { SubmitForReviewModal, ReviewActions } from "./governance";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
+
+/** Treat content as HTML when it visibly starts with an HTML tag.
+ *  Anything else (markdown, plain text, empty) goes through the
+ *  markdown renderer. Markdown can legally contain inline HTML, but
+ *  documents that start with `<` are overwhelmingly going to be the
+ *  TipTap-saved kind. */
+function looksLikeHtml(s: string): boolean {
+  if (!s) return false;
+  return /^\s*</.test(s);
+}
 
 interface DocumentEditorProps {
   nestId: string;
@@ -64,6 +75,10 @@ export function DocumentEditor({
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDocPicker, setShowDocPicker] = useState(false);
+  // Per CU-86ahmvmex: existing docs open in view mode by default so the
+  // user actually sees rendered markdown. New docs go straight to edit.
+  // The user can flip via the toolbar button.
+  const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : "view");
 
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
 
@@ -415,22 +430,47 @@ export function DocumentEditor({
             )}
           </div>
 
-          {/* Editor */}
+          {/* View or edit. View is a read-only markdown renderer (the doc
+              body stays byte-for-byte the same on disk). Edit is the
+              TipTap surface — its save path is unchanged by this PR. */}
           <div>
-            <label className="block mb-1 text-sm font-medium">
-              Content <span className="text-destructive">*</span>
-            </label>
-            <MarkdownEditor
-              ref={editorRef}
-              content={content}
-              onChange={setContent}
-              onSave={handleSave}
-              nestId={nestId}
-              editable={!isLocked}
-              onRequestDocLink={() => setShowDocPicker(true)}
-              onWikiLinkClick={handleWikiLinkClick}
-              placeholder="Start writing..."
-            />
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-sm font-medium">
+                Content <span className="text-destructive">*</span>
+              </label>
+              {!isNew && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setMode(mode === "view" ? "edit" : "view")}
+                  data-testid="document-editor-mode-toggle"
+                >
+                  {mode === "view" ? "Edit" : "View"}
+                </Button>
+              )}
+            </div>
+            {mode === "view" && !looksLikeHtml(content) ? (
+              <div className="border rounded-lg bg-background shadow-sm min-h-[300px]">
+                <DocumentViewer
+                  content={content}
+                  onWikiLinkClick={(title) =>
+                    handleWikiLinkClick(title, null)
+                  }
+                />
+              </div>
+            ) : (
+              <MarkdownEditor
+                ref={editorRef}
+                content={content}
+                onChange={setContent}
+                onSave={handleSave}
+                nestId={nestId}
+                editable={!isLocked && mode === "edit"}
+                onRequestDocLink={() => setShowDocPicker(true)}
+                onWikiLinkClick={handleWikiLinkClick}
+                placeholder="Start writing..."
+              />
+            )}
           </div>
         </div>
       )}
