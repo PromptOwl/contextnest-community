@@ -1,6 +1,7 @@
 import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
+import { vi } from "vitest";
 import { resetDb } from "../src/db/client.js";
 import { _reset as resetRateLimits } from "../src/shared/rate-limit.js";
 
@@ -17,11 +18,6 @@ export function setupTestEnv() {
   process.env.DATA_ROOT = testDir;
   process.env.DATABASE_PATH = join(testDir, "test.db");
   process.env.PROMPTOWL_KEY = ""; // no license in tests
-  // Tests don't have a real PromptOwl license, so the license gate in
-  // app.ts would 503 every non-GET. The bypass env var short-circuits
-  // that gate. See src/app.ts for the safety notes — production must
-  // not set this.
-  process.env.PROMPTOWL_DEV_LICENSE_BYPASS = "1";
   process.env.TELEMETRY_ENABLED = "false";
 
   return {
@@ -35,9 +31,35 @@ export function setupTestEnv() {
   };
 }
 
-/** Create the Hono app (must be called AFTER setupTestEnv sets env vars) */
+/** Create the Hono app (must be called AFTER setupTestEnv sets env vars).
+ *
+ * The license gate in app.ts blocks every non-GET (and every governance
+ * route) until getCurrentLicense() returns a valid license. Tests don't
+ * have a real PromptOwl key, so we mock the license module to report a
+ * valid license without changing production code. The mock is scoped to
+ * this file's module cache, so test files that import the real license
+ * module (license.test.ts) are unaffected.
+ */
 export async function createTestApp(authMode: "open" | "key" = "open") {
   process.env.AUTH_MODE = authMode;
+  vi.resetModules();
+  vi.doMock("../src/auth/license.js", async () => {
+    const actual = await vi.importActual<
+      typeof import("../src/auth/license.js")
+    >("../src/auth/license.js");
+    return {
+      ...actual,
+      getCurrentLicense: () => ({
+        valid: true,
+        tier: "test",
+        org: "Test Org",
+        limits: null,
+        suspended: false,
+        suspendedReason: null,
+        ownerEmail: null,
+      }),
+    };
+  });
   const { createApp } = await import("../src/app.js");
   return createApp();
 }
