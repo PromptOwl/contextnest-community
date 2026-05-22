@@ -37,6 +37,42 @@ export function setStewardshipEnabled(nestId: string, enabled: boolean): void {
   );
 }
 
+/**
+ * Disable stewardship AND wipe every access record tied to it.
+ *
+ * Disabling governance is destructive by design: stewards/collaborators were
+ * granted on the assumption the approval workflow gated their writes. Once
+ * that workflow is off, leaving collaborator rows in place means everyone
+ * silently gains ungoverned access. Wipe them in the same transaction as
+ * the flag flip so the two states can't drift.
+ *
+ * Only pending review_requests are removed — approved/rejected/cancelled
+ * rows are historical audit data and stay.
+ */
+export function disableStewardshipAndWipeAccess(nestId: string): {
+  stewards: number;
+  collaborators: number;
+  pendingReviews: number;
+} {
+  const db = getDb();
+  const wipe = db.transaction((id: string) => {
+    const stewards = db
+      .prepare("DELETE FROM stewards WHERE nest_id = ?")
+      .run(id).changes;
+    const collaborators = db
+      .prepare("DELETE FROM nest_collaborators WHERE nest_id = ?")
+      .run(id).changes;
+    const pendingReviews = db
+      .prepare(
+        "DELETE FROM review_requests WHERE nest_id = ? AND status = 'pending'",
+      )
+      .run(id).changes;
+    db.prepare("UPDATE nests SET stewardship_enabled = 0 WHERE id = ?").run(id);
+    return { stewards, collaborators, pendingReviews };
+  });
+  return wipe(nestId);
+}
+
 export async function createNest(
   userId: string,
   name: string,

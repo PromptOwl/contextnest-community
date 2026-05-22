@@ -109,9 +109,10 @@ queryRoutes.post("/context", async (c) => {
   }
 
   // ── 3. Permission gate (no-op when stewardship is disabled) ──
-  const userEmail = resolveCallerEmail(c.get("userId"));
+  const userId = c.get("userId");
+  const userEmail = resolveCallerEmail(userId);
   const beforePermission = documents.length;
-  const accessible = filterAccessible(nestId, userEmail, documents);
+  const accessible = filterAccessible(nestId, userId, userEmail, documents);
   const permissionFiltered = beforePermission - accessible.length;
 
   // ── 4. Budget-fit within max_tokens ──
@@ -182,8 +183,9 @@ queryRoutes.post("/query", async (c) => {
     hops: body.hops ?? 2,
   });
 
-  const userEmail = resolveCallerEmail(c.get("userId"));
-  const accessible = filterAccessible(nestId, userEmail, result.documents);
+  const userId = c.get("userId");
+  const userEmail = resolveCallerEmail(userId);
+  const accessible = filterAccessible(nestId, userId, userEmail, result.documents);
 
   return c.json({
     query: body.query,
@@ -222,8 +224,9 @@ queryRoutes.get("/search", async (c) => {
     return terms.every((term) => haystack.includes(term));
   });
 
-  const userEmail = resolveCallerEmail(c.get("userId"));
-  const accessible = filterAccessible(nestId, userEmail, matches);
+  const userId = c.get("userId");
+  const userEmail = resolveCallerEmail(userId);
+  const accessible = filterAccessible(nestId, userId, userEmail, matches);
 
   return c.json({
     query: q,
