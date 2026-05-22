@@ -22,6 +22,7 @@ import {
   AlertCircle,
   Send,
   X,
+  Pencil,
 } from "lucide-react";
 import {
   MarkdownEditor,
@@ -168,6 +169,12 @@ export function DocumentEditor({
   // avoids the user typing a long draft only to discover they couldn't
   // save it. Cancelling the review (future feature) would unlock here.
   const isLocked = status === "pending_review";
+
+  // Fields (title, tags, content) are read-only outside of edit mode.
+  // New docs default to edit, existing docs default to view — user must
+  // explicitly opt-in via the "Start Editing" header button or a
+  // double-click on the content area.
+  const fieldsDisabled = isLocked || mode !== "edit";
 
   const canSave = useMemo(
     () =>
@@ -340,18 +347,28 @@ export function DocumentEditor({
             />
           )}
           {!isLocked && !isReviewerOnly && (
-            <Button
-              onClick={handleSave}
-              disabled={!canSave}
-              data-testid="document-editor-save"
-            >
-              {saving ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <Save className="h-4 w-4 mr-2" />
-              )}
-              {isNew ? "Create" : "Save"}
-            </Button>
+            mode === "edit" ? (
+              <Button
+                onClick={handleSave}
+                disabled={!canSave}
+                data-testid="document-editor-save"
+              >
+                {saving ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4 mr-2" />
+                )}
+                {isNew ? "Create" : "Save"}
+              </Button>
+            ) : (
+              <Button
+                onClick={() => setMode("edit")}
+                data-testid="document-editor-start-edit"
+              >
+                <Pencil className="h-4 w-4 mr-2" />
+                Start Editing
+              </Button>
+            )
           )}
         </div>
       </div>
@@ -389,7 +406,7 @@ export function DocumentEditor({
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Document title"
-              disabled={isLocked}
+              disabled={fieldsDisabled}
               data-testid="document-editor-title"
             />
           </div>
@@ -410,14 +427,14 @@ export function DocumentEditor({
                   }
                 }}
                 placeholder='Press Enter or space. Try "#api #v2" or "api, v2"'
-                disabled={isLocked}
+                disabled={fieldsDisabled}
                 data-testid="document-editor-tag-input"
               />
               <Button
                 type="button"
                 variant="outline"
                 onClick={addTag}
-                disabled={isLocked || !tagInput.trim()}
+                disabled={fieldsDisabled || !tagInput.trim()}
               >
                 Add
               </Button>
@@ -430,7 +447,7 @@ export function DocumentEditor({
                     className="inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs"
                   >
                     {t}
-                    {!isLocked && (
+                    {!fieldsDisabled && (
                       <button
                         type="button"
                         onClick={() => removeTag(t)}
@@ -448,25 +465,24 @@ export function DocumentEditor({
 
           {/* View or edit. View is a read-only markdown renderer (the doc
               body stays byte-for-byte the same on disk). Edit is the
-              TipTap surface — its save path is unchanged by this PR. */}
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="block text-sm font-medium">
-                Content <span className="text-destructive">*</span>
-              </label>
-              {!isNew && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setMode(mode === "view" ? "edit" : "view")}
-                  data-testid="document-editor-mode-toggle"
-                >
-                  {mode === "view" ? "Edit" : "View"}
-                </Button>
-              )}
-            </div>
+              TipTap surface — its save path is unchanged by this PR.
+              Double-click anywhere in the content area is an alternate
+              entry into edit mode (the header "Start Editing" button is
+              the primary one). Skip the flip when locked or when the
+              caller is reviewer/viewer-only — those users have no edit
+              path regardless. */}
+          <div
+            onDoubleClick={() => {
+              if (mode === "view" && !isLocked && !isReviewerOnly) {
+                setMode("edit");
+              }
+            }}
+          >
+            <label className="block text-sm font-medium mb-1">
+              Content <span className="text-destructive">*</span>
+            </label>
             {mode === "view" && !looksLikeHtml(content) ? (
-              <div className="border rounded-lg bg-background shadow-sm min-h-[300px]">
+              <div className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text">
                 <DocumentViewer
                   content={content}
                   onWikiLinkClick={(title) =>
