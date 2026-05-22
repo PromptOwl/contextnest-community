@@ -47,7 +47,43 @@ export function assignSteward(data: Omit<Steward, "id">): Steward {
 
 export function removeSteward(id: string): void {
   const db = getDb();
-  db.prepare("UPDATE stewards SET is_active = 0 WHERE id = ?").run(id);
+  // Hard-delete the steward row and revoke the nest_collaborators row that
+  // assignSteward → ensureCollaborator created on their behalf; otherwise
+  // the user keeps seeing the nest in their list (listSharedNests joins
+  // on nest_collaborators) and can still hit shared-nest endpoints.
+  //
+  // Edge case: a user may have been added via direct sharing AND made a
+  // steward later. We can't distinguish the two sources from the schema,
+  // so removing the last remaining steward row drops the collab row too.
+  // Leaving stale access is worse than asking an owner to re-share in
+  // that rare overlap.
+  const remove = db.transaction((stewardId: string) => {
+    const row = db
+      .prepare("SELECT nest_id, user_email FROM stewards WHERE id = ?")
+      .get(stewardId) as { nest_id: string; user_email: string } | undefined;
+    db.prepare("DELETE FROM stewards WHERE id = ?").run(stewardId);
+    if (!row) return;
+
+    // Keep the collab row while the user still has another active steward
+    // assignment on the same nest (e.g. removed from a tag scope but still
+    // a nest-level steward).
+    const remaining = db
+      .prepare(
+        "SELECT 1 FROM stewards WHERE nest_id = ? AND LOWER(user_email) = LOWER(?) AND is_active = 1 LIMIT 1",
+      )
+      .get(row.nest_id, row.user_email);
+    if (remaining) return;
+
+    const user = db
+      .prepare("SELECT id FROM users WHERE LOWER(email) = LOWER(?)")
+      .get(row.user_email) as { id: string } | undefined;
+    if (!user) return;
+
+    db.prepare(
+      "DELETE FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
+    ).run(row.nest_id, user.id);
+  });
+  remove(id);
 }
 
 export function getSteward(id: string): Steward | null {
