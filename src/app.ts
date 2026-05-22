@@ -4,6 +4,9 @@ import { cors } from "hono/cors";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
+import { listNests, listSharedNests } from "./nests/service.js";
+import { engineCache } from "./nodes/engine.js";
+import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
@@ -239,6 +242,43 @@ export function createApp(): Hono<AuthEnv> {
     }
   });
 
+  // GET /stats — dashboard summary counts: nests visible to caller,
+  // documents across those nests, total users on the server. Uses
+  // flexAuthMiddleware so it works without auth in open mode and with
+  // a Bearer/cookie in key mode.
+  app.use("/stats", flexAuthMiddleware);
+  app.get("/stats", async (c) => {
+    const db = getDb();
+    const userId = c.get("userId");
+    const userEmail = resolveCallerEmail(userId);
+
+    const visibleNests = [...listNests(userId), ...listSharedNests(userId)];
+
+    // Count accessible documents across every nest the caller can see.
+    // Mirrors the per-nest filterAccessible logic used by GET /nests/:id/nodes
+    // so stewardship-gated docs don't inflate the total for non-stewards.
+    let documents = 0;
+    for (const nest of visibleNests) {
+      try {
+        const { storage } = engineCache.get(nest.id);
+        const docs = await storage.discoverDocuments();
+        documents += filterAccessible(nest.id, userEmail, docs).length;
+      } catch {
+        // Nest with filesystem issue — skip; don't break the whole count.
+      }
+    }
+
+    const usersRow = db
+      .prepare("SELECT COUNT(*) as c FROM users")
+      .get() as { c: number };
+
+    return c.json({
+      nests: visibleNests.length,
+      documents,
+      users: usersRow.c,
+    });
+  });
+
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
 
@@ -292,16 +332,7 @@ export function createApp(): Hono<AuthEnv> {
         path.includes("/can-approve") ||
         path.includes("/can-edit");
       const needsLicense = c.req.method !== "GET" || isGovernance;
-      // Dev/test bypass: when running the integration test suite (or a
-      // local dev server without a license) the license gate would 503
-      // every non-GET, which makes the suite unrunnable. The env var
-      // PROMPTOWL_DEV_LICENSE_BYPASS=1 short-circuits the gate. The
-      // variable's name + this comment block are the safeguard against
-      // accidental production use — there is no UI affordance to set it
-      // and the dist build doesn't ship a default value for it.
-      const licenseBypass =
-        process.env.PROMPTOWL_DEV_LICENSE_BYPASS === "1";
-      if (needsLicense && !licenseBypass) {
+      if (needsLicense) {
         const lic = getCurrentLicense();
         if (!lic?.valid) {
           return c.json(

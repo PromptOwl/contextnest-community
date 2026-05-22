@@ -286,6 +286,10 @@ export async function getNest(nestId: string) {
   }>(`/nests/${nestId}`);
 }
 
+export async function getServerStats() {
+  return request<{ nests: number; documents: number; users: number }>("/stats");
+}
+
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
 export async function listNodes(nestId: string) {
