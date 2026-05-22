@@ -10,7 +10,7 @@ import {
   isStewardshipEnabled,
   setStewardshipEnabled,
 } from "./service.js";
-import { ValidationError, NotFoundError } from "../shared/errors.js";
+import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
@@ -101,9 +101,29 @@ nestRoutes.get("/:nestId", async (c) => {
 // DELETE /nests/:nestId
 nestRoutes.delete("/:nestId", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const permission = effectivePermission(nestId, c.get("userId"));
-  if (permission !== "owner") {
+  const userId = c.get("userId");
+
+  // Real-owner nests are deletable only by that owner. The ungoverned
+  // commons (anon-owned nests) are the exception:
+  //   - open mode: effectivePermission promotes anon nests to "owner" for
+  //     every caller, so anyone in the workspace can delete them.
+  //   - key mode (closed/single): the server license-admin acts as
+  //     caretaker for the commons; without this branch their real user-id
+  //     resolves to "none" and the delete 404s.
+  const nest = getNest(nestId);
+  if (!nest) {
     throw new NotFoundError("Nest not found");
+  }
+  const permission = effectivePermission(nestId, userId);
+  const isAnonOwned = nest.user_id === ANON_USER_ID;
+  const adminCaretaker =
+    config.AUTH_MODE !== "open" &&
+    isAnonOwned &&
+    isLicenseAdminUserId(userId);
+  if (permission !== "owner" && !adminCaretaker) {
+    throw new ForbiddenError(
+      "You don't have permission to delete this nest. Only the nest owner can delete it.",
+    );
   }
 
   await deleteNest(nestId);

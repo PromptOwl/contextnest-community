@@ -68,22 +68,22 @@ export async function createNest(
 
 export function listNests(userId: string): Nest[] {
   const db = getDb();
-  // Always include anonymous-owned nests as the ungoverned shared commons,
-  // plus nests owned by the caller. De-dupe when caller IS the anonymous user.
+  // The "ungoverned commons" (anon-owned nests) is an open-mode concept —
+  // every visitor effectively co-owns it. In key mode (closed/single) we
+  // only surface anon nests to the caretaker (license-admin); regular
+  // signed-in users should not see nests they have no real claim to.
+  // De-dupe when caller IS the anonymous user.
   if (userId === ANON_USER_ID) {
     return db
       .prepare("SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC")
       .all(ANON_USER_ID) as Nest[];
   }
-  // Key-mode caller. Anon-owned nests are the shared commons but the admin
-  // can mark individual ones private — in that case only the license-admin
-  // user sees them. Public anon nests stay visible to everyone.
-  if (isLicenseAdminUserId(userId)) {
+  const includeAnon =
+    config.AUTH_MODE === "open" || isLicenseAdminUserId(userId);
+  if (!includeAnon) {
     return db
-      .prepare(
-        "SELECT * FROM nests WHERE user_id = ? OR user_id = ? ORDER BY created_at DESC",
-      )
-      .all(userId, ANON_USER_ID) as Nest[];
+      .prepare("SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC")
+      .all(userId) as Nest[];
   }
   return db
     .prepare(

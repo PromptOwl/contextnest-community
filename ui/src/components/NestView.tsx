@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
+import { DeleteNestDialog } from "./DeleteNestDialog";
 import { Button } from "@/components/ui/button";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
@@ -38,6 +39,8 @@ import { MarkdownEditor } from "./MarkdownEditor";
 interface NestViewProps {
   nestId: string;
   nestName: string;
+  isOwner: boolean;
+  isAnonOwned: boolean;
   onBack: () => void;
   onOpenDocument: (nodeId: string | "new") => void;
 }
@@ -45,10 +48,18 @@ interface NestViewProps {
 export function NestView({
   nestId,
   nestName,
+  isOwner,
+  isAnonOwned,
   onBack,
   onOpenDocument,
 }: NestViewProps) {
-  const { isAdmin, adminStatus } = useAuth();
+  const { isAdmin, adminStatus, authMode } = useAuth();
+  // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
+  //   - real-owner nest → only that owner
+  //   - anon-owned + open mode → any caller (server treats anon as commons)
+  //   - anon-owned + key mode → license-admin caretaker only
+  const canDeleteNest =
+    isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   const [nodes, setNodes] = useState<any[]>([]);
   const [stewards, setStewards] = useState<Steward[]>([]);
@@ -73,6 +84,7 @@ export function NestView({
   }>({ versions: [], approvedVersion: null, currentVersion: 0 });
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
+  const [showDelete, setShowDelete] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -264,13 +276,27 @@ export function NestView({
             <Link2 className="h-4 w-4 mr-2" />
             Connect
           </Button>
+          {/* Delete — gated to match server rules (owner, or admin
+              caretaker on the ungoverned commons in key mode). Server
+              still enforces; hiding the button just keeps the UI
+              honest for callers who can't act. */}
+          {canDeleteNest && (
+            <Button
+              variant="outline"
+              onClick={() => setShowDelete(true)}
+              className="text-destructive hover:text-destructive hover:bg-destructive/10"
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
+            </Button>
+          )}
           {isAdmin && (
             <Button variant="outline" onClick={() => setShowSettings(true)}>
               <SettingsIcon className="h-4 w-4 mr-2" />
               Settings
             </Button>
           )}
-          {stewardshipEnabled && (
+          {stewardshipEnabled && !isStewardOnly && (
             <>
               <Button variant="outline" onClick={() => api.syncStewards(nestId).then(fetchData)}>
                 <RefreshCw className="h-4 w-4 mr-2" />
@@ -282,10 +308,12 @@ export function NestView({
               </Button>
             </>
           )}
-          <Button onClick={() => onOpenDocument("new")}>
-            <Plus className="h-4 w-4 mr-2" />
-            New Document
-          </Button>
+          {canEditDocs && (
+            <Button onClick={() => onOpenDocument("new")}>
+              <Plus className="h-4 w-4 mr-2" />
+              New Document
+            </Button>
+          )}
         </div>
       </div>
 
@@ -676,15 +704,17 @@ export function NestView({
                       approve. Add an editor/reviewer to delegate approvals
                       for a tag or specific doc.
                     </p>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="w-full"
-                      onClick={() => setShowAssignSteward(true)}
-                    >
-                      <Shield className="h-3.5 w-3.5 mr-2" />
-                      Assign your first steward
-                    </Button>
+                    {!isStewardOnly && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                        onClick={() => setShowAssignSteward(true)}
+                      >
+                        <Shield className="h-3.5 w-3.5 mr-2" />
+                        Assign your first steward
+                      </Button>
+                    )}
                   </div>
                 ) : (
                   <StewardList
@@ -694,8 +724,10 @@ export function NestView({
                         : stewards.filter((s) => s.scope === stewardScope)
                     }
                     showScope
-                    onAddSteward={() => setShowAssignSteward(true)}
-                    onRemove={handleRemoveSteward}
+                    onAddSteward={
+                      isStewardOnly ? undefined : () => setShowAssignSteward(true)
+                    }
+                    onRemove={isStewardOnly ? undefined : handleRemoveSteward}
                   />
                 )}
               </CardContent>
@@ -756,6 +788,16 @@ export function NestView({
           stewardshipEnabled={stewardshipEnabled}
           onClose={() => setShowSettings(false)}
           onChanged={() => { setShowSettings(false); fetchData(); }}
+        />
+      )}
+
+      {showDelete && (
+        <DeleteNestDialog
+          nestId={nestId}
+          nestName={nestName}
+          open
+          onOpenChange={setShowDelete}
+          onDeleted={() => { setShowDelete(false); onBack(); }}
         />
       )}
 

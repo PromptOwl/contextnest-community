@@ -165,6 +165,28 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE users ADD COLUMN is_invited INTEGER NOT NULL DEFAULT 0");
   }
 
+  // Defensive backfill for stewards columns. The CREATE TABLE above and
+  // migration 002 below both declare can_approve / can_reject, but some
+  // legacy DBs in the wild ended up with a stewards table missing these
+  // columns (002 rebuild was skipped via schema_migrations while the
+  // original table was an earlier shape). Guard with PRAGMA so this is
+  // a no-op on clean DBs.
+  const stewardCols = (
+    db.prepare("PRAGMA table_info(stewards)").all() as Array<{ name: string }>
+  ).map((c) => c.name);
+  if (stewardCols.length > 0) {
+    if (!stewardCols.includes("can_approve")) {
+      db.exec(
+        "ALTER TABLE stewards ADD COLUMN can_approve INTEGER NOT NULL DEFAULT 1",
+      );
+    }
+    if (!stewardCols.includes("can_reject")) {
+      db.exec(
+        "ALTER TABLE stewards ADD COLUMN can_reject INTEGER NOT NULL DEFAULT 1",
+      );
+    }
+  }
+
   // ─── Versioned migrations ───
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (

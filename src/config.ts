@@ -7,7 +7,10 @@ import dotenv from "dotenv";
 // Load .env before any getter reads process.env. Try cwd first (typical
 // dev: `npm run dev` from project root), then fall back to the directory
 // next to the compiled entrypoint (packaged `node dist/index.js` runs).
-// override: true so .env wins over stale OS-level vars.
+// override: true so .env wins over stale OS-level vars — EXCEPT under
+// vitest, where each test sets DATA_ROOT/PROMPTOWL_KEY before
+// vi.resetModules() re-imports this file; overriding would clobber
+// that test setup and the suite would all read the dev .env values.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const envCandidates = [
@@ -15,12 +18,15 @@ const envCandidates = [
   join(__dirname, "..", ".env"),
 ];
 const envFileLoaded = envCandidates.find((p) => existsSync(p)) || null;
-if (envFileLoaded) {
+const isTestRun = !!process.env.VITEST;
+if (envFileLoaded && !isTestRun) {
   dotenv.config({ path: envFileLoaded, override: true });
 }
-console.log(
-  `[config] dotenv: ${envFileLoaded ? `loaded ${envFileLoaded}` : "no .env file found"}`,
-);
+if (!isTestRun) {
+  console.log(
+    `[config] dotenv: ${envFileLoaded ? `loaded ${envFileLoaded}` : "no .env file found"}`,
+  );
+}
 
 function dataRoot() {
   return process.env.DATA_ROOT || join(process.cwd(), "data");
