@@ -5,7 +5,7 @@ import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Users, Eye, Pencil, Shield,
 } from "lucide-react";
 
 const ANON_USER_ID = "00000000-0000-0000-0000-000000000000";
@@ -15,29 +15,25 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { DeleteNestDialog } from "./DeleteNestDialog";
 
 interface DashboardProps {
-  onSelectNest: (nestId: string, name: string) => void;
+  onSelectNest: (
+    nestId: string,
+    name: string,
+    isOwner: boolean,
+    isAnonOwned: boolean,
+  ) => void;
 }
 
 export function Dashboard({ onSelectNest }: DashboardProps) {
-  const { adminStatus } = useAuth();
+  const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const [nests, setNests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   // Pending target sits in state so the modal can render the nest name in
   // the confirmation copy without prop-drilling through a separate child.
   const [deleteTarget, setDeleteTarget] = useState<
@@ -74,23 +70,7 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
   };
 
   const requestDelete = (nestId: string, nestName: string) => {
-    setDeleteError(null);
     setDeleteTarget({ id: nestId, name: nestName });
-  };
-
-  const confirmDelete = async () => {
-    if (!deleteTarget) return;
-    const { id } = deleteTarget;
-    setDeletingId(id);
-    try {
-      await api.deleteNest(id);
-      setDeleteTarget(null);
-      await fetchNests();
-    } catch (err: any) {
-      setDeleteError(err?.message || "Failed to delete nest");
-    } finally {
-      setDeletingId(null);
-    }
   };
 
   return (
@@ -205,16 +185,16 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
         </Card>
       ) : (
         <>
-          {deleteError && (
-            <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-900">
-              {deleteError}
-            </div>
-          )}
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {nests.map((nest) => {
               const isAnonymous = nest.user_id === ANON_USER_ID;
-              const isDeleting = deletingId === nest.id;
-              const openNest = () => onSelectNest(nest.id, nest.name);
+              const openNest = () =>
+                onSelectNest(
+                  nest.id,
+                  nest.name,
+                  nest.is_owner ?? (nest.permission ?? "owner") === "owner",
+                  isAnonymous,
+                );
               // Server now stamps `permission` + `is_owner` on each nest.
               // Fall back to legacy behaviour (treat as owner) when the
               // field is absent so older API responses don't strip
@@ -222,6 +202,12 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
               const permission: string = nest.permission ?? "owner";
               const isOwner: boolean = nest.is_owner ?? permission === "owner";
               const isShared = !isOwner;
+              // Mirror server delete rule: real owner, or admin caretaker
+              // on the ungoverned commons in key mode. Open-mode anon
+              // nests already report is_owner=true via effectivePermission.
+              const canDelete =
+                isOwner ||
+                (isAnonymous && authMode !== "open" && isAdmin);
               const roleLabel =
                 permission === "admin"
                   ? "Admin"
@@ -254,13 +240,14 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                     isAnonymous
                       ? "border-dashed border-amber-300"
                       : "border-border"
-                  } ${isDeleting ? "opacity-50 pointer-events-none" : ""}`}
+                  }`}
                 >
-                  {/* Delete — owner only. Server also enforces this; the
-                      UI gate keeps the affordance off cards the user can't
-                      act on so shared/reviewer/viewer nests don't show a
-                      teasing Trash icon. */}
-                  {isOwner && (
+                  {/* Delete — gated to match server rules (owner, or admin
+                      caretaker on the ungoverned commons in key mode).
+                      Keeps the affordance off cards the user can't act on
+                      so shared/reviewer/viewer nests don't show a teasing
+                      Trash icon. */}
+                  {canDelete && (
                     <button
                       type="button"
                       aria-label={`Delete nest ${nest.name}`}
@@ -269,14 +256,9 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                         e.stopPropagation();
                         requestDelete(nest.id, nest.name);
                       }}
-                      disabled={isDeleting}
-                      className="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                      className="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
-                      {isDeleting ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-3.5 w-3.5" />
-                      )}
+                      <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   )}
 
@@ -367,71 +349,20 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
         </>
       )}
 
-      <Dialog
-        open={deleteTarget !== null}
-        onOpenChange={(open) => {
-          if (!open && deletingId === null) setDeleteTarget(null);
-        }}
-      >
-        <DialogContent className="sm:max-w-[440px]">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-red-700">
-              <Trash2 className="h-4 w-4" />
-              Delete nest
-            </DialogTitle>
-            <DialogDescription>
-              You're about to permanently delete{" "}
-              <strong className="text-foreground">
-                {deleteTarget?.name}
-              </strong>
-              . This cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-900 space-y-1">
-            <p className="font-medium">This will remove:</p>
-            <ul className="list-disc list-inside space-y-0.5">
-              <li>All documents and version history</li>
-              <li>Stewardship assignments and review-queue entries</li>
-              <li>Collaborator access and linked API keys</li>
-              <li>The nest folder on disk</li>
-            </ul>
-          </div>
-
-          {deleteError && (
-            <div className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-900">
-              {deleteError}
-            </div>
-          )}
-
-          <DialogFooter className="gap-2">
-            <Button
-              variant="outline"
-              onClick={() => setDeleteTarget(null)}
-              disabled={deletingId !== null}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={confirmDelete}
-              disabled={deletingId !== null}
-            >
-              {deletingId !== null ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
-                  Deleting...
-                </>
-              ) : (
-                <>
-                  <Trash2 className="h-3.5 w-3.5 mr-2" />
-                  Delete nest
-                </>
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {deleteTarget && (
+        <DeleteNestDialog
+          nestId={deleteTarget.id}
+          nestName={deleteTarget.name}
+          open
+          onOpenChange={(open) => {
+            if (!open) setDeleteTarget(null);
+          }}
+          onDeleted={async () => {
+            setDeleteTarget(null);
+            await fetchNests();
+          }}
+        />
+      )}
     </div>
   );
 }

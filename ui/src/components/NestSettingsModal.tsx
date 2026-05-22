@@ -14,8 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Input } from "@/components/ui/input";
-import { Shield, AlertCircle, Loader2, Info, Trash2 } from "lucide-react";
+import { Shield, AlertCircle, Loader2, Info } from "lucide-react";
 import * as api from "../lib/api";
 
 interface NestSettingsModalProps {
@@ -24,12 +23,6 @@ interface NestSettingsModalProps {
   stewardshipEnabled: boolean;
   onClose: () => void;
   onChanged: () => void;
-  /**
-   * Called after the nest is successfully deleted from the Danger Zone.
-   * The caller should navigate away from the now-deleted nest (e.g. back
-   * to the dashboard) and refresh the nest list.
-   */
-  onDeleted?: () => void;
 }
 
 export function NestSettingsModal({
@@ -38,14 +31,10 @@ export function NestSettingsModal({
   stewardshipEnabled,
   onClose,
   onChanged,
-  onDeleted,
 }: NestSettingsModalProps) {
   const [enabled, setEnabled] = useState(stewardshipEnabled);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState("");
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const handleSave = async () => {
     if (enabled === stewardshipEnabled) {
@@ -130,69 +119,6 @@ export function NestSettingsModal({
                 </div>
               </div>
             )}
-          </div>
-
-          {/* Danger Zone — delete nest. Owner-only is enforced server-side
-              (DELETE /nests/:nestId returns 404 for non-owners), so a wrong
-              click here surfaces a friendly error rather than soft-failing. */}
-          <div className="rounded-lg border border-destructive/30 p-4 space-y-3">
-            <div className="space-y-1">
-              <Label className="flex items-center gap-2 text-sm font-medium text-destructive">
-                <Trash2 className="h-4 w-4" />
-                Danger Zone
-              </Label>
-              <p className="text-xs text-muted-foreground">
-                Permanently delete this nest, every document, every version, and
-                every API key scoped to it. This cannot be undone.
-              </p>
-            </div>
-
-            {deleteError && (
-              <Alert variant="destructive">
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{deleteError}</AlertDescription>
-              </Alert>
-            )}
-
-            <div className="space-y-2">
-              <Label htmlFor="delete-confirm" className="text-xs">
-                Type <strong className="font-mono">{nestName}</strong> to confirm:
-              </Label>
-              <Input
-                id="delete-confirm"
-                value={deleteConfirm}
-                onChange={(e) => setDeleteConfirm(e.target.value)}
-                placeholder={nestName}
-                disabled={deleting}
-                autoComplete="off"
-              />
-              <Button
-                variant="destructive"
-                size="sm"
-                disabled={deleteConfirm !== nestName || deleting}
-                onClick={async () => {
-                  setDeleting(true);
-                  setDeleteError(null);
-                  try {
-                    await api.deleteNest(nestId);
-                    onDeleted?.();
-                  } catch (err: any) {
-                    setDeleteError(
-                      err?.message ??
-                        "Failed to delete this nest. You may not have permission, " +
-                          "or the server may be unreachable.",
-                    );
-                    setDeleting(false);
-                  }
-                }}
-              >
-                {deleting ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  "Delete this nest"
-                )}
-              </Button>
-            </div>
           </div>
         </div>
 

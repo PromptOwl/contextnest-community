@@ -23,12 +23,20 @@ import { useAuth } from "./auth/AuthContext";
 
 type View =
   | { page: "dashboard" }
-  | { page: "nest"; nestId: string; nestName: string }
+  | {
+      page: "nest";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    }
   | {
       page: "document";
       nestId: string;
       nestName: string;
       nodeId: string | "new";
+      isOwner: boolean;
+      isAnonOwned: boolean;
     }
   | { page: "teammates" };
 
@@ -178,8 +186,14 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-4 py-6">
         {view.page === "dashboard" && (
           <Dashboard
-            onSelectNest={(id, name) =>
-              setView({ page: "nest", nestId: id, nestName: name })
+            onSelectNest={(id, name, isOwner, isAnonOwned) =>
+              setView({
+                page: "nest",
+                nestId: id,
+                nestName: name,
+                isOwner,
+                isAnonOwned,
+              })
             }
           />
         )}
@@ -187,6 +201,8 @@ export default function App() {
           <NestView
             nestId={view.nestId}
             nestName={view.nestName}
+            isOwner={view.isOwner}
+            isAnonOwned={view.isAnonOwned}
             onBack={() => setView({ page: "dashboard" })}
             onOpenDocument={(nodeId) =>
               setView({
@@ -194,6 +210,8 @@ export default function App() {
                 nestId: view.nestId,
                 nestName: view.nestName,
                 nodeId,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
               })
             }
           />
@@ -208,6 +226,8 @@ export default function App() {
                 page: "nest",
                 nestId: view.nestId,
                 nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
               })
             }
             onSaved={() =>
@@ -215,18 +235,24 @@ export default function App() {
                 page: "nest",
                 nestId: view.nestId,
                 nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
               })
             }
             onNavigateDocument={(linkNestId, linkNodeId) =>
-              // Cross-nest links don't carry the target nest's name —
-              // we keep the current nestName as a best-effort label.
-              // The DocumentEditor reloads from the server anyway.
+              // Cross-nest links don't carry the target nest's name or
+              // ownership — keep current values as a best-effort and let
+              // DocumentEditor reload. Delete affordance in NestView
+              // will be hidden for cross-nest hops it can't verify.
               setView({
                 page: "document",
                 nestId: linkNestId,
                 nestName:
                   linkNestId === view.nestId ? view.nestName : "Document",
                 nodeId: linkNodeId,
+                isOwner: linkNestId === view.nestId ? view.isOwner : false,
+                isAnonOwned:
+                  linkNestId === view.nestId ? view.isAnonOwned : false,
               })
             }
           />
