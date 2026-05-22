@@ -1,4 +1,6 @@
 import { getDb } from "../db/client.js";
+import { isLicenseAdminUserId } from "../auth/license.js";
+import { ANON_USER_ID } from "./constants.js";
 
 export type NestPermission = "none" | "read" | "write" | "admin" | "owner";
 
@@ -15,9 +17,13 @@ const PERMISSION_LEVELS: Record<NestPermission, number> = {
  *
  * Resolution order:
  * 1. Nest owner -> 'owner'
- * 2. Direct user grant in nest_collaborators -> that permission
- * 3. Nest visibility = 'public' -> 'read'
- * 4. Otherwise -> 'none'
+ * 2. Anon-owned nest + caller is license-admin -> 'owner'
+ *    (admin keeps full control over the ungoverned commons even after the
+ *    nest is flipped to private — otherwise only the anon user could
+ *    manage it and there's no login path for anon.)
+ * 3. Direct user grant in nest_collaborators -> that permission
+ * 4. Nest visibility = 'public' -> 'read'
+ * 5. Otherwise -> 'none'
  */
 export function resolveNestPermission(
   nestId: string,
@@ -31,6 +37,10 @@ export function resolveNestPermission(
 
   if (!nest) return "none";
   if (nest.user_id === userId) return "owner";
+
+  if (nest.user_id === ANON_USER_ID && isLicenseAdminUserId(userId)) {
+    return "owner";
+  }
 
   const directGrant = db
     .prepare(

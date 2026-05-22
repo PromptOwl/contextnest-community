@@ -1,6 +1,7 @@
 /**
- * AdminLoginModal — login flow for both open mode (claim admin) and key mode.
- * Supports PromptOwl device auth + email/password fallback.
+ * AdminLoginModal — login flow. Supports PromptOwl device auth +
+ * email/password fallback. Admin role is gated by the installed
+ * Community License key, so there is no in-app "claim" flow.
  */
 import React, { useState } from "react";
 import {
@@ -14,19 +15,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Shield, AlertCircle, Loader2, ExternalLink, Copy, Check, KeyRound } from "lucide-react";
+import { Shield, AlertCircle, Loader2, ExternalLink, Copy, Check, KeyRound, Eye, EyeOff } from "lucide-react";
 import * as api from "../lib/api";
 import type { ClaimBlocked } from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 
 interface AdminLoginModalProps {
-  alreadyClaimed: boolean;
   existingAdmin: string | null;
   onClose: () => void;
 }
 
 export function AdminLoginModal({
-  alreadyClaimed,
   existingAdmin,
   onClose,
 }: AdminLoginModalProps) {
@@ -39,6 +38,7 @@ export function AdminLoginModal({
   const [deviceUrl, setDeviceUrl] = useState<string | null>(null);
   const [deviceCode, setDeviceCode] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [claimBlocked, setClaimBlocked] = useState<{
     info: ClaimBlocked;
     attemptedEmail: string;
@@ -60,6 +60,9 @@ export function AdminLoginModal({
       setDeviceCode(device.deviceCode);
       window.open(device.verificationUrl, "_blank", "noopener,noreferrer");
 
+      // Poll for approval. Only "pending" keeps the loop alive — any
+      // other status (denied/rejected/expired/cancelled/unknown) is
+      // terminal so the user isn't stuck on "Waiting for approval...".
       for (let i = 0; i < 180; i++) {
         await new Promise((r) => setTimeout(r, 2000));
         const poll = await api.pollDeviceAuth(device.deviceCode, device.clientSecret);
@@ -88,14 +91,27 @@ export function AdminLoginModal({
           onClose();
           return;
         }
-        if (poll.status === "expired") {
-          setError("Login expired. Try again.");
-          setDeviceUrl(null);
-          setDeviceCode(null);
-          setLoading(false);
-          return;
-        }
+        if (poll.status === "pending") continue;
+
+        const terminalMsg =
+          poll.status === "denied" || poll.status === "rejected"
+            ? "Login denied. Approve the request in PromptOwl to continue, or try again."
+            : poll.status === "expired"
+              ? "Login expired. Try again."
+              : poll.status === "cancelled"
+                ? "Login cancelled. Try again."
+                : `Login failed (status: ${poll.status}). Try again.`;
+        setError(terminalMsg);
+        setDeviceUrl(null);
+        setDeviceCode(null);
+        setLoading(false);
+        return;
       }
+      // Loop exhausted — 180 * 2s = 6 min w/o approval.
+      setError("Login timed out waiting for approval. Try again.");
+      setDeviceUrl(null);
+      setDeviceCode(null);
+      setLoading(false);
     } catch (err: any) {
       setError(err.message);
       setDeviceUrl(null);
@@ -132,14 +148,12 @@ export function AdminLoginModal({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Shield className="h-4 w-4" />
-            {alreadyClaimed ? "Login" : "Claim as Admin"}
+            Login
           </DialogTitle>
           <DialogDescription>
-            {alreadyClaimed
-              ? existingAdmin
-                ? `This server is administered by ${existingAdmin}. Login to manage settings and teammates.`
-                : "Login with your account."
-              : "The first PromptOwl-authenticated user becomes this server's admin. Admins can enable stewardship, invite teammates, and manage settings."}
+            {existingAdmin
+              ? `This server is administered by ${existingAdmin}. Login to manage settings and teammates.`
+              : "Login with your account."}
           </DialogDescription>
         </DialogHeader>
 
@@ -253,24 +267,32 @@ export function AdminLoginModal({
                 </div>
               )}
 
-              <div className="relative">
-                <div className="absolute inset-0 flex items-center">
-                  <div className="w-full border-t border-border" />
-                </div>
-                <div className="relative flex justify-center text-xs uppercase">
-                  <span className="bg-background px-2 text-muted-foreground">
-                    or
-                  </span>
-                </div>
-              </div>
+              {/* Hide the email+password switch while the PromptOwl
+                  device-auth flow is live — keeps the user focused on
+                  approving the active request instead of starting a
+                  second login path in parallel. */}
+              {!deviceUrl && (
+                <>
+                  <div className="relative">
+                    <div className="absolute inset-0 flex items-center">
+                      <div className="w-full border-t border-border" />
+                    </div>
+                    <div className="relative flex justify-center text-xs uppercase">
+                      <span className="bg-background px-2 text-muted-foreground">
+                        or
+                      </span>
+                    </div>
+                  </div>
 
-              <Button
-                variant="outline"
-                className="w-full"
-                onClick={() => setMode("password")}
-              >
-                Use email + password
-              </Button>
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => setMode("password")}
+                  >
+                    Use email + password
+                  </Button>
+                </>
+              )}
             </>
           ) : (
             <form onSubmit={handlePassword} className="space-y-3">
@@ -286,12 +308,30 @@ export function AdminLoginModal({
               </div>
               <div className="space-y-1">
                 <Label>Password</Label>
-                <Input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                />
+                <div className="relative">
+                  <Input
+                    type={showPassword ? "text" : "password"}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    className="pr-9"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={
+                      showPassword ? "Hide password" : "Show password"
+                    }
+                    tabIndex={-1}
+                    className="absolute inset-y-0 right-0 flex items-center px-2 text-muted-foreground hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-r-md"
+                  >
+                    {showPassword ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
               </div>
               <Button type="submit" disabled={loading} className="w-full">
                 {loading ? (

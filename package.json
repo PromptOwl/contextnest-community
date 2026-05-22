@@ -56,10 +56,16 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  },
   "dependencies": {
     "@hono/node-server": "^1.13.8",
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@promptowl/contextnest-engine": "^0.3.7",
+    "@promptowl/contextnest-engine": "^1.0.0",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.8.2",
     "dotenv": "^16.6.1",
@@ -108,6 +114,7 @@
     "postcss": "^8.4.47",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "sonner": "^2.0.7",
     "react-markdown": "^9.1.0",
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.5.0",

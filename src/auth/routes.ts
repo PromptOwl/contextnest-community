@@ -29,6 +29,7 @@ import {
   isLicenseAdminUserId,
 } from "./license.js";
 import { tryConsume } from "../shared/rate-limit.js";
+import { ANON_USER_ID } from "../shared/constants.js";
 
 // Auth-endpoint rate limits. Keyed on IP for anonymous attempts + email
 // on login (so brute-forcing one email from a botnet still clamps).
@@ -666,10 +667,10 @@ authRoutes.get("/teammates", async (c) => {
          (SELECT COUNT(*) FROM api_keys WHERE user_id = u.id) as key_count,
          (SELECT MAX(last_used_at) FROM api_keys WHERE user_id = u.id) as last_active
        FROM users u
-       WHERE u.id != '00000000-0000-0000-0000-000000000000'
+       WHERE u.id != ?
        ORDER BY u.created_at DESC`,
     )
-    .all() as Array<{
+    .all(ANON_USER_ID) as Array<{
     id: string;
     email: string;
     name: string | null;

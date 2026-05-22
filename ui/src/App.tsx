@@ -19,6 +19,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { toast } from "sonner";
 import { useAuth } from "./auth/AuthContext";
 
 type View =
@@ -56,6 +65,25 @@ export default function App() {
     null,
   );
   const [licenseLoading, setLicenseLoading] = useState(true);
+  // Logout flow: confirm dialog → call logout() → sonner success toast.
+  // The Toaster portal lives at the root of the tree (rendered below)
+  // so the toast survives the view swap that logout triggers (Login
+  // screen mounts when authenticated flips false in key mode).
+  const [logoutConfirm, setLogoutConfirm] = useState(false);
+  const [logoutPending, setLogoutPending] = useState(false);
+
+  const requestLogout = useCallback(() => setLogoutConfirm(true), []);
+
+  const confirmLogout = useCallback(async () => {
+    setLogoutPending(true);
+    try {
+      await logout();
+      setLogoutConfirm(false);
+      toast.success("Logged out successfully");
+    } finally {
+      setLogoutPending(false);
+    }
+  }, [logout]);
 
   const refreshLicense = useCallback(async () => {
     try {
@@ -131,8 +159,57 @@ export default function App() {
     return <LicenseSetupPage onActivated={refreshLicense} />;
   }
 
+  // Logout chrome (confirm dialog + success toast) lives at the top of
+  // the render tree so it survives the unmount/remount that happens when
+  // logout flips `authenticated` and the app swaps to <Login />.
+  const logoutChrome = (
+    <>
+      <Dialog
+        open={logoutConfirm}
+        onOpenChange={(open) => {
+          if (!open && !logoutPending) setLogoutConfirm(false);
+        }}
+      >
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <LogOut className="h-4 w-4 text-muted-foreground" />
+              Log out?
+            </DialogTitle>
+            <DialogDescription>
+              You'll be signed out of this browser. Any unsaved edits in
+              other tabs may be lost — save your work first.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setLogoutConfirm(false)}
+              disabled={logoutPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmLogout}
+              disabled={logoutPending}
+            >
+              {logoutPending ? "Logging out..." : "Log out"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+    </>
+  );
+
   if (!authenticated && authMode === "key") {
-    return <Login />;
+    return (
+      <>
+        <Login />
+        {logoutChrome}
+      </>
+    );
   }
 
   return (
@@ -166,7 +243,7 @@ export default function App() {
                 me={adminStatus.me}
                 isAdmin={isAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
-                onLogout={logout}
+                onLogout={requestLogout}
               />
             ) : (
               <Button
@@ -175,7 +252,7 @@ export default function App() {
                 onClick={() => setShowAdminLogin(true)}
               >
                 <Shield className="h-3.5 w-3.5 mr-1" />
-                {adminStatus?.claimed ? "Login" : "Claim as Admin"}
+                Login
               </Button>
             )}
           </div>
@@ -264,11 +341,11 @@ export default function App() {
 
       {showAdminLogin && (
         <AdminLoginModal
-          alreadyClaimed={!!adminStatus?.claimed}
           existingAdmin={adminStatus?.admin?.email || null}
           onClose={() => setShowAdminLogin(false)}
         />
       )}
+      {logoutChrome}
     </div>
   );
 }

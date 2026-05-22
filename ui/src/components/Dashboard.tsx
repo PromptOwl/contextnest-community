@@ -5,10 +5,9 @@ import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Users, Eye, Pencil, Shield,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield,
 } from "lucide-react";
-
-const ANON_USER_ID = "00000000-0000-0000-0000-000000000000";
+import { ANON_USER_ID } from "../lib/constants";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";

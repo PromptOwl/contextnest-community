@@ -4,8 +4,9 @@ import { v4 as uuid } from "uuid";
 import { NestStorage } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
-import { isLicenseAdminUserId } from "../auth/license.js";
 import { trackEvent } from "../telemetry/tracker.js";
+import { isLicenseAdminUserId } from "../auth/license.js";
+import { ANON_USER_ID } from "../shared/constants.js";
 import type { Nest } from "../shared/types.js";
 
 function nestPath(nestId: string): string {
@@ -46,9 +47,14 @@ export async function createNest(
   const slug = toSlug(name);
   const db = getDb();
 
+  // Ungoverned (anon-owned) nests default to public so the shared commons
+  // stays visible to everyone in both open and key modes. Admin can flip
+  // an individual nest to private later via PATCH /nests/:id/visibility.
+  const visibility = userId === ANON_USER_ID ? "public" : "private";
+
   db.prepare(
-    "INSERT INTO nests (id, user_id, name, slug, description) VALUES (?, ?, ?, ?, ?)",
-  ).run(id, userId, name, slug, description || null);
+    "INSERT INTO nests (id, user_id, name, slug, description, visibility) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(id, userId, name, slug, description || null, visibility);
 
   const path = nestPath(id);
   mkdirSync(path, { recursive: true });
@@ -59,8 +65,6 @@ export async function createNest(
 
   return db.prepare("SELECT * FROM nests WHERE id = ?").get(id) as Nest;
 }
-
-const ANON_USER_ID = "00000000-0000-0000-0000-000000000000";
 
 export function listNests(userId: string): Nest[] {
   const db = getDb();
@@ -83,7 +87,7 @@ export function listNests(userId: string): Nest[] {
   }
   return db
     .prepare(
-      "SELECT * FROM nests WHERE user_id = ? OR user_id = ? ORDER BY created_at DESC",
+      "SELECT * FROM nests WHERE user_id = ? OR (user_id = ? AND visibility = 'public') ORDER BY created_at DESC",
     )
     .all(userId, ANON_USER_ID) as Nest[];
 }

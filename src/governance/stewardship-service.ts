@@ -2,7 +2,7 @@
  * Stewardship Service — SQLite implementation of StewardshipAdapter.
  *
  * Ported from PromptOwl's contextStewardship.ts actions + ContextSteward model.
- * Resolution hierarchy: document(1) > folder(2) > tag(3) > nest(4).
+ * Resolution hierarchy: document(1) > tag(2) > nest(3).
  */
 
 import { v4 as uuid } from "uuid";
@@ -25,8 +25,8 @@ export function assignSteward(data: Omit<Steward, "id">): Steward {
 
   db.prepare(
     `INSERT INTO stewards
-     (id, nest_id, scope, node_pattern, tag_name, user_email, user_id, role, can_approve, can_reject, assigned_by, is_active)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (id, nest_id, scope, node_pattern, tag_name, user_email, user_id, role, assigned_by, is_active)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     data.nestId,
@@ -36,8 +36,6 @@ export function assignSteward(data: Omit<Steward, "id">): Steward {
     data.userEmail,
     data.userId || null,
     data.role,
-    data.canApprove ? 1 : 0,
-    data.canReject ? 1 : 0,
     data.assignedBy,
     data.isActive ? 1 : 0,
   );
@@ -213,13 +211,10 @@ export async function createStewardRecord(params: {
   nestId: string;
   scope: StewardshipScope;
   documentId?: string;
-  folderPath?: string;
   tagName?: string;
   users: Array<{
     email: string;
     role?: StewardRole;
-    canApprove?: boolean;
-    canReject?: boolean;
   }>;
   assignedBy: string;
 }): Promise<Steward[]> {
@@ -234,10 +229,6 @@ export async function createStewardRecord(params: {
     case "document":
       if (!params.documentId) throw new Error("documentId required for document scope");
       nodePattern = params.documentId;
-      break;
-    case "folder":
-      if (!params.folderPath) throw new Error("folderPath required for folder scope");
-      nodePattern = params.folderPath;
       break;
     case "tag":
       if (!params.tagName) throw new Error("tagName required for tag scope");
@@ -287,8 +278,6 @@ export async function createStewardRecord(params: {
       userEmail: email,
       userId: userRow?.id,
       role: user.role ?? "reviewer",
-      canApprove: user.canApprove !== false,
-      canReject: user.canReject !== false,
       assignedBy: params.assignedBy,
       assignedAt: new Date().toISOString(),
       isActive: true,
@@ -313,7 +302,7 @@ export async function createStewardRecord(params: {
 
 // ─── STEWARD RESOLUTION ─────────────────────────────────────────────────
 // Ported from PromptOwl's resolveStewardsForDocument aggregation pipeline.
-// Priority: document(1) > folder(2) > tag(3) > nest(4).
+// Priority: document(1) > tag(2) > nest(3).
 //
 // Executed as a single SQL UNION ALL so large vaults don't pay an in-memory scan.
 // Tags are read from node_tag_index (kept in sync by tag-index-service).
@@ -352,8 +341,6 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
     user_email: string;
     user_id: string | null;
     role: string;
-    can_approve: number;
-    can_reject: number;
     assigned_by: string;
     assigned_at: string;
     is_active: number;
@@ -362,8 +349,6 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
   };
 
   // Document: exact match on node_pattern (no globs — keep SQL simple).
-  // Folder: path-prefix match; folder rows without '*' use `node_pattern || '/%'`,
-  //   legacy globs (containing '*') are resolved in JS below.
   // Tag: JOIN on node_tag_index for fast tag lookup.
   // Nest: unconditional.
   const rows = db
@@ -374,17 +359,7 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
         WHERE s.nest_id = ? AND s.is_active = 1 AND s.scope = 'document'
           AND s.node_pattern = ?
       UNION ALL
-      SELECT s.*, 2 AS priority, ('folder: ' || s.node_pattern) AS match_source
-        FROM stewards s
-        WHERE s.nest_id = ? AND s.is_active = 1 AND s.scope = 'folder'
-          AND s.node_pattern IS NOT NULL
-          AND instr(s.node_pattern, '*') = 0
-          AND (
-            ? LIKE s.node_pattern || '/%'
-            OR s.node_pattern = ?
-          )
-      UNION ALL
-      SELECT s.*, 3 AS priority, ('tag: ' || s.tag_name) AS match_source
+      SELECT s.*, 2 AS priority, ('tag: ' || s.tag_name) AS match_source
         FROM stewards s
         JOIN node_tag_index nt
           ON nt.nest_id = s.nest_id
@@ -392,7 +367,7 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
         WHERE s.nest_id = ? AND s.is_active = 1 AND s.scope = 'tag'
           AND nt.node_id = ?
       UNION ALL
-      SELECT s.*, 4 AS priority, 'nest-level steward' AS match_source
+      SELECT s.*, 3 AS priority, 'nest-level steward' AS match_source
         FROM stewards s
         WHERE s.nest_id = ? AND s.is_active = 1 AND s.scope = 'nest'
       ORDER BY priority ASC, user_email ASC
@@ -400,7 +375,6 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
     )
     .all(
       nestId, nodeId,                  // document branch
-      nestId, nodeId, nestId,          // folder branch (path-prefix OR whole-nest folder)
       nestId, nodeId,                  // tag branch
       nestId,                          // nest branch
     ) as Row[];
@@ -410,29 +384,6 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
     priority: row.priority,
     source: row.match_source,
   }));
-
-  // Legacy fallback: folder rows containing glob wildcards are rare but
-  // still supported — scan them in JS against the node ID.
-  const legacyFolderGlobs = db
-    .prepare(
-      `SELECT * FROM stewards
-       WHERE nest_id = ? AND is_active = 1 AND scope = 'folder'
-         AND node_pattern IS NOT NULL AND instr(node_pattern, '*') > 0`,
-    )
-    .all(nestId) as any[];
-  for (const row of legacyFolderGlobs) {
-    if (globMatch(nodeId, row.node_pattern)) {
-      resolved.push({
-        steward: rowToSteward(row),
-        priority: 2,
-        source: `folder: ${row.node_pattern}`,
-      });
-    }
-  }
-
-  if (legacyFolderGlobs.length > 0) {
-    resolved.sort((a, b) => a.priority - b.priority);
-  }
 
   if (resolved.length > 0) {
     return { stewards: resolved, fallbackToOwner: false };
@@ -557,8 +508,7 @@ export function canUserApprove(
   const match = resolved.find(
     (r) =>
       r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
-      r.steward.role === "reviewer" &&
-      r.steward.canApprove,
+      r.steward.role === "reviewer",
   );
   if (!match) {
     return {
@@ -602,20 +552,6 @@ export function canUserAccess(
     return { allowed: true, reason: match.source, role: match.steward.role };
   }
   return { allowed: false, reason: "no steward assignment", role: null };
-}
-
-// Kept for legacy folder-glob fallback only.
-function globMatch(value: string, pattern: string): boolean {
-  if (pattern === "*") return true;
-  if (!pattern.includes("*")) return value === pattern;
-  const regex = new RegExp(
-    "^" +
-      pattern
-        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-        .replace(/\*/g, ".*") +
-      "$",
-  );
-  return regex.test(value);
 }
 
 // ─── SYNC FROM stewards.yaml ────────────────────────────────────────────
@@ -665,8 +601,6 @@ export function syncFromConfig(
         userEmail: entry.email.toLowerCase(),
         userId: user?.id,
         role,
-        canApprove: entry.can_approve !== false,
-        canReject: entry.can_reject !== false,
         assignedBy: "config",
         assignedAt: new Date().toISOString(),
         isActive: true,
@@ -678,13 +612,6 @@ export function syncFromConfig(
   // Nest-level stewards
   if (config.nest) {
     addEntries("nest", config.nest);
-  }
-
-  // Folder-level stewards
-  if (config.folders) {
-    for (const [pattern, entries] of Object.entries(config.folders)) {
-      addEntries("folder", entries, { nodePattern: pattern });
-    }
   }
 
   // Tag-level stewards
@@ -716,8 +643,6 @@ function rowToSteward(row: any): Steward {
     userEmail: row.user_email,
     userId: row.user_id || undefined,
     role: row.role,
-    canApprove: !!row.can_approve,
-    canReject: !!row.can_reject,
     assignedBy: row.assigned_by,
     assignedAt: row.assigned_at,
     isActive: !!row.is_active,

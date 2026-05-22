@@ -130,6 +130,51 @@ export function AuthProvider({ children }: PropsWithChildren) {
     return () => window.removeEventListener("auth:unauthorized", onUnauth);
   }, [authMode]);
 
+  // Cross-tab sync — logout / login in one tab fires a `storage` event in
+  // every other tab on the same origin. Refresh from /auth/admin-status
+  // so each tab settles to whatever the server says is current.
+  //
+  // Why this matters in AUTH_MODE=open: the server treats anonymous
+  // callers as the open-mode admin, so a logged-out tab still gets 200s
+  // on writes. No 401 ever fires, so the existing `auth:unauthorized`
+  // signal can't tear down stale admin UI. The storage event closes
+  // that gap without polling.
+  //
+  // The visibilitychange handler is the safety net: any tab that was
+  // backgrounded across a logout in another tab will reconcile when
+  // it regains focus, even if the storage event was missed (e.g. tab
+  // was sleeping under aggressive browser power saving).
+  useEffect(() => {
+    const KEY = "cnst_auth_tick";
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== KEY) return;
+      void refresh();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    window.addEventListener("storage", onStorage);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [refresh]);
+
+  // Notify sibling tabs that auth state changed. Writes a monotonically
+  // increasing value to localStorage so the `storage` event fires even
+  // when the new value matches the prior one (back-to-back logouts).
+  // Same-tab listeners do NOT receive storage events, so the local
+  // state update above still has to run independently.
+  const broadcastAuthChange = useCallback(() => {
+    try {
+      localStorage.setItem("cnst_auth_tick", String(Date.now()));
+    } catch {
+      // Private mode / storage disabled — cross-tab sync degrades to
+      // the visibilitychange safety net.
+    }
+  }, []);
+
   const loginSuccess = useCallback(
     (user?: LoginSuccessUser) => {
       const mySeq = ++seqRef.current;
@@ -142,6 +187,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         }));
         setAuthenticated(true);
       }
+      broadcastAuthChange();
       // Reconcile from server in the background — guarded by seq so a
       // stale response can't overwrite this optimistic flip.
       (async () => {
@@ -156,7 +202,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         }
       })();
     },
-    [authMode, deriveAuthenticated],
+    [authMode, broadcastAuthChange, deriveAuthenticated],
   );
 
   const logout = useCallback(async () => {
@@ -169,7 +215,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
     }
     setAuthenticated(authMode === "open");
     setAdminStatus((prev) => (prev ? { ...prev, me: null } : prev));
-  }, [authMode]);
+    broadcastAuthChange();
+  }, [authMode, broadcastAuthChange]);
 
   const isAdmin = !!adminStatus?.me?.is_admin;
 

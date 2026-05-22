@@ -237,13 +237,13 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_assign_steward",
     description:
-      "Assign a data steward to govern a scope (nest, tag, folder pattern, or specific document). Stewards review and approve changes before they go live.",
+      "Assign a data steward to govern a scope (nest, tag, or specific document). Stewards review and approve changes before they go live.",
     inputSchema: {
       type: "object" as const,
       properties: {
         email: { type: "string", description: "Email of the person to assign as steward" },
-        scope: { type: "string", description: "Scope: nest (all docs), tag, folder, or document" },
-        target: { type: "string", description: "Scope target: tag name (e.g. #architecture), folder pattern (e.g. nodes/api-*), or document title" },
+        scope: { type: "string", description: "Scope: nest (all docs), tag, or document" },
+        target: { type: "string", description: "Scope target: tag name (e.g. #architecture) or document title" },
         role: { type: "string", description: "Role: reviewer (default), editor, or viewer" },
       },
       required: ["email", "scope"],
@@ -567,7 +567,7 @@ export async function handleToolCall(
         const list = resolved
           .map(
             (r, i) =>
-              `${i + 1}. **${r.steward.userEmail}** — ${r.steward.role} (${r.source})${r.steward.canApprove ? " ✓ can approve" : ""}`,
+              `${i + 1}. **${r.steward.userEmail}** — ${r.steward.role} (${r.source})${r.steward.role === "reviewer" ? " ✓ can approve" : ""}`,
           )
           .join("\n");
         return `# Stewards for "${args.title}"\n\n${list}`;
@@ -585,16 +585,14 @@ export async function handleToolCall(
           ? "Nest-level"
           : s.scope === "tag"
             ? `Tag: ${s.tagName}`
-            : s.scope === "folder"
-              ? `Folder: ${s.nodePattern}`
-              : `Document: ${s.nodePattern}`;
+            : `Document: ${s.nodePattern}`;
         (byScope[key] = byScope[key] || []).push(s);
       }
 
       const sections = Object.entries(byScope)
         .map(
           ([scope, stewards]) =>
-            `## ${scope}\n${stewards.map((s) => `- **${s.userEmail}** (${s.role})${s.canApprove ? " — can approve" : ""}`).join("\n")}`,
+            `## ${scope}\n${stewards.map((s) => `- **${s.userEmail}** (${s.role})${s.role === "reviewer" ? " — can approve" : ""}`).join("\n")}`,
         )
         .join("\n\n");
 
@@ -669,7 +667,7 @@ export async function handleToolCall(
       const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
 
       try {
-        const request = reviews.approve({
+        const request = await reviews.approve({
           nestId: ctx.nestId,
           nodeId: node.id,
           version: currentVersion,
@@ -732,21 +730,19 @@ export async function handleToolCall(
     }
 
     case "context_assign_steward": {
-      const scope = args.scope as "nest" | "tag" | "folder" | "document";
-      if (!["nest", "tag", "folder", "document"].includes(scope)) {
-        return `Invalid scope "${args.scope}". Use: nest, tag, folder, or document.`;
+      const scope = args.scope as "nest" | "tag" | "document";
+      if (!["nest", "tag", "document"].includes(scope)) {
+        return `Invalid scope "${args.scope}". Use: nest, tag, or document.`;
       }
 
       try {
         stewardship.assignSteward({
           nestId: ctx.nestId,
           scope,
-          nodePattern: scope === "folder" || scope === "document" ? args.target : undefined,
+          nodePattern: scope === "document" ? args.target : undefined,
           tagName: scope === "tag" ? args.target : undefined,
           userEmail: args.email,
           role: (args.role as any) || "reviewer",
-          canApprove: true,
-          canReject: true,
           assignedBy: ctx.userEmail,
           assignedAt: new Date().toISOString(),
           isActive: true,

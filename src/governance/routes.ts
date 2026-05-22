@@ -13,6 +13,7 @@ import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
 import * as versions from "./version-service.js";
+import * as externalEdits from "./external-edit-service.js";
 import { loadStewardsConfig } from "./stewards-parser.js";
 import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
@@ -38,14 +39,19 @@ governanceRoutes.get("/stewards", async (c) => {
 
 // POST /nests/:nestId/stewards
 // Accepts two shapes:
-//   1) Multi-user: { scope, documentId?|folderPath?|tagName?, users: [{email, role, canApprove, canReject}] }
-//   2) Legacy single-user (fallback): { scope, email, role, canApprove, canReject, nodePattern?, tagName? }
+//   1) Multi-user: { scope, documentId?|tagName?, users: [{email, role}] }
+//   2) Legacy single-user (fallback): { scope, email, role, nodePattern?, tagName? }
 governanceRoutes.post("/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
   const body = await c.req.json<any>();
   const assignedBy = getUserEmail(c);
 
   if (!body.scope) throw new ValidationError("scope is required");
+  if (body.scope === "folder") {
+    throw new ValidationError(
+      "folder scope is no longer supported — use 'nest' or 'document'",
+    );
+  }
 
   // New shape: users[] array
   if (Array.isArray(body.users)) {
@@ -53,7 +59,6 @@ governanceRoutes.post("/stewards", async (c) => {
       nestId,
       scope: body.scope,
       documentId: body.documentId,
-      folderPath: body.folderPath,
       tagName: body.tagName,
       users: body.users,
       assignedBy,
@@ -69,14 +74,11 @@ governanceRoutes.post("/stewards", async (c) => {
     nestId,
     scope: body.scope,
     documentId: body.scope === "document" ? body.nodePattern : undefined,
-    folderPath: body.scope === "folder" ? body.nodePattern : undefined,
     tagName: body.scope === "tag" ? body.tagName : undefined,
     users: [
       {
         email: body.email,
         role: body.role,
-        canApprove: body.canApprove,
-        canReject: body.canReject,
       },
     ],
     assignedBy,
@@ -119,6 +121,27 @@ governanceRoutes.get("/review-queue", async (c) => {
   return c.json(result);
 });
 
+// GET /nests/:nestId/external-edits
+// List pending external (direct filesystem) edits awaiting approval.
+governanceRoutes.get("/external-edits", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const refresh = c.req.query("refresh") === "true";
+  if (refresh) {
+    await externalEdits.scanNestForDrift(nestId, "user:refresh");
+  }
+  const entries = await externalEdits.listNestExternalEdits(nestId);
+  return c.json({ entries, total: entries.length });
+});
+
+// POST /nests/:nestId/external-edits/scan
+// Force a drift scan and return what was newly staged.
+governanceRoutes.post("/external-edits/scan", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const actor = getUserEmail(c);
+  const result = await externalEdits.scanNestForDrift(nestId, actor);
+  return c.json(result);
+});
+
 // ═════════════════════════════════════════════════════════════════════════
 // Node-level routes (mounted at /:nestId/nodes, BEFORE the CRUD catch-all)
 // ═════════════════════════════════════════════════════════════════════════
@@ -140,7 +163,6 @@ governanceNodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
       scope: r.steward.scope,
       source: r.source,
       priority: r.priority,
-      canApprove: r.steward.canApprove,
     })),
     fallbackToOwner,
     ownerEmail,
@@ -230,7 +252,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
   const isAdmin = isSuperAdmin(userEmail);
 
   try {
-    const request = reviews.approve({
+    const request = await reviews.approve({
       nestId,
       nodeId,
       version: versions.getCurrentVersion(nestId, nodeId),
@@ -293,6 +315,102 @@ governanceNodeRoutes.get("/:nodeId{.+}/can-edit", async (c) => {
   const userEmail = getUserEmail(c);
   return c.json(stewardship.canUserEdit(nestId, nodeId, userEmail));
 });
+
+// GET /nests/:nestId/nodes/:nodeId/external-edits
+governanceNodeRoutes.get("/:nodeId{.+?}/external-edits", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const pending = await externalEdits.getPendingChange(nestId, nodeId);
+  return c.json({ pending });
+});
+
+// GET /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId
+governanceNodeRoutes.get(
+  "/:nodeId{.+?}/external-edits/:suggestionId",
+  async (c) => {
+    const nestId = c.req.param("nestId")!;
+    const nodeId = c.req.param("nodeId")!;
+    const suggestionId = c.req.param("suggestionId")!;
+    const detail = await externalEdits.getExternalEditDetail(
+      nestId,
+      nodeId,
+      suggestionId,
+    );
+    if (!detail) {
+      return c.json({ error: "Suggestion not found" }, 404);
+    }
+    return c.json({ entry: detail });
+  },
+);
+
+// POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/approve
+governanceNodeRoutes.post(
+  "/:nodeId{.+?}/external-edits/:suggestionId/approve",
+  async (c) => {
+    const nestId = c.req.param("nestId")!;
+    const nodeId = c.req.param("nodeId")!;
+    const suggestionId = c.req.param("suggestionId")!;
+    const body = await c.req
+      .json<{ comment?: string }>()
+      .catch(() => ({}) as { comment?: string });
+    const actor = getUserEmail(c);
+    try {
+      const result = await externalEdits.approveExternalEdit({
+        nestId,
+        documentId: nodeId,
+        suggestionId,
+        actor,
+        comment: body.comment,
+      });
+      return c.json({
+        approved: true,
+        version: result.versionEntry.version,
+        chainEvent: result.chainEvent.event_id,
+      });
+    } catch (err: any) {
+      console.error(
+        `[external-edit-route] approve failed nest=${nestId} node=${nodeId} suggestion=${suggestionId}`,
+        { message: err?.message, name: err?.name, stack: err?.stack },
+      );
+      return c.json(
+        { error: err.message, name: err?.name },
+        400,
+      );
+    }
+  },
+);
+
+// POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/reject
+governanceNodeRoutes.post(
+  "/:nodeId{.+?}/external-edits/:suggestionId/reject",
+  async (c) => {
+    const nestId = c.req.param("nestId")!;
+    const nodeId = c.req.param("nodeId")!;
+    const suggestionId = c.req.param("suggestionId")!;
+    const body = await c.req
+      .json<{ reason?: string }>()
+      .catch(() => ({}) as { reason?: string });
+    if (!body.reason) {
+      throw new ValidationError("Rejection reason is required");
+    }
+    const actor = getUserEmail(c);
+    try {
+      const result = await externalEdits.rejectExternalEdit({
+        nestId,
+        documentId: nodeId,
+        suggestionId,
+        actor,
+        reason: body.reason,
+      });
+      return c.json({
+        rejected: true,
+        chainEvent: result.chainEvent.event_id,
+      });
+    } catch (err: any) {
+      return c.json({ error: err.message }, 400);
+    }
+  },
+);
 
 // POST /nests/:nestId/nodes/:nodeId/cancel-review
 governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {

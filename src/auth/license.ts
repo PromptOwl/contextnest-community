@@ -154,6 +154,17 @@ async function runLicenseWatcher(): Promise<void> {
     try {
       watcherAbort = new AbortController();
       const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
+      // Cap fetch lifetime under the longest reasonable upstream hold
+      // so a stalled connection (e.g. Vercel buffering, dropped TCP)
+      // cannot pin the watcher beyond ~30s. AbortSignal.any composes
+      // the local abort (used by installLicenseKey) with the timeout.
+      const fetchTimeout = AbortSignal.timeout(30 * 1000);
+      const signal =
+        typeof (AbortSignal as { any?: unknown }).any === "function"
+          ? (AbortSignal as unknown as {
+              any: (s: AbortSignal[]) => AbortSignal;
+            }).any([watcherAbort.signal, fetchTimeout])
+          : watcherAbort.signal;
       const res = await fetch(`${promptowlUrl}/api/license/listen`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -163,10 +174,20 @@ async function runLicenseWatcher(): Promise<void> {
             ? new Date().toISOString()
             : undefined,
         }),
-        signal: watcherAbort.signal,
+        signal,
       });
 
       if (!res.ok) {
+        // Upstream gateway timeouts (Vercel/Cloudflare/nginx killing
+        // the long-poll connection) carry no event payload — same
+        // semantics as "no_change". Reconnect immediately without
+        // inflating the backoff, otherwise repeated 504s ramp the
+        // retry delay to 60s and stretch revoke-detection latency
+        // to a full minute.
+        if (res.status === 504 || res.status === 408 || res.status === 502) {
+          backoff = WATCHER_BACKOFF_MIN_MS;
+          continue;
+        }
         throw new Error(`listen returned ${res.status}`);
       }
 
@@ -214,6 +235,43 @@ async function runLicenseWatcher(): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ─── Safety revalidate ────────────────────────────────────────────────
+//
+// The long-poll watcher is the primary signal, but several conditions
+// can silently drop revoke events: upstream serverless cold-starts,
+// multi-instance PromptOwl deployments where the in-process event bus
+// only fires on one instance, persistent network blackouts that
+// exhaust the backoff. This timer runs a forceFresh validate every
+// 60s as a floor on detection latency. Cheap (one HTTP call/minute)
+// and idempotent with the watcher — whichever notices first wins.
+
+let safetyPollHandle: NodeJS.Timeout | null = null;
+const SAFETY_POLL_INTERVAL_MS = 60 * 1000;
+
+export function startLicenseSafetyPoll(): void {
+  if (safetyPollHandle) return;
+  safetyPollHandle = setInterval(async () => {
+    if (!config.PROMPTOWL_KEY) return;
+    try {
+      const wasValid = !!currentLicense?.valid;
+      await validateLicense({ forceFresh: true });
+      const isValid = !!currentLicense?.valid;
+      if (wasValid && !isValid) {
+        console.log("[license] safety poll detected revocation");
+        handleLicenseRevoked();
+      }
+    } catch (err) {
+      // Don't escalate — the watcher and next safety tick will retry.
+      console.warn(
+        `[license] safety poll error: ${(err as Error).message}`,
+      );
+    }
+  }, SAFETY_POLL_INTERVAL_MS);
+  if (typeof safetyPollHandle.unref === "function") {
+    safetyPollHandle.unref();
+  }
 }
 
 /**
