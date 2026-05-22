@@ -335,6 +335,14 @@ export function DocumentEditor({
                 {title || (isNew ? "New document" : "Untitled")}
               </h3>
               {!isNew && status && <StatusBadge status={status} />}
+              {!isNew && !stewardshipEnabled && status === "approved" && (
+                <span
+                  className="px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700 border border-green-200"
+                  title="Stewardship is off for this nest, so saving publishes immediately and the document is AI-readable."
+                >
+                  Auto-published
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -344,9 +352,10 @@ export function DocumentEditor({
               variant="outline"
               onClick={() => setShowSubmitModal(true)}
               data-testid="document-editor-submit"
+              title="With stewardship on, &quot;publishing&quot; in this nest means submitting for steward approval."
             >
               <Send className="h-4 w-4 mr-2" />
-              Submit for Review
+              Publish (requires approval)
             </Button>
           )}
           {canReviewHere && (

@@ -114,9 +114,12 @@ export async function approve(params: {
     pending.id,
   );
 
-  // Update version status
+  // Update version status. We write 'published' (not 'approved') so the DB
+  // mirrors the engine's terminal status — history.yaml/frontmatter record
+  // the post-approve state as published, and divergence between the two
+  // breaks drift detection and display-status resolution.
   db.prepare(
-    "UPDATE node_versions SET status = 'approved' WHERE nest_id = ? AND node_id = ? AND version = ?",
+    "UPDATE node_versions SET status = 'published' WHERE nest_id = ? AND node_id = ? AND version = ?",
   ).run(params.nestId, params.nodeId, params.version);
 
   // Pin this as the approved version (for AI queries)
@@ -151,7 +154,7 @@ export async function approve(params: {
         version: engineVersion,
         content: node.body || "",
         author: params.approvedBy,
-        status: "approved",
+        status: "published",
         tags,
         changeNote: params.note || `Approved review request ${pending.id}`,
       });

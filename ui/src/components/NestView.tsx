@@ -264,14 +264,18 @@ export function NestView({
   return (
     <div className="md:py-6">
       {/* Header — PromptOwl ContextDashboard layout */}
-      <div className="flex flex-col sm:flex-row items-start justify-between gap-2 sm:gap-4 mb-4">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4 mb-4">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="icon" onClick={onBack}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <h3 className="text-xl font-semibold">{nestName}</h3>
         </div>
-        <div className="flex items-center gap-2">
+        {/* Action row: wraps onto multiple lines below sm-breakpoint instead
+            of forcing a single horizontal scroll. `flex-wrap` + `justify-end`
+            on wider screens keeps the spacing visually intentional rather
+            than awkwardly clipped at the right edge. */}
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:justify-end">
           <Button variant="outline" onClick={() => setShowConnect(true)}>
             <Link2 className="h-4 w-4 mr-2" />
             Connect
