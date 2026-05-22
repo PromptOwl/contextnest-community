@@ -663,6 +663,7 @@ export function NestView({
           stewardshipEnabled={stewardshipEnabled}
           onClose={() => setShowSettings(false)}
           onChanged={() => { setShowSettings(false); fetchData(); }}
+          onDeleted={() => { setShowSettings(false); onBack(); }}
         />
       )}
 
