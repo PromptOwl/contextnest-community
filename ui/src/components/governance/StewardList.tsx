@@ -18,14 +18,13 @@ import {
   Trash2,
   Shield,
   Tag,
-  Folder,
   FileText,
   Building2,
   UserPlus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type StewardshipScope = "document" | "folder" | "tag" | "nest";
+export type StewardshipScope = "document" | "tag" | "nest";
 
 export interface Steward {
   id: string;
@@ -35,8 +34,6 @@ export interface Steward {
   tagName?: string;
   nodePattern?: string;
   role: "editor" | "reviewer" | "viewer";
-  canApprove: boolean;
-  canReject: boolean;
 }
 
 interface StewardListProps {
@@ -51,7 +48,6 @@ interface StewardListProps {
 
 const scopeConfig: Record<StewardshipScope, { label: string; icon: React.ComponentType<{ className?: string }> }> = {
   document: { label: "Document", icon: FileText },
-  folder: { label: "Folder", icon: Folder },
   tag: { label: "Tag", icon: Tag },
   nest: { label: "Nest", icon: Building2 },
 };
@@ -81,8 +77,7 @@ export function StewardList({
     const config = scopeConfig[steward.scope];
     let target = "";
     if (steward.scope === "tag") target = steward.tagName || "";
-    else if (steward.scope === "document" || steward.scope === "folder")
-      target = steward.nodePattern || "";
+    else if (steward.scope === "document") target = steward.nodePattern || "";
 
     return (
       <div className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -159,16 +154,6 @@ export function StewardList({
               <Badge variant="secondary" className="text-[10px] px-1.5 py-0 capitalize">
                 {steward.role}
               </Badge>
-              {steward.canApprove && (
-                <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-                  Approve
-                </Badge>
-              )}
-              {steward.canReject && (
-                <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-                  Reject
-                </Badge>
-              )}
             </div>
           </div>
 

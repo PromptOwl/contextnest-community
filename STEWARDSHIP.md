@@ -30,14 +30,13 @@ A **steward** is a person (identified by email) who governs a subset of the nest
 
 ## Scope — who governs what
 
-Stewards are assigned at one of four scopes. When a document needs a steward (to approve, or to check access), the server resolves them in this order — **first match wins**:
+Stewards are assigned at one of three scopes. When a document needs a steward (to approve, or to check access), the server resolves them in this order — **first match wins**:
 
 | Priority | Scope | Target | Example |
 |---|---|---|---|
 | 1 | **Document** | Exact node id | `nodes/pricing-policy` — only this one doc |
-| 2 | **Folder** | Path prefix | `nodes/legal/` — anything under the legal folder |
-| 3 | **Tag** | Tag name (lowercased, no `#`) | `security` — any doc tagged `#security` |
-| 4 | **Nest** | (none — applies to the whole nest) | The fallback for anything not covered above |
+| 2 | **Tag** | Tag name (lowercased, no `#`) | `security` — any doc tagged `#security` |
+| 3 | **Nest** | (none — applies to the whole nest) | The fallback for anything not covered above |
 
 If nothing matches and no steward resolves, the **nest owner** is the implicit steward (owner fallback). That keeps a freshly-enabled nest workable even with zero stewards configured.
 
@@ -66,10 +65,9 @@ Rules of thumb:
 
 - **Nest scope** — use sparingly. "This person reviews everything in this nest."
 - **Tag scope** — the most common. "Legal reviews anything with `#legal`. Security reviews `#auth` and `#pii`."
-- **Folder scope** — organizational. "The docs team owns `nodes/product-docs/`."
-- **Document scope** — override. "This specific doc has a dedicated reviewer regardless of its tags or folder."
+- **Document scope** — override. "This specific doc has a dedicated reviewer regardless of its tags."
 
-You can stack them: a doc tagged `#legal` in folder `nodes/contracts/` can have a doc-level steward that overrides both. Priority order resolves ties.
+You can stack them: a doc tagged `#legal` can have a doc-level steward that overrides the tag steward. Priority order resolves ties.
 
 ## `stewards.yaml` (optional)
 
@@ -86,10 +84,6 @@ tags:
       role: reviewer
   "#security":
     - email: security-team@acme.com
-      role: reviewer
-folders:
-  "nodes/engineering":
-    - email: eng-lead@acme.com
       role: reviewer
 ```
 

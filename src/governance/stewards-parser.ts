@@ -28,9 +28,6 @@ export function parseStewardsYaml(content: string): StewardsConfig {
 
     if (currentSection === "nest") {
       result.nest = [...(result.nest || []), ...currentEntries];
-    } else if (currentSection === "folders" && currentTarget) {
-      result.folders = result.folders || {};
-      result.folders[currentTarget] = currentEntries;
     } else if (currentSection === "tags" && currentTarget) {
       result.tags = result.tags || {};
       result.tags[currentTarget] = currentEntries;
@@ -54,12 +51,13 @@ export function parseStewardsYaml(content: string): StewardsConfig {
       if (key === "version") continue;
       if (key === "nest" || key === "data_room") {
         currentSection = "nest";
-      } else if (key === "folders") {
-        currentSection = "folders";
       } else if (key === "tags") {
         currentSection = "tags";
       } else if (key === "documents") {
         currentSection = "documents";
+      } else if (key === "folders") {
+        // Legacy 'folders:' section ignored — folder scope removed.
+        currentSection = null;
       }
       continue;
     }
@@ -86,9 +84,11 @@ export function parseStewardsYaml(content: string): StewardsConfig {
 }
 
 function parseEntry(str: string): StewardEntry | null {
-  // Could be inline object: { email: foo@bar.com, can_approve: true }
+  // Could be inline object: { email: foo@bar.com, role: reviewer }
   // Or just: email: foo@bar.com
-  // Or key: value pairs on one line
+  // Or key: value pairs on one line.
+  // Legacy can_approve/can_reject keys are accepted but ignored — role
+  // is now the sole signal (reviewer = approve+reject).
 
   const emailMatch = str.match(/email:\s*["']?([^\s,"'{}]+)["']?/);
   if (!emailMatch) return null;
@@ -97,13 +97,6 @@ function parseEntry(str: string): StewardEntry | null {
 
   const roleMatch = str.match(/role:\s*["']?(\w+)["']?/);
   if (roleMatch) entry.role = roleMatch[1] as any;
-
-  if (str.includes("can_approve:")) {
-    entry.can_approve = str.includes("can_approve: true");
-  }
-  if (str.includes("can_reject:")) {
-    entry.can_reject = str.includes("can_reject: true");
-  }
 
   return entry;
 }

@@ -4,6 +4,9 @@ import { cors } from "hono/cors";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
+import { listNests, listSharedNests } from "./nests/service.js";
+import { engineCache } from "./nodes/engine.js";
+import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
@@ -188,7 +191,7 @@ export function createApp(): Hono<AuthEnv> {
           {
             valid: false,
             error:
-              "License key was saved but PromptOwl rejected it. Verify the key is correct and active.",
+              "PromptOwl rejected this license key. It wasn't saved. Verify the key is correct and active, then try again.",
           },
           400,
         );
@@ -203,6 +206,43 @@ export function createApp(): Hono<AuthEnv> {
       const msg = err instanceof Error ? err.message : "Failed to install key";
       return c.json({ error: msg }, 500);
     }
+  });
+
+  // GET /stats — dashboard summary counts: nests visible to caller,
+  // documents across those nests, total users on the server. Uses
+  // flexAuthMiddleware so it works without auth in open mode and with
+  // a Bearer/cookie in key mode.
+  app.use("/stats", flexAuthMiddleware);
+  app.get("/stats", async (c) => {
+    const db = getDb();
+    const userId = c.get("userId");
+    const userEmail = resolveCallerEmail(userId);
+
+    const visibleNests = [...listNests(userId), ...listSharedNests(userId)];
+
+    // Count accessible documents across every nest the caller can see.
+    // Mirrors the per-nest filterAccessible logic used by GET /nests/:id/nodes
+    // so stewardship-gated docs don't inflate the total for non-stewards.
+    let documents = 0;
+    for (const nest of visibleNests) {
+      try {
+        const { storage } = engineCache.get(nest.id);
+        const docs = await storage.discoverDocuments();
+        documents += filterAccessible(nest.id, userEmail, docs).length;
+      } catch {
+        // Nest with filesystem issue — skip; don't break the whole count.
+      }
+    }
+
+    const usersRow = db
+      .prepare("SELECT COUNT(*) as c FROM users")
+      .get() as { c: number };
+
+    return c.json({
+      nests: visibleNests.length,
+      documents,
+      users: usersRow.c,
+    });
   });
 
   // === All /nests routes ===
@@ -288,11 +328,11 @@ export function createApp(): Hono<AuthEnv> {
     let required: NestPermission = "read";
     const path = c.req.path;
     // Stewardship endpoints run their own per-row permission checks
-    // (canApprove / canReject / steward role). Bumping every non-GET to
-    // "write" here blocks reviewers — who legitimately have read-only
-    // collaborator access plus an approve-bearing steward row — before
-    // their handler can even decide. Let read-permission users through
-    // for these paths and trust the handler.
+    // (steward role). Bumping every non-GET to "write" here blocks
+    // reviewers — who legitimately have read-only collaborator access
+    // plus a reviewer steward row — before their handler can even
+    // decide. Let read-permission users through for these paths and
+    // trust the handler.
     const isStewardActionPath =
       path.includes("/approve") ||
       path.includes("/reject") ||

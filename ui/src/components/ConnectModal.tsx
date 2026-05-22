@@ -24,12 +24,19 @@ import {
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
   Copy,
   Check,
   Terminal,
   Monitor,
   Bot,
   AlertCircle,
+  CheckCircle2,
   Key,
   Loader2,
   RefreshCw,
@@ -72,11 +79,19 @@ export function ConnectModal({
 
   const [busy, setBusy] = useState<"loading" | "mint" | "rotate" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Transient confirmation surfaced after a successful Generate/Rotate.
+  // Auto-clears so the panel reverts to its neutral resting state instead
+  // of leaving a stale "click Rotate" prompt visible after the user has
+  // already rotated.
+  const [justActed, setJustActed] = useState<"generated" | "rotated" | null>(
+    null,
+  );
 
   // Probe key state when dialog opens / reopens.
   useEffect(() => {
     if (!isOpen) {
       setError(null);
+      setJustActed(null);
       return;
     }
     if (!authenticated || authMode === "open") {
@@ -118,6 +133,7 @@ export function ConnectModal({
       setHasExistingKey(true);
       setRevealKind("generated");
       setRevealedKey(api_key);
+      setJustActed("generated");
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -137,12 +153,23 @@ export function ConnectModal({
       setHasExistingKey(true);
       setRevealKind("rotated");
       setRevealedKey(api_key);
+      setJustActed("rotated");
     } catch (err: any) {
       setError(err.message);
     } finally {
       setBusy(null);
     }
   };
+
+  // Auto-clear the transient confirmation. Keeps the panel honest: once
+  // enough time has passed for the user to absorb the success state, we
+  // fall back to neutral copy so a later glance doesn't misread it as a
+  // fresh, unacknowledged action.
+  useEffect(() => {
+    if (!justActed) return;
+    const t = setTimeout(() => setJustActed(null), 6000);
+    return () => clearTimeout(t);
+  }, [justActed]);
 
   const closeReveal = () => {
     // Drop plaintext from memory. Once gone, only Rotate can mint a new
@@ -219,21 +246,36 @@ export function ConnectModal({
                   <span className="font-medium">External-client API key</span>
                 </div>
                 {hasExistingKey ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={rotateKey}
-                    disabled={busy !== null}
-                  >
-                    {busy === "rotate" ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <>
-                        <RefreshCw className="h-3.5 w-3.5 mr-1" />
-                        Rotate
-                      </>
-                    )}
-                  </Button>
+                  <TooltipProvider delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={rotateKey}
+                          disabled={busy !== null}
+                          aria-label="Rotate API key — invalidates the current key and mints a fresh one"
+                        >
+                          {busy === "rotate" ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <>
+                              <RefreshCw className="h-3.5 w-3.5 mr-1" />
+                              Rotate
+                            </>
+                          )}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="left" className="max-w-[260px]">
+                        <p className="text-xs">
+                          Mints a fresh API key and immediately invalidates the
+                          current one. Use only if the existing key is lost or
+                          compromised — external clients will need the new
+                          value to keep working.
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
                 ) : (
                   <Button
                     size="sm"
@@ -249,12 +291,21 @@ export function ConnectModal({
                 )}
               </div>
 
-              {hasExistingKey && (
+              {hasExistingKey && justActed && (
+                <p className="flex items-start gap-1.5 text-xs text-green-700">
+                  <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>
+                    {justActed === "rotated" ? "Key rotated" : "Key generated"} ·
+                    new prefix{" "}
+                    <code className="font-mono">{existingPrefix}</code>
+                    {justActed === "rotated" && " · previous key revoked"}.
+                  </span>
+                </p>
+              )}
+              {hasExistingKey && !justActed && (
                 <p className="text-xs text-muted-foreground">
-                  You have a key on file (
-                  <code className="font-mono">{existingPrefix}</code>). The
-                  plaintext can't be retrieved — click <strong>Rotate</strong>{" "}
-                  to mint a fresh one (the old key is invalidated immediately).
+                  Active key prefix:{" "}
+                  <code className="font-mono">{existingPrefix}</code>.
                 </p>
               )}
               {!hasExistingKey && (

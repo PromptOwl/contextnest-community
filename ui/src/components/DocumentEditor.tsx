@@ -22,14 +22,27 @@ import {
   AlertCircle,
   Send,
   X,
+  Pencil,
 } from "lucide-react";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
-import { SubmitForReviewModal, ReviewActions } from "./governance";
+import { DocumentViewer } from "./DocumentViewer";
+import { SubmitForReviewModal, ReviewActions, ExternalEditBanner } from "./governance";
+import type { PendingChange } from "../lib/api";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
+
+/** Treat content as HTML when it visibly starts with an HTML tag.
+ *  Anything else (markdown, plain text, empty) goes through the
+ *  markdown renderer. Markdown can legally contain inline HTML, but
+ *  documents that start with `<` are overwhelmingly going to be the
+ *  TipTap-saved kind. */
+function looksLikeHtml(s: string): boolean {
+  if (!s) return false;
+  return /^\s*</.test(s);
+}
 
 interface DocumentEditorProps {
   nestId: string;
@@ -54,6 +67,9 @@ export function DocumentEditor({
   const { adminStatus } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   const [canReviewHerePerm, setCanReviewHerePerm] = useState(false);
+  // Caller's resolved steward role for this node (null = none / not a steward).
+  // Drives read-only gating for reviewer/viewer roles on Save + Submit.
+  const [myNodeRole, setMyNodeRole] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -61,9 +77,14 @@ export function DocumentEditor({
   const [tagInput, setTagInput] = useState("");
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
+  const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDocPicker, setShowDocPicker] = useState(false);
+  // Per CU-86ahmvmex: existing docs open in view mode by default so the
+  // user actually sees rendered markdown. New docs go straight to edit.
+  // The user can flip via the toolbar button.
+  const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : "view");
 
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
 
@@ -98,6 +119,7 @@ export function DocumentEditor({
   useEffect(() => {
     if (isNew || !nodeId || !currentEmail) {
       setCanReviewHerePerm(false);
+      setMyNodeRole(null);
       return;
     }
     let cancelled = false;
@@ -108,9 +130,13 @@ export function DocumentEditor({
         const mine = (stewards as any[]).find(
           (s) => (s.email || "").toLowerCase() === currentEmail,
         );
-        setCanReviewHerePerm(!!mine && mine.role === "reviewer" && mine.canApprove);
+        setMyNodeRole(mine?.role ?? null);
+        setCanReviewHerePerm(!!mine && mine.role === "reviewer");
       } catch {
-        if (!cancelled) setCanReviewHerePerm(false);
+        if (!cancelled) {
+          setCanReviewHerePerm(false);
+          setMyNodeRole(null);
+        }
       }
     })();
     return () => {
@@ -128,6 +154,7 @@ export function DocumentEditor({
       setTags(Array.isArray(node?.tags) ? node.tags : []);
       setBaseVersion(node?.version);
       setStatus(node?.status ?? null);
+      setPendingChange((node as any)?.pendingChange ?? null);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -145,6 +172,12 @@ export function DocumentEditor({
   // avoids the user typing a long draft only to discover they couldn't
   // save it. Cancelling the review (future feature) would unlock here.
   const isLocked = status === "pending_review";
+
+  // Fields (title, tags, content) are read-only outside of edit mode.
+  // New docs default to edit, existing docs default to view — user must
+  // explicitly opt-in via the "Start Editing" header button or a
+  // double-click on the content area.
+  const fieldsDisabled = isLocked || mode !== "edit";
 
   const canSave = useMemo(
     () =>
@@ -188,7 +221,7 @@ export function DocumentEditor({
         const newId = res?.node?.id;
         onSaved?.(newId ?? "");
       } else {
-        await api.updateNode(
+        const res = await api.updateNode(
           nestId,
           nodeId,
           {
@@ -198,6 +231,14 @@ export function DocumentEditor({
           },
           baseVersion,
         );
+        // Server publishes through the engine which bumps the version
+        // beyond what UI knew. Pick up the new number so the next save
+        // sends a matching X-Base-Version and doesn't 409.
+        const nextVersion =
+          (res as any)?.version ?? (res as any)?.node?.version;
+        if (typeof nextVersion === "number") {
+          setBaseVersion(nextVersion);
+        }
         onSaved?.(nodeId);
       }
     } catch (err: any) {
@@ -232,11 +273,19 @@ export function DocumentEditor({
   const canReviewHere =
     !isNew && status === "pending_review" && canReviewHerePerm;
 
+  // Reviewers + viewers are read-only on the docs they govern — reviewers
+  // approve/reject, viewers just read; neither authors content. Hide Save
+  // + Submit-for-Review whenever the caller's resolved role on this node
+  // is reviewer or viewer, regardless of status. Editors/owners (no
+  // steward row or role === "editor") are unaffected.
+  const isReviewerOnly =
+    myNodeRole === "reviewer" || myNodeRole === "viewer";
+
   // Submit-for-Review only makes sense on an existing draft when the
   // nest has stewardship enabled. Pending/approved/rejected docs hide
   // the button (re-submit on edit creates a new draft → button returns).
   const canSubmitForReview =
-    !isNew && stewardshipEnabled && status === "draft";
+    !isNew && stewardshipEnabled && status === "draft" && !isReviewerOnly;
 
   const handleDocLinkInsert = (node: { id: string; title: string }) => {
     // Insert as `[[Title]]` so the stored markdown stays portable —
@@ -317,19 +366,29 @@ export function DocumentEditor({
               onReject={handleReject}
             />
           )}
-          {!isLocked && (
-            <Button
-              onClick={handleSave}
-              disabled={!canSave}
-              data-testid="document-editor-save"
-            >
-              {saving ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <Save className="h-4 w-4 mr-2" />
-              )}
-              {isNew ? "Create" : "Save"}
-            </Button>
+          {!isLocked && !isReviewerOnly && (
+            mode === "edit" ? (
+              <Button
+                onClick={handleSave}
+                disabled={!canSave}
+                data-testid="document-editor-save"
+              >
+                {saving ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4 mr-2" />
+                )}
+                {isNew ? "Create" : "Save"}
+              </Button>
+            ) : (
+              <Button
+                onClick={() => setMode("edit")}
+                data-testid="document-editor-start-edit"
+              >
+                <Pencil className="h-4 w-4 mr-2" />
+                Start Editing
+              </Button>
+            )
           )}
         </div>
       </div>
@@ -348,6 +407,18 @@ export function DocumentEditor({
         </div>
       ) : (
         <div className="space-y-4">
+          {!isNew && pendingChange && (
+            <ExternalEditBanner
+              nestId={nestId}
+              nodeId={nodeId}
+              pending={pendingChange}
+              onResolved={() => {
+                setPendingChange(null);
+                loadNode();
+              }}
+            />
+          )}
+
           {isLocked && (
             <Alert>
               <AlertCircle className="h-4 w-4" />
@@ -367,7 +438,7 @@ export function DocumentEditor({
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Document title"
-              disabled={isLocked}
+              disabled={fieldsDisabled}
               data-testid="document-editor-title"
             />
           </div>
@@ -388,14 +459,14 @@ export function DocumentEditor({
                   }
                 }}
                 placeholder='Press Enter or space. Try "#api #v2" or "api, v2"'
-                disabled={isLocked}
+                disabled={fieldsDisabled}
                 data-testid="document-editor-tag-input"
               />
               <Button
                 type="button"
                 variant="outline"
                 onClick={addTag}
-                disabled={isLocked || !tagInput.trim()}
+                disabled={fieldsDisabled || !tagInput.trim()}
               >
                 Add
               </Button>
@@ -408,7 +479,7 @@ export function DocumentEditor({
                     className="inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs"
                   >
                     {t}
-                    {!isLocked && (
+                    {!fieldsDisabled && (
                       <button
                         type="button"
                         onClick={() => removeTag(t)}
@@ -424,22 +495,46 @@ export function DocumentEditor({
             )}
           </div>
 
-          {/* Editor */}
-          <div>
-            <label className="block mb-1 text-sm font-medium">
+          {/* View or edit. View is a read-only markdown renderer (the doc
+              body stays byte-for-byte the same on disk). Edit is the
+              TipTap surface — its save path is unchanged by this PR.
+              Double-click anywhere in the content area is an alternate
+              entry into edit mode (the header "Start Editing" button is
+              the primary one). Skip the flip when locked or when the
+              caller is reviewer/viewer-only — those users have no edit
+              path regardless. */}
+          <div
+            onDoubleClick={() => {
+              if (mode === "view" && !isLocked && !isReviewerOnly) {
+                setMode("edit");
+              }
+            }}
+          >
+            <label className="block text-sm font-medium mb-1">
               Content <span className="text-destructive">*</span>
             </label>
-            <MarkdownEditor
-              ref={editorRef}
-              content={content}
-              onChange={setContent}
-              onSave={handleSave}
-              nestId={nestId}
-              editable={!isLocked}
-              onRequestDocLink={() => setShowDocPicker(true)}
-              onWikiLinkClick={handleWikiLinkClick}
-              placeholder="Start writing..."
-            />
+            {mode === "view" && !looksLikeHtml(content) ? (
+              <div className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text">
+                <DocumentViewer
+                  content={content}
+                  onWikiLinkClick={(title) =>
+                    handleWikiLinkClick(title, null)
+                  }
+                />
+              </div>
+            ) : (
+              <MarkdownEditor
+                ref={editorRef}
+                content={content}
+                onChange={setContent}
+                onSave={handleSave}
+                nestId={nestId}
+                editable={!isLocked && mode === "edit"}
+                onRequestDocLink={() => setShowDocPicker(true)}
+                onWikiLinkClick={handleWikiLinkClick}
+                placeholder="Start writing..."
+              />
+            )}
           </div>
         </div>
       )}
@@ -484,9 +579,17 @@ function StatusBadge({ status }: { status: string }) {
       label: "Approved",
       cls: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
     },
+    published: {
+      label: "Published",
+      cls: "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
+    },
     rejected: {
       label: "Rejected",
       cls: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
+    },
+    external_edit_pending: {
+      label: "External edit",
+      cls: "bg-orange-100 text-orange-800 dark:bg-orange-950 dark:text-orange-300",
     },
   };
   const info = map[status];

@@ -13,6 +13,20 @@ export function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
+/**
+ * Author prefix for version rows minted by the auto-publish bump (engine
+ * `publishDocument` side-effect, not a user-driven edit). Used to exclude
+ * those rows from current-version + conflict-detection queries so the UI's
+ * X-Base-Version stays aligned with the user's last saved version even
+ * after publish bumps the engine version on disk.
+ */
+export const SYSTEM_AUTHOR_PREFIX = "system:auto-publish:";
+
+/** Wrap a real user email as a system-author marker. */
+export function systemAuthor(email: string): string {
+  return `${SYSTEM_AUTHOR_PREFIX}${email}`;
+}
+
 // ─── Create Version ─────────────────────────────────────────────────────
 
 export function createVersion(params: {
@@ -89,9 +103,11 @@ export function getCurrentVersion(
   const db = getDb();
   const row = db
     .prepare(
-      "SELECT MAX(version) as v FROM node_versions WHERE nest_id = ? AND node_id = ?",
+      `SELECT MAX(version) as v FROM node_versions
+        WHERE nest_id = ? AND node_id = ?
+          AND author NOT LIKE ?`,
     )
-    .get(nestId, nodeId) as { v: number | null };
+    .get(nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`) as { v: number | null };
   return row?.v || 0;
 }
 
@@ -141,9 +157,14 @@ export function checkConflict(
   const db = getDb();
   const current = db
     .prepare(
-      "SELECT version, content_hash, author, created_at FROM node_versions WHERE nest_id = ? AND node_id = ? ORDER BY version DESC LIMIT 1",
+      `SELECT version, content_hash, author, created_at
+         FROM node_versions
+        WHERE nest_id = ? AND node_id = ?
+          AND author NOT LIKE ?
+        ORDER BY version DESC
+        LIMIT 1`,
     )
-    .get(nestId, nodeId) as
+    .get(nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`) as
     | {
         version: number;
         content_hash: string;
@@ -201,7 +222,7 @@ export function getNodeTags(nestId: string, nodeId: string): string[] {
 export function getDisplayStatus(
   nestId: string,
   nodeId: string,
-): "draft" | "pending_review" | "approved" | "rejected" {
+): "draft" | "pending_review" | "approved" | "published" | "rejected" {
   const db = getDb();
 
   // 1. Any pending review wins — even if the current version row says
@@ -225,17 +246,19 @@ export function getDisplayStatus(
     | undefined;
   if (!current) return "draft";
 
-  // 3. "approved" only when the latest version is the one pinned in
-  // approved_versions. After an author edits past an approved version,
-  // the new (latest) version is a draft even though an older approved
-  // version is still serving LLM traffic — display reflects the latest.
-  if (current.status === "approved") {
+  // 3. Terminal "published" / "approved" only when the latest version is
+  // the one pinned in approved_versions. After an author edits past it,
+  // the new (latest) version is a draft even though an older row is
+  // still serving LLM traffic — display reflects the latest row.
+  if (current.status === "published" || current.status === "approved") {
     const approved = db
       .prepare(
         "SELECT approved_version FROM approved_versions WHERE nest_id = ? AND node_id = ?",
       )
       .get(nestId, nodeId) as { approved_version: number } | undefined;
-    if (approved?.approved_version === current.version) return "approved";
+    if (approved?.approved_version === current.version) {
+      return current.status === "published" ? "published" : "approved";
+    }
     return "draft";
   }
   if (current.status === "rejected") return "rejected";

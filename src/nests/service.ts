@@ -5,6 +5,8 @@ import { NestStorage } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { trackEvent } from "../telemetry/tracker.js";
+import { isLicenseAdminUserId } from "../auth/license.js";
+import { ANON_USER_ID } from "../shared/constants.js";
 import type { Nest } from "../shared/types.js";
 
 function nestPath(nestId: string): string {
@@ -45,9 +47,14 @@ export async function createNest(
   const slug = toSlug(name);
   const db = getDb();
 
+  // Ungoverned (anon-owned) nests default to public so the shared commons
+  // stays visible to everyone in both open and key modes. Admin can flip
+  // an individual nest to private later via PATCH /nests/:id/visibility.
+  const visibility = userId === ANON_USER_ID ? "public" : "private";
+
   db.prepare(
-    "INSERT INTO nests (id, user_id, name, slug, description) VALUES (?, ?, ?, ?, ?)",
-  ).run(id, userId, name, slug, description || null);
+    "INSERT INTO nests (id, user_id, name, slug, description, visibility) VALUES (?, ?, ?, ?, ?, ?)",
+  ).run(id, userId, name, slug, description || null, visibility);
 
   const path = nestPath(id);
   mkdirSync(path, { recursive: true });
@@ -59,20 +66,28 @@ export async function createNest(
   return db.prepare("SELECT * FROM nests WHERE id = ?").get(id) as Nest;
 }
 
-const ANON_USER_ID = "00000000-0000-0000-0000-000000000000";
-
 export function listNests(userId: string): Nest[] {
   const db = getDb();
-  // Always include anonymous-owned nests as the ungoverned shared commons,
-  // plus nests owned by the caller. De-dupe when caller IS the anonymous user.
+  // The "ungoverned commons" (anon-owned nests) is an open-mode concept —
+  // every visitor effectively co-owns it. In key mode (closed/single) we
+  // only surface anon nests to the caretaker (license-admin); regular
+  // signed-in users should not see nests they have no real claim to.
+  // De-dupe when caller IS the anonymous user.
   if (userId === ANON_USER_ID) {
     return db
       .prepare("SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC")
       .all(ANON_USER_ID) as Nest[];
   }
+  const includeAnon =
+    config.AUTH_MODE === "open" || isLicenseAdminUserId(userId);
+  if (!includeAnon) {
+    return db
+      .prepare("SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC")
+      .all(userId) as Nest[];
+  }
   return db
     .prepare(
-      "SELECT * FROM nests WHERE user_id = ? OR user_id = ? ORDER BY created_at DESC",
+      "SELECT * FROM nests WHERE user_id = ? OR (user_id = ? AND visibility = 'public') ORDER BY created_at DESC",
     )
     .all(userId, ANON_USER_ID) as Nest[];
 }
@@ -104,14 +119,41 @@ export function getNest(nestId: string): Nest | null {
 export async function deleteNest(nestId: string): Promise<void> {
   const db = getDb();
 
-  db.prepare("DELETE FROM api_keys WHERE nest_id = ?").run(nestId);
-  db.prepare("DELETE FROM nests WHERE id = ?").run(nestId);
+  // Foreign-key CASCADE handles most of this (see migrations.ts) but the
+  // explicit deletes inside a single transaction give us two guarantees:
+  //   1. Behaviour stays correct even if a future migration drops a CASCADE
+  //      clause or a connection forgets to enable `foreign_keys = ON`.
+  //   2. The whole wipe is atomic — a crash mid-delete can't leave dangling
+  //      stewards / versions / review rows pointing at a removed nest.
+  const wipe = db.transaction((id: string) => {
+    db.prepare("DELETE FROM approved_versions WHERE nest_id = ?").run(id);
+    db.prepare("DELETE FROM node_versions WHERE nest_id = ?").run(id);
+    db.prepare("DELETE FROM review_requests WHERE nest_id = ?").run(id);
+    db.prepare("DELETE FROM stewards WHERE nest_id = ?").run(id);
+    db.prepare("DELETE FROM nest_collaborators WHERE nest_id = ?").run(id);
+    // node_tag_index is FK-cascaded too, but explicit keeps the contract
+    // visible. Wrapped in try/catch because the table is only created by
+    // the tag-index migration — older DBs predate it.
+    try {
+      db.prepare("DELETE FROM node_tag_index WHERE nest_id = ?").run(id);
+    } catch {
+      // Table not present on legacy DBs — fine, nothing to clean.
+    }
+    db.prepare("DELETE FROM api_keys WHERE nest_id = ?").run(id);
+    db.prepare("DELETE FROM nests WHERE id = ?").run(id);
+  });
+  wipe(nestId);
 
+  // Best-effort filesystem cleanup — the engine's NestStorage writes
+  // YAML/markdown into <DATA_ROOT>/nests/<nestId>. Removing this folder
+  // is the on-disk counterpart to the DB wipe above. Failure here is
+  // non-fatal: the DB rows are already gone, so the nest is unreachable
+  // from the app either way; an orphaned directory is harmless.
   const path = nestPath(nestId);
   try {
     rmSync(path, { recursive: true, force: true });
-  } catch {
-    // Directory may not exist
+  } catch (err) {
+    console.warn(`[nests] failed to remove nest directory ${path}:`, err);
   }
 
   trackEvent("nest.delete", { nestId });

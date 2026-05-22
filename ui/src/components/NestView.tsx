@@ -2,15 +2,16 @@
  * NestView — governance dashboard for a single nest.
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
-import React, { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import * as api from "../lib/api";
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
-  Pencil, Trash2,
+  Pencil, Trash2, FileWarning,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
+import { DeleteNestDialog } from "./DeleteNestDialog";
 import { Button } from "@/components/ui/button";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
@@ -26,8 +27,6 @@ import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
 import {
   StewardList, StewardAssignmentModal, ReviewQueue, ReviewActions,
   SubmitForReviewModal, VersionHistory, LifecycleStatusBadge,
@@ -40,6 +39,8 @@ import { MarkdownEditor } from "./MarkdownEditor";
 interface NestViewProps {
   nestId: string;
   nestName: string;
+  isOwner: boolean;
+  isAnonOwned: boolean;
   onBack: () => void;
   onOpenDocument: (nodeId: string | "new") => void;
 }
@@ -47,18 +48,28 @@ interface NestViewProps {
 export function NestView({
   nestId,
   nestName,
+  isOwner,
+  isAnonOwned,
   onBack,
   onOpenDocument,
 }: NestViewProps) {
-  const { isAdmin, adminStatus } = useAuth();
+  const { isAdmin, adminStatus, authMode } = useAuth();
+  // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
+  //   - real-owner nest → only that owner
+  //   - anon-owned + open mode → any caller (server treats anon as commons)
+  //   - anon-owned + key mode → license-admin caretaker only
+  const canDeleteNest =
+    isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   const [nodes, setNodes] = useState<any[]>([]);
   const [stewards, setStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
+  const [externalEdits, setExternalEdits] = useState<api.ExternalEditEntry[]>([]);
+  const [externalEditsLoading, setExternalEditsLoading] = useState(false);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [stewardScope, setStewardScope] = useState<
-    "all" | "document" | "folder" | "tag" | "nest"
+    "all" | "document" | "tag" | "nest"
   >("all");
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -73,6 +84,7 @@ export function NestView({
   }>({ versions: [], approvedVersion: null, currentVersion: 0 });
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
+  const [showDelete, setShowDelete] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -80,17 +92,31 @@ export function NestView({
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, settingsData] = await Promise.all([
-      api.listNodes(nestId).catch(() => ({ nodes: [] })),
-      api.listStewards(nestId).catch(() => ({ stewards: [] })),
-      api.getReviewQueue(nestId).catch(() => ({ requests: [], total: 0 })),
-      api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
-    ]);
+    const [nodesData, stewardsData, queueData, settingsData, externalData] =
+      await Promise.all([
+        api.listNodes(nestId).catch(() => ({ nodes: [] })),
+        api.listStewards(nestId).catch(() => ({ stewards: [] })),
+        api.getReviewQueue(nestId).catch(() => ({ requests: [], total: 0 })),
+        api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
+        api.listExternalEdits(nestId).catch(() => ({ entries: [], total: 0 })),
+      ]);
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
     setStewardshipEnabled(settingsData.stewardship_enabled);
+    setExternalEdits(externalData.entries);
     setLoading(false);
+  }, [nestId]);
+
+  const refreshExternalEdits = useCallback(async () => {
+    setExternalEditsLoading(true);
+    try {
+      await api.scanExternalEdits(nestId).catch(() => null);
+      const { entries } = await api.listExternalEdits(nestId);
+      setExternalEdits(entries);
+    } finally {
+      setExternalEditsLoading(false);
+    }
   }, [nestId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
@@ -121,9 +147,7 @@ export function NestView({
   // Approve/reject is reviewer-only by product rule. Editors, viewers, and
   // nest owners (no steward row) cannot action a review even though server
   // would still enforce; hide the affordance to keep UI honest.
-  const canReviewDocs = myStewards.some(
-    (s) => s.role === "reviewer" && s.canApprove,
-  );
+  const canReviewDocs = myStewards.some((s) => s.role === "reviewer");
 
   // Map nodeId → submitter so the per-row Review button can hide on
   // docs the current user submitted (separation-of-duties: authors must
@@ -133,22 +157,16 @@ export function NestView({
   for (const r of reviewQueue) {
     submitterByNode.set(r.nodeId, r.requestedBy.toLowerCase());
   }
-  // Eligibility check: does the caller hold a steward row whose scope
-  // covers this node AND has canApprove? Mirrors server resolution
-  // (document > folder > tag > nest), but client-side so the queue can
-  // be filtered without N extra round-trips.
+  // Eligibility check: does the caller hold a reviewer steward row whose
+  // scope covers this node? Mirrors server resolution (document > tag >
+  // nest), but client-side so the queue can be filtered without N extra
+  // round-trips.
   const canReviewNode = (node: { id: string; tags?: string[] }) => {
     if (!node) return false;
     return myStewards.some((s) => {
-      if (!s.canApprove) return false;
+      if (s.role !== "reviewer") return false;
       if (s.scope === "nest") return true;
       if (s.scope === "document") return s.nodePattern === node.id;
-      if (s.scope === "folder") {
-        return (
-          s.nodePattern === nestId ||
-          (s.nodePattern && node.id.startsWith(s.nodePattern + "/"))
-        );
-      }
       if (s.scope === "tag") {
         const target = (s.tagName || "").toLowerCase().replace(/^#+/, "");
         return (node.tags || [])
@@ -215,10 +233,10 @@ export function NestView({
 
   const handleAssignSteward = async (data: any) => {
     // Modal returns scope + generic `target`. Backend's legacy shape expects
-    // scope-specific fields: nodePattern (document/folder) or tagName (tag).
+    // scope-specific fields: nodePattern (document) or tagName (tag).
     const { target, ...rest } = data;
     const payload: any = { ...rest };
-    if (data.scope === "document" || data.scope === "folder") {
+    if (data.scope === "document") {
       payload.nodePattern = target;
     } else if (data.scope === "tag") {
       payload.tagName = target;
@@ -258,13 +276,27 @@ export function NestView({
             <Link2 className="h-4 w-4 mr-2" />
             Connect
           </Button>
+          {/* Delete — gated to match server rules (owner, or admin
+              caretaker on the ungoverned commons in key mode). Server
+              still enforces; hiding the button just keeps the UI
+              honest for callers who can't act. */}
+          {canDeleteNest && (
+            <Button
+              variant="outline"
+              onClick={() => setShowDelete(true)}
+              className="text-destructive hover:text-destructive hover:bg-destructive/10"
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
+            </Button>
+          )}
           {isAdmin && (
             <Button variant="outline" onClick={() => setShowSettings(true)}>
               <SettingsIcon className="h-4 w-4 mr-2" />
               Settings
             </Button>
           )}
-          {stewardshipEnabled && (
+          {stewardshipEnabled && !isStewardOnly && (
             <>
               <Button variant="outline" onClick={() => api.syncStewards(nestId).then(fetchData)}>
                 <RefreshCw className="h-4 w-4 mr-2" />
@@ -276,10 +308,12 @@ export function NestView({
               </Button>
             </>
           )}
-          <Button onClick={() => onOpenDocument("new")}>
-            <Plus className="h-4 w-4 mr-2" />
-            New Document
-          </Button>
+          {canEditDocs && (
+            <Button onClick={() => onOpenDocument("new")}>
+              <Plus className="h-4 w-4 mr-2" />
+              New Document
+            </Button>
+          )}
         </div>
       </div>
 
@@ -364,6 +398,17 @@ export function NestView({
               )}
             </TabsTrigger>
           )}
+          <TabsTrigger value="external-edits" className="gap-2">
+            External Edits
+            {externalEdits.length > 0 && (
+              <Badge
+                variant="secondary"
+                className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
+              >
+                {externalEdits.length}
+              </Badge>
+            )}
+          </TabsTrigger>
           {stewardshipEnabled && (
             <TabsTrigger value="stewards">Stewards</TabsTrigger>
           )}
@@ -510,6 +555,83 @@ export function NestView({
           </TabsContent>
         )}
 
+        <TabsContent value="external-edits" className="space-y-4">
+          <Card>
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <FileWarning className="h-4 w-4 text-orange-600" />
+                    External Edits
+                  </CardTitle>
+                  <CardDescription>
+                    Files edited directly on disk, awaiting your approval.
+                  </CardDescription>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={refreshExternalEdits}
+                  disabled={externalEditsLoading}
+                  className="h-8 w-8"
+                  data-testid="external-edits-refresh"
+                >
+                  {externalEditsLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {externalEdits.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-8 text-center">
+                  <CheckCircle2 className="h-10 w-10 text-green-500 mb-3" />
+                  <p className="text-sm font-medium">No pending external edits</p>
+                  <p className="text-xs text-muted-foreground">
+                    All files on disk match their last approved state.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {externalEdits.map((entry) => (
+                    <div
+                      key={entry.suggestion_id}
+                      className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors"
+                      onClick={() => onOpenDocument(entry.document_id)}
+                      data-testid={`external-edit-row-${entry.suggestion_id}`}
+                    >
+                      <FileWarning className="h-5 w-5 text-orange-600 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium truncate">
+                            {entry.document_id}
+                          </span>
+                          <Badge
+                            variant="secondary"
+                            className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
+                          >
+                            {entry.source}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                          <Clock className="h-3 w-3" />
+                          <span>
+                            {new Date(entry.detected_at).toLocaleString()}
+                          </span>
+                          <span>•</span>
+                          <span>by {entry.actor}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
         {stewardshipEnabled && (
           <TabsContent value="stewards" className="space-y-4">
             <Card className="border-blue-200 bg-blue-50/40">
@@ -531,7 +653,6 @@ export function NestView({
                 </p>
                 <ol className="list-decimal list-inside ml-2 space-y-0.5">
                   <li><strong>Document</strong> — this exact doc</li>
-                  <li><strong>Folder</strong> — everything under a path</li>
                   <li><strong>Tag</strong> — everything with #tag</li>
                   <li><strong>Nest</strong> — anything not matched above</li>
                 </ol>
@@ -557,7 +678,7 @@ export function NestView({
                   </div>
                   {stewards.length > 0 && (
                     <div className="flex items-center gap-2">
-                      {(["all", "document", "folder", "tag", "nest"] as const).map(
+                      {(["all", "document", "tag", "nest"] as const).map(
                         (s) => (
                           <button
                             key={s}
@@ -581,17 +702,19 @@ export function NestView({
                     <p className="text-muted-foreground leading-relaxed">
                       Without stewards, every draft needs the nest owner to
                       approve. Add an editor/reviewer to delegate approvals
-                      for a tag, folder, or specific doc.
+                      for a tag or specific doc.
                     </p>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="w-full"
-                      onClick={() => setShowAssignSteward(true)}
-                    >
-                      <Shield className="h-3.5 w-3.5 mr-2" />
-                      Assign your first steward
-                    </Button>
+                    {!isStewardOnly && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                        onClick={() => setShowAssignSteward(true)}
+                      >
+                        <Shield className="h-3.5 w-3.5 mr-2" />
+                        Assign your first steward
+                      </Button>
+                    )}
                   </div>
                 ) : (
                   <StewardList
@@ -601,8 +724,10 @@ export function NestView({
                         : stewards.filter((s) => s.scope === stewardScope)
                     }
                     showScope
-                    onAddSteward={() => setShowAssignSteward(true)}
-                    onRemove={handleRemoveSteward}
+                    onAddSteward={
+                      isStewardOnly ? undefined : () => setShowAssignSteward(true)
+                    }
+                    onRemove={isStewardOnly ? undefined : handleRemoveSteward}
                   />
                 )}
               </CardContent>
@@ -666,6 +791,16 @@ export function NestView({
         />
       )}
 
+      {showDelete && (
+        <DeleteNestDialog
+          nestId={nestId}
+          nestName={nestName}
+          open
+          onOpenChange={setShowDelete}
+          onDeleted={() => { setShowDelete(false); onBack(); }}
+        />
+      )}
+
       {showAssignSteward && (
         <StewardAssignmentModal
           isOpen={showAssignSteward}
@@ -696,11 +831,12 @@ export function NestView({
 
       {versionNode && (
         <Dialog open onOpenChange={() => setVersionNode(null)}>
-          <DialogContent className="sm:max-w-[600px]">
+          <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-hidden flex flex-col">
             <DialogHeader>
               <DialogTitle>{versionNode.title}</DialogTitle>
             </DialogHeader>
             <VersionHistory
+              className="flex-1 min-h-0 overflow-hidden"
               versions={versionData.versions}
               currentVersion={versionData.currentVersion}
               approvedVersion={versionData.approvedVersion}
