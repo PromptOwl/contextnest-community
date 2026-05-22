@@ -1,6 +1,7 @@
 import { mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
+import { vi } from "vitest";
 import { resetDb } from "../src/db/client.js";
 import { _reset as resetRateLimits } from "../src/shared/rate-limit.js";
 
@@ -30,28 +31,75 @@ export function setupTestEnv() {
   };
 }
 
-/** Create the Hono app (must be called AFTER setupTestEnv sets env vars) */
+/** Create the Hono app (must be called AFTER setupTestEnv sets env vars).
+ *
+ * The license gate in app.ts blocks every non-GET (and every governance
+ * route) until getCurrentLicense() returns a valid license. Tests don't
+ * have a real PromptOwl key, so we mock the license module to report a
+ * valid license without changing production code. The mock is scoped to
+ * this file's module cache, so test files that import the real license
+ * module (license.test.ts) are unaffected.
+ */
 export async function createTestApp(authMode: "open" | "key" = "open") {
   process.env.AUTH_MODE = authMode;
+  vi.resetModules();
+  vi.doMock("../src/auth/license.js", async () => {
+    const actual = await vi.importActual<
+      typeof import("../src/auth/license.js")
+    >("../src/auth/license.js");
+    return {
+      ...actual,
+      getCurrentLicense: () => ({
+        valid: true,
+        tier: "test",
+        org: "Test Org",
+        limits: null,
+        suspended: false,
+        suspendedReason: null,
+        ownerEmail: null,
+      }),
+    };
+  });
   const { createApp } = await import("../src/app.js");
   return createApp();
 }
 
-/** Register a user and return their API key + user ID */
+/** Register a user and return their API key + user ID.
+ *
+ * Note: `/auth/register` only opens a browser session — it deliberately
+ * doesn't mint an external Bearer API key anymore (see src/auth/routes.ts
+ * around line 136). The test pipeline needs Bearer tokens for every
+ * subsequent request, so we mint a key explicitly via `/auth/keys` right
+ * after registration, using the session cookie that registration set.
+ */
 export async function registerUser(
   app: any,
   email: string,
   name: string = email.split("@")[0],
 ) {
-  const res = await app.request("/auth/register", {
+  const registerRes = await app.request("/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password: "testpass", name }),
   });
-  const data = await res.json();
+  const registerData = await registerRes.json();
+  const sessionCookie = registerRes.headers.get("set-cookie") || "";
+
+  const keyRes = await app.request("/auth/keys", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      // Replay the session cookie that registration just set, so the
+      // /auth/keys route authenticates the request as this user.
+      Cookie: sessionCookie,
+    },
+    body: JSON.stringify({ label: "test" }),
+  });
+  const keyData = await keyRes.json();
+
   return {
-    apiKey: data.api_key as string,
-    userId: data.user.id as string,
+    apiKey: keyData.api_key as string,
+    userId: registerData.user.id as string,
     email,
   };
 }

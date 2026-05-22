@@ -65,6 +65,9 @@ export function DocumentEditor({
   const { adminStatus } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   const [canReviewHerePerm, setCanReviewHerePerm] = useState(false);
+  // Caller's resolved steward role for this node (null = none / not a steward).
+  // Drives read-only gating for reviewer/viewer roles on Save + Submit.
+  const [myNodeRole, setMyNodeRole] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
@@ -113,6 +116,7 @@ export function DocumentEditor({
   useEffect(() => {
     if (isNew || !nodeId || !currentEmail) {
       setCanReviewHerePerm(false);
+      setMyNodeRole(null);
       return;
     }
     let cancelled = false;
@@ -123,9 +127,13 @@ export function DocumentEditor({
         const mine = (stewards as any[]).find(
           (s) => (s.email || "").toLowerCase() === currentEmail,
         );
+        setMyNodeRole(mine?.role ?? null);
         setCanReviewHerePerm(!!mine && mine.role === "reviewer" && mine.canApprove);
       } catch {
-        if (!cancelled) setCanReviewHerePerm(false);
+        if (!cancelled) {
+          setCanReviewHerePerm(false);
+          setMyNodeRole(null);
+        }
       }
     })();
     return () => {
@@ -247,11 +255,19 @@ export function DocumentEditor({
   const canReviewHere =
     !isNew && status === "pending_review" && canReviewHerePerm;
 
+  // Reviewers + viewers are read-only on the docs they govern — reviewers
+  // approve/reject, viewers just read; neither authors content. Hide Save
+  // + Submit-for-Review whenever the caller's resolved role on this node
+  // is reviewer or viewer, regardless of status. Editors/owners (no
+  // steward row or role === "editor") are unaffected.
+  const isReviewerOnly =
+    myNodeRole === "reviewer" || myNodeRole === "viewer";
+
   // Submit-for-Review only makes sense on an existing draft when the
   // nest has stewardship enabled. Pending/approved/rejected docs hide
   // the button (re-submit on edit creates a new draft → button returns).
   const canSubmitForReview =
-    !isNew && stewardshipEnabled && status === "draft";
+    !isNew && stewardshipEnabled && status === "draft" && !isReviewerOnly;
 
   const handleDocLinkInsert = (node: { id: string; title: string }) => {
     // Insert as `[[Title]]` so the stored markdown stays portable —
@@ -323,7 +339,7 @@ export function DocumentEditor({
               onReject={handleReject}
             />
           )}
-          {!isLocked && (
+          {!isLocked && !isReviewerOnly && (
             <Button
               onClick={handleSave}
               disabled={!canSave}

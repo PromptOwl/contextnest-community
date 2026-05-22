@@ -22,7 +22,11 @@ describe("key mode (auth required)", () => {
   it("rejects requests without API key", async () => {
     const { status, data } = await jsonRequest(app, "GET", "/nests");
     expect(status).toBe(401);
-    expect(data.error).toContain("API key");
+    // flexAuthMiddleware emits "Missing or invalid credentials" — that's
+    // the actual contract today. Earlier the message said "API key
+    // required" but the wording moved to a generic phrase when cookie
+    // sessions joined Bearer keys as a transport.
+    expect(data.error.toLowerCase()).toMatch(/credentials|api key/);
   });
 
   it("accepts requests with valid API key", async () => {
@@ -41,7 +45,9 @@ describe("key mode (auth required)", () => {
     const bob = await registerUser(app, "bob@test.com", "Bob");
     expect(bob.apiKey).toMatch(/^cnst_/);
 
-    // Login
+    // Login. The server now uses an httpOnly session cookie rather than
+    // returning an api_key in the body — the cookie is the credential
+    // for browser flows. External Bearer keys come from /auth/keys.
     const loginRes = await app.request("/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -49,7 +55,8 @@ describe("key mode (auth required)", () => {
     });
     const loginData = await loginRes.json();
     expect(loginRes.status).toBe(200);
-    expect(loginData.api_key).toMatch(/^cnst_/);
+    expect(loginData.user?.email).toBe("bob@test.com");
+    expect(loginRes.headers.get("set-cookie") || "").toMatch(/cnst_session=/);
   });
 
   it("rejects login with wrong password", async () => {
@@ -105,37 +112,41 @@ describe("key mode (auth required)", () => {
   });
 
   it("API key management", async () => {
-    // Create additional key
-    const { status: createStatus, data: keyData } = await jsonRequest(
+    // The server now enforces a single api_key per user — POST /auth/keys
+    // 409s when a key already exists; clients must rotate instead.
+    // Alice's helper-minted key counts as the existing one, so we go
+    // straight to rotate.
+    const { status: rotateStatus, data: rotateData } = await jsonRequest(
       app,
       "POST",
-      "/auth/keys",
+      "/auth/keys/rotate",
       { label: "ci-key" },
       alice.apiKey,
     );
-    expect(createStatus).toBe(201);
-    expect(keyData.api_key).toMatch(/^cnst_/);
+    expect(rotateStatus).toBe(200);
+    expect(rotateData.api_key).toMatch(/^cnst_/);
 
-    // List keys
+    // List keys — should still be one (rotate is atomic delete+insert).
+    // Use the freshly-rotated key since the old one is now invalid.
     const { data: listData } = await jsonRequest(
       app,
       "GET",
       "/auth/keys",
       undefined,
-      alice.apiKey,
+      rotateData.api_key,
     );
-    expect(listData.keys.length).toBeGreaterThanOrEqual(2);
+    expect(listData.keys.length).toBe(1);
+    expect(listData.keys[0].label).toBe("ci-key");
 
-    // Delete key
-    const ciKey = listData.keys.find(
-      (k: any) => k.label === "ci-key",
-    );
+    // Delete the key — leaves alice without external Bearer access for
+    // any subsequent test; this is intentionally the last test in this
+    // describe block.
     const { status: delStatus } = await jsonRequest(
       app,
       "DELETE",
-      `/auth/keys/${ciKey.id}`,
+      `/auth/keys/${listData.keys[0].id}`,
       undefined,
-      alice.apiKey,
+      rotateData.api_key,
     );
     expect(delStatus).toBe(200);
   });
