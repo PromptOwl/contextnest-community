@@ -19,8 +19,15 @@ interface DashboardProps {
   onSelectNest: (nestId: string, name: string) => void;
 }
 
+interface ServerStats {
+  nests: number;
+  documents: number;
+  users: number;
+}
+
 export function Dashboard({ onSelectNest }: DashboardProps) {
   const [nests, setNests] = useState<any[]>([]);
+  const [stats, setStats] = useState<ServerStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
@@ -32,8 +39,14 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
   const fetchNests = async () => {
     setLoading(true);
     try {
-      const data = await api.listNests();
-      setNests(data.nests);
+      // /stats is best-effort. If it 503s (license gate, on older servers)
+      // or 404s (not deployed yet) we fall back to nest count only.
+      const [nestsData, statsData] = await Promise.all([
+        api.listNests(),
+        api.getServerStats().catch(() => null),
+      ]);
+      setNests(nestsData.nests);
+      setStats(statsData);
     } catch {} finally {
       setLoading(false);
     }
@@ -67,10 +80,24 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                 <CopyInline value={serverUrl} />
               </CardDescription>
             </div>
-            <div className="flex gap-4 text-center">
+            <div className="flex gap-6 text-center">
               <div>
-                <div className="text-2xl font-bold">{nests.length}</div>
+                <div className="text-2xl font-bold">
+                  {stats?.nests ?? nests.length}
+                </div>
                 <div className="text-xs text-muted-foreground">Nests</div>
+              </div>
+              <div>
+                <div className="text-2xl font-bold">
+                  {stats ? stats.documents : "—"}
+                </div>
+                <div className="text-xs text-muted-foreground">Documents</div>
+              </div>
+              <div>
+                <div className="text-2xl font-bold">
+                  {stats ? stats.users : "—"}
+                </div>
+                <div className="text-xs text-muted-foreground">Users</div>
               </div>
             </div>
           </div>
