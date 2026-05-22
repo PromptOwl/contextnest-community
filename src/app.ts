@@ -258,7 +258,16 @@ export function createApp(): Hono<AuthEnv> {
         path.includes("/can-approve") ||
         path.includes("/can-edit");
       const needsLicense = c.req.method !== "GET" || isGovernance;
-      if (needsLicense) {
+      // Dev/test bypass: when running the integration test suite (or a
+      // local dev server without a license) the license gate would 503
+      // every non-GET, which makes the suite unrunnable. The env var
+      // PROMPTOWL_DEV_LICENSE_BYPASS=1 short-circuits the gate. The
+      // variable's name + this comment block are the safeguard against
+      // accidental production use — there is no UI affordance to set it
+      // and the dist build doesn't ship a default value for it.
+      const licenseBypass =
+        process.env.PROMPTOWL_DEV_LICENSE_BYPASS === "1";
+      if (needsLicense && !licenseBypass) {
         const lic = getCurrentLicense();
         if (!lic?.valid) {
           return c.json(

@@ -17,6 +17,11 @@ export function setupTestEnv() {
   process.env.DATA_ROOT = testDir;
   process.env.DATABASE_PATH = join(testDir, "test.db");
   process.env.PROMPTOWL_KEY = ""; // no license in tests
+  // Tests don't have a real PromptOwl license, so the license gate in
+  // app.ts would 503 every non-GET. The bypass env var short-circuits
+  // that gate. See src/app.ts for the safety notes — production must
+  // not set this.
+  process.env.PROMPTOWL_DEV_LICENSE_BYPASS = "1";
   process.env.TELEMETRY_ENABLED = "false";
 
   return {
@@ -37,21 +42,42 @@ export async function createTestApp(authMode: "open" | "key" = "open") {
   return createApp();
 }
 
-/** Register a user and return their API key + user ID */
+/** Register a user and return their API key + user ID.
+ *
+ * Note: `/auth/register` only opens a browser session — it deliberately
+ * doesn't mint an external Bearer API key anymore (see src/auth/routes.ts
+ * around line 136). The test pipeline needs Bearer tokens for every
+ * subsequent request, so we mint a key explicitly via `/auth/keys` right
+ * after registration, using the session cookie that registration set.
+ */
 export async function registerUser(
   app: any,
   email: string,
   name: string = email.split("@")[0],
 ) {
-  const res = await app.request("/auth/register", {
+  const registerRes = await app.request("/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password: "testpass", name }),
   });
-  const data = await res.json();
+  const registerData = await registerRes.json();
+  const sessionCookie = registerRes.headers.get("set-cookie") || "";
+
+  const keyRes = await app.request("/auth/keys", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      // Replay the session cookie that registration just set, so the
+      // /auth/keys route authenticates the request as this user.
+      Cookie: sessionCookie,
+    },
+    body: JSON.stringify({ label: "test" }),
+  });
+  const keyData = await keyRes.json();
+
   return {
-    apiKey: data.api_key as string,
-    userId: data.user.id as string,
+    apiKey: keyData.api_key as string,
+    userId: registerData.user.id as string,
     email,
   };
 }
