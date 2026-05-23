@@ -101,7 +101,11 @@ export function DocumentViewer({
                   type="button"
                   className="text-blue-600 hover:underline font-medium"
                   onClick={(e) => {
+                    // Stop bubbling so DocumentEditor's content-area
+                    // click-to-edit handler doesn't ALSO fire on a
+                    // wikilink navigation.
                     e.preventDefault();
+                    e.stopPropagation();
                     onWikiLinkClick?.(title);
                   }}
                 >
@@ -110,11 +114,15 @@ export function DocumentViewer({
               );
             }
             // Real links: open in a new tab, mark as untrusted-source.
+            // stopPropagation for the same reason as the wikilink case —
+            // clicking a real link in view mode shouldn't flip the doc
+            // into edit mode.
             return (
               <a
                 href={href}
                 target="_blank"
                 rel="noreferrer noopener"
+                onClick={(e) => e.stopPropagation()}
                 {...props}
               >
                 {children}

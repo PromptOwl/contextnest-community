@@ -53,6 +53,11 @@ interface DocumentEditorProps {
   /** Open a different document — invoked when the user clicks an
    *  internal `nest://` link inside the editor. */
   onNavigateDocument?: (nestId: string, nodeId: string) => void;
+  /** Whether the current user is the nest owner. Owners bypass the
+   *  reviewer-only steward gate so they can edit + save regardless of
+   *  whether they've also assigned themselves a reviewer row. Mirrors
+   *  the server-side owner short-circuit in canUserEdit. */
+  isOwner?: boolean;
 }
 
 export function DocumentEditor({
@@ -62,6 +67,7 @@ export function DocumentEditor({
   onBack,
   onSaved,
   onNavigateDocument,
+  isOwner,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
   const { adminStatus } = useAuth();
@@ -278,8 +284,14 @@ export function DocumentEditor({
   // + Submit-for-Review whenever the caller's resolved role on this node
   // is reviewer or viewer, regardless of status. Editors/owners (no
   // steward row or role === "editor") are unaffected.
+  // Nest owners bypass the reviewer-only gate. A common seeding pattern
+  // is "I'm the owner AND I add myself as a reviewer in stewards.yaml so
+  // I can approve my own work." Without the owner override, the steward
+  // row makes the UI think we're reviewer-only and the Edit button + body
+  // click-to-edit affordance disappear — even though canUserEdit on the
+  // server already allows the owner. CU-86ahn99nx.
   const isReviewerOnly =
-    myNodeRole === "reviewer" || myNodeRole === "viewer";
+    !isOwner && (myNodeRole === "reviewer" || myNodeRole === "viewer");
 
   // Submit-for-Review only makes sense on an existing draft when the
   // nest has stewardship enabled. Pending/approved/rejected docs hide
@@ -498,13 +510,14 @@ export function DocumentEditor({
           {/* View or edit. View is a read-only markdown renderer (the doc
               body stays byte-for-byte the same on disk). Edit is the
               TipTap surface — its save path is unchanged by this PR.
-              Double-click anywhere in the content area is an alternate
-              entry into edit mode (the header "Start Editing" button is
-              the primary one). Skip the flip when locked or when the
-              caller is reviewer/viewer-only — those users have no edit
-              path regardless. */}
+              Wiki-like instant edit: a single click anywhere in the
+              content area flips to edit mode. WikiLink and real-anchor
+              clicks inside DocumentViewer stopPropagation so navigation
+              still works without triggering the edit flip. Skip the
+              flip when locked or when the caller is reviewer/viewer-only
+              — those users have no edit path regardless. */}
           <div
-            onDoubleClick={() => {
+            onClick={() => {
               if (mode === "view" && !isLocked && !isReviewerOnly) {
                 setMode("edit");
               }

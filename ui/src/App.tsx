@@ -298,6 +298,7 @@ export default function App() {
             nestId={view.nestId}
             nestName={view.nestName}
             nodeId={view.nodeId}
+            isOwner={view.isOwner}
             onBack={() =>
               setView({
                 page: "nest",
