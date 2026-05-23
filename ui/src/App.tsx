@@ -46,6 +46,9 @@ type View =
       nodeId: string | "new";
       isOwner: boolean;
       isAnonOwned: boolean;
+      /** Pre-fill the title when arriving via a broken-wikilink click.
+       *  Only meaningful when nodeId === "new". */
+      initialTitle?: string;
     }
   | { page: "teammates" };
 
@@ -332,6 +335,22 @@ export default function App() {
                   linkNestId === view.nestId ? view.isAnonOwned : false,
               })
             }
+            onCreateDocument={(linkNestId, initialTitle) =>
+              // Broken `[[Title]]` click → land on the new-doc page with
+              // the title pre-filled, matching the Obsidian / MediaWiki
+              // wiki convention. Only fires in the same nest; cross-nest
+              // creation would need permission gating we don't have yet.
+              setView({
+                page: "document",
+                nestId: linkNestId,
+                nestName: view.nestName,
+                nodeId: "new",
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+                initialTitle,
+              })
+            }
+            initialTitle={view.initialTitle}
           />
         )}
         {view.page === "teammates" && (

@@ -53,6 +53,14 @@ interface DocumentEditorProps {
   /** Open a different document — invoked when the user clicks an
    *  internal `nest://` link inside the editor. */
   onNavigateDocument?: (nestId: string, nodeId: string) => void;
+  /** Create a new document — invoked when the user clicks a
+   *  `[[Title]]` that doesn't resolve to an existing doc.
+   *  Obsidian / MediaWiki convention: broken link → create-with-title. */
+  onCreateDocument?: (nestId: string, title: string) => void;
+  /** When `nodeId === "new"` and this is set, pre-fill the title state.
+   *  Used by the wikilink-create flow to land the user in an editor
+   *  that's already started rather than fully blank. */
+  initialTitle?: string;
 }
 
 export function DocumentEditor({
@@ -62,6 +70,8 @@ export function DocumentEditor({
   onBack,
   onSaved,
   onNavigateDocument,
+  onCreateDocument,
+  initialTitle,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
   const { adminStatus } = useAuth();
@@ -71,7 +81,7 @@ export function DocumentEditor({
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
   const [myNodeRole, setMyNodeRole] = useState<string | null>(null);
 
-  const [title, setTitle] = useState("");
+  const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState("");
@@ -307,9 +317,18 @@ export function DocumentEditor({
       const exact = (nodes as Array<{ id: string; title: string }>).find(
         (n) => n.title.toLowerCase() === title.toLowerCase(),
       );
-      if (exact) onNavigateDocument?.(nestId, exact.id);
+      if (exact) {
+        onNavigateDocument?.(nestId, exact.id);
+        return;
+      }
+      // Broken link: title doesn't resolve to anything. Offer to create —
+      // Obsidian / MediaWiki convention. We don't prompt; that would
+      // interrupt the wiki-feel. The user lands in an editor with the
+      // title pre-filled; "back" cancels.
+      onCreateDocument?.(nestId, title);
     } catch {
-      /* nothing useful to do — link stays broken */
+      // Search itself failed (network / server error). Don't auto-create
+      // on top of an error; the link stays broken until the next click.
     }
   };
 
