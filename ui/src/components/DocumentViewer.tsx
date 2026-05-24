@@ -50,10 +50,13 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
       }
       const title = m[1].trim();
       const display = (m[2] ?? m[1]).trim();
+      // Wrap the rendered text in « » per the wiki convention (Hootie /
+      // MediaWiki / Notion) so wikilinks read as wikilinks even without
+      // CSS — instant visual recognition.
       newChildren.push({
         type: "link",
         url: `${WIKI_LINK_SCHEME}${title}`,
-        children: [{ type: "text", value: display }],
+        children: [{ type: "text", value: `«${display}»` }],
       });
       lastIndex = wikiLinkRegex.lastIndex;
     }
