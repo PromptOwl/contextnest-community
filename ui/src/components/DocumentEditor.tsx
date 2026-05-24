@@ -429,18 +429,32 @@ export function DocumentEditor({
             </Alert>
           )}
 
-          {/* Title */}
+          {/* Title — render as a Notion-style h1 in view mode so the page
+              reads as a document, not a form. Switches to an Input in
+              edit mode. The surrounding click-to-edit wrapper picks up
+              clicks on the h1 and flips mode. */}
           <div>
-            <label className="block mb-1 text-sm font-medium">
-              Title <span className="text-destructive">*</span>
-            </label>
-            <Input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Document title"
-              disabled={fieldsDisabled}
-              data-testid="document-editor-title"
-            />
+            {mode === "view" && !isNew ? (
+              <h1
+                className="text-3xl font-bold leading-tight text-foreground"
+                data-testid="document-editor-title"
+              >
+                {title || "Untitled"}
+              </h1>
+            ) : (
+              <>
+                <label className="block mb-1 text-sm font-medium">
+                  Title <span className="text-destructive">*</span>
+                </label>
+                <Input
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="Document title"
+                  disabled={fieldsDisabled}
+                  data-testid="document-editor-title"
+                />
+              </>
+            )}
           </div>
 
           {/* Tags */}
