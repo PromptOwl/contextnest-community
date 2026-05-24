@@ -43,6 +43,9 @@ interface NestViewProps {
   isAnonOwned: boolean;
   onBack: () => void;
   onOpenDocument: (nodeId: string | "new") => void;
+  /** Seed the search filter on mount. Used when arriving from a tag
+   *  click on a document detail page. */
+  initialSearch?: string;
 }
 
 export function NestView({
@@ -52,6 +55,7 @@ export function NestView({
   isAnonOwned,
   onBack,
   onOpenDocument,
+  initialSearch,
 }: NestViewProps) {
   const { isAdmin, adminStatus, authMode } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
@@ -72,7 +76,7 @@ export function NestView({
     "all" | "document" | "tag" | "nest"
   >("all");
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(initialSearch ?? "");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [reviewNode, setReviewNode] = useState<any | null>(null);
   const [submitNode, setSubmitNode] = useState<any | null>(null);
@@ -130,7 +134,18 @@ export function NestView({
 
   const filtered = nodes.filter((n) => {
     if (statusFilter !== "all" && n.status !== statusFilter) return false;
-    if (search && !n.title.toLowerCase().includes(search.toLowerCase())) return false;
+    if (search) {
+      // Search matches title OR any tag — so clicking a tag chip on a
+      // document detail (which sets search to the tag string) actually
+      // filters to docs with that tag, not just docs whose title
+      // contains the tag string.
+      const needle = search.toLowerCase();
+      const inTitle = n.title?.toLowerCase().includes(needle);
+      const inTags = Array.isArray(n.tags)
+        ? n.tags.some((t: string) => t.toLowerCase().includes(needle))
+        : false;
+      if (!inTitle && !inTags) return false;
+    }
     return true;
   });
 
