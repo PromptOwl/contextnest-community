@@ -294,10 +294,34 @@ export default function App() {
                 isAnonOwned: view.isAnonOwned,
               })
             }
+            onCreateDocument={(linkNestId, initialTitle) =>
+              // Broken `[[Title]]` click from the review modal → new-doc
+              // page with title pre-filled. Mirrors the DocumentEditor
+              // wiki-create flow so the convention is consistent across
+              // both reading surfaces.
+              setView({
+                page: "document",
+                nestId: linkNestId,
+                nestName: view.nestName,
+                nodeId: "new",
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+                initialTitle,
+              })
+            }
           />
         )}
         {view.page === "document" && (
           <DocumentEditor
+            // Key by nest + node so React unmounts the editor when the
+            // user hops to a different doc (wiki-link nav) or pivots
+            // from an existing doc into a fresh "new" page via a
+            // broken-link click. Without this, useState values (title,
+            // content, status) survive the prop change and the old
+            // doc's body renders under the new doc's chrome — and
+            // isNew flips true with stale state, hiding the status
+            // badge + Submit-for-review button on the original doc.
+            key={`${view.nestId}/${view.nodeId}`}
             nestId={view.nestId}
             nestName={view.nestName}
             nodeId={view.nodeId}
