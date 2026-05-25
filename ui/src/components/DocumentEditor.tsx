@@ -535,24 +535,29 @@ export function DocumentEditor({
           >
             <ArrowLeft className="h-5 w-5" />
           </Button>
-          <div className="min-w-0">
-            <div className="text-xs text-muted-foreground truncate">
+          {/* Breadcrumb-style header: `<nest> > <doc> [Status]` on a single
+              line. Replaces the prior two-line layout that duplicated the
+              title with the in-body h1. */}
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-sm text-muted-foreground truncate">
               {nestName}
-            </div>
-            <div className="flex items-center gap-2 min-w-0">
-              <h3 className="text-xl font-semibold truncate mb-0">
-                {title || (isNew ? "New document" : "Untitled")}
-              </h3>
-              {!isNew && status && <StatusBadge status={status} />}
-              {!isNew && !stewardshipEnabled && status === "approved" && (
-                <span
-                  className="px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700 border border-green-200"
-                  title="Stewardship is off for this nest, so saving publishes immediately and the document is AI-readable."
-                >
-                  Auto-published
-                </span>
-              )}
-            </div>
+            </span>
+            <span className="text-muted-foreground shrink-0">›</span>
+            <h3
+              className="text-xl font-semibold truncate mb-0"
+              data-testid="document-editor-header-title"
+            >
+              {title || (isNew ? "New document" : "Untitled")}
+            </h3>
+            {!isNew && status && <StatusBadge status={status} />}
+            {!isNew && !stewardshipEnabled && status === "approved" && (
+              <span
+                className="px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700 border border-green-200"
+                title="Stewardship is off for this nest, so saving publishes immediately and the document is AI-readable."
+              >
+                Auto-published
+              </span>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -640,8 +645,8 @@ export function DocumentEditor({
 
           {/* Title — render as a Notion-style h1 in view mode so the page
               reads as a document, not a form. Switches to an Input in
-              edit mode. The surrounding click-to-edit wrapper picks up
-              clicks on the h1 and flips mode. */}
+              edit mode. The breadcrumb header above shows the same title
+              as navigation context; this h1 is the canonical doc heading. */}
           <div>
             {mode === "view" && !isNew ? (
               <h1
