@@ -126,6 +126,7 @@ export async function getHealth() {
   return request<{
     status: string;
     auth_mode: string;
+    logo_url?: string | null;
     suspended_reason?: string;
   }>("/health");
 }

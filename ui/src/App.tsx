@@ -58,6 +58,7 @@ type View =
 export default function App() {
   const {
     authMode,
+    logoUrl,
     adminStatus,
     authenticated,
     isAdmin,
@@ -227,7 +228,11 @@ export default function App() {
             onClick={() => setView({ page: "dashboard" })}
             className="flex items-center gap-2 hover:opacity-80"
           >
-            <img src={hootieIcon} alt="ContextNest" className="h-7 w-7" />
+            <img
+              src={logoUrl ?? hootieIcon}
+              alt="ContextNest"
+              className="h-7 w-7 object-contain"
+            />
             <span className="font-semibold">ContextNest</span>
             <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
               Community

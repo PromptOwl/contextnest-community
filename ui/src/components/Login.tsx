@@ -4,7 +4,7 @@ import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 
 export function Login() {
-  const { loginSuccess } = useAuth();
+  const { loginSuccess, logoUrl } = useAuth();
   const [mode, setMode] = useState<"login" | "register" | "promptowl">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -109,7 +109,15 @@ export function Login() {
     <div className="min-h-screen flex items-center justify-center bg-background">
       <div className="w-full max-w-sm space-y-6 p-6">
         <div className="text-center">
-          <span className="text-4xl">🪺</span>
+          {logoUrl ? (
+            <img
+              src={logoUrl}
+              alt=""
+              className="h-12 w-12 mx-auto object-contain"
+            />
+          ) : (
+            <span className="text-4xl">🪺</span>
+          )}
           <h1 className="text-xl font-semibold mt-2">ContextNest</h1>
           <p className="text-sm text-muted-foreground">Community Server</p>
         </div>
