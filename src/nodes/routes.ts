@@ -19,6 +19,7 @@ import { isStewardshipEnabled } from "../nests/service.js";
 import {
   scanDocumentForDrift,
   getPendingChange,
+  loadLatestApprovedNode,
 } from "../governance/external-edit-service.js";
 
 export const nodeRoutes = new Hono<AuthEnv>();
@@ -337,6 +338,20 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     } catch (err) {
       console.error("[external-edit] stage-on-read failed:", err);
     }
+    // Engine returns the nearest *keyframe* body (every 10 versions) as
+    // the approved baseline — at v=5 that's the v=1 keyframe, so the
+    // editor would render the original draft body underneath the drift
+    // banner. Reconstruct the actual latest version from history.yaml
+    // so the user sees the current approved state, with the drift shown
+    // separately via the suggestion patch.
+    try {
+      const latest = await loadLatestApprovedNode(nestId, nodeId);
+      if (latest) {
+        node = { ...latest, pendingChange: node.pendingChange };
+      }
+    } catch (err) {
+      console.error("[external-edit] reconstruct-latest failed:", err);
+    }
   }
   const response = toNodeResponse(node);
   // Resolved-from-DB workflow status; on-disk frontmatter status is
@@ -561,6 +576,14 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
     ).run(nestId, nodeId);
     db.prepare(
       "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
+    ).run(nestId, nodeId);
+    // Document-scoped steward rows pin to this exact node_pattern. Tag
+    // and nest-scoped stewards stay — they govern the whole nest, not
+    // this single doc. Without this purge, recreating a doc with the
+    // same slug silently inherits the prior doc's reviewer assignments.
+    db.prepare(
+      `DELETE FROM stewards
+       WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
     ).run(nestId, nodeId);
   })();
 
