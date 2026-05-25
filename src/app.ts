@@ -118,6 +118,7 @@ export function createApp(): Hono<AuthEnv> {
       service: "contextnest-community",
       version: "0.1.0",
       auth_mode: config.AUTH_MODE,
+      logo_url: config.LOGO_URL,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     }),
   );

@@ -43,6 +43,7 @@ export type LoginSuccessUser = {
 
 export interface AuthContextValue {
   authMode: AuthMode;
+  logoUrl: string | null;
   adminStatus: AdminStatus | null;
   authenticated: boolean;
   isAdmin: boolean;
@@ -57,6 +58,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: PropsWithChildren) {
   const [authMode, setAuthMode] = useState<AuthMode>(null);
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [adminStatus, setAdminStatus] = useState<AdminStatus | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -101,6 +103,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         if (cancelled) return;
         const mode = h.auth_mode as AuthMode;
         setAuthMode(mode);
+        setLogoUrl(h.logo_url ?? null);
 
         const status = await api.getAdminStatus();
         if (cancelled) return;
@@ -116,6 +119,14 @@ export function AuthProvider({ children }: PropsWithChildren) {
       cancelled = true;
     };
   }, [deriveAuthenticated]);
+
+  // Swap browser tab favicon to the operator's custom logo when set.
+  // The fallback href in index.html stays as the inline 🪺 SVG.
+  useEffect(() => {
+    if (!logoUrl) return;
+    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (link) link.href = logoUrl;
+  }, [logoUrl]);
 
   // Listen for 401s from any api.request — the server says our session
   // is invalid. Reset state so the user is bounced back to the login
@@ -224,6 +235,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
     <AuthContext.Provider
       value={{
         authMode,
+        logoUrl,
         adminStatus,
         authenticated,
         isAdmin,

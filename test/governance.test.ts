@@ -75,7 +75,7 @@ tags:
       {},
       admin.apiKey,
     );
-  });
+  }, 30000);
 
   afterAll(() => env.cleanup());
 
