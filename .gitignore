@@ -3,4 +3,4 @@ dist/
 node_modules/
 coverage/
 ui/node_modules/
-config.bat
+.env
