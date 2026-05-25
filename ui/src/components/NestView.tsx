@@ -141,10 +141,12 @@ export function NestView({
   const isStewardOnly = !isAdmin && myStewards.length > 0;
   const canEditDocs =
     !isStewardOnly || myStewards.some((s) => s.role === "editor");
-  // Approve/reject is reviewer-only by product rule. Editors, viewers, and
-  // nest owners (no steward row) cannot action a review even though server
-  // would still enforce; hide the affordance to keep UI honest.
-  const canReviewDocs = myStewards.some((s) => s.role === "reviewer");
+  // Approve/reject is reviewer-only by product rule, with one exception:
+  // the nest owner can self-approve any pending review (mirrors server
+  // canUserApprove short-circuit added in CU-86ahn99dg). Editors and
+  // viewers still see nothing.
+  const canReviewDocs =
+    isOwner || myStewards.some((s) => s.role === "reviewer");
 
   // Map nodeId → submitter so the per-row Review button can hide on
   // docs the current user submitted (separation-of-duties: authors must
@@ -157,9 +159,11 @@ export function NestView({
   // Eligibility check: does the caller hold a reviewer steward row whose
   // scope covers this node? Mirrors server resolution (document > tag >
   // nest), but client-side so the queue can be filtered without N extra
-  // round-trips.
+  // round-trips. Nest owner short-circuits — server now allows owner to
+  // approve anything in their nest (CU-86ahn99dg).
   const canReviewNode = (node: { id: string; tags?: string[] }) => {
     if (!node) return false;
+    if (isOwner) return true;
     return myStewards.some((s) => {
       if (s.role !== "reviewer") return false;
       if (s.scope === "nest") return true;
@@ -174,13 +178,12 @@ export function NestView({
     });
   };
 
-  // Review queue: only the assigned reviewer for the node sees the
-  // request. Owners and server admins do NOT get a free pass — the
-  // queue is purely a reviewer worklist; owners use the audit/version
-  // panels for visibility instead. Drops own-submitted requests too
-  // (separation of duties).
+  // Review queue: the assigned reviewer sees their scope. Nest owner
+  // also sees the full queue and may self-approve their own submissions
+  // (CU-86ahn99dg) — the separation-of-duties drop only applies to
+  // non-owner reviewers.
   const reviewableQueue = reviewQueue.filter((r) => {
-    if (r.requestedBy.toLowerCase() === currentEmail) return false;
+    if (!isOwner && r.requestedBy.toLowerCase() === currentEmail) return false;
     const node = nodes.find((n) => n.id === r.nodeId);
     if (!node) return false;
     return canReviewNode(node);
@@ -520,7 +523,8 @@ export function NestView({
                         )}
                         {stewardshipEnabled &&
                           node.status === "pending_review" &&
-                          submitterByNode.get(node.id) !== currentEmail &&
+                          (isOwner ||
+                            submitterByNode.get(node.id) !== currentEmail) &&
                           canReviewDocs && (
                             <Button
                               variant="outline"
