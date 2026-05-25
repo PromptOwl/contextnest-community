@@ -82,6 +82,10 @@ interface DocumentEditorProps {
   /** Open a different document — invoked when the user clicks an
    *  internal `nest://` link inside the editor. */
   onNavigateDocument?: (nestId: string, nodeId: string) => void;
+  /** Filter the nest list by a tag — invoked when the user clicks a
+   *  tag chip in view mode. Wiki convention: tags click → see other
+   *  docs with this tag. */
+  onTagClick?: (tag: string) => void;
   /** Create a new document — invoked when the user clicks a
    *  `[[Title]]` that doesn't resolve to an existing doc.
    *  Obsidian / MediaWiki convention: broken link → create-with-title. */
@@ -100,6 +104,7 @@ export function DocumentEditor({
   onBack,
   onSaved,
   onNavigateDocument,
+  onTagClick,
   onCreateDocument,
   initialTitle,
 }: DocumentEditorProps) {
@@ -704,24 +709,46 @@ export function DocumentEditor({
             </div>
             {tags.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mt-2">
-                {tags.map((t) => (
-                  <span
-                    key={t}
-                    className="inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs"
-                  >
-                    {t}
-                    {!fieldsDisabled && (
-                      <button
-                        type="button"
-                        onClick={() => removeTag(t)}
-                        className="hover:text-destructive"
-                        aria-label={`Remove ${t}`}
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    )}
-                  </span>
-                ))}
+                {tags.map((t) => {
+                  // View mode: click chip → filter nest list by this
+                  // tag. Edit mode: the X handles remove; the chip
+                  // itself is non-interactive so users don't
+                  // accidentally navigate away mid-edit.
+                  const tagClickable = mode === "view" && !!onTagClick;
+                  return (
+                    <span
+                      key={t}
+                      onClick={
+                        tagClickable
+                          ? (e) => {
+                              e.stopPropagation();
+                              onTagClick!(t);
+                            }
+                          : undefined
+                      }
+                      className={
+                        "inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs" +
+                        (tagClickable ? " cursor-pointer hover:bg-secondary/80" : "")
+                      }
+                      title={tagClickable ? `Filter nest by ${t}` : undefined}
+                    >
+                      {t}
+                      {!fieldsDisabled && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeTag(t);
+                          }}
+                          className="hover:text-destructive"
+                          aria-label={`Remove ${t}`}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
               </div>
             )}
           </div>

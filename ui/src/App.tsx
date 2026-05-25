@@ -38,6 +38,9 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      /** Seed the nest list's search filter when arriving via a tag
+       *  click on a document detail page. */
+      initialSearch?: string;
     }
   | {
       page: "document";
@@ -283,6 +286,7 @@ export default function App() {
             nestName={view.nestName}
             isOwner={view.isOwner}
             isAnonOwned={view.isAnonOwned}
+            initialSearch={view.initialSearch}
             onBack={() => setView({ page: "dashboard" })}
             onOpenDocument={(nodeId) =>
               setView({
@@ -343,6 +347,19 @@ export default function App() {
                 isOwner: linkNestId === view.nestId ? view.isOwner : false,
                 isAnonOwned:
                   linkNestId === view.nestId ? view.isAnonOwned : false,
+              })
+            }
+            onTagClick={(tag) =>
+              // Wiki convention: clicking a tag in the document detail
+              // page navigates back to the nest list filtered by that
+              // tag. Same nest only.
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+                initialSearch: tag,
               })
             }
             onCreateDocument={(linkNestId, initialTitle) =>
