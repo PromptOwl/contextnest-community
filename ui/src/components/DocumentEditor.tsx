@@ -73,6 +73,10 @@ interface DocumentEditorProps {
   nestId: string;
   nestName: string;
   nodeId: string | "new";
+  /** Caller owns this nest. Enables the inline approve/reject affordance
+   *  on owner-authored pending reviews — server allows owner self-approve
+   *  (see canUserApprove in stewardship-service.ts, CU-86ahn99dg). */
+  isOwner?: boolean;
   onBack: () => void;
   onSaved?: (savedNodeId: string) => void;
   /** Open a different document — invoked when the user clicks an
@@ -92,6 +96,7 @@ export function DocumentEditor({
   nestId,
   nestName,
   nodeId,
+  isOwner = false,
   onBack,
   onSaved,
   onNavigateDocument,
@@ -419,8 +424,13 @@ export function DocumentEditor({
     await api.rejectNode(nestId, nodeId, note);
     await loadNode();
   };
+  // Owner short-circuit mirrors server-side canUserApprove: nest owner can
+  // approve any pending review, including their own submissions (the
+  // seeding flow). Reviewer stewards still need a row to get the affordance.
   const canReviewHere =
-    !isNew && status === "pending_review" && myNodeRole === "reviewer";
+    !isNew &&
+    status === "pending_review" &&
+    (myNodeRole === "reviewer" || isOwner);
 
   // Reviewers + viewers are read-only on the docs they govern — reviewers
   // approve/reject, viewers just read; neither authors content. Hide Save
