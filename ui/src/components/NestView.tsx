@@ -121,12 +121,9 @@ export function NestView({
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const stats = {
-    total: nodes.length,
-    pending: nodes.filter((n) => n.status === "pending_review").length,
-    approved: nodes.filter((n) => n.status === "approved").length,
-    reviewQueue: reviewQueue.length,
-  };
+  // stats are built later (after reviewableQueue is computed) so the
+  // Review Queue card can bind to the count the user can actually act
+  // on — not the raw queue size. See computeStats() below.
 
   const filtered = nodes.filter((n) => {
     if (statusFilter !== "all" && n.status !== statusFilter) return false;
@@ -188,6 +185,17 @@ export function NestView({
     if (!node) return false;
     return canReviewNode(node);
   });
+
+  // Computed here so the Review Queue card binds to reviewableQueue.length
+  // (what the user can actually act on) instead of reviewQueue.length
+  // (raw size, which over-promised before — see CU-86ahn99fv).
+  const stats = {
+    total: nodes.length,
+    pending: nodes.filter((n) => n.status === "pending_review").length,
+    approved: nodes.filter((n) => n.status === "approved").length,
+    reviewQueue: reviewQueue.length,
+    reviewable: reviewableQueue.length,
+  };
 
   const openVersions = async (node: any) => {
     setVersionNode(node);
@@ -373,12 +381,23 @@ export function NestView({
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription>Review Queue</CardDescription>
-                <CardTitle className="text-3xl text-blue-600">{stats.reviewQueue}</CardTitle>
+                <CardTitle className="text-3xl text-blue-600">
+                  {stats.reviewable}
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Shield className="h-4 w-4" />
-                  <span>Need your review</span>
+                  <span>
+                    Need your review
+                    {stats.reviewQueue > stats.reviewable && (
+                      <span className="ml-1 text-xs">
+                        ({stats.reviewQueue} pending total,
+                        {" "}
+                        {stats.reviewQueue - stats.reviewable} outside your scope)
+                      </span>
+                    )}
+                  </span>
                 </div>
               </CardContent>
             </Card>
