@@ -27,6 +27,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useRef,
   useState,
   type ForwardedRef,
 } from "react";
@@ -105,6 +106,30 @@ export const MarkdownEditor = forwardRef<
   // a reader will see without having to leave the editor.
   const [previewing, setPreviewing] = useState(false);
   const effectiveEditable = editable && !previewing;
+
+  // `[[` autocomplete state. Opens when the user types an unclosed
+  // double-bracket; the dropdown searches nest docs so picks are
+  // exact-title matches by default — reduces broken-link cases.
+  const [wikiPopup, setWikiPopup] = useState<{
+    query: string;
+    from: number;
+    to: number;
+    coords: { left: number; top: number };
+    selectedIdx: number;
+  } | null>(null);
+  const [wikiResults, setWikiResults] = useState<
+    Array<{ id: string; title: string }>
+  >([]);
+  // Refs mirror state so the editor's static `handleKeyDown` (captured
+  // once at useEditor time) can see the latest values without a re-init.
+  const wikiPopupRef = useRef(wikiPopup);
+  const wikiResultsRef = useRef(wikiResults);
+  useEffect(() => {
+    wikiPopupRef.current = wikiPopup;
+  }, [wikiPopup]);
+  useEffect(() => {
+    wikiResultsRef.current = wikiResults;
+  }, [wikiResults]);
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -150,6 +175,43 @@ export const MarkdownEditor = forwardRef<
           "prose prose-sm dark:prose-invert max-w-none focus:outline-none min-h-[300px] px-6 py-4",
       },
       handleKeyDown: (_view, event) => {
+        const popup = wikiPopupRef.current;
+        const results = wikiResultsRef.current;
+        if (popup && results.length > 0) {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setWikiPopup((s) =>
+              s
+                ? { ...s, selectedIdx: (s.selectedIdx + 1) % results.length }
+                : s,
+            );
+            return true;
+          }
+          if (event.key === "ArrowUp") {
+            event.preventDefault();
+            setWikiPopup((s) =>
+              s
+                ? {
+                    ...s,
+                    selectedIdx:
+                      (s.selectedIdx - 1 + results.length) % results.length,
+                  }
+                : s,
+            );
+            return true;
+          }
+          if (event.key === "Enter" || event.key === "Tab") {
+            event.preventDefault();
+            const pick = results[popup.selectedIdx];
+            if (pick) insertWikiPickRef.current?.(pick);
+            return true;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setWikiPopup(null);
+            return true;
+          }
+        }
         if ((event.ctrlKey || event.metaKey) && event.key === "s") {
           event.preventDefault();
           onSave?.();
@@ -165,6 +227,105 @@ export const MarkdownEditor = forwardRef<
       editor.setEditable(effectiveEditable);
     }
   }, [editor, effectiveEditable]);
+
+  // Insertion handler kept in a ref so the static `handleKeyDown`
+  // closure inside useEditor can call the latest version. Replaces
+  // the partial `[[query` with `[[Title]] ` and clears the popup.
+  const insertWikiPickRef = useRef<
+    ((doc: { id: string; title: string }) => void) | null
+  >(null);
+  useEffect(() => {
+    insertWikiPickRef.current = (doc) => {
+      if (!editor) return;
+      const popup = wikiPopupRef.current;
+      if (!popup) return;
+      editor
+        .chain()
+        .focus()
+        .insertContentAt(
+          { from: popup.from, to: popup.to },
+          `[[${doc.title}]] `,
+        )
+        .run();
+      setWikiPopup(null);
+    };
+  }, [editor]);
+
+  // Detect `[[query` at the cursor on every selection / doc update.
+  // Trigger pattern: `[[` followed by 0+ non-`]` non-newline chars,
+  // anchored at the cursor. Closing `]]` cancels the popup so the
+  // user types past the bracket without it lingering.
+  useEffect(() => {
+    if (!editor) return;
+    const update = () => {
+      if (!effectiveEditable) {
+        setWikiPopup(null);
+        return;
+      }
+      const { state, view } = editor;
+      const { selection } = state;
+      if (!selection.empty) {
+        setWikiPopup(null);
+        return;
+      }
+      const $from = selection.$from;
+      const parentStart = $from.start();
+      const before = state.doc.textBetween(
+        Math.max(parentStart, $from.pos - 200),
+        $from.pos,
+        "\n",
+        "￼",
+      );
+      const m = /\[\[([^\]\n]*)$/.exec(before);
+      if (!m) {
+        setWikiPopup(null);
+        return;
+      }
+      const query = m[1];
+      const matchStart = $from.pos - m[0].length;
+      const coords = view.coordsAtPos($from.pos);
+      setWikiPopup((prev) => ({
+        query,
+        from: matchStart,
+        to: $from.pos,
+        coords: { left: coords.left, top: coords.bottom },
+        selectedIdx: prev && prev.query === query ? prev.selectedIdx : 0,
+      }));
+    };
+    editor.on("selectionUpdate", update);
+    editor.on("update", update);
+    return () => {
+      editor.off("selectionUpdate", update);
+      editor.off("update", update);
+    };
+  }, [editor, effectiveEditable]);
+
+  // Fetch matching docs whenever the query changes. Empty query
+  // (just `[[`) lists everything so users can browse without typing.
+  useEffect(() => {
+    if (!wikiPopup || !nestId) {
+      setWikiResults([]);
+      return;
+    }
+    let cancelled = false;
+    const q = wikiPopup.query.trim();
+    (async () => {
+      try {
+        const res = q
+          ? await api.searchNodes(nestId, q)
+          : await api.listNodes(nestId);
+        if (cancelled) return;
+        const list = ((res.nodes as Array<{ id: string; title: string }>) || [])
+          .slice(0, 8);
+        setWikiResults(list);
+      } catch {
+        if (!cancelled) setWikiResults([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [wikiPopup?.query, nestId]);
 
   // Sync external `content` into the editor only when it differs *and*
   // the user isn't actively editing. Without the focus guard, every
@@ -242,6 +403,42 @@ export const MarkdownEditor = forwardRef<
         )}
         data-testid="markdown-editor-content"
       />
+
+      {wikiPopup && wikiResults.length > 0 && (
+        <div
+          className="fixed z-50 w-72 max-h-64 overflow-y-auto rounded-md border bg-popover text-popover-foreground shadow-md"
+          style={{
+            left: wikiPopup.coords.left,
+            top: wikiPopup.coords.top + 4,
+          }}
+          // Avoid stealing editor focus so the cursor selection that
+          // `insertContentAt` targets stays intact.
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground border-b">
+            Link a document
+          </div>
+          <ul className="py-1">
+            {wikiResults.map((doc, idx) => (
+              <li key={doc.id}>
+                <button
+                  type="button"
+                  className={cn(
+                    "w-full text-left px-3 py-1.5 text-sm hover:bg-muted",
+                    idx === wikiPopup.selectedIdx && "bg-muted",
+                  )}
+                  onClick={() => insertWikiPickRef.current?.(doc)}
+                >
+                  <div className="truncate font-medium">{doc.title}</div>
+                  <div className="truncate text-xs text-muted-foreground">
+                    {doc.id}
+                  </div>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 });
