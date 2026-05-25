@@ -46,6 +46,9 @@ type View =
       nodeId: string | "new";
       isOwner: boolean;
       isAnonOwned: boolean;
+      /** Pre-fill the title when arriving via a broken-wikilink click.
+       *  Only meaningful when nodeId === "new". */
+      initialTitle?: string;
     }
   | { page: "teammates" };
 
@@ -295,9 +298,19 @@ export default function App() {
         )}
         {view.page === "document" && (
           <DocumentEditor
+            // Key by nest + node so React unmounts the editor when the
+            // user hops to a different doc (wiki-link nav) or pivots
+            // from an existing doc into a fresh "new" page via a
+            // broken-link click. Without this, useState values (title,
+            // content, status) survive the prop change and the old
+            // doc's body renders under the new doc's chrome — and
+            // isNew flips true with stale state, hiding the status
+            // badge + Submit-for-review button on the original doc.
+            key={`${view.nestId}/${view.nodeId}`}
             nestId={view.nestId}
             nestName={view.nestName}
             nodeId={view.nodeId}
+            isOwner={view.isOwner}
             onBack={() =>
               setView({
                 page: "nest",
@@ -332,6 +345,22 @@ export default function App() {
                   linkNestId === view.nestId ? view.isAnonOwned : false,
               })
             }
+            onCreateDocument={(linkNestId, initialTitle) =>
+              // Broken `[[Title]]` click → land on the new-doc page with
+              // the title pre-filled, matching the Obsidian / MediaWiki
+              // wiki convention. Only fires in the same nest; cross-nest
+              // creation would need permission gating we don't have yet.
+              setView({
+                page: "document",
+                nestId: linkNestId,
+                nestName: view.nestName,
+                nodeId: "new",
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+                initialTitle,
+              })
+            }
+            initialTitle={view.initialTitle}
           />
         )}
         {view.page === "teammates" && (

@@ -16,7 +16,11 @@ import {
   rejectSuggestion,
   listSuggestions,
   readSuggestion,
+  parseDocument,
   VersionManager,
+  computeContentHash,
+  getChecksumContent,
+  type ContextNode,
   type RbacHook,
   type SuggestionMeta,
   type PendingChange,
@@ -93,6 +97,45 @@ async function loadChainHead(
 }
 
 /**
+ * Reconstruct the document at its latest history version and return a
+ * parsed node. Used when drift is detected: the engine's
+ * `readDocument(verifyChecksum: true)` returns the nearest *keyframe*
+ * (every 10 versions), which means a v=5 doc would render the v=1
+ * body in the editor while the drift banner is shown. Reconstructing
+ * from history.yaml gives the actual last-approved bytes.
+ */
+export async function loadLatestApprovedNode(
+  nestId: string,
+  documentId: string,
+): Promise<ContextNode | null> {
+  const { storage } = engineCache.get(nestId);
+  const head = await loadChainHead(storage, documentId);
+  if (!head) return null;
+  return parseDocument(docPath(nestId, documentId), head.content, documentId);
+}
+
+/**
+ * True when the live body hash matches the latest version's body in
+ * history.yaml. Drift against the stored frontmatter checksum that
+ * lands on a body we already wrote (PATCH/MCP save left a stale
+ * checksum, or scanner raced between writeDocument and createVersion)
+ * is not a real out-of-band edit — the content is recorded in history.
+ *
+ * A real external edit produces bytes no version reconstructs to and
+ * still gets flagged.
+ */
+async function bodyMatchesLatestVersion(
+  storage: NestStorage,
+  documentId: string,
+  liveBodyHash: string,
+): Promise<boolean> {
+  const head = await loadChainHead(storage, documentId);
+  if (!head) return false;
+  const headBodyHash = computeContentHash(getChecksumContent(head.content));
+  return headBodyHash === liveBodyHash;
+}
+
+/**
  * Check a single document for drift and stage a suggestion if the live
  * bytes diverged from the last-approved checksum. Returns the staged
  * suggestion meta, or null when nothing drifted.
@@ -120,6 +163,14 @@ async function scanDocumentForDriftInternal(
 
   const drift = detectDrift(raw, node.frontmatter.checksum);
   if (!drift.drifted) return null;
+
+  // Skip staging when the live body already matches the latest version
+  // in history — the bytes are ours (draft save / MCP update left a
+  // stale checksum) and not an out-of-band edit. Without this the next
+  // GET flips the doc to external_edit_pending right after a save.
+  if (await bodyMatchesLatestVersion(storage, documentId, drift.actualHash)) {
+    return null;
+  }
 
   // Match the chain head the engine will read on approveSuggestion.
   // The engine calls `reconstructVersion(latest)`, which returns the live
@@ -163,31 +214,57 @@ export async function scanNestForDrift(
   return { scanned: docs.length, staged };
 }
 
-/** Get the latest pending external edit for a document, if any. */
+/** Get the latest pending external edit for a document, if any.
+ *
+ * Stale suggestions whose proposed body has since been folded into
+ * history (e.g. legacy entries staged before the latest-version guard
+ * in scan) are filtered out so they no longer flip the doc to
+ * external_edit_pending in the UI.
+ */
 export async function getPendingChange(
   nestId: string,
   documentId: string,
 ): Promise<PendingChange | null> {
   const { storage } = engineCache.get(nestId);
   const list = await listSuggestions(storage, documentId);
-  if (list.length === 0) return null;
-  const latest = list[list.length - 1];
-  return {
-    suggestion_id: latest.suggestion_id,
-    detected_at: latest.detected_at,
-    source: latest.source,
-    proposed_hash: latest.proposed_hash,
-  };
+  for (let i = list.length - 1; i >= 0; i--) {
+    const meta = list[i];
+    if (await bodyMatchesLatestVersion(storage, documentId, meta.proposed_hash)) {
+      continue;
+    }
+    return {
+      suggestion_id: meta.suggestion_id,
+      detected_at: meta.detected_at,
+      source: meta.source,
+      proposed_hash: meta.proposed_hash,
+    };
+  }
+  return null;
 }
 
-/** List every pending external edit across all documents in a nest. */
+/** List every pending external edit across all documents in a nest.
+ *
+ * Filters stale suggestions whose proposed body matches the document's
+ * latest version — those are recorded history, not real out-of-band
+ * edits, so showing them in the admin queue is misleading.
+ */
 export async function listNestExternalEdits(
   nestId: string,
 ): Promise<ExternalEditEntry[]> {
   const { storage } = engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
   const lists = await Promise.all(
-    docs.map((doc) => listSuggestions(storage, doc.id)),
+    docs.map(async (doc) => {
+      const metas = await listSuggestions(storage, doc.id);
+      const fresh: SuggestionMeta[] = [];
+      for (const meta of metas) {
+        if (await bodyMatchesLatestVersion(storage, doc.id, meta.proposed_hash)) {
+          continue;
+        }
+        fresh.push(meta);
+      }
+      return fresh;
+    }),
   );
   const entries: ExternalEditEntry[] = lists.flat().map((meta) => ({
     suggestion_id: meta.suggestion_id,

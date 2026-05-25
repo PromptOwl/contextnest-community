@@ -411,8 +411,13 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
 //
 // Rules:
 //   super-admin (access.yaml)  -> all allowed
-//   nest owner                 -> edit + access, NEVER approve (separation-of-duties)
-//   steward role=reviewer      -> approve + reject + access
+//   nest owner                 -> edit + access + approve (including own
+//                                 submissions; the owner already has full
+//                                 control over the nest, so the
+//                                 separation-of-duties rule was theater
+//                                 for the seeding case — CU-86ahn99dg).
+//                                 The version log still records the actor.
+//   steward role=reviewer      -> approve + reject + access (NOT own work)
 //   steward role=editor        -> edit + access
 //   steward role=viewer        -> access only
 
@@ -492,6 +497,17 @@ export function canUserApprove(
 ): PermissionResult {
   if (isSuperAdmin(userEmail)) {
     return { allowed: true, reason: "super admin", role: "super_admin" };
+  }
+
+  // Nest owner can always approve — including their own submissions.
+  // Mirrors the short-circuit in canUserEdit / canUserAccess. The owner
+  // already controls the nest at every other layer; pretending the
+  // separation-of-duties rule applies to them just blocks the seeding
+  // flow. The version log still records the actor for audit. See
+  // CU-86ahn99dg.
+  const owner = getNestOwnerEmail(nestId);
+  if (owner && owner.toLowerCase() === userEmail.toLowerCase()) {
+    return { allowed: true, reason: "nest owner", role: "owner" };
   }
 
   // Check steward assignment first — a user who isn't a steward can't approve

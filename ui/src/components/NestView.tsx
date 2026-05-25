@@ -121,12 +121,9 @@ export function NestView({
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const stats = {
-    total: nodes.length,
-    pending: nodes.filter((n) => n.status === "pending_review").length,
-    approved: nodes.filter((n) => n.status === "approved").length,
-    reviewQueue: reviewQueue.length,
-  };
+  // stats are built later (after reviewableQueue is computed) so the
+  // Review Queue card can bind to the count the user can actually act
+  // on — not the raw queue size. See computeStats() below.
 
   const filtered = nodes.filter((n) => {
     if (statusFilter !== "all" && n.status !== statusFilter) return false;
@@ -144,10 +141,12 @@ export function NestView({
   const isStewardOnly = !isAdmin && myStewards.length > 0;
   const canEditDocs =
     !isStewardOnly || myStewards.some((s) => s.role === "editor");
-  // Approve/reject is reviewer-only by product rule. Editors, viewers, and
-  // nest owners (no steward row) cannot action a review even though server
-  // would still enforce; hide the affordance to keep UI honest.
-  const canReviewDocs = myStewards.some((s) => s.role === "reviewer");
+  // Approve/reject is reviewer-only by product rule, with one exception:
+  // the nest owner can self-approve any pending review (mirrors server
+  // canUserApprove short-circuit added in CU-86ahn99dg). Editors and
+  // viewers still see nothing.
+  const canReviewDocs =
+    isOwner || myStewards.some((s) => s.role === "reviewer");
 
   // Map nodeId → submitter so the per-row Review button can hide on
   // docs the current user submitted (separation-of-duties: authors must
@@ -160,9 +159,11 @@ export function NestView({
   // Eligibility check: does the caller hold a reviewer steward row whose
   // scope covers this node? Mirrors server resolution (document > tag >
   // nest), but client-side so the queue can be filtered without N extra
-  // round-trips.
+  // round-trips. Nest owner short-circuits — server now allows owner to
+  // approve anything in their nest (CU-86ahn99dg).
   const canReviewNode = (node: { id: string; tags?: string[] }) => {
     if (!node) return false;
+    if (isOwner) return true;
     return myStewards.some((s) => {
       if (s.role !== "reviewer") return false;
       if (s.scope === "nest") return true;
@@ -177,17 +178,27 @@ export function NestView({
     });
   };
 
-  // Review queue: only the assigned reviewer for the node sees the
-  // request. Owners and server admins do NOT get a free pass — the
-  // queue is purely a reviewer worklist; owners use the audit/version
-  // panels for visibility instead. Drops own-submitted requests too
-  // (separation of duties).
+  // Review queue: the assigned reviewer sees their scope. Nest owner
+  // also sees the full queue and may self-approve their own submissions
+  // (CU-86ahn99dg) — the separation-of-duties drop only applies to
+  // non-owner reviewers.
   const reviewableQueue = reviewQueue.filter((r) => {
-    if (r.requestedBy.toLowerCase() === currentEmail) return false;
+    if (!isOwner && r.requestedBy.toLowerCase() === currentEmail) return false;
     const node = nodes.find((n) => n.id === r.nodeId);
     if (!node) return false;
     return canReviewNode(node);
   });
+
+  // Computed here so the Review Queue card binds to reviewableQueue.length
+  // (what the user can actually act on) instead of reviewQueue.length
+  // (raw size, which over-promised before — see CU-86ahn99fv).
+  const stats = {
+    total: nodes.length,
+    pending: nodes.filter((n) => n.status === "pending_review").length,
+    approved: nodes.filter((n) => n.status === "approved").length,
+    reviewQueue: reviewQueue.length,
+    reviewable: reviewableQueue.length,
+  };
 
   const openVersions = async (node: any) => {
     setVersionNode(node);
@@ -373,12 +384,23 @@ export function NestView({
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription>Review Queue</CardDescription>
-                <CardTitle className="text-3xl text-blue-600">{stats.reviewQueue}</CardTitle>
+                <CardTitle className="text-3xl text-blue-600">
+                  {stats.reviewable}
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Shield className="h-4 w-4" />
-                  <span>Need your review</span>
+                  <span>
+                    Need your review
+                    {stats.reviewQueue > stats.reviewable && (
+                      <span className="ml-1 text-xs">
+                        ({stats.reviewQueue} pending total,
+                        {" "}
+                        {stats.reviewQueue - stats.reviewable} outside your scope)
+                      </span>
+                    )}
+                  </span>
                 </div>
               </CardContent>
             </Card>
@@ -501,7 +523,8 @@ export function NestView({
                         )}
                         {stewardshipEnabled &&
                           node.status === "pending_review" &&
-                          submitterByNode.get(node.id) !== currentEmail &&
+                          (isOwner ||
+                            submitterByNode.get(node.id) !== currentEmail) &&
                           canReviewDocs && (
                             <Button
                               variant="outline"
@@ -827,9 +850,14 @@ export function NestView({
       {reviewNode && (
         <ReviewDocumentModal
           node={reviewNode}
+          nestId={nestId}
           onApprove={handleApprove}
           onReject={handleReject}
           onClose={() => setReviewNode(null)}
+          onOpenDocument={(nodeId) => {
+            setReviewNode(null);
+            onOpenDocument(nodeId);
+          }}
         />
       )}
 
@@ -856,27 +884,78 @@ export function NestView({
 
 function ReviewDocumentModal({
   node,
+  nestId,
   onApprove,
   onReject,
   onClose,
+  onOpenDocument,
 }: {
   node: any;
+  nestId: string;
   onApprove: (note?: string) => Promise<void>;
   onReject: (note: string) => Promise<void>;
   onClose: () => void;
+  onOpenDocument: (nodeId: string) => void;
 }) {
+  const [linkError, setLinkError] = useState<string | null>(null);
+
+  // Resolve `[[Title]]` clicks to a node id and jump straight to that
+  // doc. Without this the wiki-link decoration renders but click does
+  // nothing — `MarkdownEditor` only wires nav when `onWikiLinkClick`
+  // is provided. Cache miss (no id from the existence check) falls
+  // back to a fresh title→id lookup so links resolve even when the
+  // target was created after the reviewer opened the modal. Broken
+  // links are NOT routed to the create flow — the caller is acting
+  // as a reviewer here (read-only role for this surface), so silently
+  // dropping them into an authoring page would mislead them; instead
+  // we surface an inline note.
+  const handleWikiLinkClick = async (title: string, id: string | null) => {
+    setLinkError(null);
+    if (id) {
+      onOpenDocument(id);
+      return;
+    }
+    try {
+      const { nodes } = await api.searchNodes(nestId, title);
+      const exact = (nodes as Array<{ id: string; title: string }>).find(
+        (n) => n.title.toLowerCase() === title.toLowerCase(),
+      );
+      if (exact) {
+        onOpenDocument(exact.id);
+        return;
+      }
+      setLinkError(
+        `"${title}" doesn't exist in this nest. Reviewers can't create new documents — ask an editor to add it.`,
+      );
+    } catch {
+      setLinkError("Couldn't look up that document — try again later.");
+    }
+  };
+
   return (
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[600px] max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>{node.title}</DialogTitle>
         </DialogHeader>
+        {linkError && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+            {linkError}
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto rounded-md">
           {node.content ? (
             <MarkdownEditor
+              // Remount when the reviewer switches between docs in the
+              // queue. Same modal instance otherwise → TipTap keeps its
+              // previous doc's editor state and the body briefly shows
+              // the wrong content on swap.
+              key={node.id}
               content={node.content}
               onChange={() => { }}
               editable={false}
+              nestId={nestId}
+              onWikiLinkClick={handleWikiLinkClick}
             />
           ) : (
             <p className="text-sm text-muted-foreground p-4">(no content)</p>
