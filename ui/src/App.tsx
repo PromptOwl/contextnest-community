@@ -294,21 +294,6 @@ export default function App() {
                 isAnonOwned: view.isAnonOwned,
               })
             }
-            onCreateDocument={(linkNestId, initialTitle) =>
-              // Broken `[[Title]]` click from the review modal → new-doc
-              // page with title pre-filled. Mirrors the DocumentEditor
-              // wiki-create flow so the convention is consistent across
-              // both reading surfaces.
-              setView({
-                page: "document",
-                nestId: linkNestId,
-                nestName: view.nestName,
-                nodeId: "new",
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-                initialTitle,
-              })
-            }
           />
         )}
         {view.page === "document" && (

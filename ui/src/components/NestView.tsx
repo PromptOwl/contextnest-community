@@ -43,11 +43,6 @@ interface NestViewProps {
   isAnonOwned: boolean;
   onBack: () => void;
   onOpenDocument: (nodeId: string | "new") => void;
-  /** Broken `[[Title]]` click inside the review modal — opens a fresh
-   *  new-doc page with the title pre-filled. Mirrors DocumentEditor's
-   *  same-named callback so the wiki-create convention works in both
-   *  contexts. */
-  onCreateDocument?: (nestId: string, title: string) => void;
 }
 
 export function NestView({
@@ -57,7 +52,6 @@ export function NestView({
   isAnonOwned,
   onBack,
   onOpenDocument,
-  onCreateDocument,
 }: NestViewProps) {
   const { isAdmin, adminStatus, authMode } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
@@ -860,14 +854,6 @@ export function NestView({
             setReviewNode(null);
             onOpenDocument(nodeId);
           }}
-          onCreateDocument={
-            onCreateDocument
-              ? (linkNestId, title) => {
-                  setReviewNode(null);
-                  onCreateDocument(linkNestId, title);
-                }
-              : undefined
-          }
         />
       )}
 
@@ -899,7 +885,6 @@ function ReviewDocumentModal({
   onReject,
   onClose,
   onOpenDocument,
-  onCreateDocument,
 }: {
   node: any;
   nestId: string;
@@ -907,17 +892,21 @@ function ReviewDocumentModal({
   onReject: (note: string) => Promise<void>;
   onClose: () => void;
   onOpenDocument: (nodeId: string) => void;
-  onCreateDocument?: (nestId: string, title: string) => void;
 }) {
+  const [linkError, setLinkError] = useState<string | null>(null);
+
   // Resolve `[[Title]]` clicks to a node id and jump straight to that
   // doc. Without this the wiki-link decoration renders but click does
   // nothing — `MarkdownEditor` only wires nav when `onWikiLinkClick`
   // is provided. Cache miss (no id from the existence check) falls
   // back to a fresh title→id lookup so links resolve even when the
   // target was created after the reviewer opened the modal. Broken
-  // link → fire onCreateDocument so the reviewer can spawn a stub
-  // (matches DocumentEditor's wiki-create convention).
+  // links are NOT routed to the create flow — the caller is acting
+  // as a reviewer here (read-only role for this surface), so silently
+  // dropping them into an authoring page would mislead them; instead
+  // we surface an inline note.
   const handleWikiLinkClick = async (title: string, id: string | null) => {
+    setLinkError(null);
     if (id) {
       onOpenDocument(id);
       return;
@@ -931,9 +920,11 @@ function ReviewDocumentModal({
         onOpenDocument(exact.id);
         return;
       }
-      onCreateDocument?.(nestId, title);
+      setLinkError(
+        `"${title}" doesn't exist in this nest. Reviewers can't create new documents — ask an editor to add it.`,
+      );
     } catch {
-      /* search failed — keep link dead until next click */
+      setLinkError("Couldn't look up that document — try again later.");
     }
   };
 
@@ -943,6 +934,11 @@ function ReviewDocumentModal({
         <DialogHeader>
           <DialogTitle>{node.title}</DialogTitle>
         </DialogHeader>
+        {linkError && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+            {linkError}
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto rounded-md">
           {node.content ? (
             <MarkdownEditor
