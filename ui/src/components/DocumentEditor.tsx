@@ -111,11 +111,12 @@ export function DocumentEditor({
   const isNew = nodeId === "new";
   const { adminStatus } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
-  // Caller's resolved steward role for this node (null = none / not a steward).
-  // Drives read-only gating + the inline reviewer affordance. We derive
-  // the "can review here?" answer from this single source instead of
-  // tracking a redundant boolean.
-  const [myNodeRole, setMyNodeRole] = useState<string | null>(null);
+  // Caller's resolved steward roles for this node (empty = not a steward).
+  // A user may hold more than one row (e.g. editor on the doc + reviewer
+  // on the nest); we keep the full set so editor+reviewer keeps BOTH the
+  // edit affordance and the inline approve/reject affordance instead of
+  // picking one and losing the other.
+  const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   const [content, setContent] = useState("");
@@ -124,6 +125,12 @@ export function DocumentEditor({
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
   const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
+  // Submitter of the active pending review (null when not pending).
+  // Drives SoD on the inline approve/reject: the user who submitted
+  // the review can't approve it themselves — server enforces the same
+  // rule and 403s if you try, but hiding the affordance avoids the
+  // user clicking through an error.
+  const [pendingReviewBy, setPendingReviewBy] = useState<string | null>(null);
   // Peek-modal state for wiki-link clicks. Clicking `[[Title]]` used to
   // navigate away from the editor, which silently discarded any unsaved
   // edits. Now we open a read-only preview in-place; "Open in editor"
@@ -197,7 +204,7 @@ export function DocumentEditor({
   // can treat "no row" as "no special permissions".
   useEffect(() => {
     if (isNew || !nodeId || !currentEmail) {
-      setMyNodeRole(null);
+      setMyNodeRoles([]);
       return;
     }
     let cancelled = false;
@@ -205,12 +212,12 @@ export function DocumentEditor({
       try {
         const { stewards } = await api.getNodeStewards(nestId, nodeId);
         if (cancelled) return;
-        const mine = (stewards as any[]).find(
+        const mine = (stewards as any[]).filter(
           (s) => (s.email || "").toLowerCase() === currentEmail,
         );
-        setMyNodeRole(mine?.role ?? null);
+        setMyNodeRoles(mine.map((s) => s.role));
       } catch {
-        if (!cancelled) setMyNodeRole(null);
+        if (!cancelled) setMyNodeRoles([]);
       }
     })();
     return () => {
@@ -232,6 +239,9 @@ export function DocumentEditor({
       setBaseVersion(node?.version);
       setStatus(node?.status ?? null);
       setPendingChange((node as any)?.pendingChange ?? null);
+      setPendingReviewBy(
+        ((node as any)?.pendingReviewBy as string | null | undefined) ?? null,
+      );
       initialSnapshotRef.current = {
         title: loadedTitle,
         content: loadedContent,
@@ -381,12 +391,7 @@ export function DocumentEditor({
   // dialog; otherwise the intent runs straight through. Read-only
   // sessions skip the prompt — the user couldn't have produced edits.
   const confirmLeave = (label: string, run: () => void) => {
-    if (
-      !isDirty ||
-      isLocked ||
-      myNodeRole === "reviewer" ||
-      myNodeRole === "viewer"
-    ) {
+    if (!isDirty || isLocked || isReviewerOnly) {
       run();
       return;
     }
@@ -429,21 +434,30 @@ export function DocumentEditor({
     await api.rejectNode(nestId, nodeId, note);
     await loadNode();
   };
-  // Owner short-circuit mirrors server-side canUserApprove: nest owner can
-  // approve any pending review, including their own submissions (the
-  // seeding flow). Reviewer stewards still need a row to get the affordance.
+  const hasReviewerRole = myNodeRoles.includes("reviewer");
+  const hasEditorRole = myNodeRoles.includes("editor");
+
+  // Owner short-circuit mirrors server-side canUserApprove: nest owner
+  // can approve any pending review, including their own submissions
+  // (the seeding flow). Reviewer stewards still need a reviewer row.
+  // SoD: anyone who isn't the owner can't approve a review THEY
+  // submitted — even when they also hold an editor row. The user must
+  // hand off to another reviewer.
+  const isOwnSubmission =
+    !!pendingReviewBy &&
+    !!currentEmail &&
+    pendingReviewBy.toLowerCase() === currentEmail;
   const canReviewHere =
     !isNew &&
     status === "pending_review" &&
-    (myNodeRole === "reviewer" || isOwner);
+    (hasReviewerRole || isOwner) &&
+    (isOwner || !isOwnSubmission);
 
-  // Reviewers + viewers are read-only on the docs they govern — reviewers
-  // approve/reject, viewers just read; neither authors content. Hide Save
-  // + Submit-for-Review whenever the caller's resolved role on this node
-  // is reviewer or viewer, regardless of status. Editors/owners (no
-  // steward row or role === "editor") are unaffected.
-  const isReviewerOnly =
-    myNodeRole === "reviewer" || myNodeRole === "viewer";
+  // Read-only when the caller's only steward rows are reviewer/viewer
+  // (no editor row anywhere). Editors author content; reviewers just
+  // approve/reject; viewers just read. A user with editor + reviewer is
+  // NOT read-only — keep edit affordances open for them.
+  const isReviewerOnly = myNodeRoles.length > 0 && !hasEditorRole;
 
   // Submit-for-Review only makes sense on an existing draft when the
   // nest has stewardship enabled. Pending/approved/rejected docs hide

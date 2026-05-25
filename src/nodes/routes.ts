@@ -9,6 +9,7 @@ import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
 import * as stewardship from "../governance/stewardship-service.js";
+import * as reviews from "../governance/review-service.js";
 import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
 import {
   resolveCallerEmail,
@@ -360,6 +361,12 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   response.status = node.pendingChange
     ? "external_edit_pending"
     : versions.getDisplayStatus(nestId, nodeId);
+  // Surface the pending review's submitter so the UI can hide the
+  // approve/reject affordance from that user (SoD). Server enforces too.
+  if (response.status === "pending_review") {
+    const pending = reviews.getPendingReview(nestId, nodeId);
+    (response as any).pendingReviewBy = pending?.requestedBy ?? null;
+  }
   return c.json({ node: response });
 });
 
