@@ -56,61 +56,44 @@ nodeRoutes.get("/", async (c) => {
 
   // Public readers (visibility=public, no owner/collab grant) see only the
   // approved version of each document — never the latest on-disk body,
-  // which may contain post-approval drafts. Reconstruct the approved
-  // snapshot per node and stamp the response with the approved version
-  // number + "approved" status.
-  // const publicReader = isPublicReader(nestId, userId);
+  // which may contain post-approval drafts. Drift / external-edit pending
+  // state is owner-facing context, so we skip the pendingChange lookup
+  // entirely for public readers.
+  const publicReader = isPublicReader(nestId, userId);
 
-  // const nodes = await Promise.all(
-  //   accessible.map(async (doc) => {
-  //     const r = toNodeResponse(doc);
-  //     if (publicReader) {
-  //       const approved = versions.getApprovedVersion(nestId, doc.id);
-  //       if (approved != null) {
-  //         try {
-  //           r.content = await versionManager.reconstructVersion(
-  //             doc.id,
-  //             approved,
-  //           );
-  //         } catch (err) {
-  //           console.error(
-  //             "reconstructVersion failed (public list)",
-  //             doc.id,
-  //             approved,
-  //             err,
-  //           );
-  //           r.content = "";
-  //         }
-  //         r.version = approved;
-  //         r.status = "approved";
-  //         return r;
-  //       }
-  //     }
-  //     // Workflow status is computed entirely from the DB so the .md
-  //     // frontmatter stays stable across draft → pending → approved
-  //     // cycles. See getDisplayStatus() for the resolution order.
-  //     r.status = versions.getDisplayStatus(nestId, r.id);
-  //     return r;
-  //   }),
-  // );
-
-  // return c.json({ count: nodes.length, nodes });
-  const pendingByDoc = new Map<string, Awaited<ReturnType<typeof getPendingChange>>>();
-  await Promise.all(
+  const nodes = await Promise.all(
     accessible.map(async (doc) => {
-      try {
-        pendingByDoc.set(doc.id, await getPendingChange(nestId, doc.id));
-      } catch {
-        pendingByDoc.set(doc.id, null);
-      }
-    }),
-  );
-
-  return c.json({
-    count: accessible.length,
-    nodes: accessible.map((doc) => {
       const r = toNodeResponse(doc);
-      const pending = pendingByDoc.get(doc.id);
+
+      if (publicReader) {
+        const approved = versions.getApprovedVersion(nestId, doc.id);
+        if (approved != null) {
+          try {
+            r.content = await versionManager.reconstructVersion(
+              doc.id,
+              approved,
+            );
+          } catch (err) {
+            console.error(
+              "reconstructVersion failed (public list)",
+              doc.id,
+              approved,
+              err,
+            );
+            r.content = "";
+          }
+          r.version = approved;
+          r.status = "approved";
+        }
+        return r;
+      }
+
+      let pending: Awaited<ReturnType<typeof getPendingChange>> = null;
+      try {
+        pending = await getPendingChange(nestId, doc.id);
+      } catch {
+        pending = null;
+      }
       if (pending) {
         r.pendingChange = pending;
         r.status = "external_edit_pending";
@@ -121,8 +104,10 @@ nodeRoutes.get("/", async (c) => {
         r.status = versions.getDisplayStatus(nestId, r.id);
       }
       return r;
-    })
-  });
+    }),
+  );
+
+  return c.json({ count: nodes.length, nodes });
 });
 
 // POST /nests/:nestId/nodes
