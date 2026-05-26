@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { ANON_USER_ID } from "../shared/constants.js";
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -72,19 +73,17 @@ export function runMigrations(db: Database.Database): void {
   db.exec(`
     -- Steward assignments (mirrors PromptOwl ContextSteward model)
     -- scope+target combination determines what the steward governs
-    -- Resolution priority: document(1) > folder(2) > tag(3) > nest(4)
+    -- Resolution priority: document(1) > tag(2) > nest(3)
     CREATE TABLE IF NOT EXISTS stewards (
       id TEXT PRIMARY KEY,
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-      scope TEXT NOT NULL CHECK(scope IN ('document', 'folder', 'tag', 'nest')),
-      node_pattern TEXT,           -- glob for document/folder scope (e.g. "nodes/api-*")
+      scope TEXT NOT NULL CHECK(scope IN ('document', 'tag', 'nest')),
+      node_pattern TEXT,           -- exact node id for document scope
       tag_name TEXT,               -- for tag scope
       user_email TEXT NOT NULL,
       user_id TEXT REFERENCES users(id),
       role TEXT NOT NULL DEFAULT 'reviewer'
         CHECK(role IN ('editor', 'reviewer', 'admin')),
-      can_approve INTEGER NOT NULL DEFAULT 1,
-      can_reject INTEGER NOT NULL DEFAULT 1,
       assigned_by TEXT NOT NULL,
       assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
       is_active INTEGER NOT NULL DEFAULT 1
@@ -215,24 +214,23 @@ export function runMigrations(db: Database.Database): void {
         CREATE TABLE stewards_new (
           id TEXT PRIMARY KEY,
           nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-          scope TEXT NOT NULL CHECK(scope IN ('document', 'folder', 'tag', 'nest')),
+          scope TEXT NOT NULL CHECK(scope IN ('document', 'tag', 'nest')),
           node_pattern TEXT,
           tag_name TEXT,
           user_email TEXT NOT NULL,
           user_id TEXT REFERENCES users(id),
           role TEXT NOT NULL DEFAULT 'reviewer'
             CHECK(role IN ('editor', 'reviewer', 'viewer')),
-          can_approve INTEGER NOT NULL DEFAULT 1,
-          can_reject INTEGER NOT NULL DEFAULT 1,
           assigned_by TEXT NOT NULL,
           assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
           is_active INTEGER NOT NULL DEFAULT 1
         );
 
-        -- Copy rows; map legacy 'admin' role to 'reviewer', normalize tag_name + email
+        -- Copy rows; map legacy 'admin' role to 'reviewer', normalize tag_name + email.
+        -- Legacy can_approve/can_reject columns are dropped here (role is now the sole signal).
         INSERT INTO stewards_new
           (id, nest_id, scope, node_pattern, tag_name, user_email, user_id,
-           role, can_approve, can_reject, assigned_by, assigned_at, is_active)
+           role, assigned_by, assigned_at, is_active)
         SELECT
           id, nest_id, scope, node_pattern,
           CASE
@@ -242,7 +240,7 @@ export function runMigrations(db: Database.Database): void {
           lower(user_email),
           user_id,
           CASE role WHEN 'admin' THEN 'reviewer' ELSE role END,
-          can_approve, can_reject, assigned_by, assigned_at, is_active
+          assigned_by, assigned_at, is_active
         FROM stewards;
 
         DROP TABLE stewards;
@@ -263,10 +261,6 @@ export function runMigrations(db: Database.Database): void {
           ON stewards(nest_id, node_pattern, user_email)
           WHERE scope = 'document' AND node_pattern IS NOT NULL AND is_active = 1;
 
-        CREATE UNIQUE INDEX idx_stewards_uniq_folder
-          ON stewards(nest_id, node_pattern, user_email)
-          WHERE scope = 'folder' AND node_pattern IS NOT NULL AND is_active = 1;
-
         CREATE UNIQUE INDEX idx_stewards_uniq_tag
           ON stewards(nest_id, tag_name, user_email)
           WHERE scope = 'tag' AND tag_name IS NOT NULL AND is_active = 1;
@@ -275,9 +269,6 @@ export function runMigrations(db: Database.Database): void {
         CREATE INDEX idx_stewards_tag_lookup
           ON stewards(nest_id, tag_name)
           WHERE scope = 'tag' AND is_active = 1;
-        CREATE INDEX idx_stewards_folder_lookup
-          ON stewards(nest_id, node_pattern)
-          WHERE scope = 'folder' AND is_active = 1;
         CREATE INDEX idx_stewards_doc_lookup
           ON stewards(nest_id, node_pattern)
           WHERE scope = 'document' AND is_active = 1;
@@ -407,6 +398,147 @@ export function runMigrations(db: Database.Database): void {
         db.exec("ALTER TABLE license_cache ADD COLUMN owner_email TEXT");
       }
       recordMigration("004_license_cache_owner_email");
+    })();
+  }
+
+  // 005: anon-owned (ungoverned) nests default to public visibility.
+  // Old rows were created with the schema default 'private', which hid
+  // them from regular users in key mode even though the listNests path
+  // still returned them — inconsistent state. One-shot backfill aligns
+  // existing data with the new createNest default. Admin can flip
+  // individual nests back to private via PATCH /nests/:id/visibility.
+  if (!hasMigration("005_anon_nest_public_default")) {
+    db.transaction(() => {
+      db.prepare(
+        "UPDATE nests SET visibility = 'public' WHERE user_id = ? AND visibility = 'private'",
+      ).run(ANON_USER_ID);
+      recordMigration("005_anon_nest_public_default");
+    })();
+  }
+
+  // 006: add 'published' to node_versions.status CHECK. The no-stewards
+  // save flow used to write two rows per edit (one 'approved' user row +
+  // a system-author row mirroring the engine's publish bump). New flow
+  // writes a single 'published' row at the engine's bumped version, so
+  // governance numbering stays in lockstep with the on-disk frontmatter.
+  // SQLite can't ALTER a CHECK in place — rebuild the table.
+  if (!hasMigration("006_node_versions_published_status")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE node_versions_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          content_hash TEXT NOT NULL,
+          author TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'draft'
+            CHECK(status IN ('draft', 'pending_review', 'approved', 'published', 'rejected')),
+          change_note TEXT,
+          tags_json TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(nest_id, node_id, version)
+        );
+        INSERT INTO node_versions_new
+          (id, nest_id, node_id, version, content_hash, author, status, change_note, tags_json, created_at)
+        SELECT
+          id, nest_id, node_id, version, content_hash, author, status, change_note, tags_json, created_at
+        FROM node_versions;
+        DROP TABLE node_versions;
+        ALTER TABLE node_versions_new RENAME TO node_versions;
+        CREATE INDEX idx_versions_node ON node_versions(nest_id, node_id);
+      `);
+      recordMigration("006_node_versions_published_status");
+    })();
+  }
+
+  // 007: drop legacy can_approve/can_reject columns from stewards.
+  // Role is now the sole signal (reviewer = approve+reject).
+  // Skip cleanly if columns are already gone (fresh installs, or repeat runs).
+  if (!hasMigration("007_drop_steward_capability_flags")) {
+    const stewardCols = (
+      db.prepare("PRAGMA table_info(stewards)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    const hasLegacyCols =
+      stewardCols.includes("can_approve") || stewardCols.includes("can_reject");
+    if (hasLegacyCols) {
+      db.transaction(() => {
+        if (stewardCols.includes("can_approve")) {
+          db.exec("ALTER TABLE stewards DROP COLUMN can_approve");
+        }
+        if (stewardCols.includes("can_reject")) {
+          db.exec("ALTER TABLE stewards DROP COLUMN can_reject");
+        }
+        recordMigration("007_drop_steward_capability_flags");
+      })();
+    } else {
+      recordMigration("007_drop_steward_capability_flags");
+    }
+  }
+
+  // 008: drop folder scope from stewards.
+  //   - hard-delete any existing folder rows (path-prefix matching removed
+  //     from resolver, so keeping them would orphan data the UI can't see)
+  //   - drop folder-specific partial indexes
+  //   - rebuild stewards with tightened CHECK constraint ('document','tag','nest')
+  if (!hasMigration("008_drop_steward_folder_scope")) {
+    db.transaction(() => {
+      db.exec("DELETE FROM stewards WHERE scope = 'folder'");
+      db.exec("DROP INDEX IF EXISTS idx_stewards_uniq_folder");
+      db.exec("DROP INDEX IF EXISTS idx_stewards_folder_lookup");
+
+      // Rebuild only if current CHECK still allows folder. PRAGMA table_info
+      // doesn't expose CHECK text; inspect sqlite_master.
+      const tbl = db
+        .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='stewards'")
+        .get() as { sql?: string } | undefined;
+      if (tbl?.sql && tbl.sql.includes("'folder'")) {
+        db.exec(`
+          CREATE TABLE stewards_new (
+            id TEXT PRIMARY KEY,
+            nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+            scope TEXT NOT NULL CHECK(scope IN ('document', 'tag', 'nest')),
+            node_pattern TEXT,
+            tag_name TEXT,
+            user_email TEXT NOT NULL,
+            user_id TEXT REFERENCES users(id),
+            role TEXT NOT NULL DEFAULT 'reviewer'
+              CHECK(role IN ('editor', 'reviewer', 'viewer')),
+            assigned_by TEXT NOT NULL,
+            assigned_at TEXT NOT NULL DEFAULT (datetime('now')),
+            is_active INTEGER NOT NULL DEFAULT 1
+          );
+          INSERT INTO stewards_new
+            (id, nest_id, scope, node_pattern, tag_name, user_email, user_id,
+             role, assigned_by, assigned_at, is_active)
+          SELECT
+            id, nest_id, scope, node_pattern, tag_name, user_email, user_id,
+            role, assigned_by, assigned_at, is_active
+          FROM stewards;
+          DROP TABLE stewards;
+          ALTER TABLE stewards_new RENAME TO stewards;
+
+          CREATE INDEX idx_stewards_nest ON stewards(nest_id);
+          CREATE INDEX idx_stewards_email ON stewards(user_email);
+          CREATE INDEX idx_stewards_scope ON stewards(nest_id, scope);
+          CREATE UNIQUE INDEX idx_stewards_uniq_nest
+            ON stewards(nest_id, user_email)
+            WHERE scope = 'nest' AND is_active = 1;
+          CREATE UNIQUE INDEX idx_stewards_uniq_document
+            ON stewards(nest_id, node_pattern, user_email)
+            WHERE scope = 'document' AND node_pattern IS NOT NULL AND is_active = 1;
+          CREATE UNIQUE INDEX idx_stewards_uniq_tag
+            ON stewards(nest_id, tag_name, user_email)
+            WHERE scope = 'tag' AND tag_name IS NOT NULL AND is_active = 1;
+          CREATE INDEX idx_stewards_tag_lookup
+            ON stewards(nest_id, tag_name)
+            WHERE scope = 'tag' AND is_active = 1;
+          CREATE INDEX idx_stewards_doc_lookup
+            ON stewards(nest_id, node_pattern)
+            WHERE scope = 'document' AND is_active = 1;
+        `);
+      }
+      recordMigration("008_drop_steward_folder_scope");
     })();
   }
 }

@@ -144,7 +144,12 @@ export function NestSettingsModal({
                 </Label>
                 <p className="text-xs text-muted-foreground">
                   Require steward approval before documents become AI-ready.
-                  New documents will start as <strong>drafts</strong>.
+                  New documents will start as <strong>drafts</strong>. This also
+                  changes what &ldquo;publishing&rdquo; means in this nest:
+                  with stewardship on, the document editor shows
+                  <em> Publish (requires approval)</em>; with it off,
+                  saving auto-publishes and an <em>Auto-published</em> badge
+                  appears next to the title.
                 </p>
               </div>
               <Switch checked={enabled} onCheckedChange={setEnabled} />

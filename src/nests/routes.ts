@@ -15,8 +15,7 @@ import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
-
-const ANON_USER_ID = "00000000-0000-0000-0000-000000000000";
+import { ANON_USER_ID } from "../shared/constants.js";
 
 /**
  * Effective permission for a nest, honoring open-mode + anon-owned nests.

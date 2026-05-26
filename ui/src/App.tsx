@@ -19,6 +19,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { toast } from "sonner";
 import { useAuth } from "./auth/AuthContext";
 
 type View =
@@ -29,6 +38,9 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      /** Seed the nest list's search filter when arriving via a tag
+       *  click on a document detail page. */
+      initialSearch?: string;
     }
   | {
       page: "document";
@@ -37,12 +49,16 @@ type View =
       nodeId: string | "new";
       isOwner: boolean;
       isAnonOwned: boolean;
+      /** Pre-fill the title when arriving via a broken-wikilink click.
+       *  Only meaningful when nodeId === "new". */
+      initialTitle?: string;
     }
   | { page: "teammates" };
 
 export default function App() {
   const {
     authMode,
+    logoUrl,
     adminStatus,
     authenticated,
     isAdmin,
@@ -56,6 +72,25 @@ export default function App() {
     null,
   );
   const [licenseLoading, setLicenseLoading] = useState(true);
+  // Logout flow: confirm dialog → call logout() → sonner success toast.
+  // The Toaster portal lives at the root of the tree (rendered below)
+  // so the toast survives the view swap that logout triggers (Login
+  // screen mounts when authenticated flips false in key mode).
+  const [logoutConfirm, setLogoutConfirm] = useState(false);
+  const [logoutPending, setLogoutPending] = useState(false);
+
+  const requestLogout = useCallback(() => setLogoutConfirm(true), []);
+
+  const confirmLogout = useCallback(async () => {
+    setLogoutPending(true);
+    try {
+      await logout();
+      setLogoutConfirm(false);
+      toast.success("Logged out successfully");
+    } finally {
+      setLogoutPending(false);
+    }
+  }, [logout]);
 
   const refreshLicense = useCallback(async () => {
     try {
@@ -131,8 +166,57 @@ export default function App() {
     return <LicenseSetupPage onActivated={refreshLicense} />;
   }
 
+  // Logout chrome (confirm dialog + success toast) lives at the top of
+  // the render tree so it survives the unmount/remount that happens when
+  // logout flips `authenticated` and the app swaps to <Login />.
+  const logoutChrome = (
+    <>
+      <Dialog
+        open={logoutConfirm}
+        onOpenChange={(open) => {
+          if (!open && !logoutPending) setLogoutConfirm(false);
+        }}
+      >
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <LogOut className="h-4 w-4 text-muted-foreground" />
+              Log out?
+            </DialogTitle>
+            <DialogDescription>
+              You'll be signed out of this browser. Any unsaved edits in
+              other tabs may be lost — save your work first.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setLogoutConfirm(false)}
+              disabled={logoutPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmLogout}
+              disabled={logoutPending}
+            >
+              {logoutPending ? "Logging out..." : "Log out"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+    </>
+  );
+
   if (!authenticated && authMode === "key") {
-    return <Login />;
+    return (
+      <>
+        <Login />
+        {logoutChrome}
+      </>
+    );
   }
 
   return (
@@ -144,7 +228,11 @@ export default function App() {
             onClick={() => setView({ page: "dashboard" })}
             className="flex items-center gap-2 hover:opacity-80"
           >
-            <img src={hootieIcon} alt="ContextNest" className="h-7 w-7" />
+            <img
+              src={logoUrl ?? hootieIcon}
+              alt="ContextNest"
+              className="h-7 w-7 object-contain"
+            />
             <span className="font-semibold">ContextNest</span>
             <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
               Community
@@ -166,7 +254,7 @@ export default function App() {
                 me={adminStatus.me}
                 isAdmin={isAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
-                onLogout={logout}
+                onLogout={requestLogout}
               />
             ) : (
               <Button
@@ -175,7 +263,7 @@ export default function App() {
                 onClick={() => setShowAdminLogin(true)}
               >
                 <Shield className="h-3.5 w-3.5 mr-1" />
-                {adminStatus?.claimed ? "Login" : "Claim as Admin"}
+                Login
               </Button>
             )}
           </div>
@@ -203,6 +291,7 @@ export default function App() {
             nestName={view.nestName}
             isOwner={view.isOwner}
             isAnonOwned={view.isAnonOwned}
+            initialSearch={view.initialSearch}
             onBack={() => setView({ page: "dashboard" })}
             onOpenDocument={(nodeId) =>
               setView({
@@ -218,9 +307,19 @@ export default function App() {
         )}
         {view.page === "document" && (
           <DocumentEditor
+            // Key by nest + node so React unmounts the editor when the
+            // user hops to a different doc (wiki-link nav) or pivots
+            // from an existing doc into a fresh "new" page via a
+            // broken-link click. Without this, useState values (title,
+            // content, status) survive the prop change and the old
+            // doc's body renders under the new doc's chrome — and
+            // isNew flips true with stale state, hiding the status
+            // badge + Submit-for-review button on the original doc.
+            key={`${view.nestId}/${view.nodeId}`}
             nestId={view.nestId}
             nestName={view.nestName}
             nodeId={view.nodeId}
+            isOwner={view.isOwner}
             onBack={() =>
               setView({
                 page: "nest",
@@ -255,6 +354,35 @@ export default function App() {
                   linkNestId === view.nestId ? view.isAnonOwned : false,
               })
             }
+            onTagClick={(tag) =>
+              // Wiki convention: clicking a tag in the document detail
+              // page navigates back to the nest list filtered by that
+              // tag. Same nest only.
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+                initialSearch: tag,
+              })
+            }
+            onCreateDocument={(linkNestId, initialTitle) =>
+              // Broken `[[Title]]` click → land on the new-doc page with
+              // the title pre-filled, matching the Obsidian / MediaWiki
+              // wiki convention. Only fires in the same nest; cross-nest
+              // creation would need permission gating we don't have yet.
+              setView({
+                page: "document",
+                nestId: linkNestId,
+                nestName: view.nestName,
+                nodeId: "new",
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+                initialTitle,
+              })
+            }
+            initialTitle={view.initialTitle}
           />
         )}
         {view.page === "teammates" && (
@@ -264,11 +392,11 @@ export default function App() {
 
       {showAdminLogin && (
         <AdminLoginModal
-          alreadyClaimed={!!adminStatus?.claimed}
           existingAdmin={adminStatus?.admin?.email || null}
           onClose={() => setShowAdminLogin(false)}
         />
       )}
+      {logoutChrome}
     </div>
   );
 }

@@ -64,6 +64,25 @@ export const config = {
   get TELEMETRY_INTERVAL_MS() {
     return parseInt(process.env.TELEMETRY_INTERVAL_MS || "3600000", 10);
   },
+  /**
+   * Optional custom logo URL shown in UI header + login screen.
+   * Must be an absolute https://, http://, or data:image/… URL. Other
+   * schemes (file://, javascript:, relative paths) are rejected with a
+   * warning so an operator typo doesn't silently break the favicon.
+   * When unset or invalid, the UI falls back to the bundled icon.
+   */
+  get LOGO_URL(): string | null {
+    const raw = process.env.LOGO_URL?.trim();
+    if (!raw) return null;
+    const ok = /^(https?:\/\/|data:image\/)/i.test(raw);
+    if (!ok) {
+      console.warn(
+        `[config] LOGO_URL rejected: must start with https://, http://, or data:image/ (got "${raw}"). Falling back to default logo.`,
+      );
+      return null;
+    }
+    return raw;
+  },
   get AUTH_MODE(): "open" | "key" {
     // Default is "key" — requires an explicit AUTH_MODE=open to run
     // without authentication. Safer default for public deployments;

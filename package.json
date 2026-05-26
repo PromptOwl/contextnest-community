@@ -1,6 +1,6 @@
 {
   "name": "@promptowl/contextnest-community",
-  "version": "0.1.0-alpha.2",
+  "version": "1.0.1",
   "description": "ContextNest Community Edition — self-hosted context governance server for AI workflows. Commercial software by Promptowl LLC.",
   "private": false,
   "type": "module",
@@ -48,18 +48,27 @@
     "dev": "concurrently -k -n server,ui -c blue,magenta \"npm run dev:server\" \"npm run dev:ui\"",
     "dev:server": "tsx watch src/index.ts",
     "dev:ui": "vite build --config ui/vite.config.ts --watch",
-    "build": "tsup src/index.ts --format esm --dts --clean && pnpm build:ui",
+    "build": "tsup src/index.ts --format esm --dts --clean && npm run build:ui",
     "build:server": "tsup src/index.ts --format esm --dts --clean",
     "build:ui": "vite build --config ui/vite.config.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublish": "npm run build",
+    "version-packages": "changeset version && npm install --package-lock-only",
+    "release": "npm run build && changeset publish"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
   },
   "dependencies": {
     "@hono/node-server": "^1.13.8",
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@promptowl/contextnest-engine": "^0.3.7",
+    "@promptowl/contextnest-engine": "^1.0.0",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.8.2",
     "dotenv": "^16.6.1",
@@ -68,6 +77,8 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.7.0",
+    "@changesets/cli": "^2.31.0",
     "@radix-ui/react-alert-dialog": "^1.1.11",
     "@radix-ui/react-avatar": "^1.1.0",
     "@radix-ui/react-checkbox": "^1.1.1",
@@ -108,6 +119,9 @@
     "postcss": "^8.4.47",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "sonner": "^2.0.7",
+    "react-markdown": "^9.1.0",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.5.0",
     "tailwindcss": "^3.4.14",
     "tailwindcss-animate": "^1.0.7",

@@ -5,15 +5,20 @@
  * PromptOwl can subscribe to this layer by implementing the same adapter interfaces.
  */
 
-// Document lifecycle states
+// Document lifecycle states. `published` is the terminal state for
+// auto-publish (no-stewards) saves — engine has bumped frontmatter on
+// disk and the row points at the live published version. `approved` is
+// kept for legacy data + the stewards approval workflow until that
+// flow is folded into `published` too.
 export type DocumentLifecycleStatus =
   | "draft"
   | "pending_review"
   | "approved"
+  | "published"
   | "rejected";
 
-// Stewardship scope types (resolution priority: document > folder > tag > nest)
-export type StewardshipScope = "document" | "folder" | "tag" | "nest";
+// Stewardship scope types (resolution priority: document > tag > nest)
+export type StewardshipScope = "document" | "tag" | "nest";
 
 // Review request priority levels
 export type ReviewRequestPriority = "low" | "normal" | "high" | "urgent";
@@ -45,14 +50,12 @@ export interface Steward {
   nestId: string;
   scope: StewardshipScope;
   // Scope targets (only one is set based on scope)
-  nodePattern?: string; // glob pattern for document/folder scope (e.g. "nodes/api-*")
+  nodePattern?: string; // exact node id for document scope
   tagName?: string; // tag scope
   // Assignment
   userEmail: string;
   userId?: string; // resolved from email when user exists
   role: StewardRole;
-  canApprove: boolean;
-  canReject: boolean;
   assignedBy: string;
   assignedAt: string;
   isActive: boolean;
@@ -61,7 +64,7 @@ export interface Steward {
 // Resolved steward with priority (returned from resolution)
 export interface ResolvedSteward {
   steward: Steward;
-  priority: number; // 1=document, 2=folder, 3=tag, 4=nest
+  priority: number; // 1=document, 2=tag, 3=nest
   source: string; // human-readable reason (e.g. "tag: #architecture")
 }
 
@@ -119,7 +122,6 @@ export interface GovernedNode {
 export interface StewardsConfig {
   version: number;
   nest?: StewardEntry[];
-  folders?: Record<string, StewardEntry[]>;
   tags?: Record<string, StewardEntry[]>;
   documents?: Record<string, StewardEntry[]>;
 }
@@ -127,8 +129,6 @@ export interface StewardsConfig {
 export interface StewardEntry {
   email: string;
   role?: StewardRole;
-  can_approve?: boolean;
-  can_reject?: boolean;
 }
 
 // access.yaml format (server-level config)
