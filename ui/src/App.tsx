@@ -30,6 +30,16 @@ import {
 import { toast } from "sonner";
 import { useAuth } from "./auth/AuthContext";
 
+/** One ancestor in the wiki-link nav chain. */
+export interface BreadcrumbEntry {
+  nestId: string;
+  nestName: string;
+  nodeId: string;
+  title: string;
+  isOwner: boolean;
+  isAnonOwned: boolean;
+}
+
 type View =
   | { page: "dashboard" }
   | {
@@ -52,6 +62,8 @@ type View =
       /** Pre-fill the title when arriving via a broken-wikilink click.
        *  Only meaningful when nodeId === "new". */
       initialTitle?: string;
+      /** Prior wiki-link hops, oldest first. Back pops the last entry. */
+      breadcrumb?: BreadcrumbEntry[];
     }
   | { page: "teammates" };
 
@@ -305,86 +317,127 @@ export default function App() {
             }
           />
         )}
-        {view.page === "document" && (
-          <DocumentEditor
-            // Key by nest + node so React unmounts the editor when the
-            // user hops to a different doc (wiki-link nav) or pivots
-            // from an existing doc into a fresh "new" page via a
-            // broken-link click. Without this, useState values (title,
-            // content, status) survive the prop change and the old
-            // doc's body renders under the new doc's chrome — and
-            // isNew flips true with stale state, hiding the status
-            // badge + Submit-for-review button on the original doc.
-            key={`${view.nestId}/${view.nodeId}`}
-            nestId={view.nestId}
-            nestName={view.nestName}
-            nodeId={view.nodeId}
-            isOwner={view.isOwner}
-            onBack={() =>
-              setView({
-                page: "nest",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-              })
-            }
-            onSaved={() =>
-              setView({
-                page: "nest",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-              })
-            }
-            onNavigateDocument={(linkNestId, linkNodeId) =>
-              // Cross-nest links don't carry the target nest's name or
-              // ownership — keep current values as a best-effort and let
-              // DocumentEditor reload. Delete affordance in NestView
-              // will be hidden for cross-nest hops it can't verify.
-              setView({
-                page: "document",
-                nestId: linkNestId,
-                nestName:
-                  linkNestId === view.nestId ? view.nestName : "Document",
-                nodeId: linkNodeId,
-                isOwner: linkNestId === view.nestId ? view.isOwner : false,
-                isAnonOwned:
-                  linkNestId === view.nestId ? view.isAnonOwned : false,
-              })
-            }
-            onTagClick={(tag) =>
-              // Wiki convention: clicking a tag in the document detail
-              // page navigates back to the nest list filtered by that
-              // tag. Same nest only.
-              setView({
-                page: "nest",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-                initialSearch: tag,
-              })
-            }
-            onCreateDocument={(linkNestId, initialTitle) =>
-              // Broken `[[Title]]` click → land on the new-doc page with
-              // the title pre-filled, matching the Obsidian / MediaWiki
-              // wiki convention. Only fires in the same nest; cross-nest
-              // creation would need permission gating we don't have yet.
-              setView({
-                page: "document",
-                nestId: linkNestId,
-                nestName: view.nestName,
-                nodeId: "new",
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-                initialTitle,
-              })
-            }
-            initialTitle={view.initialTitle}
-          />
-        )}
+        {view.page === "document" && (() => {
+          // Shared nav helpers to avoid setView shape duplication.
+          const doc = view;
+          const openDocument = (target: {
+            nestId: string;
+            nestName: string;
+            nodeId: string | "new";
+            isOwner: boolean;
+            isAnonOwned: boolean;
+            initialTitle?: string;
+            breadcrumb?: BreadcrumbEntry[];
+          }) => setView({ page: "document", ...target });
+          const openNest = (initialSearch?: string) =>
+            setView({
+              page: "nest",
+              nestId: doc.nestId,
+              nestName: doc.nestName,
+              isOwner: doc.isOwner,
+              isAnonOwned: doc.isAnonOwned,
+              initialSearch,
+            });
+          return (
+            <DocumentEditor
+              // Key by nest + node so React unmounts the editor when the
+              // user hops to a different doc (wiki-link nav) or pivots
+              // from an existing doc into a fresh "new" page via a
+              // broken-link click. Without this, useState values (title,
+              // content, status) survive the prop change and the old
+              // doc's body renders under the new doc's chrome — and
+              // isNew flips true with stale state, hiding the status
+              // badge + Submit-for-review button on the original doc.
+              key={`${doc.nestId}/${doc.nodeId}`}
+              nestId={doc.nestId}
+              nestName={doc.nestName}
+              nodeId={doc.nodeId}
+              isOwner={doc.isOwner}
+              breadcrumb={doc.breadcrumb}
+              onBack={() => {
+                // Pop last ancestor when chain non-empty; else nest list.
+                const stack = doc.breadcrumb ?? [];
+                if (stack.length > 0) {
+                  const prev = stack[stack.length - 1];
+                  openDocument({ ...prev, breadcrumb: stack.slice(0, -1) });
+                  return;
+                }
+                openNest();
+              }}
+              onJumpBreadcrumb={(index) => {
+                // Jump to ancestor at index; drop entries after.
+                const stack = doc.breadcrumb ?? [];
+                const entry = stack[index];
+                if (!entry) return;
+                openDocument({ ...entry, breadcrumb: stack.slice(0, index) });
+              }}
+              onSaved={() => openNest()}
+              onNavigateDocument={(linkNestId, linkNodeId, currentTitle) => {
+                // Cycle handling: never duplicate target in chain.
+                //  - target == current doc → no-op (self-link).
+                //  - target already in stack → truncate to that occurrence (jump-back).
+                //  - else → push current onto stack.
+                const stack = doc.breadcrumb ?? [];
+                const sameNest = linkNestId === doc.nestId;
+                if (linkNestId === doc.nestId && linkNodeId === doc.nodeId) {
+                  return;
+                }
+                const existingIdx = stack.findIndex(
+                  (e) => e.nestId === linkNestId && e.nodeId === linkNodeId,
+                );
+                if (existingIdx !== -1) {
+                  openDocument({
+                    nestId: linkNestId,
+                    nestName: sameNest ? doc.nestName : "Document",
+                    nodeId: linkNodeId,
+                    isOwner: sameNest ? doc.isOwner : false,
+                    isAnonOwned: sameNest ? doc.isAnonOwned : false,
+                    breadcrumb: stack.slice(0, existingIdx),
+                  });
+                  return;
+                }
+                const nextStack =
+                  doc.nodeId !== "new"
+                    ? [
+                        ...stack,
+                        {
+                          nestId: doc.nestId,
+                          nestName: doc.nestName,
+                          nodeId: doc.nodeId,
+                          title: currentTitle?.trim() || "Untitled",
+                          isOwner: doc.isOwner,
+                          isAnonOwned: doc.isAnonOwned,
+                        },
+                      ]
+                    : stack;
+                openDocument({
+                  nestId: linkNestId,
+                  nestName: sameNest ? doc.nestName : "Document",
+                  nodeId: linkNodeId,
+                  isOwner: sameNest ? doc.isOwner : false,
+                  isAnonOwned: sameNest ? doc.isAnonOwned : false,
+                  breadcrumb: nextStack,
+                });
+              }}
+              onTagClick={(tag) =>
+                // Tag chip → nest list filtered by tag.
+                openNest(tag)
+              }
+              onCreateDocument={(linkNestId, initialTitle) =>
+                // Broken `[[Title]]` → new-doc page with title pre-filled.
+                openDocument({
+                  nestId: linkNestId,
+                  nestName: doc.nestName,
+                  nodeId: "new",
+                  isOwner: doc.isOwner,
+                  isAnonOwned: doc.isAnonOwned,
+                  initialTitle,
+                })
+              }
+              initialTitle={doc.initialTitle}
+            />
+          );
+        })()}
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}
