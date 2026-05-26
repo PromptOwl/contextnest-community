@@ -509,12 +509,11 @@ export function NestView({
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="font-medium truncate">{node.title}</span>
-                          {stewardshipEnabled && (
-                            <LifecycleStatusBadge
-                              status={(node.status as DocumentLifecycleStatus) || "draft"}
-                              size="sm"
-                            />
-                          )}
+                          <LifecycleStatusBadge
+                            status={(node.status as DocumentLifecycleStatus) || "draft"}
+                            size="sm"
+                          />
+
                         </div>
                         <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
                           <span>v{node.version || 1}</span>
