@@ -9,6 +9,7 @@ import {
   deleteNest,
   isStewardshipEnabled,
   setStewardshipEnabled,
+  disableStewardshipAndWipeAccess,
 } from "./service.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import { getDb } from "../db/client.js";
@@ -47,7 +48,21 @@ export const nestRoutes = new Hono<AuthEnv>();
 nestRoutes.get("/", async (c) => {
   const userId = c.get("userId");
   const owned = listNests(userId);
-  const shared = listSharedNests(userId);
+  let shared = listSharedNests(userId);
+
+  // Defensive cleanup: a shared nest whose owner disabled stewardship some
+  // time ago may still have stale collaborator/steward rows (legacy data
+  // from before disable-wipes-access was wired in). Treat that as a signal
+  // to wipe and exclude the nest from this caller's shared list. The PATCH
+  // path now wipes on disable, so this branch only fires for pre-existing
+  // mismatches.
+  const visibleShared = shared.filter((n) => {
+    if (isStewardshipEnabled(n.id)) return true;
+    disableStewardshipAndWipeAccess(n.id);
+    return false;
+  });
+  shared = visibleShared;
+
   // Annotate each row with the caller's effective permission so the UI
   // can render an accurate share line and gate destructive actions
   // (delete) on owner-only without an extra round-trip per card.
@@ -163,11 +178,23 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
   }
 
   const body = await c.req.json<{ stewardship_enabled?: boolean }>();
+  let wiped: {
+    stewards: number;
+    collaborators: number;
+    pendingReviews: number;
+  } | null = null;
   if (typeof body.stewardship_enabled === "boolean") {
-    setStewardshipEnabled(nestId, body.stewardship_enabled);
+    if (body.stewardship_enabled) {
+      setStewardshipEnabled(nestId, true);
+    } else {
+      // Disable is destructive — flag flip + wipe of stewards, collaborators,
+      // and pending reviews happens atomically. See disableStewardshipAndWipeAccess.
+      wiped = disableStewardshipAndWipeAccess(nestId);
+    }
   }
 
   return c.json({
     stewardship_enabled: isStewardshipEnabled(nestId),
+    wiped,
   });
 });

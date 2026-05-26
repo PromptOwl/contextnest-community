@@ -262,7 +262,7 @@ export function createApp(): Hono<AuthEnv> {
       try {
         const { storage } = engineCache.get(nest.id);
         const docs = await storage.discoverDocuments();
-        documents += filterAccessible(nest.id, userEmail, docs).length;
+        documents += filterAccessible(nest.id, userId, userEmail, docs).length;
       } catch {
         // Nest with filesystem issue — skip; don't break the whole count.
       }

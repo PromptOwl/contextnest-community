@@ -14,7 +14,15 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Shield, AlertCircle, Loader2, Info, Globe, Lock } from "lucide-react";
+import {
+  Shield,
+  AlertCircle,
+  AlertTriangle,
+  Loader2,
+  Info,
+  Globe,
+  Lock,
+} from "lucide-react";
 import * as api from "../lib/api";
 
 type Visibility = "private" | "public";
@@ -42,6 +50,10 @@ export function NestSettingsModal({
     useState<Visibility>("private");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Acknowledgement required only when the caller is turning stewardship
+  // OFF (was on, now off). Toggling on, or no change, doesn't need it.
+  const [disableAcknowledged, setDisableAcknowledged] = useState(false);
+  const turningStewardshipOff = stewardshipEnabled && !enabled;
 
   useEffect(() => {
     let cancelled = false;
@@ -138,7 +150,7 @@ export function NestSettingsModal({
               <Switch checked={enabled} onCheckedChange={setEnabled} />
             </div>
 
-            {!enabled && (
+            {!enabled && !turningStewardshipOff && (
               <div className="flex items-start gap-2 text-xs text-muted-foreground pt-2 border-t">
                 <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
                 <div>
@@ -147,6 +159,33 @@ export function NestSettingsModal({
                   still on — every edit creates a new version.
                 </div>
               </div>
+            )}
+
+            {turningStewardshipOff && (
+              <Alert variant="destructive" className="pt-2">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription className="space-y-2">
+                  <div>
+                    <strong>Disabling stewardship wipes shared access.</strong>{" "}
+                    All steward assignments, collaborator grants, and pending
+                    review requests for this nest will be deleted. Anyone who
+                    accessed this nest via sharing will lose access — the owner
+                    will have to re-share. Approved/rejected review history is
+                    kept.
+                  </div>
+                  <label className="flex items-center gap-2 text-xs font-medium cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={disableAcknowledged}
+                      onChange={(e) =>
+                        setDisableAcknowledged(e.target.checked)
+                      }
+                      className="h-3.5 w-3.5"
+                    />
+                    I understand this will revoke all shared access.
+                  </label>
+                </AlertDescription>
+              </Alert>
             )}
 
             {enabled && (
@@ -219,7 +258,10 @@ export function NestSettingsModal({
           <Button variant="outline" onClick={onClose} disabled={loading}>
             Cancel
           </Button>
-          <Button onClick={handleSave} disabled={loading}>
+          <Button
+            onClick={handleSave}
+            disabled={loading || (turningStewardshipOff && !disableAcknowledged)}
+          >
             {loading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (

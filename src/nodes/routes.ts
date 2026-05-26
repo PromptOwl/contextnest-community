@@ -15,6 +15,7 @@ import {
   filterAccessible,
 } from "../governance/access-guard.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { isPublicReader } from "../shared/access.js";
 
 export const nodeRoutes = new Hono<AuthEnv>();
 
@@ -40,22 +41,53 @@ function toNodeResponse(node: ContextNode) {
 // GET /nests/:nestId/nodes
 nodeRoutes.get("/", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const { storage } = engineCache.get(nestId);
+  const { storage, versions: versionManager } = engineCache.get(nestId);
   const documents = await storage.discoverDocuments();
-  const userEmail = resolveCallerEmail(c.get("userId"));
-  const accessible = filterAccessible(nestId, userEmail, documents);
+  const userId = c.get("userId");
+  const userEmail = resolveCallerEmail(userId);
+  const accessible = filterAccessible(nestId, userId, userEmail, documents);
 
-  return c.json({
-    count: accessible.length,
-    nodes: accessible.map((doc) => {
+  // Public readers (visibility=public, no owner/collab grant) see only the
+  // approved version of each document — never the latest on-disk body,
+  // which may contain post-approval drafts. Reconstruct the approved
+  // snapshot per node and stamp the response with the approved version
+  // number + "approved" status.
+  const publicReader = isPublicReader(nestId, userId);
+
+  const nodes = await Promise.all(
+    accessible.map(async (doc) => {
       const r = toNodeResponse(doc);
+      if (publicReader) {
+        const approved = versions.getApprovedVersion(nestId, doc.id);
+        if (approved != null) {
+          try {
+            r.content = await versionManager.reconstructVersion(
+              doc.id,
+              approved,
+            );
+          } catch (err) {
+            console.error(
+              "reconstructVersion failed (public list)",
+              doc.id,
+              approved,
+              err,
+            );
+            r.content = "";
+          }
+          r.version = approved;
+          r.status = "approved";
+          return r;
+        }
+      }
       // Workflow status is computed entirely from the DB so the .md
       // frontmatter stays stable across draft → pending → approved
       // cycles. See getDisplayStatus() for the resolution order.
       r.status = versions.getDisplayStatus(nestId, r.id);
       return r;
     }),
-  });
+  );
+
+  return c.json({ count: nodes.length, nodes });
 });
 
 // POST /nests/:nestId/nodes
@@ -248,10 +280,11 @@ nodeRoutes.get("/:nodeId{.+?}/reviews", async (c) => {
 nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const { storage } = engineCache.get(nestId);
+  const { storage, versions: versionManager } = engineCache.get(nestId);
 
-  const userEmail = resolveCallerEmail(c.get("userId"));
-  if (!canReadNode(nestId, nodeId, userEmail)) {
+  const userId = c.get("userId");
+  const userEmail = resolveCallerEmail(userId);
+  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
     return c.json(
       { error: "Access denied — no steward assignment for this node" },
       403,
@@ -265,6 +298,33 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     throw new NotFoundError(`Node not found: ${nodeId}`);
   }
   const response = toNodeResponse(node);
+
+  // Public readers get the approved version's body + version number, not
+  // the latest on-disk content. canReadNode already guarantees an
+  // approved version exists for this caller.
+  if (isPublicReader(nestId, userId)) {
+    const approved = versions.getApprovedVersion(nestId, nodeId);
+    if (approved != null) {
+      try {
+        response.content = await versionManager.reconstructVersion(
+          nodeId,
+          approved,
+        );
+      } catch (err) {
+        console.error(
+          "reconstructVersion failed (public single)",
+          nodeId,
+          approved,
+          err,
+        );
+        response.content = "";
+      }
+      response.version = approved;
+      response.status = "approved";
+      return c.json({ node: response });
+    }
+  }
+
   // Resolved-from-DB workflow status; on-disk frontmatter status is
   // ignored entirely so the file never gets rewritten on workflow
   // transitions.
