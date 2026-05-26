@@ -1,15 +1,4 @@
-/**
- * DocumentEditor — full-page document create/edit view.
- *
- * Two modes driven by `nodeId`:
- *   - "new"   → empty title/tags/content. Save calls POST /nests/:id/nodes.
- *   - "<id>"  → loads existing via GET, populates fields. Save calls PATCH.
- *
- * Permission gating mirrors the nest list: server returns 403 if the
- * caller can't write — we surface that error and disable the form. We
- * don't attempt to pre-fetch the user's role from the client because the
- * server is the source of truth.
- */
+/** DocumentEditor — create/edit view; `nodeId === "new"` → POST, else PATCH. Server enforces 403. */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../lib/api";
 import { Button } from "@/components/ui/button";
@@ -30,7 +19,6 @@ import {
   Send,
   X,
   Pencil,
-  ExternalLink,
 } from "lucide-react";
 import {
   MarkdownEditor,
@@ -41,23 +29,16 @@ import { SubmitForReviewModal, ReviewActions, ExternalEditBanner } from "./gover
 import type { PendingChange } from "../lib/api";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
+import type { BreadcrumbEntry } from "../App";
+import { Fragment } from "react";
 
-/** Treat content as HTML when it visibly starts with an HTML tag.
- *  Anything else (markdown, plain text, empty) goes through the
- *  markdown renderer. Markdown can legally contain inline HTML, but
- *  documents that start with `<` are overwhelmingly going to be the
- *  TipTap-saved kind. */
+/** HTML if it starts with a tag; else markdown. */
 function looksLikeHtml(s: string): boolean {
   if (!s) return false;
   return /^\s*</.test(s);
 }
 
-/** Canonicalize HTML for dirty-tracking. Server-loaded markup and the
- *  HTML TipTap re-emits after a no-op edit cycle (type-then-delete)
- *  almost never match byte-for-byte — whitespace, attribute order,
- *  empty `<p>` collapsing. Parsing through DOMParser + serializing
- *  via innerHTML normalizes both sides so semantic equality compares
- *  as equal. */
+/** Canonicalize HTML for dirty-tracking (TipTap re-emits don't byte-match server load). */
 function normalizeHtml(s: string): string {
   if (!s) return "";
   if (typeof DOMParser === "undefined") return s.trim();
@@ -73,27 +54,26 @@ interface DocumentEditorProps {
   nestId: string;
   nestName: string;
   nodeId: string | "new";
-  /** Caller owns this nest. Enables the inline approve/reject affordance
-   *  on owner-authored pending reviews — server allows owner self-approve
-   *  (see canUserApprove in stewardship-service.ts, CU-86ahn99dg). */
+  /** Owner can self-approve pending reviews (CU-86ahn99dg). */
   isOwner?: boolean;
   onBack: () => void;
   onSaved?: (savedNodeId: string) => void;
-  /** Open a different document — invoked when the user clicks an
-   *  internal `nest://` link inside the editor. */
-  onNavigateDocument?: (nestId: string, nodeId: string) => void;
-  /** Filter the nest list by a tag — invoked when the user clicks a
-   *  tag chip in view mode. Wiki convention: tags click → see other
-   *  docs with this tag. */
+  /** Open another document; `currentTitle` feeds breadcrumb push. */
+  onNavigateDocument?: (
+    nestId: string,
+    nodeId: string,
+    currentTitle?: string,
+  ) => void;
+  /** Tag chip click → filter nest list by tag. */
   onTagClick?: (tag: string) => void;
-  /** Create a new document — invoked when the user clicks a
-   *  `[[Title]]` that doesn't resolve to an existing doc.
-   *  Obsidian / MediaWiki convention: broken link → create-with-title. */
+  /** Broken `[[Title]]` click → create-with-title. */
   onCreateDocument?: (nestId: string, title: string) => void;
-  /** When `nodeId === "new"` and this is set, pre-fill the title state.
-   *  Used by the wikilink-create flow to land the user in an editor
-   *  that's already started rather than fully blank. */
+  /** Pre-fill title when nodeId === "new" (wiki-create flow). */
   initialTitle?: string;
+  /** Prior wiki-link hops, oldest first; rendered as clickable chips. */
+  breadcrumb?: BreadcrumbEntry[];
+  /** Jump to ancestor at `index`; drops entries after it. */
+  onJumpBreadcrumb?: (index: number) => void;
 }
 
 export function DocumentEditor({
@@ -107,14 +87,13 @@ export function DocumentEditor({
   onTagClick,
   onCreateDocument,
   initialTitle,
+  breadcrumb,
+  onJumpBreadcrumb,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
   const { adminStatus } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
-  // Caller's resolved steward role for this node (null = none / not a steward).
-  // Drives read-only gating + the inline reviewer affordance. We derive
-  // the "can review here?" answer from this single source instead of
-  // tracking a redundant boolean.
+  // Per-node steward role (null = none). Drives read-only gating + reviewer affordance.
   const [myNodeRole, setMyNodeRole] = useState<string | null>(null);
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
@@ -124,32 +103,15 @@ export function DocumentEditor({
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
   const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
-  // Peek-modal state for wiki-link clicks. Clicking `[[Title]]` used to
-  // navigate away from the editor, which silently discarded any unsaved
-  // edits. Now we open a read-only preview in-place; "Open in editor"
-  // is the explicit affordance for actually leaving the page. The
-  // `loading` field is folded in so the modal can render a spinner
-  // without a separate state hook tracking the same lifecycle.
-  const [previewDoc, setPreviewDoc] = useState<{
-    id: string;
-    title: string;
-    content: string;
-    loading: boolean;
-  } | null>(null);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDocPicker, setShowDocPicker] = useState(false);
-  // Per CU-86ahmvmex: existing docs open in view mode by default so the
-  // user actually sees rendered markdown. New docs go straight to edit.
-  // The user can flip via the toolbar button.
+  // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
   const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : "view");
 
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
 
-  // Snapshot of the last loaded/saved state. Drives `isDirty` so the
-  // wiki-link nav paths know whether they need to persist the current
-  // doc before unmounting the editor — without it, clicking through a
-  // `[[link]]` silently discarded any pending edits.
+  // Last loaded/saved snapshot; drives isDirty for the leave-confirm path.
   const initialSnapshotRef = useRef<{
     title: string;
     content: string;
@@ -163,16 +125,10 @@ export function DocumentEditor({
   const [loading, setLoading] = useState(!isNew);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Explicit "user actually edited something" flag. Drives `isDirty`
-  // instead of a raw state-vs-snapshot diff: TipTap normalizes loaded
-  // HTML on mount (whitespace, attribute order), so the diff alone
-  // flips dirty on every edit-mode toggle even when the user hasn't
-  // typed a single character. Flipping this only on real input events
-  // keeps the unsaved-changes prompt from firing on no-op opens.
+  // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
   const [touched, setTouched] = useState(false);
 
-  // Load existing doc + nest settings in parallel. Settings drive
-  // whether the "Submit for Review" button surfaces.
+  // Load nest settings; drives Submit-for-Review visibility.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -191,10 +147,7 @@ export function DocumentEditor({
     };
   }, [nestId]);
 
-  // Resolve the caller's per-node steward role. Drives the inline
-  // reviewer affordance, the reviewer/viewer read-only gating, and the
-  // wiki-create block. Falls back to null on miss / failure so callers
-  // can treat "no row" as "no special permissions".
+  // Resolve per-node steward role; null = no special permissions.
   useEffect(() => {
     if (isNew || !nodeId || !currentEmail) {
       setMyNodeRole(null);
@@ -250,16 +203,10 @@ export function DocumentEditor({
     loadNode();
   }, [isNew, loadNode]);
 
-  // Lock the editor while a review is pending. The server would reject
-  // edits via the steward workflow anyway, but locking client-side
-  // avoids the user typing a long draft only to discover they couldn't
-  // save it. Cancelling the review (future feature) would unlock here.
+  // Lock while review pending; server would reject anyway but UX is nicer.
   const isLocked = status === "pending_review";
 
-  // Fields (title, tags, content) are read-only outside of edit mode.
-  // New docs default to edit, existing docs default to view — user must
-  // explicitly opt-in via the "Start Editing" header button or a
-  // double-click on the content area.
+  // Fields read-only outside edit mode; "Start Editing" or dblclick opts in.
   const fieldsDisabled = isLocked || mode !== "edit";
 
   const canSave = useMemo(
@@ -271,14 +218,7 @@ export function DocumentEditor({
     [isLocked, title, content, saving],
   );
 
-  // Dirty only when the user has actually interacted with an input AND
-  // the state diverges from the loaded/saved snapshot. The `touched`
-  // gate avoids the spurious-dirty case where switching to edit mode
-  // re-emits a normalized version of the same content without any
-  // real change. The content comparison normalizes HTML on both sides
-  // so a type-then-delete cycle reverts to "not dirty" — TipTap's
-  // re-emitted markup wouldn't byte-match the server-loaded form
-  // otherwise.
+  // Dirty = touched AND diff vs snapshot (normalized to absorb TipTap reformat).
   const isDirty = useMemo(() => {
     if (!touched) return false;
     const snap = initialSnapshotRef.current;
@@ -292,9 +232,7 @@ export function DocumentEditor({
   }, [touched, title, content, tags]);
 
   const addTag = useCallback(() => {
-    // Split on whitespace OR comma so users can paste "#one #two" or
-    // "one, two" and get two tags. Strip every leading "#" — common
-    // convention is hash-prefixed but the stored value is bare.
+    // Split on whitespace/comma; strip leading "#" (stored bare).
     const tokens = tagInput
       .split(/[\s,]+/)
       .map((t) => t.trim().replace(/^#+/, ""))
@@ -325,9 +263,7 @@ export function DocumentEditor({
       savedId = (res as any)?.node?.id;
     } else {
       const res = await api.updateNode(nestId, nodeId, payload, baseVersion);
-      // Server publishes through the engine which bumps the version
-      // beyond what UI knew. Pick up the new number so the next save
-      // sends a matching X-Base-Version and doesn't 409.
+      // Engine bumps version on publish; pick it up so next save's X-Base-Version matches.
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
       if (typeof nextVersion === "number") setBaseVersion(nextVersion);
@@ -342,17 +278,13 @@ export function DocumentEditor({
     return { ok: true, savedId };
   };
 
-  // Pending navigation gated behind the unsaved-changes confirm. We
-  // stash the user's intent and only run it after Save / Discard.
+  // Pending nav stashed behind unsaved-changes confirm; runs after Save/Discard.
   const [leaveIntent, setLeaveIntent] = useState<{
     label: string;
     run: () => void;
   } | null>(null);
 
-  // Single save path. `afterSave` is the optional continuation — used
-  // by both the header Save button (→ onSaved) and the leave-confirm
-  // dialog (→ run the stashed nav intent). Centralising the
-  // saving/error/canSave plumbing keeps both flows in lockstep.
+  // Single save path; afterSave continuation feeds onSaved or stashed intent.
   const runSave = async (afterSave: (savedId: string) => void) => {
     if (!canSave) {
       setError(
@@ -376,10 +308,7 @@ export function DocumentEditor({
 
   const handleSave = () => runSave((savedId) => onSaved?.(savedId));
 
-  // Wraps every action that unmounts the editor (back, wiki-link nav,
-  // broken-link create). If the doc is dirty we surface a confirm
-  // dialog; otherwise the intent runs straight through. Read-only
-  // sessions skip the prompt — the user couldn't have produced edits.
+  // Confirm before unmount when dirty; read-only sessions skip the prompt.
   const confirmLeave = (label: string, run: () => void) => {
     if (
       !isDirty ||
@@ -411,14 +340,11 @@ export function DocumentEditor({
     if (isNew) return;
     await api.submitForReview(nestId, nodeId, note, priority);
     setShowSubmitModal(false);
-    // Reload so status flips to pending_review and the button hides.
+    // Reload → status flips to pending_review, button hides.
     await loadNode();
   };
 
-  // Reviewer actions surfaced inline so an assigned steward doesn't need to
-  // bounce back to the nest list to action the document they just opened.
-  // Server enforces permission; we just expose the affordance when the doc
-  // is awaiting review.
+  // Inline reviewer actions; server still enforces permission.
   const handleApprove = async (note?: string) => {
     if (isNew) return;
     await api.approveNode(nestId, nodeId, note);
@@ -429,101 +355,60 @@ export function DocumentEditor({
     await api.rejectNode(nestId, nodeId, note);
     await loadNode();
   };
-  // Owner short-circuit mirrors server-side canUserApprove: nest owner can
-  // approve any pending review, including their own submissions (the
-  // seeding flow). Reviewer stewards still need a row to get the affordance.
+  // Owner short-circuit mirrors server canUserApprove (CU-86ahn99dg).
   const canReviewHere =
     !isNew &&
     status === "pending_review" &&
     (myNodeRole === "reviewer" || isOwner);
 
-  // Reviewers + viewers are read-only on the docs they govern — reviewers
-  // approve/reject, viewers just read; neither authors content. Hide Save
-  // + Submit-for-Review whenever the caller's resolved role on this node
-  // is reviewer or viewer, regardless of status. Editors/owners (no
-  // steward row or role === "editor") are unaffected.
+  // Reviewer/viewer roles are read-only; hide Save + Submit-for-Review.
   const isReviewerOnly =
     myNodeRole === "reviewer" || myNodeRole === "viewer";
 
-  // Submit-for-Review only makes sense on an existing draft when the
-  // nest has stewardship enabled. Pending/approved/rejected docs hide
-  // the button (re-submit on edit creates a new draft → button returns).
+  // Submit-for-Review only on existing drafts with stewardship enabled.
   const canSubmitForReview =
     !isNew && stewardshipEnabled && status === "draft" && !isReviewerOnly;
 
   const handleDocLinkInsert = (node: { id: string; title: string }) => {
-    // Insert as `[[Title]]` so the stored markdown stays portable —
-    // Hootie/CLI/MCP all parse the same syntax. The WikiLink extension
-    // handles styling and navigation at render time.
+    // Insert as `[[Title]]` for portable markdown across Hootie/CLI/MCP.
     editorRef.current?.insertWikiLink(node.title);
   };
 
-  const openPreviewById = async (resolvedId: string, fallbackTitle: string) => {
-    setPreviewDoc({
-      id: resolvedId,
-      title: fallbackTitle,
-      content: "",
-      loading: true,
-    });
-    try {
-      const { node } = await api.getNode(nestId, resolvedId);
-      setPreviewDoc({
-        id: resolvedId,
-        title: node?.title ?? fallbackTitle,
-        content: node?.content ?? "",
-        loading: false,
-      });
-    } catch {
-      // Fetch failed — keep the placeholder so the user sees the modal
-      // and a "(could not load)" body. They can still open in editor
-      // for a full reload.
-      setPreviewDoc({
-        id: resolvedId,
-        title: fallbackTitle,
-        content: "",
-        loading: false,
-      });
-    }
-  };
-
-  const handleWikiLinkClick = async (title: string, id: string | null) => {
-    // Live link from the existence-check cache — open a peek modal so
-    // any unsaved edits in the current doc are preserved. The old
-    // behavior navigated away and discarded them.
+  const handleWikiLinkClick = async (linkTitle: string, id: string | null) => {
+    // Cached hit → leave-confirm then nav.
     if (id) {
-      await openPreviewById(id, title);
+      confirmLeave(
+        `open "${linkTitle}"`,
+        () => onNavigateDocument?.(nestId, id, title),
+      );
       return;
     }
-    // Cache miss: resolve title → id at click time so links keep
-    // working when the user typed `[[Foo]]` before Foo was created.
+    // Cache miss: resolve title→id at click time.
     try {
-      const { nodes } = await api.searchNodes(nestId, title);
+      const { nodes } = await api.searchNodes(nestId, linkTitle);
       const exact = (nodes as Array<{ id: string; title: string }>).find(
-        (n) => n.title.toLowerCase() === title.toLowerCase(),
+        (n) => n.title.toLowerCase() === linkTitle.toLowerCase(),
       );
       if (exact) {
-        await openPreviewById(exact.id, exact.title);
-        return;
-      }
-      // Broken link: title doesn't resolve. Block create for
-      // reviewer / viewer roles — they don't have authoring rights,
-      // and silently routing them to the new-doc page is misleading
-      // (the server would reject the save anyway).
-      if (isReviewerOnly) {
-        setError(
-          `"${title}" doesn't exist in this nest. Reviewers and viewers can't create new documents — ask an editor to add it.`,
+        confirmLeave(
+          `open "${exact.title}"`,
+          () => onNavigateDocument?.(nestId, exact.id, title),
         );
         return;
       }
-      // Confirm with the user before leaving — current doc may have
-      // unsaved edits we'd otherwise discard.
+      // Broken link: block create for reviewer/viewer (no authoring rights).
+      if (isReviewerOnly) {
+        setError(
+          `"${linkTitle}" doesn't exist in this nest. Reviewers and viewers can't create new documents — ask an editor to add it.`,
+        );
+        return;
+      }
       confirmLeave(
-        `create "${title}"`,
-        () => onCreateDocument?.(nestId, title),
+        `create "${linkTitle}"`,
+        () => onCreateDocument?.(nestId, linkTitle),
       );
     } catch {
-      // Search itself failed (network / server error). Don't auto-create
-      // on top of an error; the link stays broken until the next click.
+      // Search failed; don't auto-create on top of error.
     }
   };
 
@@ -540,16 +425,32 @@ export function DocumentEditor({
           >
             <ArrowLeft className="h-5 w-5" />
           </Button>
-          {/* Breadcrumb-style header: `<nest> > <doc> [Status]` on a single
-              line. Replaces the prior two-line layout that duplicated the
-              title with the in-body h1. */}
-          <div className="flex items-center gap-2 min-w-0">
+          {/* Chain: nest > ancestors… > doc. Chip click truncates chain. */}
+          <div className="flex items-center gap-2 min-w-0 flex-wrap">
             <span className="text-sm text-muted-foreground truncate">
               {nestName}
             </span>
+            {breadcrumb?.map((entry, i) => (
+              <Fragment key={`${entry.nestId}/${entry.nodeId}/${i}`}>
+                <span className="text-muted-foreground shrink-0">›</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    confirmLeave(`go to "${entry.title}"`, () =>
+                      onJumpBreadcrumb?.(i),
+                    )
+                  }
+                  className="text-sm text-muted-foreground hover:text-foreground hover:underline underline-offset-2 truncate max-w-[160px]"
+                  title={entry.title}
+                  data-testid={`document-editor-breadcrumb-${i}`}
+                >
+                  {entry.title}
+                </button>
+              </Fragment>
+            ))}
             <span className="text-muted-foreground shrink-0">›</span>
             <h3
-              className="text-xl font-semibold truncate mb-0"
+              className="text-sm font-bold text-foreground truncate mb-0 leading-none"
               data-testid="document-editor-header-title"
             >
               {title || (isNew ? "New document" : "Untitled")}
@@ -648,10 +549,7 @@ export function DocumentEditor({
             </Alert>
           )}
 
-          {/* Title — render as a Notion-style h1 in view mode so the page
-              reads as a document, not a form. Switches to an Input in
-              edit mode. The breadcrumb header above shows the same title
-              as navigation context; this h1 is the canonical doc heading. */}
+          {/* Notion-style h1 in view mode; Input in edit mode. */}
           <div>
             {mode === "view" && !isNew ? (
               <h1
@@ -687,8 +585,7 @@ export function DocumentEditor({
                 value={tagInput}
                 onChange={(e) => setTagInput(e.target.value)}
                 onKeyDown={(e) => {
-                  // Space/comma/Enter all commit — supports pasted
-                  // "#one #two", typed "tag, tag", or single-tag entry.
+                  // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
                   if (e.key === "Enter" || e.key === "," || e.key === " ") {
                     e.preventDefault();
                     addTag();
@@ -710,10 +607,7 @@ export function DocumentEditor({
             {tags.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mt-2">
                 {tags.map((t) => {
-                  // View mode: click chip → filter nest list by this
-                  // tag. Edit mode: the X handles remove; the chip
-                  // itself is non-interactive so users don't
-                  // accidentally navigate away mid-edit.
+                  // View mode: chip click → filter nest by tag. Edit mode: X removes.
                   const tagClickable = mode === "view" && !!onTagClick;
                   return (
                     <span
@@ -753,14 +647,7 @@ export function DocumentEditor({
             )}
           </div>
 
-          {/* View or edit. View is a read-only markdown renderer (the doc
-              body stays byte-for-byte the same on disk). Edit is the
-              TipTap surface — its save path is unchanged by this PR.
-              Double-click anywhere in the content area is an alternate
-              entry into edit mode (the header "Start Editing" button is
-              the primary one). Skip the flip when locked or when the
-              caller is reviewer/viewer-only — those users have no edit
-              path regardless. */}
+          {/* View: read-only markdown. Edit: TipTap. Dblclick → edit unless locked/reviewer. */}
           <div
             onDoubleClick={() => {
               if (mode === "view" && !isLocked && !isReviewerOnly) {
@@ -786,10 +673,7 @@ export function DocumentEditor({
                 content={content}
                 onChange={(next) => {
                   setContent(next);
-                  // Edit-mode TipTap fires onUpdate on real doc changes,
-                  // not on programmatic setContent (we pass
-                  // emitUpdate:false there) and not on setEditable. So
-                  // any onChange here is a genuine user input.
+                  // TipTap onUpdate fires only on real user input here.
                   setTouched(true);
                 }}
                 onSave={handleSave}
@@ -866,72 +750,13 @@ export function DocumentEditor({
         </Dialog>
       )}
 
-      {previewDoc && (
-        <Dialog open onOpenChange={() => setPreviewDoc(null)}>
-          <DialogContent className="sm:max-w-[700px] max-h-[80vh] flex flex-col">
-            <DialogHeader>
-              <DialogTitle className="pr-8">{previewDoc.title}</DialogTitle>
-            </DialogHeader>
-            <div className="flex-1 overflow-y-auto rounded-md border">
-              {previewDoc.loading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                </div>
-              ) : previewDoc.content ? (
-                looksLikeHtml(previewDoc.content) ? (
-                  <MarkdownEditor
-                    key={previewDoc.id}
-                    content={previewDoc.content}
-                    onChange={() => {}}
-                    editable={false}
-                  />
-                ) : (
-                  <DocumentViewer content={previewDoc.content} />
-                )
-              ) : (
-                <p className="text-sm text-muted-foreground p-4">
-                  (no content)
-                </p>
-              )}
-            </div>
-            <DialogFooter>
-              <Button
-                variant="outline"
-                onClick={() => setPreviewDoc(null)}
-              >
-                Close
-              </Button>
-              <Button
-                disabled={saving}
-                onClick={() => {
-                  if (!previewDoc) return;
-                  const targetId = previewDoc.id;
-                  const targetTitle = previewDoc.title;
-                  // Close the peek modal first so the leave-confirm
-                  // dialog isn't stacked on top of it.
-                  setPreviewDoc(null);
-                  confirmLeave(
-                    `open "${targetTitle}"`,
-                    () => onNavigateDocument?.(nestId, targetId),
-                  );
-                }}
-              >
-                <ExternalLink className="h-4 w-4 mr-2" />
-                Open in editor
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      )}
     </div>
   );
 }
 
 export default DocumentEditor;
 
-// Status pill rendered next to the document title. Colours intentionally
-// loud (especially "pending_review") so users notice immediately that
-// the document is awaiting steward action and don't try to resubmit.
+// Status pill next to doc title; loud colours flag pending_review.
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { label: string; cls: string }> = {
     draft: {
