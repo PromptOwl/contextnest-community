@@ -55,33 +55,13 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   await next();
 });
 
-// In key mode, try a real credential (cookie session OR Bearer key) first.
-// If present, validate via the real auth middleware. If absent, fall back
-// to open behavior so anonymous open-mode clients still work.
-//
-// Per-vault public reads: in key mode an unauthenticated GET to a
-// nest-scoped sub-route (e.g. /nests/:id/nodes) is passed through as the
-// anonymous user. The downstream access middleware then runs
-// resolveNestPermission, which returns 'read' for visibility='public'
-// nests and 'none' (→404) otherwise. This keeps the unauth path
-// strictly read-only and limits it to nest sub-routes — `GET /nests`,
-// admin endpoints, and every non-GET still 401.
+// Unauth GETs in key mode: allow read-only access to /nests routes
+// (list + bare + sub) so public nests work without login. Admin paths
+// and writes still 401.
 function isPublicReadEligiblePath(method: string, path: string): boolean {
   if (method !== "GET") return false;
-  // Must be a nest sub-route (/nests/<id>/...) — not bare /nests, not
-  // any other top-level route.
-  const m = path.match(/^\/nests\/[^/]+\/.+/);
-  if (!m) return false;
-  // Admin sub-routes stay locked even on public nests.
-  if (
-    path.includes("/collaborators") ||
-    path.includes("/visibility") ||
-    path.includes("/settings") ||
-    path.includes("/mcp")
-  ) {
-    return false;
-  }
-  return true;
+  if (!/^\/nests(\/[^/]+(\/.*)?)?$/.test(path)) return false;
+  return !/\/(collaborators|visibility|settings|mcp)/.test(path);
 }
 
 const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
@@ -98,7 +78,6 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     return next();
   }
 
-  // Anonymous read-only path for public nests in key mode.
   if (isPublicReadEligiblePath(c.req.method, c.req.path)) {
     const anonId = ensureAnonymousUser();
     c.set("userId", anonId);

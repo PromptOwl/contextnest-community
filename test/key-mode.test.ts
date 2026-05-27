@@ -288,6 +288,23 @@ describe("sharing in key mode", () => {
     expect(data.count).toBe(1);
   });
 
+  it("bare GET /nests/:id is unauth-readable on a public nest (UI deep-link probe)", async () => {
+    // The UI uses GET /nests/:id to confirm a ?nest=<id> deep link is
+    // resolvable before rendering the read-only nest view. The bare path
+    // (no sub-route) must be in the public-read bypass; otherwise the
+    // probe 401s and the visitor lands on Login despite the public flag.
+    const { status, data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}`,
+      undefined,
+    );
+    expect(status).toBe(200);
+    expect(data.nest?.id).toBe(nestId);
+    expect(data.nest?.visibility).toBe("public");
+    expect(data.permission).toBe("read");
+  });
+
   it("private nest sub-routes 404 for unauthenticated callers", async () => {
     // Flip back to private and try again with no credentials.
     await jsonRequest(

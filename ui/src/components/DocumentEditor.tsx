@@ -104,6 +104,8 @@ export function DocumentEditor({
   const [status, setStatus] = useState<string | null>(null);
   const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
+  // Public-reader gate (visibility=public + permission='read').
+  const [isReadOnly, setIsReadOnly] = useState(false);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
@@ -128,16 +130,20 @@ export function DocumentEditor({
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
   const [touched, setTouched] = useState(false);
 
-  // Load nest settings; drives Submit-for-Review visibility.
+  // Settings → Submit-for-Review visibility; permission → read-only gate.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const settings = await api
-          .getNestSettings(nestId)
-          .catch(() => ({ stewardship_enabled: false }));
+        const [settings, meta] = await Promise.all([
+          api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
+          api.getNest(nestId).catch(() => null),
+        ]);
         if (cancelled) return;
         setStewardshipEnabled(!!settings.stewardship_enabled);
+        if (meta?.nest?.visibility === "public" && meta?.permission === "read") {
+          setIsReadOnly(true);
+        }
       } catch {
         /* non-fatal */
       }
@@ -396,10 +402,10 @@ export function DocumentEditor({
         );
         return;
       }
-      // Broken link: block create for reviewer/viewer (no authoring rights).
-      if (isReviewerOnly) {
+      // Block create for reviewer/viewer/public-reader (no authoring).
+      if (isReviewerOnly || isReadOnly) {
         setError(
-          `"${linkTitle}" doesn't exist in this nest. Reviewers and viewers can't create new documents — ask an editor to add it.`,
+          `"${linkTitle}" doesn't exist in this nest. You only have view access — ask someone with edit rights to add it.`,
         );
         return;
       }
@@ -456,10 +462,10 @@ export function DocumentEditor({
               {title || (isNew ? "New document" : "Untitled")}
             </h3>
             {!isNew && status && <StatusBadge status={status} />}
-            {!isNew && !stewardshipEnabled && status === "approved" && (
+            {!isNew && !stewardshipEnabled && status === "published" && (
               <span
                 className="px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700 border border-green-200"
-                title="Stewardship is off for this nest, so saving publishes immediately and the document is AI-readable."
+                title="Stewardship off — saving auto-publishes."
               >
                 Auto-published
               </span>
@@ -467,7 +473,8 @@ export function DocumentEditor({
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {canSubmitForReview && (
+          {/* Write/review affordances hidden for public reader. */}
+          {!isReadOnly && canSubmitForReview && (
             <Button
               variant="outline"
               onClick={() => setShowSubmitModal(true)}
@@ -478,7 +485,7 @@ export function DocumentEditor({
               Publish (requires approval)
             </Button>
           )}
-          {canReviewHere && (
+          {!isReadOnly && canReviewHere && (
             <ReviewActions
               documentTitle={title}
               version={baseVersion ?? 1}
@@ -486,7 +493,7 @@ export function DocumentEditor({
               onReject={handleReject}
             />
           )}
-          {!isLocked && !isReviewerOnly && (
+          {!isReadOnly && !isLocked && !isReviewerOnly && (
             mode === "edit" ? (
               <Button
                 onClick={handleSave}
@@ -647,9 +654,10 @@ export function DocumentEditor({
             )}
           </div>
 
-          {/* View: read-only markdown. Edit: TipTap. Dblclick → edit unless locked/reviewer. */}
+          {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
           <div
             onDoubleClick={() => {
+              if (isReadOnly) return;
               if (mode === "view" && !isLocked && !isReviewerOnly) {
                 setMode("edit");
               }

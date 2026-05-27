@@ -7,7 +7,7 @@ import * as api from "../lib/api";
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
-  Pencil, Trash2, FileWarning,
+  Pencil, Trash2, FileWarning, Globe,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
@@ -71,6 +71,9 @@ export function NestView({
   const [externalEdits, setExternalEdits] = useState<api.ExternalEditEntry[]>([]);
   const [externalEditsLoading, setExternalEditsLoading] = useState(false);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
+  const [visibility, setVisibility] = useState<"private" | "public">("private");
+  // Caller's nest-level permission (from GET /nests/:id).
+  const [permission, setPermission] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [stewardScope, setStewardScope] = useState<
     "all" | "document" | "tag" | "nest"
@@ -96,19 +99,26 @@ export function NestView({
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, settingsData, externalData] =
+    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta] =
       await Promise.all([
         api.listNodes(nestId).catch(() => ({ nodes: [] })),
         api.listStewards(nestId).catch(() => ({ stewards: [] })),
         api.getReviewQueue(nestId).catch(() => ({ requests: [], total: 0 })),
         api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
         api.listExternalEdits(nestId).catch(() => ({ entries: [], total: 0 })),
+        api.getNest(nestId).catch(() => null),
       ]);
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
     setStewardshipEnabled(settingsData.stewardship_enabled);
     setExternalEdits(externalData.entries);
+    if (nestMeta?.nest?.visibility) {
+      setVisibility(nestMeta.nest.visibility);
+    }
+    if (nestMeta?.permission) {
+      setPermission(nestMeta.permission);
+    }
     setLoading(false);
   }, [nestId]);
 
@@ -154,14 +164,16 @@ export function NestView({
     (s) => s.userEmail.toLowerCase() === currentEmail,
   );
   const isStewardOnly = !isAdmin && myStewards.length > 0;
+  // Public-reader UI gate; private read-only collabs unaffected.
+  const isReadOnly = visibility === "public" && permission === "read";
   const canEditDocs =
-    !isStewardOnly || myStewards.some((s) => s.role === "editor");
+    !isReadOnly && (!isStewardOnly || myStewards.some((s) => s.role === "editor"));
   // Approve/reject is reviewer-only by product rule, with one exception:
   // the nest owner can self-approve any pending review (mirrors server
   // canUserApprove short-circuit added in CU-86ahn99dg). Editors and
   // viewers still see nothing.
   const canReviewDocs =
-    isOwner || myStewards.some((s) => s.role === "reviewer");
+    !isReadOnly && (isOwner || myStewards.some((s) => s.role === "reviewer"));
 
   // Map nodeId → submitter so the per-row Review button can hide on
   // docs the current user submitted (separation-of-duties: authors must
@@ -178,6 +190,7 @@ export function NestView({
   // approve anything in their nest (CU-86ahn99dg).
   const canReviewNode = (node: { id: string; tags?: string[] }) => {
     if (!node) return false;
+    if (isReadOnly) return false;
     if (isOwner) return true;
     return myStewards.some((s) => {
       if (s.role !== "reviewer") return false;
@@ -202,6 +215,7 @@ export function NestView({
   // the UI honest.
   const canEditNode = (node: { id: string; tags?: string[] }) => {
     if (!node) return false;
+    if (isReadOnly) return false;
     if (!isStewardOnly) return canEditDocs;
     return myStewards.some((s) => {
       if (s.role !== "editor") return false;
@@ -320,53 +334,56 @@ export function NestView({
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <h3 className="text-xl font-semibold">{nestName}</h3>
+          {visibility === "public" && (
+            <Badge
+              variant="outline"
+              className="gap-1 border-blue-200 bg-blue-50 text-blue-700"
+              title="Anyone with the URL can read this nest"
+            >
+              <Globe className="h-3 w-3" />
+              Public
+            </Badge>
+          )}
         </div>
         {/* Action row: wraps onto multiple lines below sm-breakpoint instead
             of forcing a single horizontal scroll. `flex-wrap` + `justify-end`
             on wider screens keeps the spacing visually intentional rather
             than awkwardly clipped at the right edge. */}
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:justify-end">
+          {/* Connect stays for view-only; write/admin gated below. */}
           <Button variant="outline" onClick={() => setShowConnect(true)}>
             <Link2 className="h-4 w-4 mr-2" />
             Connect
           </Button>
-          {/* Delete — gated to match server rules (owner, or admin
-              caretaker on the ungoverned commons in key mode). Server
-              still enforces; hiding the button just keeps the UI
-              honest for callers who can't act. */}
-          {canDeleteNest && (
-            <Button
-              variant="outline"
-              onClick={() => setShowDelete(true)}
-              className="text-destructive hover:text-destructive hover:bg-destructive/10"
-            >
-              <Trash2 className="h-4 w-4 mr-2" />
-              Delete
-            </Button>
-          )}
-          {isAdmin && (
-            <Button variant="outline" onClick={() => setShowSettings(true)}>
-              <SettingsIcon className="h-4 w-4 mr-2" />
-              Settings
-            </Button>
-          )}
-          {stewardshipEnabled && !isStewardOnly && (
+          {!isReadOnly && (
             <>
-              <Button variant="outline" onClick={() => api.syncStewards(nestId).then(fetchData)}>
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Sync stewards.yaml
+              {canDeleteNest && (
+                <Button
+                  variant="outline"
+                  onClick={() => setShowDelete(true)}
+                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Delete
+                </Button>
+              )}
+              <Button variant="outline" onClick={() => setShowSettings(true)}>
+                <SettingsIcon className="h-4 w-4 mr-2" />
+                Settings
               </Button>
-              <Button variant="outline" onClick={() => setShowAssignSteward(true)}>
-                <Shield className="h-4 w-4 mr-2" />
-                Assign Steward
-              </Button>
+              {stewardshipEnabled && !isStewardOnly && (
+                <Button variant="outline" onClick={() => setShowAssignSteward(true)}>
+                  <Shield className="h-4 w-4 mr-2" />
+                  Assign Steward
+                </Button>
+              )}
+              {canEditDocs && (
+                <Button onClick={() => onOpenDocument("new")}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  New Document
+                </Button>
+              )}
             </>
-          )}
-          {canEditDocs && (
-            <Button onClick={() => onOpenDocument("new")}>
-              <Plus className="h-4 w-4 mr-2" />
-              New Document
-            </Button>
           )}
         </div>
       </div>
@@ -453,7 +470,8 @@ export function NestView({
       <Tabs defaultValue="documents" className="w-full">
         <TabsList className="mb-4">
           <TabsTrigger value="documents">Documents</TabsTrigger>
-          {stewardshipEnabled && (
+          {/* Governance tabs hidden for view-only. */}
+          {stewardshipEnabled && !isReadOnly && (
             <TabsTrigger value="review" className="gap-2">
               Review Queue
               {reviewableQueue.length > 0 && (
@@ -463,18 +481,20 @@ export function NestView({
               )}
             </TabsTrigger>
           )}
-          <TabsTrigger value="external-edits" className="gap-2">
-            External Edits
-            {externalEdits.length > 0 && (
-              <Badge
-                variant="secondary"
-                className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
-              >
-                {externalEdits.length}
-              </Badge>
-            )}
-          </TabsTrigger>
-          {stewardshipEnabled && (
+          {!isReadOnly && (
+            <TabsTrigger value="external-edits" className="gap-2">
+              External Edits
+              {externalEdits.length > 0 && (
+                <Badge
+                  variant="secondary"
+                  className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
+                >
+                  {externalEdits.length}
+                </Badge>
+              )}
+            </TabsTrigger>
+          )}
+          {stewardshipEnabled && !isReadOnly && (
             <TabsTrigger value="stewards">Stewards</TabsTrigger>
           )}
         </TabsList>
@@ -851,6 +871,7 @@ export function NestView({
           nestId={nestId}
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
+          canManageStewardship={isAdmin}
           onClose={() => setShowSettings(false)}
           onChanged={() => { setShowSettings(false); fetchData(); }}
         />
@@ -872,6 +893,10 @@ export function NestView({
           onClose={() => setShowAssignSteward(false)}
           nestId={nestId}
           onSubmit={handleAssignSteward}
+          onSync={async () => {
+            await api.syncStewards(nestId);
+            await fetchData();
+          }}
         />
       )}
 

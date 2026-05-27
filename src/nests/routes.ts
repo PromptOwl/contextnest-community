@@ -5,6 +5,7 @@ import {
   createNest,
   listNests,
   listSharedNests,
+  listPublicNests,
   getNest,
   deleteNest,
   isStewardshipEnabled,
@@ -48,6 +49,8 @@ nestRoutes.get("/", async (c) => {
   const userId = c.get("userId");
   const owned = listNests(userId);
   let shared = listSharedNests(userId);
+  // Public-but-not-mine; surfaces them in dashboard list.
+  const publicExtras = listPublicNests(userId);
 
   // Defensive cleanup: a shared nest whose owner disabled stewardship some
   // time ago may still have stale collaborator/steward rows (legacy data
@@ -85,9 +88,15 @@ nestRoutes.get("/", async (c) => {
     }
     return { ...n, permission, is_owner, owner_email };
   };
-  return c.json({
-    nests: [...owned.map(annotate), ...shared.map(annotate)],
-  });
+  // Dedupe by id; owner/shared rows win over public discovery row.
+  const seen = new Set<string>();
+  const out: ReturnType<typeof annotate>[] = [];
+  for (const n of [...owned, ...shared, ...publicExtras]) {
+    if (seen.has(n.id)) continue;
+    seen.add(n.id);
+    out.push(annotate(n));
+  }
+  return c.json({ nests: out });
 });
 
 // POST /nests

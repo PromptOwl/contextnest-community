@@ -22,6 +22,8 @@ import {
   Info,
   Globe,
   Lock,
+  Copy,
+  Check,
 } from "lucide-react";
 import * as api from "../lib/api";
 
@@ -31,6 +33,8 @@ interface NestSettingsModalProps {
   nestId: string;
   nestName: string;
   stewardshipEnabled: boolean;
+  /** False hides the stewardship section. Server still enforces. */
+  canManageStewardship: boolean;
   onClose: () => void;
   onChanged: () => void;
 }
@@ -39,6 +43,7 @@ export function NestSettingsModal({
   nestId,
   nestName,
   stewardshipEnabled,
+  canManageStewardship,
   onClose,
   onChanged,
 }: NestSettingsModalProps) {
@@ -53,7 +58,27 @@ export function NestSettingsModal({
   // Acknowledgement required only when the caller is turning stewardship
   // OFF (was on, now off). Toggling on, or no change, doesn't need it.
   const [disableAcknowledged, setDisableAcknowledged] = useState(false);
+  const [copied, setCopied] = useState(false);
   const turningStewardshipOff = stewardshipEnabled && !enabled;
+
+  // Matches App.tsx ?nest=<id> deep-link parser.
+  const publicUrl =
+    typeof window !== "undefined"
+      ? `${window.location.origin}/?nest=${nestId}`
+      : "";
+
+  const copyPublicUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(publicUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard blocked — user copies manually from the input.
+      setError(
+        "Couldn't copy automatically — select the link below and copy manually.",
+      );
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -134,7 +159,8 @@ export function NestSettingsModal({
             </Alert>
           )}
 
-          {/* Stewardship toggle */}
+          {/* Stewardship — manage-rights only. */}
+          {canManageStewardship && (
           <div className="rounded-lg border p-4 space-y-3">
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1">
@@ -205,10 +231,9 @@ export function NestSettingsModal({
               </div>
             )}
           </div>
+          )}
 
-          {/* Visibility toggle. Server enforces admin-only on the PATCH
-              /visibility route; a non-admin click surfaces a server-error
-              message via the existing alert. */}
+          {/* Visibility — server enforces admin-only. */}
           <div className="rounded-lg border p-4 space-y-3">
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1">
@@ -246,15 +271,48 @@ export function NestSettingsModal({
             )}
 
             {visibility === "public" && (
-              <div className="flex items-start gap-2 text-xs text-muted-foreground pt-2 border-t">
-                <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
-                <div>
-                  <strong className="text-foreground">Public.</strong> Anyone
-                  with the URL can read this nest's documents — no login
-                  required. Writes, admin actions, and the global nest list
-                  still require credentials.
+              <>
+                <div className="flex items-start gap-2 text-xs text-muted-foreground pt-2 border-t">
+                  <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <strong className="text-foreground">Public.</strong> Anyone
+                    with the URL can read this nest's documents — no login
+                    required. Writes, admin actions, and the global nest list
+                    still require credentials.
+                  </div>
                 </div>
-              </div>
+                {/* Shareable link; only resolves after save. */}
+                <div className="space-y-1.5 pt-2">
+                  <Label className="text-xs font-medium">Direct link</Label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={publicUrl}
+                      onFocus={(e) => e.currentTarget.select()}
+                      className="flex-1 bg-muted/40 border rounded px-2 py-1.5 text-xs font-mono break-all focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={copyPublicUrl}
+                    >
+                      {copied ? (
+                        <>
+                          <Check className="h-3.5 w-3.5 mr-1" />
+                          Copied
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3.5 w-3.5 mr-1" />
+                          Copy
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </>
             )}
           </div>
         </div>

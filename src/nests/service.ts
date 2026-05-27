@@ -104,11 +104,8 @@ export async function createNest(
 
 export function listNests(userId: string): Nest[] {
   const db = getDb();
-  // The "ungoverned commons" (anon-owned nests) is an open-mode concept —
-  // every visitor effectively co-owns it. In key mode (closed/single) we
-  // only surface anon nests to the caretaker (license-admin); regular
-  // signed-in users should not see nests they have no real claim to.
-  // De-dupe when caller IS the anonymous user.
+  // Own rows + (for admin/open) all anon-owned. Public discovery is
+  // listPublicNests; route layer dedupes by id.
   if (userId === ANON_USER_ID) {
     return db
       .prepare("SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC")
@@ -123,7 +120,7 @@ export function listNests(userId: string): Nest[] {
   }
   return db
     .prepare(
-      "SELECT * FROM nests WHERE user_id = ? OR (user_id = ? AND visibility = 'public') ORDER BY created_at DESC",
+      "SELECT * FROM nests WHERE user_id = ? OR user_id = ? ORDER BY created_at DESC",
     )
     .all(userId, ANON_USER_ID) as Nest[];
 }
@@ -139,6 +136,23 @@ export function listSharedNests(userId: string): Nest[] {
       `SELECT DISTINCT n.* FROM nests n
        JOIN nest_collaborators nc ON nc.nest_id = n.id
        WHERE n.user_id != ? AND nc.user_id = ?
+       ORDER BY n.created_at DESC`,
+    )
+    .all(userId, userId) as Nest[];
+}
+
+/** Public nests not owned/shared by caller. Route dedupes vs listNests. */
+export function listPublicNests(userId: string): Nest[] {
+  const db = getDb();
+  return db
+    .prepare(
+      `SELECT n.* FROM nests n
+       WHERE n.visibility = 'public'
+         AND n.user_id != ?
+         AND NOT EXISTS (
+           SELECT 1 FROM nest_collaborators nc
+           WHERE nc.nest_id = n.id AND nc.user_id = ?
+         )
        ORDER BY n.created_at DESC`,
     )
     .all(userId, userId) as Nest[];
