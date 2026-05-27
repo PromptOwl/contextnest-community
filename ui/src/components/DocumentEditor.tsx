@@ -113,24 +113,12 @@ export function DocumentEditor({
   // rule and 403s if you try, but hiding the affordance avoids the
   // user clicking through an error.
   const [pendingReviewBy, setPendingReviewBy] = useState<string | null>(null);
-  // Peek-modal state for wiki-link clicks. Clicking `[[Title]]` used to
-  // navigate away from the editor, which silently discarded any unsaved
-  // edits. Now we open a read-only preview in-place; "Open in editor"
-  // is the explicit affordance for actually leaving the page. The
-  // `loading` field is folded in so the modal can render a spinner
-  // without a separate state hook tracking the same lifecycle.
-  const [previewDoc, setPreviewDoc] = useState<{
-    id: string;
-    title: string;
-    content: string;
-    loading: boolean;
-  } | null>(null);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   // Public-reader gate (visibility=public + permission='read').
   const [isReadOnly, setIsReadOnly] = useState(false);
-  // Per-node steward role overrides the nest-level public-read gate so an
-  // editor/reviewer scoped to this doc still gets their affordances.
-  const isViewOnly = isReadOnly && !myNodeRole;
+  // Any per-node steward row overrides the nest-level public-read gate
+  // so an editor/reviewer scoped to this doc still gets their affordances.
+  const isViewOnly = isReadOnly && myNodeRoles.length === 0;
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.

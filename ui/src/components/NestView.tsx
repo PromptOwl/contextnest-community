@@ -169,8 +169,12 @@ export function NestView({
   // for them. Private read-only collabs unaffected (visibility check).
   const isReadOnly =
     visibility === "public" && permission === "read" && myStewards.length === 0;
+  // Gates "New Document": needs nest-wide write (owner/admin or
+  // nest-scope editor). Doc/tag-scoped editors use canEditNode instead.
   const canEditDocs =
-    !isReadOnly && (!isStewardOnly || myStewards.some((s) => s.role === "editor"));
+    !isReadOnly &&
+    (!isStewardOnly ||
+      myStewards.some((s) => s.role === "editor" && s.scope === "nest"));
   // Approve/reject is reviewer-only by product rule, with one exception:
   // the nest owner can self-approve any pending review (mirrors server
   // canUserApprove short-circuit added in CU-86ahn99dg). Editors and

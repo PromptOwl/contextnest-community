@@ -7,6 +7,7 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { listNests, listSharedNests } from "./nests/service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
+import { resolveStewardsForNode } from "./governance/stewardship-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
@@ -361,7 +362,45 @@ export function createApp(): Hono<AuthEnv> {
       required = "write";
     }
 
-    if (permissionLevel(permission) < permissionLevel(required)) {
+    // Editor steward bypass for nest-read callers: PATCH/DELETE allowed
+    // when an editor row covers the node; POST allowed only for
+    // nest-scope editors.
+    let stewardEditorBypass = false;
+    if (required === "write" && permission === "read" && parts[1] === "nodes") {
+      const userEmail = resolveCallerEmail(userId);
+      if (
+        parts.length >= 3 &&
+        (c.req.method === "PATCH" || c.req.method === "DELETE")
+      ) {
+        const rawNodeId = parts.slice(2).join("/");
+        let nodeId = rawNodeId;
+        try {
+          nodeId = decodeURIComponent(rawNodeId);
+        } catch {
+          /* malformed escape */
+        }
+        const resolved = resolveStewardsForNode(nestId, nodeId);
+        stewardEditorBypass = resolved.some(
+          (r) =>
+            r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
+            r.steward.role === "editor",
+        );
+      } else if (parts.length === 2 && c.req.method === "POST") {
+        // Empty nodeId: doc/tag branches won't match; nest branch returns all.
+        const resolved = resolveStewardsForNode(nestId, "");
+        stewardEditorBypass = resolved.some(
+          (r) =>
+            r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
+            r.steward.role === "editor" &&
+            r.steward.scope === "nest",
+        );
+      }
+    }
+
+    if (
+      !stewardEditorBypass &&
+      permissionLevel(permission) < permissionLevel(required)
+    ) {
       return c.json(
         {
           error: `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,
