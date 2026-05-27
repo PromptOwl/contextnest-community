@@ -30,6 +30,7 @@ import {
   Tag,
   FileText,
   Building2,
+  RefreshCw,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import type { StewardshipScope } from "./StewardList";
@@ -46,6 +47,8 @@ interface StewardAssignmentModalProps {
     target?: string;
     role: StewardRole;
   }) => Promise<void>;
+  /** stewards.yaml → DB sync. Omit to hide the action. */
+  onSync?: () => Promise<void> | void;
 }
 
 const scopeConfig: Record<
@@ -62,15 +65,30 @@ export function StewardAssignmentModal({
   onClose,
   nestId,
   onSubmit,
+  onSync,
 }: StewardAssignmentModalProps) {
   const [email, setEmail] = useState("");
   const [scope, setScope] = useState<StewardshipScope>("tag");
   const [target, setTarget] = useState("");
   const [role, setRole] = useState<StewardRole>("reviewer");
   const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nodes, setNodes] = useState<Array<{ id: string; title: string }>>([]);
   const [optionsLoading, setOptionsLoading] = useState(false);
+
+  const handleSync = async () => {
+    if (!onSync) return;
+    setSyncing(true);
+    setError(null);
+    try {
+      await onSync();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to sync stewards.yaml");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   // Fetch the document list when scope flips to "document".
   useEffect(() => {
@@ -284,18 +302,38 @@ export function StewardAssignmentModal({
           </div>
         </div>
 
-        <DialogFooter>
-          <Button variant="outline" onClick={handleClose} disabled={loading}>
-            Cancel
-          </Button>
-          <Button onClick={handleAssign} disabled={loading || !email.trim()}>
-            {loading ? (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            ) : (
-              <UserPlus className="h-4 w-4 mr-2" />
-            )}
-            Assign Steward
-          </Button>
+        <DialogFooter className="sm:justify-between">
+          {onSync ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleSync}
+              disabled={loading || syncing}
+              title="Re-import steward rows from the nest's stewards.yaml"
+            >
+              {syncing ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <RefreshCw className="h-4 w-4 mr-2" />
+              )}
+              Sync stewards.yaml
+            </Button>
+          ) : (
+            <span />
+          )}
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={handleClose} disabled={loading || syncing}>
+              Cancel
+            </Button>
+            <Button onClick={handleAssign} disabled={loading || syncing || !email.trim()}>
+              {loading ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <UserPlus className="h-4 w-4 mr-2" />
+              )}
+              Assign Steward
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

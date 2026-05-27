@@ -181,8 +181,8 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
             </CardTitle>
             <CardDescription>
               These emails are assigned as stewards on one or more nests, but
-              haven't been invited to this server yet — they can't log in or
-              approve anything until they have an API key.
+              haven't registered to this server yet — they
+              can't log in or approve anything until they claim an account.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -200,7 +200,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                   <div className="flex-1 min-w-0">
                     <span className="font-medium text-sm truncate">{email}</span>
                     <div className="text-xs text-muted-foreground">
-                      Assigned as steward · no API key yet
+                      Assigned as steward · not registered yet
                     </div>
                   </div>
                   <Button

@@ -126,6 +126,7 @@ export async function getHealth() {
   return request<{
     status: string;
     auth_mode: string;
+    logo_url?: string | null;
     suspended_reason?: string;
   }>("/health");
 }
@@ -267,6 +268,23 @@ export async function createNest(name: string, description?: string) {
 
 export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
+}
+
+export async function setNestVisibility(
+  nestId: string,
+  visibility: "private" | "public",
+) {
+  return request<{ visibility: "private" | "public" }>(
+    `/nests/${nestId}/visibility`,
+    { method: "PATCH", body: JSON.stringify({ visibility }) },
+  );
+}
+
+export async function getNest(nestId: string) {
+  return request<{
+    nest: { id: string; name: string; visibility: "private" | "public" };
+    permission: string;
+  }>(`/nests/${nestId}`);
 }
 
 export async function getServerStats() {
