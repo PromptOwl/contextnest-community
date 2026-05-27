@@ -8,6 +8,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { getAccessConfig } from "./access-service.js";
+import { buildTitleMap } from "./title-resolver.js";
 import type {
   Steward,
   ResolvedSteward,
@@ -90,12 +91,12 @@ export function getSteward(id: string): Steward | null {
   return row ? rowToSteward(row) : null;
 }
 
-export function getStewardsForNest(nestId: string): Steward[] {
+export async function getStewardsForNest(nestId: string): Promise<Steward[]> {
   const db = getDb();
   const rows = db
     .prepare("SELECT * FROM stewards WHERE nest_id = ? AND is_active = 1")
     .all(nestId) as any[];
-  return rows.map(rowToSteward);
+  return enrichWithTitles(nestId, rows.map(rowToSteward));
 }
 
 export function getStewardsForScope(params: {
@@ -122,11 +123,11 @@ export function getStewardsForScope(params: {
 /**
  * List stewards with filters. Mirrors PromptOwl StewardsListPage filters.
  */
-export function listStewards(params: {
+export async function listStewards(params: {
   nestId: string;
   scope?: StewardshipScope;
   search?: string;
-}): Steward[] {
+}): Promise<Steward[]> {
   const db = getDb();
   let sql = "SELECT * FROM stewards WHERE nest_id = ? AND is_active = 1";
   const args: any[] = [params.nestId];
@@ -141,7 +142,27 @@ export function listStewards(params: {
     args.push(like, like, like);
   }
   sql += " ORDER BY scope, COALESCE(node_pattern, tag_name, ''), user_email";
-  return (db.prepare(sql).all(...args) as any[]).map(rowToSteward);
+  const stewards = (db.prepare(sql).all(...args) as any[]).map(rowToSteward);
+
+  return enrichWithTitles(params.nestId, stewards);
+}
+
+// Resolve nodeTitle from on-disk frontmatter for document-scoped rows.
+// Title is not duplicated into the DB — frontmatter is source of truth —
+// so we look it up here. Skips the storage scan when no doc-scoped row
+// exists in the result set.
+async function enrichWithTitles(
+  nestId: string,
+  stewards: Steward[],
+): Promise<Steward[]> {
+  if (!stewards.some((s) => s.scope === "document")) return stewards;
+  const titleByNodeId = await buildTitleMap(nestId);
+  for (const s of stewards) {
+    if (s.scope === "document" && s.nodePattern) {
+      s.nodeTitle = titleByNodeId.get(s.nodePattern);
+    }
+  }
+  return stewards;
 }
 
 /**

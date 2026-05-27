@@ -193,6 +193,30 @@ export function NestView({
     });
   };
 
+  // Per-node edit gate. canEditDocs is a coarse "user has any edit
+  // affordance" flag (true if not a steward-only user, or if any of their
+  // steward rows is editor). That is wrong to apply per-row: a document-
+  // scoped editor would otherwise see Submit/Edit/Delete on every node in
+  // the nest. Mirror canReviewNode's scope resolution so each row honors
+  // the steward's actual reach. Server still enforces — this just keeps
+  // the UI honest.
+  const canEditNode = (node: { id: string; tags?: string[] }) => {
+    if (!node) return false;
+    if (!isStewardOnly) return canEditDocs;
+    return myStewards.some((s) => {
+      if (s.role !== "editor") return false;
+      if (s.scope === "nest") return true;
+      if (s.scope === "document") return s.nodePattern === node.id;
+      if (s.scope === "tag") {
+        const target = (s.tagName || "").toLowerCase().replace(/^#+/, "");
+        return (node.tags || [])
+          .map((t) => t.toLowerCase().replace(/^#+/, ""))
+          .includes(target);
+      }
+      return false;
+    });
+  };
+
   // Review queue: the assigned reviewer sees their scope. Nest owner
   // also sees the full queue and may self-approve their own submissions
   // (CU-86ahn99dg) — the separation-of-duties drop only applies to
@@ -509,12 +533,11 @@ export function NestView({
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="font-medium truncate">{node.title}</span>
-                          {stewardshipEnabled && (
-                            <LifecycleStatusBadge
-                              status={(node.status as DocumentLifecycleStatus) || "draft"}
-                              size="sm"
-                            />
-                          )}
+                          <LifecycleStatusBadge
+                            status={(node.status as DocumentLifecycleStatus) || "draft"}
+                            size="sm"
+                          />
+
                         </div>
                         <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
                           <span>v{node.version || 1}</span>
@@ -530,7 +553,7 @@ export function NestView({
                         className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
                         onClick={(e) => e.stopPropagation()}
                       >
-                        {stewardshipEnabled && node.status === "draft" && canEditDocs && (
+                        {stewardshipEnabled && node.status === "draft" && canEditNode(node) && (
                           <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
                             <Send className="h-3.5 w-3.5 mr-1" />
                             Submit
@@ -550,7 +573,7 @@ export function NestView({
                               Review
                             </Button>
                           )}
-                        {node.status !== "pending_review" && canEditDocs && (
+                        {node.status !== "pending_review" && canEditNode(node) && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -563,7 +586,7 @@ export function NestView({
                         <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
                           <History className="h-3.5 w-3.5" />
                         </Button>
-                        {canEditDocs && (
+                        {canEditNode(node) && (
                           <Button
                             variant="ghost"
                             size="sm"
