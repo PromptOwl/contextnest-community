@@ -574,7 +574,7 @@ export async function handleToolCall(
       }
 
       // List all stewards for the nest
-      const allStewards = stewardship.getStewardsForNest(ctx.nestId);
+      const allStewards = await stewardship.getStewardsForNest(ctx.nestId);
       if (allStewards.length === 0) {
         return "No stewards configured. All changes are auto-approved.\n\nTo configure stewards, add a `stewards.yaml` file to the vault root, or use `context_assign_steward`.";
       }
@@ -585,7 +585,7 @@ export async function handleToolCall(
           ? "Nest-level"
           : s.scope === "tag"
             ? `Tag: ${s.tagName}`
-            : `Document: ${s.nodePattern}`;
+            : `Document: ${s.nodeTitle || s.nodePattern}`;
         (byScope[key] = byScope[key] || []).push(s);
       }
 
@@ -601,7 +601,7 @@ export async function handleToolCall(
 
     case "context_review_queue": {
       const status = args.status || "pending";
-      const result = reviews.getReviewQueue({
+      const result = await reviews.getReviewQueue({
         nestId: ctx.nestId,
         status: status as any,
       });
@@ -615,7 +615,7 @@ export async function handleToolCall(
       const list = result.requests
         .map(
           (r, i) =>
-            `${i + 1}. **${r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
+            `${i + 1}. **${r.title || r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
         )
         .join("\n\n");
 

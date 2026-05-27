@@ -29,7 +29,7 @@ governanceRoutes.get("/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
   const scope = c.req.query("scope") as any;
   const search = c.req.query("search");
-  const stewards = stewardship.listStewards({
+  const stewards = await stewardship.listStewards({
     nestId,
     scope: scope || undefined,
     search: search || undefined,
@@ -111,7 +111,7 @@ governanceRoutes.get("/review-queue", async (c) => {
   const limit = parseInt(c.req.query("limit") || "50", 10);
   const offset = parseInt(c.req.query("offset") || "0", 10);
 
-  const result = reviews.getReviewQueue({
+  const result = await reviews.getReviewQueue({
     nestId,
     status: status as any,
     limit,
