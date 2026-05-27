@@ -1,7 +1,4 @@
 import { Hono } from "hono";
-import { serializeDocument } from "@promptowl/contextnest-engine";
-import type { ContextNode } from "@promptowl/contextnest-engine";
-import { safePublishDocument } from "../governance/safe-publish.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
@@ -14,73 +11,30 @@ import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-se
 import {
   resolveCallerEmail,
   canReadNode,
-  filterAccessible,
 } from "../governance/access-guard.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { isPublicReader } from "../shared/access.js";
 import {
   scanDocumentForDrift,
   getPendingChange,
   loadLatestApprovedNode,
 } from "../governance/external-edit-service.js";
+import {
+  createNode,
+  updateNode,
+  listNodesForCaller,
+  toNodeResponse,
+  bodyOnly,
+} from "./service.js";
 
 export const nodeRoutes = new Hono<AuthEnv>();
-
-function toNodeResponse(node: ContextNode) {
-  return {
-    id: node.id,
-    title: node.frontmatter.title,
-    type: node.frontmatter.type || "document",
-    tags: node.frontmatter.tags || [],
-    // Widen to string so callers can layer review-workflow states like
-    // "pending_review" / "rejected" on top of the on-disk frontmatter
-    // status. The engine's Status enum only knows draft/approved.
-    status: (node.frontmatter.status || "draft") as string,
-    version: node.frontmatter.version || 1,
-    author: node.frontmatter.author,
-    description: node.frontmatter.description,
-    created_at: node.frontmatter.created_at,
-    updated_at: node.frontmatter.updated_at,
-    content: node.body,
-    pendingChange: node.pendingChange ?? undefined,
-  };
-}
 
 // GET /nests/:nestId/nodes
 nodeRoutes.get("/", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const { storage } = engineCache.get(nestId);
-  const documents = await storage.discoverDocuments();
-  const userEmail = resolveCallerEmail(c.get("userId"));
-  const accessible = filterAccessible(nestId, userEmail, documents);
-
-  const pendingByDoc = new Map<string, Awaited<ReturnType<typeof getPendingChange>>>();
-  await Promise.all(
-    accessible.map(async (doc) => {
-      try {
-        pendingByDoc.set(doc.id, await getPendingChange(nestId, doc.id));
-      } catch {
-        pendingByDoc.set(doc.id, null);
-      }
-    }),
-  );
-
-  return c.json({
-    count: accessible.length,
-    nodes: accessible.map((doc) => {
-      const r = toNodeResponse(doc);
-      const pending = pendingByDoc.get(doc.id);
-      if (pending) {
-        r.pendingChange = pending;
-        r.status = "external_edit_pending";
-      } else {
-        // Workflow status is computed entirely from the DB so the .md
-        // frontmatter stays stable across draft → pending → approved
-        // cycles. See getDisplayStatus() for the resolution order.
-        r.status = versions.getDisplayStatus(nestId, r.id);
-      }
-      return r;
-    }),
-  });
+  const userId = c.get("userId");
+  const nodes = await listNodesForCaller(nestId, userId);
+  return c.json({ count: nodes.length, nodes });
 });
 
 // POST /nests/:nestId/nodes
@@ -99,126 +53,31 @@ nodeRoutes.post("/", async (c) => {
   }
 
   const nestId = c.req.param("nestId")!;
-  const { storage, versions: versionManager } = engineCache.get(nestId);
-
-  const slug = body.title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-  const id = `nodes/${slug}`;
-  const now = new Date().toISOString();
-  const tags =
-    body.tags?.map((t) => (t.startsWith("#") ? t : `#${t}`)) || [];
-
-  // Determine initial status: if stewards exist, start as draft; otherwise auto-approve
-  const hasStewards = isStewardshipEnabled(nestId);
-  const initialStatus = hasStewards ? "draft" : "approved";
-
-  // For no-stewards: start at v=0 so the engine's publish bump lands at
-  // v=1 (engine does currentVersion+1). Otherwise v=1 → publish writes
-  // v=2 and the first version the user sees in history is v=2.
-  // Stewards path keeps v=1 since no publish runs on create.
-  const initialVersion = hasStewards ? 1 : 0;
-
-  let node: ContextNode = {
-    id,
-    filePath: "",
-    frontmatter: {
-      title: body.title,
-      type: (body.type as any) || "document",
-      tags,
-      status: (body.status as any) || initialStatus,
-      version: initialVersion,
-      created_at: now,
-      updated_at: now,
-      metadata: {
-        owners: ["*"],
-        scope: body.scope || "team",
-      },
-    },
-    body: body.content,
-    rawContent: "",
-  };
-
-  const serialized = serializeDocument(node);
-  await storage.writeDocument(id, serialized);
-
-  // Sync tag index — resolver joins against node_tag_index.
-  syncNodeTags(nestId, id, tags);
-
-  // Track version
   const authorEmail = getUserEmail(c);
-
-  if (hasStewards) {
-    // Stewards-on: engine writes a v=1 keyframe so future reviewer
-    // approval / publish has a base to diff against. governance row
-    // mirrors at v=1 status='draft'. No publish until reviewer approves.
-    try {
-      await versionManager.createVersion(node, authorEmail);
-    } catch (err) {
-      console.error("VersionManager.createVersion failed (node create)", err);
-    }
-    versions.createVersion({
-      nestId,
-      nodeId: id,
-      version: 1,
+  const { node } = await createNode(
+    nestId,
+    {
+      title: body.title,
       content: body.content,
-      author: authorEmail,
-      status: "draft",
-      tags,
-    });
-  } else {
-    // No-stewards: publish immediately so the engine bumps frontmatter
-    // + writes a fresh keyframe. Single governance row at the bumped
-    // version with status='published' keeps DB and disk in lockstep —
-    // the prior dual-write (user 'approved' + system 'auto-publish')
-    // collided with the next user edit on UNIQUE(node, version).
-    try {
-      const result = await safePublishDocument(storage, id, {
-        editedBy: authorEmail,
-        note: "Auto-published on create (no stewards configured)",
-      });
-      const publishedVersion = result.node.frontmatter.version || 2;
-      versions.createVersion({
-        nestId,
-        nodeId: id,
-        version: publishedVersion,
-        content: result.node.body || "",
-        author: authorEmail,
-        status: "published",
-        tags,
-      });
-      versions.setApprovedVersion(nestId, id, publishedVersion, authorEmail);
-      node = result.node;
-    } catch (err) {
-      console.error("publishDocument failed (node create auto-publish)", err);
-      // Fallback: record the user's v=1 write as a draft so the doc is
-      // not invisible to governance. Reviewer/admin can re-publish later.
-      versions.createVersion({
-        nestId,
-        nodeId: id,
-        version: 1,
-        content: body.content,
-        author: authorEmail,
-        status: "draft",
-        tags,
-      });
-    }
-  }
-
-  trackEvent("node.create", { nestId, nodeId: id });
+      type: body.type,
+      tags: body.tags,
+      scope: body.scope,
+      status: body.status,
+    },
+    authorEmail,
+  );
 
   // Resolve stewards for the response
-  const resolved = stewardship.resolveStewardsForNode(nestId, id);
+  const resolved = stewardship.resolveStewardsForNode(nestId, node.id);
 
   return c.json({
     node: toNodeResponse(node),
     stewards: resolved.length > 0
       ? resolved.map((r) => ({
-          email: r.steward.userEmail,
-          role: r.steward.role,
-          source: r.source,
-        }))
+        email: r.steward.userEmail,
+        role: r.steward.role,
+        source: r.source,
+      }))
       : undefined,
   }, 201);
 });
@@ -311,10 +170,11 @@ nodeRoutes.get("/:nodeId{.+?}/reviews", async (c) => {
 nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const { storage } = engineCache.get(nestId);
+  const { storage, versions: versionManager } = engineCache.get(nestId);
 
-  const userEmail = resolveCallerEmail(c.get("userId"));
-  if (!canReadNode(nestId, nodeId, userEmail)) {
+  const userId = c.get("userId");
+  const userEmail = resolveCallerEmail(userId);
+  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
     return c.json(
       { error: "Access denied — no steward assignment for this node" },
       403,
@@ -355,6 +215,32 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     }
   }
   const response = toNodeResponse(node);
+
+  // Public readers see approved version body only.
+  if (isPublicReader(nestId, userId)) {
+    const approved = versions.getApprovedVersion(nestId, nodeId);
+    if (approved != null) {
+      try {
+        const raw = await versionManager.reconstructVersion(
+          nodeId,
+          approved,
+        );
+        response.content = bodyOnly(nodeId, raw);
+      } catch (err) {
+        console.error(
+          "reconstructVersion failed (public single)",
+          nodeId,
+          approved,
+          err,
+        );
+        response.content = "";
+      }
+      response.version = approved;
+      response.status = "published";
+      return c.json({ node: response });
+    }
+  }
+
   // Resolved-from-DB workflow status; on-disk frontmatter status is
   // ignored entirely so the file never gets rewritten on workflow
   // transitions.
@@ -374,7 +260,6 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
 nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const { storage, versions: versionManager } = engineCache.get(nestId);
   const body = await c.req.json<{
     content?: string;
     append?: string;
@@ -384,13 +269,12 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     changeNote?: string;
   }>();
 
-  // ── Conflict detection via X-Base-Version header ──
+  // Conflict detection via X-Base-Version header — REST-only contract.
   const baseVersionHeader = c.req.header("X-Base-Version");
   if (baseVersionHeader) {
     const baseVersion = parseInt(baseVersionHeader, 10);
     const conflict = versions.checkConflict(nestId, nodeId, baseVersion);
     if (conflict.conflict) {
-      // Return 409 with full conflict info + the user's rejected content
       return c.json(
         {
           error: "Version conflict",
@@ -405,150 +289,20 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     }
   }
 
-  let node: ContextNode;
-  try {
-    node = await storage.readDocument(nodeId);
-  } catch {
-    throw new NotFoundError(`Node not found: ${nodeId}`);
-  }
-
-  if (body.content !== undefined) {
-    node = { ...node, body: body.content };
-  }
-  if (body.append) {
-    node = { ...node, body: (node.body || "") + "\n\n" + body.append };
-  }
-  if (body.tags) {
-    const newTags = body.tags.map((t) => (t.startsWith("#") ? t : `#${t}`));
-    const merged = [...new Set([...(node.frontmatter.tags || []), ...newTags])];
-    node = { ...node, frontmatter: { ...node.frontmatter, tags: merged } };
-  }
-  if (body.status) {
-    node = {
-      ...node,
-      frontmatter: { ...node.frontmatter, status: body.status as any },
-    };
-  }
-  if (body.title) {
-    node = {
-      ...node,
-      frontmatter: { ...node.frontmatter, title: body.title },
-    };
-  }
-
   const authorEmail = getUserEmail(c);
-  const hasStewards = isStewardshipEnabled(nestId);
-  const currentTags = (node.frontmatter.tags || []) as string[];
-
-  // Editing past a pending review withdraws it — the steward's queue
-  // entry referenced the old version, which is now stale. The new
-  // version starts a fresh draft cycle; author re-submits when ready.
-  // Server enforces this even though the UI also locks editing during
-  // pending: API clients (MCP, CLI) hit the same code path.
-  const { cancelReview, getPendingReview } = await import(
-    "../governance/review-service.js"
+  const { node, version: responseVersion } = await updateNode(
+    nestId,
+    nodeId,
+    {
+      content: body.content,
+      append: body.append,
+      tags: body.tags,
+      title: body.title,
+      status: body.status,
+      changeNote: body.changeNote,
+    },
+    authorEmail,
   );
-  if (getPendingReview(nestId, nodeId)) {
-    cancelReview({ nestId, nodeId, cancelledBy: authorEmail });
-  }
-
-  let responseVersion: number;
-  if (hasStewards) {
-    // Stewards-on: bump version explicitly, write through engine
-    // history, record a draft row. Reviewer publishes later.
-    const currentVersion = versions.getCurrentVersion(nestId, nodeId);
-    const newVersion = currentVersion + 1;
-    node = {
-      ...node,
-      frontmatter: {
-        ...node.frontmatter,
-        version: newVersion,
-        updated_at: new Date().toISOString(),
-        // Strip the stale published-state checksum — the body just
-        // changed, so leaving the old hash would make the next GET (with
-        // verifyChecksum: true) flag the file as an external edit even
-        // though *this* app wrote it. Engine treats absent checksum as
-        // "no baseline" and skips drift detection until publish runs.
-        checksum: undefined,
-      },
-    };
-    const fm = Object.fromEntries(
-      Object.entries(node.frontmatter).filter(([, v]) => v !== undefined),
-    );
-    node = { ...node, frontmatter: fm as any };
-
-    await storage.writeDocument(nodeId, serializeDocument(node));
-    syncNodeTags(nestId, nodeId, currentTags);
-
-    try {
-      await versionManager.createVersion(node, authorEmail, {
-        note: body.changeNote,
-      });
-    } catch (err) {
-      console.error("VersionManager.createVersion failed (node patch)", err);
-    }
-
-    versions.createVersion({
-      nestId,
-      nodeId,
-      version: newVersion,
-      content: node.body || "",
-      author: authorEmail,
-      status: "draft",
-      tags: currentTags,
-      changeNote: body.changeNote,
-    });
-    responseVersion = newVersion;
-  } else {
-    // No stewards: skip the user-side version bump + the standalone
-    // engine history entry. publishDocument handles both — it reads
-    // disk, bumps version once, writes file + records the diff entry.
-    // ONE governance row per save at the engine's bumped version with
-    // status='published' keeps DB and disk in lockstep.
-    node = {
-      ...node,
-      frontmatter: {
-        ...node.frontmatter,
-        updated_at: new Date().toISOString(),
-        // Drop the prior published-state checksum before the interim
-        // write — publish recomputes it from the new body, but if
-        // publish errors out the file would otherwise be left with new
-        // body + stale checksum and drift on next read.
-        checksum: undefined,
-      },
-    };
-    const fm = Object.fromEntries(
-      Object.entries(node.frontmatter).filter(([, v]) => v !== undefined),
-    );
-    node = { ...node, frontmatter: fm as any };
-
-    await storage.writeDocument(nodeId, serializeDocument(node));
-    syncNodeTags(nestId, nodeId, currentTags);
-
-    let publishedVersion = (node.frontmatter.version || 0) + 1;
-    try {
-      const result = await safePublishDocument(storage, nodeId, {
-        editedBy: authorEmail,
-        note: body.changeNote || "Auto-published on edit (no stewards)",
-      });
-      publishedVersion = result.node.frontmatter.version || publishedVersion;
-      node = result.node;
-    } catch (err) {
-      console.error("publishDocument failed (node patch auto-publish)", err);
-    }
-    versions.createVersion({
-      nestId,
-      nodeId,
-      version: publishedVersion,
-      content: node.body || "",
-      author: authorEmail,
-      status: "published",
-      tags: currentTags,
-      changeNote: body.changeNote,
-    });
-    versions.setApprovedVersion(nestId, nodeId, publishedVersion, authorEmail);
-    responseVersion = publishedVersion;
-  }
 
   return c.json({ node: toNodeResponse(node), version: responseVersion });
 });

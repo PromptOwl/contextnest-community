@@ -6,7 +6,7 @@ import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, type LicenseStatus } from "./lib/api";
+import { getLicenseStatus, getNest, type LicenseStatus } from "./lib/api";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -80,6 +80,18 @@ export default function App() {
   } = useAuth();
   const [view, setView] = useState<View>({ page: "dashboard" });
   const [showAdminLogin, setShowAdminLogin] = useState(false);
+  // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
+  const [deepLinkProbe, setDeepLinkProbe] = useState<
+    | { status: "idle" }
+    | { status: "loading" }
+    | { status: "ok"; nestId: string; nestName: string }
+    | { status: "missing" }
+  >(() => {
+    if (typeof window === "undefined") return { status: "idle" };
+    const params = new URLSearchParams(window.location.search);
+    const nestId = params.get("nest");
+    return nestId ? { status: "loading" } : { status: "idle" };
+  });
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(
     null,
   );
@@ -117,6 +129,36 @@ export default function App() {
     }
   }, []);
 
+  // Probe GET /nests/:id once on mount. URL left intact so refresh re-probes.
+  useEffect(() => {
+    if (deepLinkProbe.status !== "loading") return;
+    const params = new URLSearchParams(window.location.search);
+    const nestId = params.get("nest");
+    if (!nestId) {
+      setDeepLinkProbe({ status: "missing" });
+      return;
+    }
+    (async () => {
+      try {
+        const { nest } = await getNest(nestId);
+        setDeepLinkProbe({
+          status: "ok",
+          nestId: nest.id,
+          nestName: nest.name,
+        });
+        setView({
+          page: "nest",
+          nestId: nest.id,
+          nestName: nest.name,
+          isOwner: false,
+          isAnonOwned: false,
+        });
+      } catch {
+        setDeepLinkProbe({ status: "missing" });
+      }
+    })();
+  }, [deepLinkProbe.status]);
+
   useEffect(() => {
     refreshLicense();
     // Server-side watcher revokes sessions within seconds of a
@@ -135,18 +177,15 @@ export default function App() {
     };
   }, [refreshLicense]);
 
-  // Reset to the dashboard whenever the signed-in user changes. App
-  // doesn't unmount across logout/login so `view` would otherwise
-  // carry the prior session's selected nest into the next user's
-  // session — that lets user B land directly inside user A's nest
-  // even when they lack access (server still 403s, but UX is wrong).
-  // Tracking the previous email (incl. logged-out → null) catches
-  // logout, login, and user-switch in one effect.
+  // Reset view on user-switch (logout/login). Skip initial null→email
+  // (just auth resolving — would clobber deep-link view).
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const prevUserEmailRef = useRef<string | null>(currentUserEmail);
   useEffect(() => {
-    if (prevUserEmailRef.current !== currentUserEmail) {
-      prevUserEmailRef.current = currentUserEmail;
+    if (prevUserEmailRef.current === currentUserEmail) return;
+    const wasLoggedIn = prevUserEmailRef.current !== null;
+    prevUserEmailRef.current = currentUserEmail;
+    if (wasLoggedIn) {
       setView({ page: "dashboard" });
     }
   }, [currentUserEmail]);
@@ -164,7 +203,12 @@ export default function App() {
     );
   }
 
-  if (loading || authMode === null || licenseLoading) {
+  if (
+    loading ||
+    authMode === null ||
+    licenseLoading ||
+    deepLinkProbe.status === "loading"
+  ) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="animate-pulse text-muted-foreground">Connecting...</div>
@@ -222,7 +266,8 @@ export default function App() {
     </>
   );
 
-  if (!authenticated && authMode === "key") {
+  // Unauth + key mode → Login, unless deep-link probe resolved a public nest.
+  if (!authenticated && authMode === "key" && deepLinkProbe.status !== "ok") {
     return (
       <>
         <Login />
@@ -258,6 +303,13 @@ export default function App() {
               <span className="hidden md:inline-flex items-center gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded">
                 <Info className="h-3 w-3" />
                 Open mode
+              </span>
+            )}
+            {/* Unauth deep-link visitor badge. */}
+            {authMode === "key" && !authenticated && (
+              <span className="hidden md:inline-flex items-center gap-1.5 text-xs text-blue-700 bg-blue-50 border border-blue-200 px-2 py-1 rounded">
+                <Info className="h-3 w-3" />
+                Public read-only
               </span>
             )}
 
@@ -304,7 +356,26 @@ export default function App() {
             isOwner={view.isOwner}
             isAnonOwned={view.isAnonOwned}
             initialSearch={view.initialSearch}
-            onBack={() => setView({ page: "dashboard" })}
+            onBack={() => {
+              // Drop ?nest from URL so refresh doesn't re-enter the nest.
+              if (typeof window !== "undefined") {
+                const params = new URLSearchParams(window.location.search);
+                if (params.has("nest")) {
+                  params.delete("nest");
+                  const qs = params.toString();
+                  window.history.replaceState(
+                    {},
+                    "",
+                    window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
+                  );
+                }
+              }
+              // Unauth → bounce to Login (Dashboard would 401).
+              if (!authenticated && authMode === "key") {
+                setDeepLinkProbe({ status: "missing" });
+              }
+              setView({ page: "dashboard" });
+            }}
             onOpenDocument={(nodeId) =>
               setView({
                 page: "document",

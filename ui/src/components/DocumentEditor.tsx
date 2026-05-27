@@ -113,19 +113,12 @@ export function DocumentEditor({
   // rule and 403s if you try, but hiding the affordance avoids the
   // user clicking through an error.
   const [pendingReviewBy, setPendingReviewBy] = useState<string | null>(null);
-  // Peek-modal state for wiki-link clicks. Clicking `[[Title]]` used to
-  // navigate away from the editor, which silently discarded any unsaved
-  // edits. Now we open a read-only preview in-place; "Open in editor"
-  // is the explicit affordance for actually leaving the page. The
-  // `loading` field is folded in so the modal can render a spinner
-  // without a separate state hook tracking the same lifecycle.
-  const [previewDoc, setPreviewDoc] = useState<{
-    id: string;
-    title: string;
-    content: string;
-    loading: boolean;
-  } | null>(null);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
+  // Public-reader gate (visibility=public + permission='read').
+  const [isReadOnly, setIsReadOnly] = useState(false);
+  // Any per-node steward row overrides the nest-level public-read gate
+  // so an editor/reviewer scoped to this doc still gets their affordances.
+  const isViewOnly = isReadOnly && myNodeRoles.length === 0;
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
@@ -150,16 +143,20 @@ export function DocumentEditor({
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
   const [touched, setTouched] = useState(false);
 
-  // Load nest settings; drives Submit-for-Review visibility.
+  // Settings → Submit-for-Review visibility; permission → read-only gate.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const settings = await api
-          .getNestSettings(nestId)
-          .catch(() => ({ stewardship_enabled: false }));
+        const [settings, meta] = await Promise.all([
+          api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
+          api.getNest(nestId).catch(() => null),
+        ]);
         if (cancelled) return;
         setStewardshipEnabled(!!settings.stewardship_enabled);
+        if (meta?.nest?.visibility === "public" && meta?.permission === "read") {
+          setIsReadOnly(true);
+        }
       } catch {
         /* non-fatal */
       }
@@ -431,10 +428,10 @@ export function DocumentEditor({
         );
         return;
       }
-      // Broken link: block create for reviewer/viewer (no authoring rights).
-      if (isReviewerOnly) {
+      // Block create for reviewer/viewer/public-reader (no authoring).
+      if (isReviewerOnly || isViewOnly) {
         setError(
-          `"${linkTitle}" doesn't exist in this nest. Reviewers and viewers can't create new documents — ask an editor to add it.`,
+          `"${linkTitle}" doesn't exist in this nest. You only have view access — ask someone with edit rights to add it.`,
         );
         return;
       }
@@ -491,10 +488,10 @@ export function DocumentEditor({
               {title || (isNew ? "New document" : "Untitled")}
             </h3>
             {!isNew && status && <StatusBadge status={status} />}
-            {!isNew && !stewardshipEnabled && status === "approved" && (
+            {!isNew && !stewardshipEnabled && status === "published" && (
               <span
                 className="px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700 border border-green-200"
-                title="Stewardship is off for this nest, so saving publishes immediately and the document is AI-readable."
+                title="Stewardship off — saving auto-publishes."
               >
                 Auto-published
               </span>
@@ -502,7 +499,8 @@ export function DocumentEditor({
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {canSubmitForReview && (
+          {/* Write/review affordances hidden for public reader. */}
+          {!isViewOnly && canSubmitForReview && (
             <Button
               variant="outline"
               onClick={() => setShowSubmitModal(true)}
@@ -513,7 +511,7 @@ export function DocumentEditor({
               Publish (requires approval)
             </Button>
           )}
-          {canReviewHere && (
+          {!isViewOnly && canReviewHere && (
             <ReviewActions
               documentTitle={title}
               version={baseVersion ?? 1}
@@ -521,7 +519,7 @@ export function DocumentEditor({
               onReject={handleReject}
             />
           )}
-          {!isLocked && !isReviewerOnly && (
+          {!isViewOnly && !isLocked && !isReviewerOnly && (
             mode === "edit" ? (
               <Button
                 onClick={handleSave}
@@ -682,9 +680,10 @@ export function DocumentEditor({
             )}
           </div>
 
-          {/* View: read-only markdown. Edit: TipTap. Dblclick → edit unless locked/reviewer. */}
+          {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
           <div
             onDoubleClick={() => {
+              if (isViewOnly) return;
               if (mode === "view" && !isLocked && !isReviewerOnly) {
                 setMode("edit");
               }
