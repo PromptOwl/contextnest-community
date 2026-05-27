@@ -8,6 +8,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { getAccessConfig } from "./access-service.js";
+import { ConflictError } from "../shared/errors.js";
 import { buildTitleMap } from "./title-resolver.js";
 import type {
   Steward,
@@ -283,8 +284,15 @@ export async function createStewardRecord(params: {
       ) as any;
 
     if (existing) {
-      results.push(rowToSteward(existing));
-      continue;
+      const scopeLabel =
+        params.scope === "document"
+          ? `document "${nodePattern}"`
+          : params.scope === "tag"
+            ? `tag "#${tagName}"`
+            : "this nest";
+      throw new ConflictError(
+        `"${email}" is already a steward of ${scopeLabel} with the "${existing.role}" role. Remove the existing assignment first to change the role.`,
+      );
     }
 
     const userRow = db
@@ -511,6 +519,27 @@ function getCurrentVersionAuthor(
   return row?.author ?? null;
 }
 
+/**
+ * For SoD: the email that triggered the current pending review wins over
+ * the original version author. The requester is the proximate "actor"
+ * asking for approval, so SoD should block them — not whoever happened
+ * to write an earlier edit. Returns null when no pending review exists.
+ */
+function getPendingReviewRequester(
+  nestId: string,
+  nodeId: string,
+): string | null {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT requested_by FROM review_requests
+       WHERE nest_id = ? AND node_id = ? AND status = 'pending'
+       ORDER BY requested_at DESC LIMIT 1`,
+    )
+    .get(nestId, nodeId) as { requested_by: string } | undefined;
+  return row?.requested_by ?? null;
+}
+
 export function canUserApprove(
   nestId: string,
   nodeId: string,
@@ -531,41 +560,58 @@ export function canUserApprove(
     return { allowed: true, reason: "nest owner", role: "owner" };
   }
 
-  // Check steward assignment first — a user who isn't a steward can't approve
-  // regardless of authorship, and the "not a steward" message is more useful.
+  // Check steward assignment first — a user who isn't a steward at all
+  // can't approve, regardless of authorship.
   const resolved = resolveStewardsForNode(nestId, nodeId);
   if (resolved.length === 0) {
     return {
       allowed: false,
-      reason: "no stewards configured for this node",
+      reason:
+        "This document has no stewards assigned, so it can't be approved yet. Ask the nest owner to add at least one reviewer.",
       role: null,
     };
   }
 
-  const match = resolved.find(
-    (r) =>
-      r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
-      r.steward.role === "reviewer",
+  // A user may hold multiple steward rows on this node (e.g. editor on
+  // the doc + reviewer on the nest). Roles are additive — editor grants
+  // edit rights, reviewer grants approve rights — so we look at the full
+  // set of the user's assignments instead of picking one.
+  const userMatches = resolved.filter(
+    (r) => r.steward.userEmail.toLowerCase() === userEmail.toLowerCase(),
   );
-  if (!match) {
+  const reviewerMatch = userMatches.find((r) => r.steward.role === "reviewer");
+  if (!reviewerMatch) {
+    const hasOtherRole = userMatches.length > 0;
     return {
       allowed: false,
-      reason: "not a reviewer steward for this node",
-      role: null,
+      reason: hasOtherRole
+        ? `You're assigned as "${userMatches[0].steward.role}" on this document — only reviewers can approve. Ask the nest owner to grant you the reviewer role.`
+        : "You're not a steward on this document, so you can't approve it. Ask the nest owner to add you as a reviewer.",
+      role: userMatches[0]?.steward.role ?? null,
     };
   }
 
-  // Separation of duties: even a reviewer can't approve their own edit.
-  const author = getCurrentVersionAuthor(nestId, nodeId);
-  if (author && author.toLowerCase() === userEmail.toLowerCase()) {
+  // Separation of duties: the user who SUBMITTED the version for review
+  // can't approve it themselves, even if they ALSO hold an editor row on
+  // this node. Holding editor in addition to reviewer doesn't waive SoD —
+  // the submitter is still the proximate actor and a second pair of eyes
+  // is required. We compare against review_requests.requested_by (the
+  // active actor) rather than node_versions.author so that when a
+  // teammate submits someone else's earlier edit, the original author
+  // can still approve.
+  const actor =
+    getPendingReviewRequester(nestId, nodeId) ??
+    getCurrentVersionAuthor(nestId, nodeId);
+  if (actor && actor.toLowerCase() === userEmail.toLowerCase()) {
     return {
       allowed: false,
-      reason: "cannot approve a version you authored (separation of duties)",
+      reason:
+        "You submitted this version for review, so you can't approve it yourself. Ask another reviewer to approve it (separation of duties).",
       role: "reviewer",
     };
   }
 
-  return { allowed: true, reason: match.source, role: "reviewer" };
+  return { allowed: true, reason: reviewerMatch.source, role: "reviewer" };
 }
 
 export function canUserAccess(

@@ -186,17 +186,15 @@ export function NestView({
   for (const r of reviewQueue) {
     submitterByNode.set(r.nodeId, r.requestedBy.toLowerCase());
   }
-  // Eligibility check: does the caller hold a reviewer steward row whose
-  // scope covers this node? Mirrors server resolution (document > tag >
-  // nest), but client-side so the queue can be filtered without N extra
-  // round-trips. Nest owner short-circuits — server now allows owner to
-  // approve anything in their nest (CU-86ahn99dg).
-  const canReviewNode = (node: { id: string; tags?: string[] }) => {
-    if (!node) return false;
-    if (isReadOnly) return false;
-    if (isOwner) return true;
-    return myStewards.some((s) => {
-      if (s.role !== "reviewer") return false;
+  // Does a steward row with `role` cover this node? Same scope-resolution
+  // rules as the server: document scope matches by id, tag scope matches
+  // when any of the node's tags match, nest scope matches everything.
+  const hasRoleOnNode = (
+    node: { id: string; tags?: string[] },
+    role: string,
+  ) =>
+    myStewards.some((s) => {
+      if (s.role !== role) return false;
       if (s.scope === "nest") return true;
       if (s.scope === "document") return s.nodePattern === node.id;
       if (s.scope === "tag") {
@@ -207,6 +205,17 @@ export function NestView({
       }
       return false;
     });
+
+  // Eligibility check: does the caller hold a reviewer steward row whose
+  // scope covers this node? Mirrors server resolution (document > tag >
+  // nest), but client-side so the queue can be filtered without N extra
+  // round-trips. Nest owner short-circuits — server now allows owner to
+  // approve anything in their nest (CU-86ahn99dg).
+  const canReviewNode = (node: { id: string; tags?: string[] }) => {
+    if (!node) return false;
+    if (isOwner) return true;
+    if (isReadOnly) return false;
+    return hasRoleOnNode(node, "reviewer");
   };
 
   // Per-node edit gate. canEditDocs is a coarse "user has any edit
@@ -235,9 +244,10 @@ export function NestView({
   };
 
   // Review queue: the assigned reviewer sees their scope. Nest owner
-  // also sees the full queue and may self-approve their own submissions
-  // (CU-86ahn99dg) — the separation-of-duties drop only applies to
-  // non-owner reviewers.
+  // also sees the full queue and may self-approve any submission
+  // (CU-86ahn99dg). SoD drops own submissions for everyone else — even
+  // editor+reviewer combos. The submitter has to hand off to another
+  // reviewer regardless of any additional roles they hold.
   const reviewableQueue = reviewQueue.filter((r) => {
     if (!isOwner && r.requestedBy.toLowerCase() === currentEmail) return false;
     const node = nodes.find((n) => n.id === r.nodeId);
@@ -584,9 +594,9 @@ export function NestView({
                         )}
                         {stewardshipEnabled &&
                           node.status === "pending_review" &&
+                          canReviewDocs &&
                           (isOwner ||
-                            submitterByNode.get(node.id) !== currentEmail) &&
-                          canReviewDocs && (
+                            submitterByNode.get(node.id) !== currentEmail) && (
                             <Button
                               variant="outline"
                               size="sm"
