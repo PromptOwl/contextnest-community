@@ -11,6 +11,7 @@ import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
 import * as versions from "./version-service.js";
+import { buildTitleMap } from "./title-resolver.js";
 import type {
   ReviewRequest,
   ReviewRequestPriority,
@@ -254,13 +255,13 @@ export function cancelReview(params: {
 
 // ─── Queue ──────────────────────────────────────────────────────────────
 
-export function getReviewQueue(params: {
+export async function getReviewQueue(params: {
   nestId?: string;
   status?: ReviewRequestStatus | ReviewRequestStatus[];
   stewardEmail?: string;
   limit?: number;
   offset?: number;
-}): { requests: ReviewRequest[]; total: number } {
+}): Promise<{ requests: ReviewRequest[]; total: number }> {
   const db = getDb();
   let whereClauses: string[] = [];
   const args: any[] = [];
@@ -313,6 +314,22 @@ export function getReviewQueue(params: {
       );
     });
   }
+
+  // Resolve human-facing document titles. The governance DB only stores
+  // node ids like "nodes/api-rate-limits"; rendering those raw leaks the
+  // storage path into the UI (CU bug — steward review queue showed
+  // "nodes/TitleA" instead of "TitleA"). Title lives in the on-disk
+  // frontmatter, so we pull it via storage. Build one title map per nest
+  // to avoid re-scanning when the queue spans multiple nests.
+  const titleMapsByNest = new Map<string, Map<string, string>>();
+  const nestIds = new Set(requests.map((r) => r.nestId));
+  for (const nid of nestIds) {
+    titleMapsByNest.set(nid, await buildTitleMap(nid));
+  }
+  requests = requests.map((r) => ({
+    ...r,
+    title: titleMapsByNest.get(r.nestId)?.get(r.nodeId),
+  }));
 
   return { requests, total };
 }
