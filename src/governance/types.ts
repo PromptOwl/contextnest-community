@@ -51,6 +51,7 @@ export interface Steward {
   scope: StewardshipScope;
   // Scope targets (only one is set based on scope)
   nodePattern?: string; // exact node id for document scope
+  nodeTitle?: string; // resolved frontmatter title for document scope (listStewards only)
   tagName?: string; // tag scope
   // Assignment
   userEmail: string;
@@ -73,6 +74,7 @@ export interface ReviewRequest {
   id: string;
   nestId: string;
   nodeId: string;
+  title?: string; // resolved from node frontmatter when listed via getReviewQueue
   version: number;
   requestedBy: string; // email
   requestedAt: string;
