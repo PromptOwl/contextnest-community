@@ -95,7 +95,7 @@ export function AdminLoginModal({
 
         const terminalMsg =
           poll.status === "denied" || poll.status === "rejected"
-            ? "Login denied. Approve the request in PromptOwl to continue, or try again."
+            ? "Login request was denied. Please try again to create a new authentication request."
             : poll.status === "expired"
               ? "Login expired. Try again."
               : poll.status === "cancelled"
