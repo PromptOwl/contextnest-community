@@ -164,8 +164,11 @@ export function NestView({
     (s) => s.userEmail.toLowerCase() === currentEmail,
   );
   const isStewardOnly = !isAdmin && myStewards.length > 0;
-  // Public-reader UI gate; private read-only collabs unaffected.
-  const isReadOnly = visibility === "public" && permission === "read";
+  // Public-reader UI gate. A caller with any steward row on this nest
+  // still has scoped editor/reviewer rights — keep affordances visible
+  // for them. Private read-only collabs unaffected (visibility check).
+  const isReadOnly =
+    visibility === "public" && permission === "read" && myStewards.length === 0;
   const canEditDocs =
     !isReadOnly && (!isStewardOnly || myStewards.some((s) => s.role === "editor"));
   // Approve/reject is reviewer-only by product rule, with one exception:

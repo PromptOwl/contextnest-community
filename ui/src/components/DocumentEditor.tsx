@@ -106,6 +106,9 @@ export function DocumentEditor({
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   // Public-reader gate (visibility=public + permission='read').
   const [isReadOnly, setIsReadOnly] = useState(false);
+  // Per-node steward role overrides the nest-level public-read gate so an
+  // editor/reviewer scoped to this doc still gets their affordances.
+  const isViewOnly = isReadOnly && !myNodeRole;
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
@@ -403,7 +406,7 @@ export function DocumentEditor({
         return;
       }
       // Block create for reviewer/viewer/public-reader (no authoring).
-      if (isReviewerOnly || isReadOnly) {
+      if (isReviewerOnly || isViewOnly) {
         setError(
           `"${linkTitle}" doesn't exist in this nest. You only have view access — ask someone with edit rights to add it.`,
         );
@@ -474,7 +477,7 @@ export function DocumentEditor({
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {/* Write/review affordances hidden for public reader. */}
-          {!isReadOnly && canSubmitForReview && (
+          {!isViewOnly && canSubmitForReview && (
             <Button
               variant="outline"
               onClick={() => setShowSubmitModal(true)}
@@ -485,7 +488,7 @@ export function DocumentEditor({
               Publish (requires approval)
             </Button>
           )}
-          {!isReadOnly && canReviewHere && (
+          {!isViewOnly && canReviewHere && (
             <ReviewActions
               documentTitle={title}
               version={baseVersion ?? 1}
@@ -493,7 +496,7 @@ export function DocumentEditor({
               onReject={handleReject}
             />
           )}
-          {!isReadOnly && !isLocked && !isReviewerOnly && (
+          {!isViewOnly && !isLocked && !isReviewerOnly && (
             mode === "edit" ? (
               <Button
                 onClick={handleSave}
@@ -657,7 +660,7 @@ export function DocumentEditor({
           {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
           <div
             onDoubleClick={() => {
-              if (isReadOnly) return;
+              if (isViewOnly) return;
               if (mode === "view" && !isLocked && !isReviewerOnly) {
                 setMode("edit");
               }
