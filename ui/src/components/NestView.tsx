@@ -35,6 +35,7 @@ import {
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
 import { MarkdownEditor } from "./MarkdownEditor";
+import { toast } from "sonner";
 
 interface NestViewProps {
   nestId: string;
@@ -103,7 +104,10 @@ export function NestView({
       await Promise.all([
         api.listNodes(nestId).catch(() => ({ nodes: [] })),
         api.listStewards(nestId).catch(() => ({ stewards: [] })),
-        api.getReviewQueue(nestId).catch(() => ({ requests: [], total: 0 })),
+        api.getReviewQueue(nestId).catch((e) => {
+          toast.error(e?.message || "Failed to load review queue");
+          return { requests: [], total: 0 };
+        }),
         api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
         api.listExternalEdits(nestId).catch(() => ({ entries: [], total: 0 })),
         api.getNest(nestId).catch(() => null),
@@ -278,25 +282,44 @@ export function NestView({
     } catch { }
   };
 
+  // Approve/reject/submit handlers used to await silently — a 403
+  // (e.g. SoD block, no reviewer role, license required) threw past
+  // setReviewNode(null), so the modal stayed open and the user saw
+  // nothing happen. Surface the error via toast and refresh on success.
   const handleApprove = async (note?: string) => {
     if (!reviewNode) return;
-    await api.approveNode(nestId, reviewNode.id, note);
-    setReviewNode(null);
-    fetchData();
+    try {
+      await api.approveNode(nestId, reviewNode.id, note);
+      toast.success("Approved");
+      setReviewNode(null);
+      fetchData();
+    } catch (err: any) {
+      toast.error(err?.message || "Approve failed");
+    }
   };
 
   const handleReject = async (note: string) => {
     if (!reviewNode) return;
-    await api.rejectNode(nestId, reviewNode.id, note);
-    setReviewNode(null);
-    fetchData();
+    try {
+      await api.rejectNode(nestId, reviewNode.id, note);
+      toast.success("Rejected");
+      setReviewNode(null);
+      fetchData();
+    } catch (err: any) {
+      toast.error(err?.message || "Reject failed");
+    }
   };
 
   const handleSubmitReview = async (note: string, priority: string) => {
     if (!submitNode) return;
-    await api.submitForReview(nestId, submitNode.id, note, priority);
-    setSubmitNode(null);
-    fetchData();
+    try {
+      await api.submitForReview(nestId, submitNode.id, note, priority);
+      toast.success("Submitted for review");
+      setSubmitNode(null);
+      fetchData();
+    } catch (err: any) {
+      toast.error(err?.message || "Submit failed");
+    }
   };
 
   const handleRemoveSteward = async (stewardId: string) => {
@@ -651,9 +674,31 @@ export function NestView({
               onRefresh={fetchData}
               onSelect={(req) => {
                 const node = nodes.find((n) => n.id === req.nodeId);
-                if (node) setReviewNode(node);
+                if (node) {
+                  setReviewNode(node);
+                  return;
+                }
+                // Orphan: review_request points to a node not in the
+                // visible list (file deleted, or filtered out by
+                // stewardship access). Without this the row click was
+                // a silent dead-end.
+                toast.error(
+                  `Can't open "${req.title || req.nodeId}" — document missing or outside your access.`,
+                );
               }}
             />
+            {/* When the raw queue has entries but the reviewable filter
+                emptied it, the queue card says "All caught up!" — which
+                is wrong. Surface the gap so the user knows items exist
+                but aren't actionable by them (scope or SoD). */}
+            {reviewQueue.length > 0 && reviewableQueue.length === 0 && (
+              <p className="text-xs text-muted-foreground text-center">
+                {reviewQueue.length} pending review
+                {reviewQueue.length === 1 ? "" : "s"} in this nest, but
+                none you can act on — outside your steward scope, or
+                submitted by you (authors can't approve their own work).
+              </p>
+            )}
           </TabsContent>
         )}
 
