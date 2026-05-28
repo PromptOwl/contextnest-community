@@ -395,7 +395,7 @@ export function DocumentEditor({
   // (no editor row anywhere). Editors author content; reviewers just
   // approve/reject; viewers just read. A user with editor + reviewer is
   // NOT read-only — keep edit affordances open for them.
-  const isReviewerOnly = myNodeRoles.length > 0 && !hasEditorRole;
+  const isReviewerOnly = !isOwner && myNodeRoles.length > 0 && !hasEditorRole;
 
   // Submit-for-Review only on existing drafts with stewardship enabled.
   const canSubmitForReview =
@@ -648,9 +648,9 @@ export function DocumentEditor({
                       onClick={
                         tagClickable
                           ? (e) => {
-                              e.stopPropagation();
-                              onTagClick!(t);
-                            }
+                            e.stopPropagation();
+                            onTagClick!(t);
+                          }
                           : undefined
                       }
                       className={
@@ -682,7 +682,7 @@ export function DocumentEditor({
 
           {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
           <div
-            onDoubleClick={() => {
+            onClick={() => {
               if (isViewOnly) return;
               if (mode === "view" && !isLocked && !isReviewerOnly) {
                 setMode("edit");
