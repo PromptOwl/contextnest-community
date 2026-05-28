@@ -344,6 +344,17 @@ export async function getOverview(nestId: string) {
   return request(`/nests/${nestId}/overview`);
 }
 
+export async function listTags(nestId: string): Promise<string[]> {
+  const res = await request<{ tags?: Record<string, number> }>(
+    `/nests/${nestId}/overview`,
+  );
+  const tags = res?.tags ?? {};
+  return Object.keys(tags)
+    .map((t) => t.replace(/^#+/, ""))
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
 // ─── Governance ─────────────────────────────────────────────────────────
 
 export async function listStewards(nestId: string) {

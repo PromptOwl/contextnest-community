@@ -75,6 +75,7 @@ export function StewardAssignmentModal({
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nodes, setNodes] = useState<Array<{ id: string; title: string }>>([]);
+  const [tags, setTags] = useState<string[]>([]);
   const [optionsLoading, setOptionsLoading] = useState(false);
 
   const handleSync = async () => {
@@ -90,22 +91,27 @@ export function StewardAssignmentModal({
     }
   };
 
-  // Fetch the document list when scope flips to "document".
+  // Fetch document list (scope=document) or tag list (scope=tag) on demand.
   useEffect(() => {
     if (!isOpen) return;
-    if (scope !== "document") return;
+    if (scope !== "document" && scope !== "tag") return;
     if (optionsLoading) return;
     let cancelled = false;
     setOptionsLoading(true);
-    api
-      .listNodes(nestId)
-      .then((res) => {
-        if (cancelled) return;
-        const list = Array.isArray(res?.nodes) ? res.nodes : [];
-        setNodes(list as Array<{ id: string; title: string }>);
-      })
+    const fetcher =
+      scope === "document"
+        ? api.listNodes(nestId).then((res) => {
+            if (cancelled) return;
+            const list = Array.isArray(res?.nodes) ? res.nodes : [];
+            setNodes(list as Array<{ id: string; title: string }>);
+          })
+        : api.listTags(nestId).then((list) => {
+            if (cancelled) return;
+            setTags(list);
+          });
+    fetcher
       .catch((err) => {
-        console.error("[StewardAssignmentModal] documents fetch failed", err);
+        console.error(`[StewardAssignmentModal] ${scope} fetch failed`, err);
       })
       .finally(() => {
         if (!cancelled) setOptionsLoading(false);
@@ -154,6 +160,7 @@ export function StewardAssignmentModal({
       setRole("reviewer");
       setError(null);
       setNodes([]);
+      setTags([]);
       onClose();
     }
   };
@@ -235,13 +242,30 @@ export function StewardAssignmentModal({
               </Label>
 
               {scope === "tag" ? (
-                <Input
-                  id="target"
-                  placeholder={scopeConfig.tag.placeholder}
+                <Select
                   value={target}
-                  onChange={(e) => setTarget(e.target.value)}
-                  disabled={loading}
-                />
+                  onValueChange={setTarget}
+                  disabled={loading || optionsLoading}
+                >
+                  <SelectTrigger id="target">
+                    <SelectValue
+                      placeholder={
+                        optionsLoading
+                          ? "Loading tags..."
+                          : tags.length === 0
+                            ? "No tags in this nest"
+                            : "Select a tag"
+                      }
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {tags.map((t) => (
+                      <SelectItem key={t} value={t}>
+                        #{t}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               ) : (
                 <Select
                   value={target}
