@@ -1,5 +1,9 @@
-/* Markdown editor decoration styles. Mirrors TheOwl/data-room so
-   wiki-link/task/mention syntax renders identically across products. */
+/* Markdown editor decoration styles. Only rules @tailwindcss/typography
+   (`prose`) does NOT cover live here: custom decorations (wiki links,
+   mentions, task checkboxes), list markers that `prose-sm` strips, the
+   empty-doc placeholder, and the focus outline. Headings, paragraphs,
+   blockquote, code, pre, links, hr — all handled by the typography
+   plugin via the `.prose` / `.prose-sm` classes on the editor container. */
 
 .wiki-bracket-hidden {
   font-size: 0;
@@ -91,6 +95,8 @@
   background-color: rgba(34, 197, 94, 0.2);
 }
 
+/* Placeholder for an empty editor — TipTap's Placeholder extension
+   sets `data-placeholder`; render it as muted text in the first line. */
 .ProseMirror p.is-editor-empty:first-child::before {
   color: hsl(var(--muted-foreground));
   content: attr(data-placeholder);
@@ -99,10 +105,8 @@
   pointer-events: none;
 }
 
-/* Tailwind's preflight strips list-style on `ul, ol`; the typography
-   plugin re-adds them inside `.prose` but only at the default size —
-   `prose-sm` drops the markers. Force them back inside the editor so
-   bulleted/numbered lists actually look like lists while editing. */
+/* `prose-sm` drops list-style markers — force them back inside the
+   editor so bullets/numbers are visible while editing. */
 .ProseMirror ul {
   list-style: disc outside;
   padding-left: 1.5rem;
@@ -121,17 +125,9 @@
   list-style: square outside;
 }
 
-.ProseMirror li {
-  margin: 0.25rem 0;
-}
-
-.ProseMirror li > p {
-  margin: 0;
-}
-
-/* Task lists from @tiptap/extension-task-list use checkbox inputs; the
-   default Tailwind reset hides the bullet but keeps padding — strip
-   padding so they line up with the inline `[ ]` decoration form. */
+/* Task lists from @tiptap/extension-task-list use checkbox inputs;
+   strip the bullet padding so they line up with the inline `[ ]`
+   decoration form. */
 .ProseMirror ul[data-type="taskList"] {
   list-style: none;
   padding-left: 0;
@@ -143,222 +139,38 @@
   gap: 0.5rem;
 }
 
-/* Tailwind preflight collapses h1/h2/h3 to the parent font-size so the
-   toolbar buttons would visually do nothing without explicit overrides.
-   Sizes picked to match TheOwl/data-room editor so the two products
-   render headings identically. */
-.ProseMirror h1 {
-  font-size: 1.875rem;
-  line-height: 2.25rem;
-  font-weight: 700;
-  margin: 1.5rem 0 1rem;
-}
-
-.ProseMirror h2 {
-  font-size: 1.5rem;
-  line-height: 2rem;
-  font-weight: 600;
-  margin: 1.25rem 0 0.75rem;
-}
-
-.ProseMirror h3 {
-  font-size: 1.25rem;
-  line-height: 1.75rem;
-  font-weight: 600;
-  margin: 1rem 0 0.5rem;
-}
-
-.ProseMirror p {
-  margin: 0.5rem 0;
-}
-
-.ProseMirror strong {
-  font-weight: 700;
-}
-
-.ProseMirror em {
-  font-style: italic;
-}
-
-.ProseMirror s {
-  text-decoration: line-through;
-}
-
-/* Blockquote — left border + muted italic, matches TheOwl. */
-.ProseMirror blockquote {
-  border-left: 4px solid hsl(var(--muted-foreground) / 0.3);
-  padding-left: 1rem;
-  font-style: italic;
-  margin: 1rem 0;
-  color: hsl(var(--muted-foreground));
-}
-
-/* Inline + block code. `pre code` strips the inline pill so it doesn't
-   double up inside fenced blocks. */
-.ProseMirror code {
-  background-color: hsl(var(--muted));
-  padding: 0.125rem 0.375rem;
-  border-radius: 0.25rem;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-    monospace;
-  font-size: 0.875rem;
-}
-
-.ProseMirror pre {
-  background-color: hsl(var(--muted));
-  padding: 1rem;
-  border-radius: 0.375rem;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-    monospace;
-  font-size: 0.875rem;
-  line-height: 1.25rem;
-  overflow-x: auto;
-  margin: 0.75rem 0;
-}
-
-.ProseMirror pre code {
-  background-color: transparent;
-  padding: 0;
-  border-radius: 0;
-  font-size: inherit;
-}
-
-/* Regular `<a>` links inserted via the toolbar URL prompt. Wiki-link
-   decorations have their own colour rules above. */
-.ProseMirror a {
-  color: rgb(37, 99, 235);
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.ProseMirror a:hover {
-  color: rgb(29, 78, 216);
-}
-
-.dark .ProseMirror a {
-  color: rgb(96, 165, 250);
-}
-
-.dark .ProseMirror a:hover {
-  color: rgb(147, 197, 253);
-}
-
-.ProseMirror hr {
-  border: 0;
-  border-top: 1px solid hsl(var(--border));
-  margin: 1.5rem 0;
-}
-
 .ProseMirror:focus {
   outline: none;
 }
 
-/* Tailwind preflight collapses h1/h2/h3 to the parent font-size so the
-   toolbar buttons would visually do nothing without explicit overrides.
-   Sizes picked to match TheOwl/data-room editor so the two products
-   render headings identically. */
-.ProseMirror h1 {
-  font-size: 1.875rem;
-  line-height: 2.25rem;
-  font-weight: 700;
-  margin: 1.5rem 0 1rem;
-}
-
-.ProseMirror h2 {
-  font-size: 1.5rem;
-  line-height: 2rem;
-  font-weight: 600;
-  margin: 1.25rem 0 0.75rem;
-}
-
-.ProseMirror h3 {
-  font-size: 1.25rem;
-  line-height: 1.75rem;
-  font-weight: 600;
-  margin: 1rem 0 0.5rem;
-}
-
-.ProseMirror p {
-  margin: 0.5rem 0;
-}
-
-.ProseMirror strong {
-  font-weight: 700;
-}
-
-.ProseMirror em {
-  font-style: italic;
-}
-
-.ProseMirror s {
-  text-decoration: line-through;
-}
-
-/* Blockquote — left border + muted italic, matches TheOwl. */
-.ProseMirror blockquote {
-  border-left: 4px solid hsl(var(--muted-foreground) / 0.3);
-  padding-left: 1rem;
-  font-style: italic;
-  margin: 1rem 0;
-  color: hsl(var(--muted-foreground));
-}
-
-/* Inline + block code. `pre code` strips the inline pill so it doesn't
-   double up inside fenced blocks. */
-.ProseMirror code {
+/* Typography plugin defaults `pre` to a dark slate background and
+   white text — fine for a docs site, jarring in a light-mode editor
+   where the rest of the surface is on the theme `--background`. Map
+   both pre and inline code to the theme `--muted` token so code
+   blocks match the rest of the chrome in both light and dark modes. */
+.prose pre,
+.prose-sm pre {
   background-color: hsl(var(--muted));
-  padding: 0.125rem 0.375rem;
-  border-radius: 0.25rem;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-    monospace;
-  font-size: 0.875rem;
+  color: hsl(var(--foreground));
 }
 
-.ProseMirror pre {
-  background-color: hsl(var(--muted));
-  padding: 1rem;
-  border-radius: 0.375rem;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-    monospace;
-  font-size: 0.875rem;
-  line-height: 1.25rem;
-  overflow-x: auto;
-  margin: 0.75rem 0;
-}
-
-.ProseMirror pre code {
+.prose pre code,
+.prose-sm pre code {
   background-color: transparent;
-  padding: 0;
-  border-radius: 0;
-  font-size: inherit;
+  color: inherit;
 }
 
-/* Regular `<a>` links inserted via the toolbar URL prompt. Wiki-link
-   decorations have their own colour rules above. */
-.ProseMirror a {
-  color: rgb(37, 99, 235);
-  text-decoration: underline;
-  cursor: pointer;
+.prose :not(pre) > code,
+.prose-sm :not(pre) > code {
+  background-color: hsl(var(--muted));
+  color: hsl(var(--foreground));
 }
 
-.ProseMirror a:hover {
-  color: rgb(29, 78, 216);
-}
-
-.dark .ProseMirror a {
-  color: rgb(96, 165, 250);
-}
-
-.dark .ProseMirror a:hover {
-  color: rgb(147, 197, 253);
-}
-
-.ProseMirror hr {
-  border: 0;
-  border-top: 1px solid hsl(var(--border));
-  margin: 1.5rem 0;
-}
-
-.ProseMirror:focus {
-  outline: none;
+/* Typography's default inline-code rule wraps the text in backticks
+   via `::before` / `::after`. Strip them so inline code reads cleanly. */
+.prose code::before,
+.prose code::after,
+.prose-sm code::before,
+.prose-sm code::after {
+  content: none;
 }
