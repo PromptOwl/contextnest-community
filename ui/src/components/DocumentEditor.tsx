@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import {
   MarkdownEditor,
+  slugFromNodeId,
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
@@ -402,8 +403,7 @@ export function DocumentEditor({
     !isNew && stewardshipEnabled && status === "draft" && !isReviewerOnly;
 
   const handleDocLinkInsert = (node: { id: string; title: string }) => {
-    // Insert as `[[Title]]` for portable markdown across Hootie/CLI/MCP.
-    editorRef.current?.insertWikiLink(node.title);
+    editorRef.current?.insertWikiLink(slugFromNodeId(node.id), node.title);
   };
 
   const handleWikiLinkClick = async (linkTitle: string, id: string | null) => {
@@ -415,11 +415,17 @@ export function DocumentEditor({
       );
       return;
     }
-    // Cache miss: resolve title→id at click time.
+    // Resolve target as id, title, or slug.
     try {
-      const { nodes } = await api.searchNodes(nestId, linkTitle);
-      const exact = (nodes as Array<{ id: string; title: string }>).find(
-        (n) => n.title.toLowerCase() === linkTitle.toLowerCase(),
+      const { nodes } = await api.listNodes(nestId);
+      const list = nodes as Array<{ id: string; title: string }>;
+      const lower = linkTitle.toLowerCase();
+      const bareSlug = slugFromNodeId(linkTitle).toLowerCase();
+      const exact = list.find(
+        (n) =>
+          n.id.toLowerCase() === lower ||
+          n.title.toLowerCase() === lower ||
+          slugFromNodeId(n.id).toLowerCase() === bareSlug,
       );
       if (exact) {
         confirmLeave(

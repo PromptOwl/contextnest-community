@@ -53,11 +53,13 @@ export const WikiLink = Extension.create<WikiLinkOptions>({
               wikiLinkRegex.lastIndex = 0;
               while ((match = wikiLinkRegex.exec(text)) !== null) {
                 const fullMatch = match[0];
-                const title = match[1].trim();
-                const displayText = match[2]?.trim() || title;
+                const target = match[1].trim();
+                const hasAlias = match[2] !== undefined;
+                const displayText = match[2]?.trim() || target;
                 const start = pos + match.index;
+                const end = start + fullMatch.length;
 
-                const cached = existsCache.get(title.toLowerCase());
+                const cached = existsCache.get(target.toLowerCase());
                 const exists = cached?.exists ?? !checkExists;
                 const docId = cached?.id;
 
@@ -65,41 +67,42 @@ export const WikiLink = Extension.create<WikiLinkOptions>({
                   ? "wiki-link-exists"
                   : "wiki-link-broken";
                 const tooltip = exists
-                  ? `Open "${title}"`
-                  : `"${title}" not found in this nest`;
+                  ? `Open "${displayText}"`
+                  : `"${displayText}" not found in this nest`;
 
-                const openBracketEnd = start + 2;
-                const closeBracketStart = start + fullMatch.length - 2;
+                // Show alias only; hide `[[target|` + `]]`.
+                const labelStart = hasAlias
+                  ? start + fullMatch.lastIndexOf("|") + 1
+                  : start + 2;
+                const labelEnd = end - 2;
 
                 decorations.push(
-                  Decoration.inline(start, openBracketEnd, {
+                  Decoration.inline(start, labelStart, {
                     class: "wiki-bracket-hidden",
                   }),
                 );
                 decorations.push(
-                  Decoration.inline(openBracketEnd, closeBracketStart, {
+                  Decoration.inline(labelStart, labelEnd, {
                     class: `wiki-link ${linkClass}`,
-                    "data-wiki-title": title,
+                    "data-wiki-title": target,
                     "data-wiki-id": docId || "",
                     "data-wiki-display": displayText,
                     title: tooltip,
                   }),
                 );
                 decorations.push(
-                  Decoration.inline(
-                    closeBracketStart,
-                    start + fullMatch.length,
-                    { class: "wiki-bracket-hidden" },
-                  ),
+                  Decoration.inline(labelEnd, end, {
+                    class: "wiki-bracket-hidden",
+                  }),
                 );
 
-                if (checkExists && !existsCache.has(title.toLowerCase())) {
+                if (checkExists && !existsCache.has(target.toLowerCase())) {
                   // Seed a tentative entry so we don't fire the same
                   // request again while the first one is in flight.
-                  existsCache.set(title.toLowerCase(), { exists: false });
-                  checkExists(title)
+                  existsCache.set(target.toLowerCase(), { exists: false });
+                  checkExists(target)
                     .then((result) => {
-                      existsCache.set(title.toLowerCase(), result);
+                      existsCache.set(target.toLowerCase(), result);
                     })
                     .catch(() => {
                       /* keep the tentative miss on failure */
