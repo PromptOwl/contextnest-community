@@ -33,6 +33,7 @@ export interface Steward {
   scope: StewardshipScope;
   tagName?: string;
   nodePattern?: string;
+  nodeTitle?: string;
   role: "editor" | "reviewer" | "viewer";
 }
 
@@ -77,7 +78,7 @@ export function StewardList({
     const config = scopeConfig[steward.scope];
     let target = "";
     if (steward.scope === "tag") target = steward.tagName || "";
-    else if (steward.scope === "document") target = steward.nodePattern || "";
+    else if (steward.scope === "document") target = steward.nodeTitle || steward.nodePattern || "";
 
     return (
       <div className="flex items-center gap-1 text-xs text-muted-foreground">

@@ -679,9 +679,11 @@ authRoutes.get("/teammates", async (c) => {
     last_active: string | null;
   }>;
 
-  // Steward emails assigned to any nest but without an API key on this
-  // server — they've been delegated governance but can't log in yet.
-  // Surface them so the admin can invite them with one click.
+  // Steward emails assigned to any nest but without any way to
+  // authenticate on this server yet — i.e. no claimed user account
+  // (is_invited = 0, password set via /auth/register) AND no api_key
+  // (admin hasn't issued one via /auth/invite-teammate). If either
+  // path exists, the steward can act and shouldn't be flagged.
   const pendingStewards = db
     .prepare(
       `SELECT DISTINCT s.user_email AS email
@@ -689,8 +691,13 @@ authRoutes.get("/teammates", async (c) => {
         WHERE s.is_active = 1
           AND NOT EXISTS (
             SELECT 1 FROM users u
-              JOIN api_keys k ON k.user_id = u.id
              WHERE lower(u.email) = lower(s.user_email)
+               AND (
+                 u.is_invited = 0
+                 OR EXISTS (
+                   SELECT 1 FROM api_keys k WHERE k.user_id = u.id
+                 )
+               )
           )
         ORDER BY s.user_email`,
     )

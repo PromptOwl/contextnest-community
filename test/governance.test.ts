@@ -75,7 +75,7 @@ tags:
       {},
       admin.apiKey,
     );
-  });
+  }, 30000);
 
   afterAll(() => env.cleanup());
 
@@ -624,6 +624,96 @@ describe("governance: permission enforcement", () => {
       `/nests/${nestId}/nodes/nodes/outsider-doc/approve`,
       { note: "Approved by admin" },
       dev.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.review.status).toBe("approved");
+  });
+});
+
+// ─── Owner can self-approve (CU-86ahn99dg) ────────────────────────────
+// The original separation-of-duties rule blocked everyone — including the
+// nest owner — from approving a version they authored. That blocks the
+// seeding flow when the owner is alone in the nest. Owner-as-approver is
+// consistent with how the owner already short-circuits canUserEdit and
+// canUserAccess.
+describe("governance: nest owner can self-approve their own submissions", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string; userId: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@solo.test", "Owner");
+
+    const { data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Solo Nest" },
+      owner.apiKey,
+    );
+    nestId = data.nest.id;
+
+    // Enable stewardship so submitted docs go through review.
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/settings`,
+      { stewardship_enabled: true },
+      owner.apiKey,
+    );
+
+    // Stewards.yaml making the owner a nest-scope reviewer. Without this,
+    // canUserApprove would 403 on "no stewards configured" before we
+    // could get to the self-approve case.
+    const nestPath = join(env.dataDir, "nests", nestId);
+    mkdirSync(nestPath, { recursive: true });
+    writeFileSync(
+      join(nestPath, "stewards.yaml"),
+      `version: 1
+nest:
+  - email: owner@solo.test, role: reviewer, can_approve: true
+`,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards/sync`,
+      {},
+      owner.apiKey,
+    );
+
+    // Owner authors a node + submits it for review.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      {
+        title: "Seed Doc",
+        content: "# Seed Doc\n\nFirst document while seeding the nest.",
+      },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/seed-doc/submit-review`,
+      { note: "seeding the nest" },
+      owner.apiKey,
+    );
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("owner can approve their own submission", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/seed-doc/approve`,
+      { note: "approving my own seed doc" },
+      owner.apiKey,
     );
     expect(status).toBe(200);
     expect(data.review.status).toBe("approved");

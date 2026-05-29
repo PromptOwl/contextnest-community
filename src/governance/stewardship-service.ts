@@ -8,6 +8,8 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { getAccessConfig } from "./access-service.js";
+import { ConflictError } from "../shared/errors.js";
+import { buildTitleMap } from "./title-resolver.js";
 import type {
   Steward,
   ResolvedSteward,
@@ -90,12 +92,12 @@ export function getSteward(id: string): Steward | null {
   return row ? rowToSteward(row) : null;
 }
 
-export function getStewardsForNest(nestId: string): Steward[] {
+export async function getStewardsForNest(nestId: string): Promise<Steward[]> {
   const db = getDb();
   const rows = db
     .prepare("SELECT * FROM stewards WHERE nest_id = ? AND is_active = 1")
     .all(nestId) as any[];
-  return rows.map(rowToSteward);
+  return enrichWithTitles(nestId, rows.map(rowToSteward));
 }
 
 export function getStewardsForScope(params: {
@@ -122,11 +124,11 @@ export function getStewardsForScope(params: {
 /**
  * List stewards with filters. Mirrors PromptOwl StewardsListPage filters.
  */
-export function listStewards(params: {
+export async function listStewards(params: {
   nestId: string;
   scope?: StewardshipScope;
   search?: string;
-}): Steward[] {
+}): Promise<Steward[]> {
   const db = getDb();
   let sql = "SELECT * FROM stewards WHERE nest_id = ? AND is_active = 1";
   const args: any[] = [params.nestId];
@@ -141,7 +143,27 @@ export function listStewards(params: {
     args.push(like, like, like);
   }
   sql += " ORDER BY scope, COALESCE(node_pattern, tag_name, ''), user_email";
-  return (db.prepare(sql).all(...args) as any[]).map(rowToSteward);
+  const stewards = (db.prepare(sql).all(...args) as any[]).map(rowToSteward);
+
+  return enrichWithTitles(params.nestId, stewards);
+}
+
+// Resolve nodeTitle from on-disk frontmatter for document-scoped rows.
+// Title is not duplicated into the DB — frontmatter is source of truth —
+// so we look it up here. Skips the storage scan when no doc-scoped row
+// exists in the result set.
+async function enrichWithTitles(
+  nestId: string,
+  stewards: Steward[],
+): Promise<Steward[]> {
+  if (!stewards.some((s) => s.scope === "document")) return stewards;
+  const titleByNodeId = await buildTitleMap(nestId);
+  for (const s of stewards) {
+    if (s.scope === "document" && s.nodePattern) {
+      s.nodeTitle = titleByNodeId.get(s.nodePattern);
+    }
+  }
+  return stewards;
 }
 
 /**
@@ -262,8 +284,15 @@ export async function createStewardRecord(params: {
       ) as any;
 
     if (existing) {
-      results.push(rowToSteward(existing));
-      continue;
+      const scopeLabel =
+        params.scope === "document"
+          ? `document "${nodePattern}"`
+          : params.scope === "tag"
+            ? `tag "#${tagName}"`
+            : "this nest";
+      throw new ConflictError(
+        `"${email}" is already a steward of ${scopeLabel} with the "${existing.role}" role. Remove the existing assignment first to change the role.`,
+      );
     }
 
     const userRow = db
@@ -411,8 +440,13 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
 //
 // Rules:
 //   super-admin (access.yaml)  -> all allowed
-//   nest owner                 -> edit + access, NEVER approve (separation-of-duties)
-//   steward role=reviewer      -> approve + reject + access
+//   nest owner                 -> edit + access + approve (including own
+//                                 submissions; the owner already has full
+//                                 control over the nest, so the
+//                                 separation-of-duties rule was theater
+//                                 for the seeding case — CU-86ahn99dg).
+//                                 The version log still records the actor.
+//   steward role=reviewer      -> approve + reject + access (NOT own work)
 //   steward role=editor        -> edit + access
 //   steward role=viewer        -> access only
 
@@ -485,6 +519,27 @@ function getCurrentVersionAuthor(
   return row?.author ?? null;
 }
 
+/**
+ * For SoD: the email that triggered the current pending review wins over
+ * the original version author. The requester is the proximate "actor"
+ * asking for approval, so SoD should block them — not whoever happened
+ * to write an earlier edit. Returns null when no pending review exists.
+ */
+function getPendingReviewRequester(
+  nestId: string,
+  nodeId: string,
+): string | null {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT requested_by FROM review_requests
+       WHERE nest_id = ? AND node_id = ? AND status = 'pending'
+       ORDER BY requested_at DESC LIMIT 1`,
+    )
+    .get(nestId, nodeId) as { requested_by: string } | undefined;
+  return row?.requested_by ?? null;
+}
+
 export function canUserApprove(
   nestId: string,
   nodeId: string,
@@ -494,41 +549,69 @@ export function canUserApprove(
     return { allowed: true, reason: "super admin", role: "super_admin" };
   }
 
-  // Check steward assignment first — a user who isn't a steward can't approve
-  // regardless of authorship, and the "not a steward" message is more useful.
+  // Nest owner can always approve — including their own submissions.
+  // Mirrors the short-circuit in canUserEdit / canUserAccess. The owner
+  // already controls the nest at every other layer; pretending the
+  // separation-of-duties rule applies to them just blocks the seeding
+  // flow. The version log still records the actor for audit. See
+  // CU-86ahn99dg.
+  const owner = getNestOwnerEmail(nestId);
+  if (owner && owner.toLowerCase() === userEmail.toLowerCase()) {
+    return { allowed: true, reason: "nest owner", role: "owner" };
+  }
+
+  // Check steward assignment first — a user who isn't a steward at all
+  // can't approve, regardless of authorship.
   const resolved = resolveStewardsForNode(nestId, nodeId);
   if (resolved.length === 0) {
     return {
       allowed: false,
-      reason: "no stewards configured for this node",
+      reason:
+        "This document has no stewards assigned, so it can't be approved yet. Ask the nest owner to add at least one reviewer.",
       role: null,
     };
   }
 
-  const match = resolved.find(
-    (r) =>
-      r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
-      r.steward.role === "reviewer",
+  // A user may hold multiple steward rows on this node (e.g. editor on
+  // the doc + reviewer on the nest). Roles are additive — editor grants
+  // edit rights, reviewer grants approve rights — so we look at the full
+  // set of the user's assignments instead of picking one.
+  const userMatches = resolved.filter(
+    (r) => r.steward.userEmail.toLowerCase() === userEmail.toLowerCase(),
   );
-  if (!match) {
+  const reviewerMatch = userMatches.find((r) => r.steward.role === "reviewer");
+  if (!reviewerMatch) {
+    const hasOtherRole = userMatches.length > 0;
     return {
       allowed: false,
-      reason: "not a reviewer steward for this node",
-      role: null,
+      reason: hasOtherRole
+        ? `You're assigned as "${userMatches[0].steward.role}" on this document — only reviewers can approve. Ask the nest owner to grant you the reviewer role.`
+        : "You're not a steward on this document, so you can't approve it. Ask the nest owner to add you as a reviewer.",
+      role: userMatches[0]?.steward.role ?? null,
     };
   }
 
-  // Separation of duties: even a reviewer can't approve their own edit.
-  const author = getCurrentVersionAuthor(nestId, nodeId);
-  if (author && author.toLowerCase() === userEmail.toLowerCase()) {
+  // Separation of duties: the user who SUBMITTED the version for review
+  // can't approve it themselves, even if they ALSO hold an editor row on
+  // this node. Holding editor in addition to reviewer doesn't waive SoD —
+  // the submitter is still the proximate actor and a second pair of eyes
+  // is required. We compare against review_requests.requested_by (the
+  // active actor) rather than node_versions.author so that when a
+  // teammate submits someone else's earlier edit, the original author
+  // can still approve.
+  const actor =
+    getPendingReviewRequester(nestId, nodeId) ??
+    getCurrentVersionAuthor(nestId, nodeId);
+  if (actor && actor.toLowerCase() === userEmail.toLowerCase()) {
     return {
       allowed: false,
-      reason: "cannot approve a version you authored (separation of duties)",
+      reason:
+        "You submitted this version for review, so you can't approve it yourself. Ask another reviewer to approve it (separation of duties).",
       role: "reviewer",
     };
   }
 
-  return { allowed: true, reason: match.source, role: "reviewer" };
+  return { allowed: true, reason: reviewerMatch.source, role: "reviewer" };
 }
 
 export function canUserAccess(

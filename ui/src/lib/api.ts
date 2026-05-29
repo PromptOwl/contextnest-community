@@ -126,6 +126,7 @@ export async function getHealth() {
   return request<{
     status: string;
     auth_mode: string;
+    logo_url?: string | null;
     suspended_reason?: string;
   }>("/health");
 }
@@ -269,11 +270,7 @@ export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
 }
 
-export async function getNest(nestId: string) {
-  return request<{ nest: any; permission: string }>(`/nests/${nestId}`);
-}
-
-export async function updateNestVisibility(
+export async function setNestVisibility(
   nestId: string,
   visibility: "private" | "public",
 ) {
@@ -281,6 +278,13 @@ export async function updateNestVisibility(
     `/nests/${nestId}/visibility`,
     { method: "PATCH", body: JSON.stringify({ visibility }) },
   );
+}
+
+export async function getNest(nestId: string) {
+  return request<{
+    nest: { id: string; name: string; visibility: "private" | "public" };
+    permission: string;
+  }>(`/nests/${nestId}`);
 }
 
 export async function getServerStats() {
@@ -338,6 +342,17 @@ export async function searchNodes(nestId: string, query: string) {
 
 export async function getOverview(nestId: string) {
   return request(`/nests/${nestId}/overview`);
+}
+
+export async function listTags(nestId: string): Promise<string[]> {
+  const res = await request<{ tags?: Record<string, number> }>(
+    `/nests/${nestId}/overview`,
+  );
+  const tags = res?.tags ?? {};
+  return Object.keys(tags)
+    .map((t) => t.replace(/^#+/, ""))
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
 }
 
 // ─── Governance ─────────────────────────────────────────────────────────

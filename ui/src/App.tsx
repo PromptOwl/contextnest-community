@@ -6,7 +6,7 @@ import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, type LicenseStatus } from "./lib/api";
+import { getLicenseStatus, getNest, type LicenseStatus } from "./lib/api";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -30,6 +30,16 @@ import {
 import { toast } from "sonner";
 import { useAuth } from "./auth/AuthContext";
 
+/** One ancestor in the wiki-link nav chain. */
+export interface BreadcrumbEntry {
+  nestId: string;
+  nestName: string;
+  nodeId: string;
+  title: string;
+  isOwner: boolean;
+  isAnonOwned: boolean;
+}
+
 type View =
   | { page: "dashboard" }
   | {
@@ -38,6 +48,9 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      /** Seed the nest list's search filter when arriving via a tag
+       *  click on a document detail page. */
+      initialSearch?: string;
     }
   | {
       page: "document";
@@ -46,12 +59,18 @@ type View =
       nodeId: string | "new";
       isOwner: boolean;
       isAnonOwned: boolean;
+      /** Pre-fill the title when arriving via a broken-wikilink click.
+       *  Only meaningful when nodeId === "new". */
+      initialTitle?: string;
+      /** Prior wiki-link hops, oldest first. Back pops the last entry. */
+      breadcrumb?: BreadcrumbEntry[];
     }
   | { page: "teammates" };
 
 export default function App() {
   const {
     authMode,
+    logoUrl,
     adminStatus,
     authenticated,
     isAdmin,
@@ -61,6 +80,18 @@ export default function App() {
   } = useAuth();
   const [view, setView] = useState<View>({ page: "dashboard" });
   const [showAdminLogin, setShowAdminLogin] = useState(false);
+  // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
+  const [deepLinkProbe, setDeepLinkProbe] = useState<
+    | { status: "idle" }
+    | { status: "loading" }
+    | { status: "ok"; nestId: string; nestName: string }
+    | { status: "missing" }
+  >(() => {
+    if (typeof window === "undefined") return { status: "idle" };
+    const params = new URLSearchParams(window.location.search);
+    const nestId = params.get("nest");
+    return nestId ? { status: "loading" } : { status: "idle" };
+  });
   const [licenseStatus, setLicenseStatus] = useState<LicenseStatus | null>(
     null,
   );
@@ -98,6 +129,36 @@ export default function App() {
     }
   }, []);
 
+  // Probe GET /nests/:id once on mount. URL left intact so refresh re-probes.
+  useEffect(() => {
+    if (deepLinkProbe.status !== "loading") return;
+    const params = new URLSearchParams(window.location.search);
+    const nestId = params.get("nest");
+    if (!nestId) {
+      setDeepLinkProbe({ status: "missing" });
+      return;
+    }
+    (async () => {
+      try {
+        const { nest } = await getNest(nestId);
+        setDeepLinkProbe({
+          status: "ok",
+          nestId: nest.id,
+          nestName: nest.name,
+        });
+        setView({
+          page: "nest",
+          nestId: nest.id,
+          nestName: nest.name,
+          isOwner: false,
+          isAnonOwned: false,
+        });
+      } catch {
+        setDeepLinkProbe({ status: "missing" });
+      }
+    })();
+  }, [deepLinkProbe.status]);
+
   useEffect(() => {
     refreshLicense();
     // Server-side watcher revokes sessions within seconds of a
@@ -116,18 +177,15 @@ export default function App() {
     };
   }, [refreshLicense]);
 
-  // Reset to the dashboard whenever the signed-in user changes. App
-  // doesn't unmount across logout/login so `view` would otherwise
-  // carry the prior session's selected nest into the next user's
-  // session — that lets user B land directly inside user A's nest
-  // even when they lack access (server still 403s, but UX is wrong).
-  // Tracking the previous email (incl. logged-out → null) catches
-  // logout, login, and user-switch in one effect.
+  // Reset view on user-switch (logout/login). Skip initial null→email
+  // (just auth resolving — would clobber deep-link view).
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const prevUserEmailRef = useRef<string | null>(currentUserEmail);
   useEffect(() => {
-    if (prevUserEmailRef.current !== currentUserEmail) {
-      prevUserEmailRef.current = currentUserEmail;
+    if (prevUserEmailRef.current === currentUserEmail) return;
+    const wasLoggedIn = prevUserEmailRef.current !== null;
+    prevUserEmailRef.current = currentUserEmail;
+    if (wasLoggedIn) {
       setView({ page: "dashboard" });
     }
   }, [currentUserEmail]);
@@ -145,7 +203,12 @@ export default function App() {
     );
   }
 
-  if (loading || authMode === null || licenseLoading) {
+  if (
+    loading ||
+    authMode === null ||
+    licenseLoading ||
+    deepLinkProbe.status === "loading"
+  ) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="animate-pulse text-muted-foreground">Connecting...</div>
@@ -203,7 +266,8 @@ export default function App() {
     </>
   );
 
-  if (!authenticated && authMode === "key") {
+  // Unauth + key mode → Login, unless deep-link probe resolved a public nest.
+  if (!authenticated && authMode === "key" && deepLinkProbe.status !== "ok") {
     return (
       <>
         <Login />
@@ -221,7 +285,11 @@ export default function App() {
             onClick={() => setView({ page: "dashboard" })}
             className="flex items-center gap-2 hover:opacity-80"
           >
-            <img src={hootieIcon} alt="ContextNest" className="h-7 w-7" />
+            <img
+              src={logoUrl ?? hootieIcon}
+              alt="ContextNest"
+              className="h-7 w-7 object-contain"
+            />
             <span className="font-semibold">ContextNest</span>
             <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
               Community
@@ -235,6 +303,13 @@ export default function App() {
               <span className="hidden md:inline-flex items-center gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded">
                 <Info className="h-3 w-3" />
                 Open mode
+              </span>
+            )}
+            {/* Unauth deep-link visitor badge. */}
+            {authMode === "key" && !authenticated && (
+              <span className="hidden md:inline-flex items-center gap-1.5 text-xs text-blue-700 bg-blue-50 border border-blue-200 px-2 py-1 rounded">
+                <Info className="h-3 w-3" />
+                Public read-only
               </span>
             )}
 
@@ -280,7 +355,27 @@ export default function App() {
             nestName={view.nestName}
             isOwner={view.isOwner}
             isAnonOwned={view.isAnonOwned}
-            onBack={() => setView({ page: "dashboard" })}
+            initialSearch={view.initialSearch}
+            onBack={() => {
+              // Drop ?nest from URL so refresh doesn't re-enter the nest.
+              if (typeof window !== "undefined") {
+                const params = new URLSearchParams(window.location.search);
+                if (params.has("nest")) {
+                  params.delete("nest");
+                  const qs = params.toString();
+                  window.history.replaceState(
+                    {},
+                    "",
+                    window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
+                  );
+                }
+              }
+              // Unauth → bounce to Login (Dashboard would 401).
+              if (!authenticated && authMode === "key") {
+                setDeepLinkProbe({ status: "missing" });
+              }
+              setView({ page: "dashboard" });
+            }}
             onOpenDocument={(nodeId) =>
               setView({
                 page: "document",
@@ -293,47 +388,127 @@ export default function App() {
             }
           />
         )}
-        {view.page === "document" && (
-          <DocumentEditor
-            nestId={view.nestId}
-            nestName={view.nestName}
-            nodeId={view.nodeId}
-            onBack={() =>
-              setView({
-                page: "nest",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-              })
-            }
-            onSaved={() =>
-              setView({
-                page: "nest",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-              })
-            }
-            onNavigateDocument={(linkNestId, linkNodeId) =>
-              // Cross-nest links don't carry the target nest's name or
-              // ownership — keep current values as a best-effort and let
-              // DocumentEditor reload. Delete affordance in NestView
-              // will be hidden for cross-nest hops it can't verify.
-              setView({
-                page: "document",
-                nestId: linkNestId,
-                nestName:
-                  linkNestId === view.nestId ? view.nestName : "Document",
-                nodeId: linkNodeId,
-                isOwner: linkNestId === view.nestId ? view.isOwner : false,
-                isAnonOwned:
-                  linkNestId === view.nestId ? view.isAnonOwned : false,
-              })
-            }
-          />
-        )}
+        {view.page === "document" && (() => {
+          // Shared nav helpers to avoid setView shape duplication.
+          const doc = view;
+          const openDocument = (target: {
+            nestId: string;
+            nestName: string;
+            nodeId: string | "new";
+            isOwner: boolean;
+            isAnonOwned: boolean;
+            initialTitle?: string;
+            breadcrumb?: BreadcrumbEntry[];
+          }) => setView({ page: "document", ...target });
+          const openNest = (initialSearch?: string) =>
+            setView({
+              page: "nest",
+              nestId: doc.nestId,
+              nestName: doc.nestName,
+              isOwner: doc.isOwner,
+              isAnonOwned: doc.isAnonOwned,
+              initialSearch,
+            });
+          return (
+            <DocumentEditor
+              // Key by nest + node so React unmounts the editor when the
+              // user hops to a different doc (wiki-link nav) or pivots
+              // from an existing doc into a fresh "new" page via a
+              // broken-link click. Without this, useState values (title,
+              // content, status) survive the prop change and the old
+              // doc's body renders under the new doc's chrome — and
+              // isNew flips true with stale state, hiding the status
+              // badge + Submit-for-review button on the original doc.
+              key={`${doc.nestId}/${doc.nodeId}`}
+              nestId={doc.nestId}
+              nestName={doc.nestName}
+              nodeId={doc.nodeId}
+              isOwner={doc.isOwner}
+              breadcrumb={doc.breadcrumb}
+              onBack={() => {
+                // Pop last ancestor when chain non-empty; else nest list.
+                const stack = doc.breadcrumb ?? [];
+                if (stack.length > 0) {
+                  const prev = stack[stack.length - 1];
+                  openDocument({ ...prev, breadcrumb: stack.slice(0, -1) });
+                  return;
+                }
+                openNest();
+              }}
+              onJumpBreadcrumb={(index) => {
+                // Jump to ancestor at index; drop entries after.
+                const stack = doc.breadcrumb ?? [];
+                const entry = stack[index];
+                if (!entry) return;
+                openDocument({ ...entry, breadcrumb: stack.slice(0, index) });
+              }}
+              onSaved={() => openNest()}
+              onNavigateDocument={(linkNestId, linkNodeId, currentTitle) => {
+                // Cycle handling: never duplicate target in chain.
+                //  - target == current doc → no-op (self-link).
+                //  - target already in stack → truncate to that occurrence (jump-back).
+                //  - else → push current onto stack.
+                const stack = doc.breadcrumb ?? [];
+                const sameNest = linkNestId === doc.nestId;
+                if (linkNestId === doc.nestId && linkNodeId === doc.nodeId) {
+                  return;
+                }
+                const existingIdx = stack.findIndex(
+                  (e) => e.nestId === linkNestId && e.nodeId === linkNodeId,
+                );
+                if (existingIdx !== -1) {
+                  openDocument({
+                    nestId: linkNestId,
+                    nestName: sameNest ? doc.nestName : "Document",
+                    nodeId: linkNodeId,
+                    isOwner: sameNest ? doc.isOwner : false,
+                    isAnonOwned: sameNest ? doc.isAnonOwned : false,
+                    breadcrumb: stack.slice(0, existingIdx),
+                  });
+                  return;
+                }
+                const nextStack =
+                  doc.nodeId !== "new"
+                    ? [
+                        ...stack,
+                        {
+                          nestId: doc.nestId,
+                          nestName: doc.nestName,
+                          nodeId: doc.nodeId,
+                          title: currentTitle?.trim() || "Untitled",
+                          isOwner: doc.isOwner,
+                          isAnonOwned: doc.isAnonOwned,
+                        },
+                      ]
+                    : stack;
+                openDocument({
+                  nestId: linkNestId,
+                  nestName: sameNest ? doc.nestName : "Document",
+                  nodeId: linkNodeId,
+                  isOwner: sameNest ? doc.isOwner : false,
+                  isAnonOwned: sameNest ? doc.isAnonOwned : false,
+                  breadcrumb: nextStack,
+                });
+              }}
+              onTagClick={(tag) =>
+                // Tag chip → nest list filtered by tag.
+                openNest(tag)
+              }
+              onCreateDocument={(linkNestId, initialTitle) =>
+                // Broken `[[Title]]` → new-doc page with title pre-filled.
+                openDocument({
+                  nestId: linkNestId,
+                  nestName: doc.nestName,
+                  nodeId: "new",
+                  isOwner: doc.isOwner,
+                  isAnonOwned: doc.isAnonOwned,
+                  initialTitle,
+                })
+              }
+              initialTitle={doc.initialTitle}
+            />
+          );
+        })()}
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}

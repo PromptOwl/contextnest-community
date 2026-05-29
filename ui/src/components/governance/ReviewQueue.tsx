@@ -29,6 +29,7 @@ export type ReviewRequestPriority = "low" | "normal" | "high" | "urgent";
 export interface ReviewRequest {
   id: string;
   nodeId: string;
+  title?: string;
   version: number;
   requestedBy: string;
   requestedAt: string;
@@ -154,7 +155,7 @@ export function ReviewQueue({
                   <FileText className="h-5 w-5 text-blue-500 flex-shrink-0" />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="font-medium truncate">{request.nodeId}</span>
+                      <span className="font-medium truncate">{request.title || request.nodeId}</span>
                       <Badge
                         variant="secondary"
                         className={cn("text-[10px] px-1.5 py-0", priorityCfg.className)}
