@@ -200,7 +200,6 @@ export const MarkdownEditor = forwardRef<
                 const list = nodes as Array<{ id: string; title: string }>;
                 const lower = target.toLowerCase();
                 const bareSlug = slugFromNodeId(target).toLowerCase();
-                console.log(bareSlug, "----bareSlug");
                 
                 const exact = list.find(
                   (n) =>
