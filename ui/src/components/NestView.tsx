@@ -7,10 +7,11 @@ import * as api from "../lib/api";
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
-  Pencil, Trash2, FileWarning,
+  Pencil, Trash2, FileWarning, Users,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
+import { ShareNestDialog } from "./ShareNestDialog";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -84,7 +85,13 @@ export function NestView({
   }>({ versions: [], approvedVersion: null, currentVersion: 0 });
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
+  const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
+  // Sharing (visibility + collaborators) is admin-gated server-side
+  // (see src/app.ts: /collaborators and /visibility require "admin").
+  // Mirror that here so non-admins don't see a button that 403s: the
+  // nest owner or a server admin can manage sharing.
+  const canShare = isOwner || isAdmin;
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -280,6 +287,15 @@ export function NestView({
             <Link2 className="h-4 w-4 mr-2" />
             Connect
           </Button>
+          {/* Share — visibility + collaborators. Gated to owner/admin to
+              match the server's admin requirement on /collaborators and
+              /visibility; non-admins would only get a 403. */}
+          {canShare && (
+            <Button variant="outline" onClick={() => setShowShare(true)}>
+              <Users className="h-4 w-4 mr-2" />
+              Share
+            </Button>
+          )}
           {/* Delete — gated to match server rules (owner, or admin
               caretaker on the ungoverned commons in key mode). Server
               still enforces; hiding the button just keeps the UI
@@ -782,6 +798,15 @@ export function NestView({
           onClose={() => setShowConnect(false)}
           nestId={nestId}
           nestName={nestName}
+        />
+      )}
+
+      {showShare && (
+        <ShareNestDialog
+          nestId={nestId}
+          nestName={nestName}
+          onClose={() => setShowShare(false)}
+          onChanged={fetchData}
         />
       )}
 

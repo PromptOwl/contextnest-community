@@ -269,6 +269,20 @@ export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
 }
 
+export async function getNest(nestId: string) {
+  return request<{ nest: any; permission: string }>(`/nests/${nestId}`);
+}
+
+export async function updateNestVisibility(
+  nestId: string,
+  visibility: "private" | "public",
+) {
+  return request<{ visibility: "private" | "public" }>(
+    `/nests/${nestId}/visibility`,
+    { method: "PATCH", body: JSON.stringify({ visibility }) },
+  );
+}
+
 export async function getServerStats() {
   return request<{ nests: number; documents: number; users: number }>("/stats");
 }
@@ -507,4 +521,22 @@ export async function addCollaborator(
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+export async function updateCollaborator(
+  nestId: string,
+  collabId: string,
+  permission: string,
+) {
+  return request<{ updated: boolean }>(
+    `/nests/${nestId}/collaborators/${collabId}`,
+    { method: "PATCH", body: JSON.stringify({ permission }) },
+  );
+}
+
+export async function removeCollaborator(nestId: string, collabId: string) {
+  return request<{ removed: boolean }>(
+    `/nests/${nestId}/collaborators/${collabId}`,
+    { method: "DELETE" },
+  );
 }
