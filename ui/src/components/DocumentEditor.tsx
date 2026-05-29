@@ -23,12 +23,14 @@ import {
   Send,
   X,
   Pencil,
+  Users,
 } from "lucide-react";
 import {
   MarkdownEditor,
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
+import { ShareNestDialog } from "./ShareNestDialog";
 import { SubmitForReviewModal, ReviewActions, ExternalEditBanner } from "./governance";
 import type { PendingChange } from "../lib/api";
 import { DocumentPickerModal } from "./DocumentPickerModal";
@@ -48,6 +50,9 @@ interface DocumentEditorProps {
   nestId: string;
   nestName: string;
   nodeId: string | "new";
+  /** Whether the caller owns this nest — gates the inline Share affordance
+   *  alongside server-admin. Mirrors NestView's owner/admin sharing gate. */
+  isOwner?: boolean;
   onBack: () => void;
   onSaved?: (savedNodeId: string) => void;
   /** Open a different document — invoked when the user clicks an
@@ -59,13 +64,22 @@ export function DocumentEditor({
   nestId,
   nestName,
   nodeId,
+  isOwner = false,
   onBack,
   onSaved,
   onNavigateDocument,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
-  const { adminStatus } = useAuth();
+  const { adminStatus, isAdmin } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
+  // Inline sharing from the document view — "add folks to a context where
+  // you're reading it" instead of bouncing back to the nest. Same dialog
+  // and owner/admin gate as NestView (the server requires admin on
+  // /collaborators and /visibility). New, unsaved docs have no shareable
+  // nest target distinct from the nest list, so only offer it once we're
+  // looking at a real nest the caller can administer.
+  const canShare = isOwner || isAdmin;
+  const [showShare, setShowShare] = useState(false);
   const [canReviewHerePerm, setCanReviewHerePerm] = useState(false);
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
@@ -347,6 +361,17 @@ export function DocumentEditor({
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {canShare && (
+            <Button
+              variant="outline"
+              onClick={() => setShowShare(true)}
+              data-testid="document-editor-share"
+              title="Share this nest — visibility and collaborators"
+            >
+              <Users className="h-4 w-4 mr-2" />
+              Share
+            </Button>
+          )}
           {canSubmitForReview && (
             <Button
               variant="outline"
@@ -556,6 +581,18 @@ export function DocumentEditor({
         excludeNodeId={isNew ? undefined : nodeId}
         onSelect={handleDocLinkInsert}
       />
+
+      {showShare && (
+        <ShareNestDialog
+          nestId={nestId}
+          nestName={nestName}
+          onClose={() => setShowShare(false)}
+          onChanged={() => {
+            /* Sharing changes don't alter this document's content; nothing
+               to reload here. The nest list re-reads on next visit. */
+          }}
+        />
+      )}
     </div>
   );
 }
