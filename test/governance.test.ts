@@ -22,7 +22,8 @@ describe("governance: stewardship with stewards.yaml", () => {
 
   beforeAll(async () => {
     env = setupTestEnv();
-    app = await createTestApp("key");
+    // lead is the server (super) admin — only they can manage the roster.
+    app = await createTestApp("key", { superAdmins: ["lead@acme.com"] });
     admin = await registerUser(app, "lead@acme.com", "Lead");
     dev = await registerUser(app, "dev@acme.com", "Dev");
     reviewer = await registerUser(app, "jane@acme.com", "Jane");
@@ -268,7 +269,8 @@ describe("governance: rejection workflow", () => {
 
   beforeAll(async () => {
     env = setupTestEnv();
-    app = await createTestApp("key");
+    // dev owns the nest AND is the server admin syncing the roster.
+    app = await createTestApp("key", { superAdmins: ["dev@acme.com"] });
     dev = await registerUser(app, "dev@acme.com", "Dev");
     reviewer = await registerUser(app, "reviewer@acme.com", "Reviewer");
 

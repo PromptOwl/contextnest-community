@@ -10,9 +10,14 @@ import {
   deleteNest,
   isStewardshipEnabled,
   setStewardshipEnabled,
-  disableStewardshipAndWipeAccess,
+  disableStewardshipAndWipeGovernance,
 } from "./service.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
+import {
+  resolveUserRoles,
+  getStewardsForUser,
+} from "../governance/stewardship-service.js";
+import { resolveCallerEmail } from "../governance/access-guard.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
@@ -48,22 +53,11 @@ export const nestRoutes = new Hono<AuthEnv>();
 nestRoutes.get("/", async (c) => {
   const userId = c.get("userId");
   const owned = listNests(userId);
-  let shared = listSharedNests(userId);
+  // Collaborator/steward grants are independent of stewardship — a shared
+  // nest stays visible whether or not governed mode is on.
+  const shared = listSharedNests(userId);
   // Public-but-not-mine; surfaces them in dashboard list.
   const publicExtras = listPublicNests(userId);
-
-  // Defensive cleanup: a shared nest whose owner disabled stewardship some
-  // time ago may still have stale collaborator/steward rows (legacy data
-  // from before disable-wipes-access was wired in). Treat that as a signal
-  // to wipe and exclude the nest from this caller's shared list. The PATCH
-  // path now wipes on disable, so this branch only fires for pre-existing
-  // mismatches.
-  const visibleShared = shared.filter((n) => {
-    if (isStewardshipEnabled(n.id)) return true;
-    disableStewardshipAndWipeAccess(n.id);
-    return false;
-  });
-  shared = visibleShared;
 
   // Annotate each row with the caller's effective permission so the UI
   // can render an accurate share line and gate destructive actions
@@ -113,13 +107,28 @@ nestRoutes.post("/", async (c) => {
 // GET /nests/:nestId
 nestRoutes.get("/:nestId", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const permission = effectivePermission(nestId, c.get("userId"));
+  const userId = c.get("userId");
+  const permission = effectivePermission(nestId, userId);
   if (permission === "none") {
     throw new NotFoundError("Nest not found");
   }
 
+  // Caller's merged effective roles (collaborator + steward), nest-wide. The
+  // client gates action buttons off this instead of re-deriving from two
+  // lists. Force 'owner' when open-mode/anon promotion granted it but the
+  // raw resolver (which is not open-mode-aware) didn't.
+  const email = resolveCallerEmail(userId);
+  let roles = resolveUserRoles(nestId, email);
+  if (permission === "owner" && !roles.includes("owner")) {
+    roles = ["owner", ...roles];
+  }
+
+  // Caller's OWN steward rows (scoped) — the full roster is admin-only, but a
+  // reviewer/editor needs their own rows to gate per-node affordances.
+  const myStewards = getStewardsForUser(nestId, email);
+
   const nest = getNest(nestId);
-  return c.json({ nest, permission });
+  return c.json({ nest, permission, roles, myStewards });
 });
 
 // DELETE /nests/:nestId
@@ -188,16 +197,16 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
   const body = await c.req.json<{ stewardship_enabled?: boolean }>();
   let wiped: {
     stewards: number;
-    collaborators: number;
     pendingReviews: number;
   } | null = null;
   if (typeof body.stewardship_enabled === "boolean") {
     if (body.stewardship_enabled) {
       setStewardshipEnabled(nestId, true);
     } else {
-      // Disable is destructive — flag flip + wipe of stewards, collaborators,
-      // and pending reviews happens atomically. See disableStewardshipAndWipeAccess.
-      wiped = disableStewardshipAndWipeAccess(nestId);
+      // Disable tears down governance (stewards + pending reviews) atomically
+      // with the flag flip. Collaborator shares are left intact — sharing is
+      // independent of governance. See disableStewardshipAndWipeGovernance.
+      wiped = disableStewardshipAndWipeGovernance(nestId);
     }
   }
 

@@ -10,6 +10,17 @@ import { getDb } from "../db/client.js";
 import { getAccessConfig } from "./access-service.js";
 import { ConflictError } from "../shared/errors.js";
 import { buildTitleMap } from "./title-resolver.js";
+import { resolveNestPermission } from "../shared/access.js";
+import { isLicenseAdminEmail } from "../auth/license.js";
+import { config } from "../config.js";
+import {
+  type EffectiveRole,
+  collabPermToRole,
+  canViewWith,
+  canEditWith,
+  canApproveWith,
+  primaryRole,
+} from "./roles.js";
 import type {
   Steward,
   ResolvedSteward,
@@ -47,43 +58,10 @@ export function assignSteward(data: Omit<Steward, "id">): Steward {
 
 export function removeSteward(id: string): void {
   const db = getDb();
-  // Hard-delete the steward row and revoke the nest_collaborators row that
-  // assignSteward → ensureCollaborator created on their behalf; otherwise
-  // the user keeps seeing the nest in their list (listSharedNests joins
-  // on nest_collaborators) and can still hit shared-nest endpoints.
-  //
-  // Edge case: a user may have been added via direct sharing AND made a
-  // steward later. We can't distinguish the two sources from the schema,
-  // so removing the last remaining steward row drops the collab row too.
-  // Leaving stale access is worse than asking an owner to re-share in
-  // that rare overlap.
-  const remove = db.transaction((stewardId: string) => {
-    const row = db
-      .prepare("SELECT nest_id, user_email FROM stewards WHERE id = ?")
-      .get(stewardId) as { nest_id: string; user_email: string } | undefined;
-    db.prepare("DELETE FROM stewards WHERE id = ?").run(stewardId);
-    if (!row) return;
-
-    // Keep the collab row while the user still has another active steward
-    // assignment on the same nest (e.g. removed from a tag scope but still
-    // a nest-level steward).
-    const remaining = db
-      .prepare(
-        "SELECT 1 FROM stewards WHERE nest_id = ? AND LOWER(user_email) = LOWER(?) AND is_active = 1 LIMIT 1",
-      )
-      .get(row.nest_id, row.user_email);
-    if (remaining) return;
-
-    const user = db
-      .prepare("SELECT id FROM users WHERE LOWER(email) = LOWER(?)")
-      .get(row.user_email) as { id: string } | undefined;
-    if (!user) return;
-
-    db.prepare(
-      "DELETE FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
-    ).run(row.nest_id, user.id);
-  });
-  remove(id);
+  // Steward and collaborator grants are independent — removing a steward
+  // only drops the steward row. Any nest_collaborators access the user has
+  // is managed separately via the Share UI and is left untouched.
+  db.prepare("DELETE FROM stewards WHERE id = ?").run(id);
 }
 
 export function getSteward(id: string): Steward | null {
@@ -170,65 +148,13 @@ async function enrichWithTitles(
  * Create a steward record for a (scope, target) with N users.
  * Inserts one row per user — partial unique indexes enforce idempotency.
  * Returns the inserted rows (existing rows for a duplicate email are skipped).
+ *
+ * Stewardship and collaboration are independent grants: a steward row grants
+ * scoped document/context rights, a collaborator row grants nest-wide access.
+ * We do NOT mirror a collaborator row here — nest visibility for stewards
+ * comes from resolveNestPermission/listSharedNests recognizing steward rows,
+ * and edit/approve rights come from resolveUserRoles merging both sources.
  */
-// Steward role → nest collaborator permission. Editors get write so they can
-// modify documents in the UI; reviewers/viewers only need read because their
-// approve/reject path goes through the stewardship API, not direct edits.
-function rolePermission(role: StewardRole | undefined): "read" | "write" {
-  return role === "editor" ? "write" : "read";
-}
-
-// Ensure the steward email is a real user in the system AND a collaborator on
-// the nest. Without this, an assigned steward cannot see the nest in their
-// list (listSharedNests JOINs nest_collaborators), so the assignment is
-// invisible to them. Mirrors the placeholder-user pattern used in
-// sharing-routes.ts when sharing by email.
-async function ensureCollaborator(
-  nestId: string,
-  email: string,
-  permission: "read" | "write" | "admin",
-  grantedBy: string,
-): Promise<void> {
-  const db = getDb();
-  let userRow = db
-    .prepare("SELECT id FROM users WHERE email = ?")
-    .get(email) as { id: string } | undefined;
-
-  if (!userRow) {
-    const { hashPassword } = await import("../auth/keys.js");
-    const newId = uuid();
-    db.prepare(
-      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-    ).run(newId, email, null, await hashPassword(uuid()));
-    userRow = { id: newId };
-  }
-
-  const nestRow = db
-    .prepare("SELECT user_id FROM nests WHERE id = ?")
-    .get(nestId) as { user_id: string } | undefined;
-  if (nestRow && nestRow.user_id === userRow.id) return; // owner; no collab row needed
-
-  const existing = db
-    .prepare(
-      "SELECT id FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
-    )
-    .get(nestId, userRow.id) as { id: string } | undefined;
-  if (existing) return;
-
-  // granted_by FK -> users(id). The route passes the assigner's email, so
-  // translate to user id; fall back to the nest owner if the email isn't
-  // registered (e.g. open-mode "admin@localhost").
-  const granterRow = db
-    .prepare("SELECT id FROM users WHERE email = ?")
-    .get(grantedBy) as { id: string } | undefined;
-  const granterId = granterRow?.id ?? nestRow?.user_id;
-  if (!granterId) return; // nest gone; nothing to grant against
-
-  db.prepare(
-    "INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by) VALUES (?, ?, ?, ?, ?)",
-  ).run(uuid(), nestId, userRow.id, permission, granterId);
-}
-
 export async function createStewardRecord(params: {
   nestId: string;
   scope: StewardshipScope;
@@ -312,13 +238,6 @@ export async function createStewardRecord(params: {
       isActive: true,
     });
     results.push(created);
-
-    await ensureCollaborator(
-      params.nestId,
-      email,
-      rolePermission(user.role),
-      params.assignedBy,
-    );
   }
 
   // If adding any stewards, ensure governed mode is on.
@@ -434,9 +353,109 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
   };
 }
 
+// ─── UNIFIED ROLE RESOLUTION ────────────────────────────────────────────
+// Merge collaborator perms (nest_collaborators) + steward rows into one
+// effective-role array. See roles.ts for the vocabulary and capability map.
+
+function userIdForEmail(email: string): string | undefined {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT id FROM users WHERE LOWER(email) = LOWER(?)")
+    .get(email) as { id: string } | undefined;
+  return row?.id;
+}
+
+/** Distinct active steward roles a user holds anywhere on the nest. */
+export function getStewardRolesForUser(
+  nestId: string,
+  userEmail: string,
+): StewardRole[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      "SELECT DISTINCT role FROM stewards WHERE nest_id = ? AND is_active = 1 AND LOWER(user_email) = LOWER(?)",
+    )
+    .all(nestId, userEmail) as { role: StewardRole }[];
+  return rows.map((r) => r.role);
+}
+
+/**
+ * The caller's own active steward rows (with scope), not the whole roster.
+ * The full roster is admin-only, but a reviewer/editor still needs their own
+ * scoped rows to drive per-node affordances — this exposes just those.
+ */
+export function getStewardsForUser(
+  nestId: string,
+  userEmail: string,
+): Steward[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      "SELECT * FROM stewards WHERE nest_id = ? AND is_active = 1 AND LOWER(user_email) = LOWER(?)",
+    )
+    .all(nestId, userEmail) as any[];
+  return rows.map(rowToSteward);
+}
+
+/** A user's nest_collaborators.permission, or null if not a collaborator. */
+export function getCollaboratorRole(
+  nestId: string,
+  userEmail: string,
+): string | null {
+  const userId = userIdForEmail(userEmail);
+  if (!userId) return null;
+  const db = getDb();
+  const row = db
+    .prepare(
+      "SELECT permission FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
+    )
+    .get(nestId, userId) as { permission: string } | undefined;
+  return row?.permission ?? null;
+}
+
+/**
+ * Effective roles for a user on a nest, merged from collaborator access and
+ * steward assignments. When `nodeId` is given, steward rows are resolved for
+ * that node (document > tag > nest); otherwise every active steward row on
+ * the nest counts (used for list display and coarse nest-wide gating).
+ */
+export function resolveUserRoles(
+  nestId: string,
+  userEmail: string,
+  opts?: { nodeId?: string },
+): EffectiveRole[] {
+  const roles = new Set<EffectiveRole>();
+
+  if (isSuperAdmin(userEmail)) roles.add("admin");
+
+  const owner = getNestOwnerEmail(nestId);
+  if (owner && owner.toLowerCase() === userEmail.toLowerCase()) {
+    roles.add("owner");
+  }
+
+  // Collaborator access (nest-wide). resolveNestPermission also yields the
+  // public-visibility 'read' fallback, so public readers resolve to viewer.
+  const userId = userIdForEmail(userEmail);
+  if (userId) {
+    const collabRole = collabPermToRole(resolveNestPermission(nestId, userId));
+    if (collabRole) roles.add(collabRole);
+  }
+
+  // Steward assignments — scoped to the node when one is given.
+  const stewardRoles = opts?.nodeId
+    ? resolveStewardsForNode(nestId, opts.nodeId)
+        .filter(
+          (r) => r.steward.userEmail.toLowerCase() === userEmail.toLowerCase(),
+        )
+        .map((r) => r.steward.role)
+    : getStewardRolesForUser(nestId, userEmail);
+  for (const role of stewardRoles) roles.add(role);
+
+  return [...roles];
+}
+
 // ─── PERMISSION CHECKS ──────────────────────────────────────────────────
-// Ported 1:1 from PromptOwl contextStewardship.ts canUserEditDocument /
-// canUserApproveDocument / canUserAccessDocument.
+// Resolution merges collaborator + steward roles via resolveUserRoles.
 //
 // Rules:
 //   super-admin (access.yaml)  -> all allowed
@@ -453,6 +472,7 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
 export type PermissionRole =
   | "super_admin"
   | "owner"
+  | "admin"
   | StewardRole
   | null;
 
@@ -465,6 +485,36 @@ export interface PermissionResult {
 function isSuperAdmin(userEmail: string): boolean {
   const cfg = getAccessConfig();
   return !!cfg?.super_admins?.includes(userEmail);
+}
+
+/**
+ * Can this user manage the steward roster (assign/remove/sync)? Single
+ * authority shared by REST (app.ts), MCP, and any other caller so the rule
+ * lives in one place. Only the server admin governs stewards:
+ *   - open mode has no real auth — everyone is effectively owner
+ *   - the license/server admin, or an access.yaml super_admin
+ */
+export function canManageStewards(userEmail: string): boolean {
+  if (config.AUTH_MODE === "open") return true;
+  return isLicenseAdminEmail(userEmail) || isSuperAdmin(userEmail);
+}
+
+/**
+ * Can this user create a new document in the nest? Mirrors the app.ts
+ * middleware's create rule: nest-wide write (owner/admin/write collaborator)
+ * or a nest-scope editor steward. Used by callers that don't run through
+ * that middleware (MCP) so the write gate doesn't depend on it alone.
+ */
+export function canCreateInNest(nestId: string, userEmail: string): boolean {
+  if (config.AUTH_MODE === "open" || isSuperAdmin(userEmail)) return true;
+  const userId = userIdForEmail(userEmail);
+  if (userId) {
+    const perm = resolveNestPermission(nestId, userId);
+    if (perm === "owner" || perm === "admin" || perm === "write") return true;
+  }
+  return getStewardsForUser(nestId, userEmail).some(
+    (s) => s.role === "editor" && s.scope === "nest",
+  );
 }
 
 function getNestOwnerEmail(nestId: string): string | null {
@@ -484,24 +534,21 @@ export function canUserEdit(
   nodeId: string,
   userEmail: string,
 ): PermissionResult {
+  const roles = resolveUserRoles(nestId, userEmail, { nodeId });
+  if (roles.includes("owner")) {
+    return { allowed: true, reason: "nest owner", role: "owner" };
+  }
   if (isSuperAdmin(userEmail)) {
     return { allowed: true, reason: "super admin", role: "super_admin" };
   }
-  const owner = getNestOwnerEmail(nestId);
-  if (owner && owner.toLowerCase() === userEmail.toLowerCase()) {
-    return { allowed: true, reason: "nest owner", role: "owner" };
+  if (canEditWith(roles)) {
+    return {
+      allowed: true,
+      reason: "editor access (collaborator or steward)",
+      role: roles.includes("admin") ? "admin" : "editor",
+    };
   }
-
-  const resolved = resolveStewardsForNode(nestId, nodeId);
-  const match = resolved.find(
-    (r) =>
-      r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
-      (r.steward.role === "editor" || r.steward.role === "reviewer"),
-  );
-  if (match) {
-    return { allowed: true, reason: match.source, role: match.steward.role };
-  }
-  return { allowed: false, reason: "no editor/reviewer role on this node", role: null };
+  return { allowed: false, reason: "no editor role on this node", role: null };
 }
 
 function getCurrentVersionAuthor(
@@ -545,60 +592,37 @@ export function canUserApprove(
   nodeId: string,
   userEmail: string,
 ): PermissionResult {
+  // Nest owner can always approve — including their own submissions. The
+  // owner already controls the nest at every other layer; pretending SoD
+  // applies to them just blocks the seeding flow. The version log still
+  // records the actor for audit. See CU-86ahn99dg.
+  const roles = resolveUserRoles(nestId, userEmail, { nodeId });
+  if (roles.includes("owner")) {
+    return { allowed: true, reason: "nest owner", role: "owner" };
+  }
   if (isSuperAdmin(userEmail)) {
     return { allowed: true, reason: "super admin", role: "super_admin" };
   }
 
-  // Nest owner can always approve — including their own submissions.
-  // Mirrors the short-circuit in canUserEdit / canUserAccess. The owner
-  // already controls the nest at every other layer; pretending the
-  // separation-of-duties rule applies to them just blocks the seeding
-  // flow. The version log still records the actor for audit. See
-  // CU-86ahn99dg.
-  const owner = getNestOwnerEmail(nestId);
-  if (owner && owner.toLowerCase() === userEmail.toLowerCase()) {
-    return { allowed: true, reason: "nest owner", role: "owner" };
-  }
-
-  // Check steward assignment first — a user who isn't a steward at all
-  // can't approve, regardless of authorship.
-  const resolved = resolveStewardsForNode(nestId, nodeId);
-  if (resolved.length === 0) {
+  // Approve requires reviewer (or admin — full access). Editors/viewers and
+  // plain collaborators cannot. Message tailors to what they do hold.
+  if (!canApproveWith(roles)) {
+    const held = primaryRole(roles);
     return {
       allowed: false,
-      reason:
-        "This document has no stewards assigned, so it can't be approved yet. Ask the nest owner to add at least one reviewer.",
-      role: null,
-    };
-  }
-
-  // A user may hold multiple steward rows on this node (e.g. editor on
-  // the doc + reviewer on the nest). Roles are additive — editor grants
-  // edit rights, reviewer grants approve rights — so we look at the full
-  // set of the user's assignments instead of picking one.
-  const userMatches = resolved.filter(
-    (r) => r.steward.userEmail.toLowerCase() === userEmail.toLowerCase(),
-  );
-  const reviewerMatch = userMatches.find((r) => r.steward.role === "reviewer");
-  if (!reviewerMatch) {
-    const hasOtherRole = userMatches.length > 0;
-    return {
-      allowed: false,
-      reason: hasOtherRole
-        ? `You're assigned as "${userMatches[0].steward.role}" on this document — only reviewers can approve. Ask the nest owner to grant you the reviewer role.`
+      reason: held
+        ? `You're a "${held}" on this document — only reviewers (or admins) can approve. Ask the nest owner to grant you the reviewer steward role.`
         : "You're not a steward on this document, so you can't approve it. Ask the nest owner to add you as a reviewer.",
-      role: userMatches[0]?.steward.role ?? null,
+      role: held,
     };
   }
 
   // Separation of duties: the user who SUBMITTED the version for review
-  // can't approve it themselves, even if they ALSO hold an editor row on
-  // this node. Holding editor in addition to reviewer doesn't waive SoD —
-  // the submitter is still the proximate actor and a second pair of eyes
-  // is required. We compare against review_requests.requested_by (the
-  // active actor) rather than node_versions.author so that when a
-  // teammate submits someone else's earlier edit, the original author
-  // can still approve.
+  // can't approve it themselves, even if they ALSO hold an editor/admin role
+  // here. The submitter is the proximate actor and a second pair of eyes is
+  // required. We compare against review_requests.requested_by (the active
+  // actor) rather than node_versions.author so that when a teammate submits
+  // someone else's earlier edit, the original author can still approve.
   const actor =
     getPendingReviewRequester(nestId, nodeId) ??
     getCurrentVersionAuthor(nestId, nodeId);
@@ -607,11 +631,15 @@ export function canUserApprove(
       allowed: false,
       reason:
         "You submitted this version for review, so you can't approve it yourself. Ask another reviewer to approve it (separation of duties).",
-      role: "reviewer",
+      role: roles.includes("admin") ? "admin" : "reviewer",
     };
   }
 
-  return { allowed: true, reason: reviewerMatch.source, role: "reviewer" };
+  return {
+    allowed: true,
+    reason: "reviewer access (collaborator or steward)",
+    role: roles.includes("admin") ? "admin" : "reviewer",
+  };
 }
 
 export function canUserAccess(
@@ -619,22 +647,21 @@ export function canUserAccess(
   nodeId: string,
   userEmail: string,
 ): PermissionResult {
+  const roles = resolveUserRoles(nestId, userEmail, { nodeId });
+  if (roles.includes("owner")) {
+    return { allowed: true, reason: "nest owner", role: "owner" };
+  }
   if (isSuperAdmin(userEmail)) {
     return { allowed: true, reason: "super admin", role: "super_admin" };
   }
-  const owner = getNestOwnerEmail(nestId);
-  if (owner && owner.toLowerCase() === userEmail.toLowerCase()) {
-    return { allowed: true, reason: "nest owner", role: "owner" };
+  if (canViewWith(roles)) {
+    return {
+      allowed: true,
+      reason: "collaborator or steward access",
+      role: primaryRole(roles),
+    };
   }
-
-  const resolved = resolveStewardsForNode(nestId, nodeId);
-  const match = resolved.find(
-    (r) => r.steward.userEmail.toLowerCase() === userEmail.toLowerCase(),
-  );
-  if (match) {
-    return { allowed: true, reason: match.source, role: match.steward.role };
-  }
-  return { allowed: false, reason: "no steward assignment", role: null };
+  return { allowed: false, reason: "no collaborator or steward access", role: null };
 }
 
 // ─── SYNC FROM stewards.yaml ────────────────────────────────────────────

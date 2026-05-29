@@ -284,6 +284,10 @@ export async function getNest(nestId: string) {
   return request<{
     nest: { id: string; name: string; visibility: "private" | "public" };
     permission: string;
+    // Caller's merged effective roles (collaborator + steward), nest-wide.
+    roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
+    // Caller's own steward rows (scoped). Full roster is admin-only.
+    myStewards?: any[];
   }>(`/nests/${nestId}`);
 }
 

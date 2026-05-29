@@ -123,10 +123,14 @@ export function DocumentEditor({
   // user clicking through an error.
   const [pendingReviewBy, setPendingReviewBy] = useState<string | null>(null);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
-  // Public-reader gate (visibility=public + permission='read').
-  const [isReadOnly, setIsReadOnly] = useState(false);
-  // Any per-node steward row overrides the nest-level public-read gate
-  // so an editor/reviewer scoped to this doc still gets their affordances.
+  // Caller's nest-level permission (GET /nests/:id). 'read' = no write access
+  // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
+  // edit. null until loaded.
+  const [permission, setPermission] = useState<string | null>(null);
+  // Read-only when the caller's nest permission is 'read' and they hold no
+  // per-node steward row. Any editor/reviewer node row overrides this so a
+  // steward scoped to this doc still gets their affordances.
+  const isReadOnly = permission === "read";
   const isViewOnly = isReadOnly && myNodeRoles.length === 0;
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDocPicker, setShowDocPicker] = useState(false);
@@ -163,9 +167,7 @@ export function DocumentEditor({
         ]);
         if (cancelled) return;
         setStewardshipEnabled(!!settings.stewardship_enabled);
-        if (meta?.nest?.visibility === "public" && meta?.permission === "read") {
-          setIsReadOnly(true);
-        }
+        setPermission(meta?.permission ?? null);
       } catch {
         /* non-fatal */
       }

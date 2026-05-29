@@ -36,6 +36,7 @@ import {
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
 import { MarkdownEditor } from "./MarkdownEditor";
+import { CollaboratorManager } from "./CollaboratorManager";
 import { toast } from "sonner";
 
 interface NestViewProps {
@@ -68,7 +69,11 @@ export function NestView({
     isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   const [nodes, setNodes] = useState<any[]>([]);
+  // Full roster — admin-only (listStewards 403s for non-admins → stays []).
   const [stewards, setStewards] = useState<Steward[]>([]);
+  // Caller's OWN steward rows (scoped), from GET /nests/:id. Drives per-node
+  // affordances for non-admin reviewers/editors who can't read the roster.
+  const [myStewards, setMyStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
   const [externalEdits, setExternalEdits] = useState<api.ExternalEditEntry[]>([]);
   const [externalEditsLoading, setExternalEditsLoading] = useState(false);
@@ -76,6 +81,8 @@ export function NestView({
   const [visibility, setVisibility] = useState<"private" | "public">("private");
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
+  // Caller's merged effective roles (collaborator + steward), nest-wide.
+  const [roles, setRoles] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [stewardScope, setStewardScope] = useState<
     "all" | "document" | "tag" | "nest"
@@ -95,11 +102,6 @@ export function NestView({
   const [showConnect, setShowConnect] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
-  // Sharing (visibility + collaborators) is admin-gated server-side
-  // (see src/app.ts: /collaborators and /visibility require "admin").
-  // Mirror that here so non-admins don't see a button that 403s: the
-  // nest owner or a server admin can manage sharing.
-  const canShare = isOwner || isAdmin;
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -130,6 +132,8 @@ export function NestView({
     if (nestMeta?.permission) {
       setPermission(nestMeta.permission);
     }
+    setRoles(nestMeta?.roles ?? []);
+    setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
     setLoading(false);
   }, [nestId]);
 
@@ -167,31 +171,35 @@ export function NestView({
     return true;
   });
 
-  // Caller's steward rows in this nest. Used to gate write affordances:
-  // owner/admin (no steward row, or isAdmin) get full controls; an
-  // assigned 'editor' steward keeps edit/submit; 'reviewer'/'viewer'
-  // stewards see only read + review actions. Server still enforces.
-  const myStewards = stewards.filter(
-    (s) => s.userEmail.toLowerCase() === currentEmail,
-  );
-  const isStewardOnly = !isAdmin && myStewards.length > 0;
-  // Public-reader UI gate. A caller with any steward row on this nest
-  // still has scoped editor/reviewer rights — keep affordances visible
-  // for them. Private read-only collabs unaffected (visibility check).
-  const isReadOnly =
-    visibility === "public" && permission === "read" && myStewards.length === 0;
-  // Gates "New Document": needs nest-wide write (owner/admin or
-  // nest-scope editor). Doc/tag-scoped editors use canEditNode instead.
-  const canEditDocs =
-    !isReadOnly &&
-    (!isStewardOnly ||
-      myStewards.some((s) => s.role === "editor" && s.scope === "nest"));
-  // Approve/reject is reviewer-only by product rule, with one exception:
-  // the nest owner can self-approve any pending review (mirrors server
-  // canUserApprove short-circuit added in CU-86ahn99dg). Editors and
-  // viewers still see nothing.
-  const canReviewDocs =
-    !isReadOnly && (isOwner || myStewards.some((s) => s.role === "reviewer"));
+  // myStewards (caller's own scoped rows) comes from GET /nests/:id, so
+  // non-admin reviewers/editors keep per-node affordances without reading the
+  // admin-only roster.
+  // All capability flags derived in one place from the caller's nest-wide
+  // effective roles (collaborator + steward, merged server-side and returned
+  // by GET /nests/:id) plus their collaborator permission. Coarse gating
+  // reads these; the server still enforces per node.
+  //   canManage     — assign stewards + share with collaborators (owner/admin)
+  //   collabCanWrite — nest-wide write via a collaborator grant
+  //   canReviewDocs  — approve/reject (owner/admin or reviewer steward)
+  //   canEditDocs    — "New Document" (nest-wide write or nest-scope editor)
+  //   isReadOnly     — no write/review/manage (public + plain 'read' collabs)
+  const caps = (() => {
+    const hasRole = (...r: string[]) => roles.some((x) => r.includes(x));
+    const canManage = isOwner || isAdmin || hasRole("owner", "admin");
+    const collabCanWrite =
+      permission === "owner" || permission === "admin" || permission === "write";
+    const canReviewDocs =
+      canManage || myStewards.some((s) => s.role === "reviewer");
+    const canEditDocs =
+      canManage ||
+      collabCanWrite ||
+      myStewards.some((s) => s.role === "editor" && s.scope === "nest");
+    const isReadOnly = !canEditDocs && !canReviewDocs && !canManage;
+    return { canManage, collabCanWrite, canReviewDocs, canEditDocs, isReadOnly };
+  })();
+  // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
+  // canReviewNode for scope resolution, so it isn't destructured here.
+  const { canManage, collabCanWrite, canEditDocs, isReadOnly } = caps;
 
   // Map nodeId → submitter so the per-row Review button can hide on
   // docs the current user submitted (separation-of-duties: authors must
@@ -228,22 +236,19 @@ export function NestView({
   // approve anything in their nest (CU-86ahn99dg).
   const canReviewNode = (node: { id: string; tags?: string[] }) => {
     if (!node) return false;
-    if (isOwner) return true;
+    if (canManage) return true; // owner/admin can review anything
     if (isReadOnly) return false;
     return hasRoleOnNode(node, "reviewer");
   };
 
-  // Per-node edit gate. canEditDocs is a coarse "user has any edit
-  // affordance" flag (true if not a steward-only user, or if any of their
-  // steward rows is editor). That is wrong to apply per-row: a document-
-  // scoped editor would otherwise see Submit/Edit/Delete on every node in
-  // the nest. Mirror canReviewNode's scope resolution so each row honors
-  // the steward's actual reach. Server still enforces — this just keeps
-  // the UI honest.
+  // Per-node edit gate. Nest-wide writers (owner/admin or a write+
+  // collaborator) edit any node; a doc/tag-scoped editor steward only edits
+  // the nodes their scope covers — applying the coarse flag per row would
+  // wrongly show Submit/Edit/Delete everywhere. Server still enforces.
   const canEditNode = (node: { id: string; tags?: string[] }) => {
     if (!node) return false;
     if (isReadOnly) return false;
-    if (!isStewardOnly) return canEditDocs;
+    if (canManage || collabCanWrite) return true;
     return myStewards.some((s) => {
       if (s.role !== "editor") return false;
       if (s.scope === "nest") return true;
@@ -405,7 +410,7 @@ export function NestView({
           {/* Share — visibility + collaborators. Gated to owner/admin to
               match the server's admin requirement on /collaborators and
               /visibility; non-admins would only get a 403. */}
-          {canShare && (
+          {canManage && (
             <Button variant="outline" onClick={() => setShowShare(true)}>
               <Users className="h-4 w-4 mr-2" />
               Share
@@ -423,11 +428,15 @@ export function NestView({
                   Delete
                 </Button>
               )}
-              <Button variant="outline" onClick={() => setShowSettings(true)}>
-                <SettingsIcon className="h-4 w-4 mr-2" />
-                Settings
-              </Button>
-              {stewardshipEnabled && !isStewardOnly && (
+              {/* Settings is stewardship-only and server-admin gated; a
+                  nest-admin/owner would just see an empty modal. */}
+              {isAdmin && (
+                <Button variant="outline" onClick={() => setShowSettings(true)}>
+                  <SettingsIcon className="h-4 w-4 mr-2" />
+                  Settings
+                </Button>
+              )}
+              {stewardshipEnabled && isAdmin && (
                 <Button variant="outline" onClick={() => setShowAssignSteward(true)}>
                   <Shield className="h-4 w-4 mr-2" />
                   Assign Steward
@@ -550,8 +559,14 @@ export function NestView({
               )}
             </TabsTrigger>
           )}
-          {stewardshipEnabled && !isReadOnly && (
+          {/* Steward roster is admin-only (list + manage). */}
+          {stewardshipEnabled && isAdmin && (
             <TabsTrigger value="stewards">Stewards</TabsTrigger>
+          )}
+          {/* Collaborators — plain access sharing, independent of
+              stewardship. Managing it is owner/admin only (server gate). */}
+          {canManage && (
+            <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
           )}
         </TabsList>
 
@@ -637,7 +652,7 @@ export function NestView({
                         )}
                         {stewardshipEnabled &&
                           node.status === "pending_review" &&
-                          canReviewDocs &&
+                          canReviewNode(node) &&
                           (isOwner ||
                             submitterByNode.get(node.id) !== currentEmail) && (
                             <Button
@@ -795,7 +810,7 @@ export function NestView({
           </Card>
         </TabsContent>
 
-        {stewardshipEnabled && (
+        {stewardshipEnabled && isAdmin && (
           <TabsContent value="stewards" className="space-y-4">
             <Card className="border-blue-200 bg-blue-50/40">
               <CardHeader className="pb-2">
@@ -867,7 +882,7 @@ export function NestView({
                       approve. Add an editor/reviewer to delegate approvals
                       for a tag or specific doc.
                     </p>
-                    {!isStewardOnly && (
+                    {isAdmin && (
                       <Button
                         variant="outline"
                         size="sm"
@@ -888,11 +903,33 @@ export function NestView({
                     }
                     showScope
                     onAddSteward={
-                      isStewardOnly ? undefined : () => setShowAssignSteward(true)
+                      isAdmin ? () => setShowAssignSteward(true) : undefined
                     }
-                    onRemove={isStewardOnly ? undefined : handleRemoveSteward}
+                    onRemove={isAdmin ? handleRemoveSteward : undefined}
                   />
                 )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+        )}
+
+        {canManage && (
+          <TabsContent value="collaborators" className="space-y-4">
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg">Collaborators</CardTitle>
+                <CardDescription>
+                  People with direct access to this nest. Sharing grants plain
+                  access (viewer/editor/admin) — it does not make anyone a
+                  steward. Manage visibility from the Share dialog.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <CollaboratorManager
+                  nestId={nestId}
+                  nestName={nestName}
+                  onChanged={fetchData}
+                />
               </CardContent>
             </Card>
           </TabsContent>

@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "fs";
+import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { vi } from "vitest";
@@ -40,7 +40,10 @@ export function setupTestEnv() {
  * this file's module cache, so test files that import the real license
  * module (license.test.ts) are unaffected.
  */
-export async function createTestApp(authMode: "open" | "key" = "open") {
+export async function createTestApp(
+  authMode: "open" | "key" = "open",
+  opts: { superAdmins?: string[] } = {},
+) {
   process.env.AUTH_MODE = authMode;
   vi.resetModules();
   vi.doMock("../src/auth/license.js", async () => {
@@ -61,6 +64,21 @@ export async function createTestApp(authMode: "open" | "key" = "open") {
     };
   });
   const { createApp } = await import("../src/app.js");
+
+  // Managing the steward roster (sync/list/assign) is server-admin only.
+  // The license mock has no ownerEmail, so grant super-admin via access.yaml
+  // and load it into the freshly-imported access-service instance.
+  if (opts.superAdmins?.length) {
+    writeFileSync(
+      join(process.env.DATA_ROOT!, "access.yaml"),
+      "super_admins:\n" +
+        opts.superAdmins.map((e) => `  - ${e}`).join("\n") +
+        "\n",
+    );
+    const access = await import("../src/governance/access-service.js");
+    access.loadAccessConfig();
+  }
+
   return createApp();
 }
 

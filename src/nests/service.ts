@@ -39,20 +39,18 @@ export function setStewardshipEnabled(nestId: string, enabled: boolean): void {
 }
 
 /**
- * Disable stewardship AND wipe every access record tied to it.
+ * Disable stewardship and tear down the governance state tied to it:
+ * steward assignments and any pending review requests.
  *
- * Disabling governance is destructive by design: stewards/collaborators were
- * granted on the assumption the approval workflow gated their writes. Once
- * that workflow is off, leaving collaborator rows in place means everyone
- * silently gains ungoverned access. Wipe them in the same transaction as
- * the flag flip so the two states can't drift.
+ * Collaborator access is NOT touched — sharing is independent of governance
+ * (a nest can be shared with or without stewardship). Removing a share is a
+ * separate, explicit action via the Share UI.
  *
  * Only pending review_requests are removed — approved/rejected/cancelled
  * rows are historical audit data and stay.
  */
-export function disableStewardshipAndWipeAccess(nestId: string): {
+export function disableStewardshipAndWipeGovernance(nestId: string): {
   stewards: number;
-  collaborators: number;
   pendingReviews: number;
 } {
   const db = getDb();
@@ -60,16 +58,13 @@ export function disableStewardshipAndWipeAccess(nestId: string): {
     const stewards = db
       .prepare("DELETE FROM stewards WHERE nest_id = ?")
       .run(id).changes;
-    const collaborators = db
-      .prepare("DELETE FROM nest_collaborators WHERE nest_id = ?")
-      .run(id).changes;
     const pendingReviews = db
       .prepare(
         "DELETE FROM review_requests WHERE nest_id = ? AND status = 'pending'",
       )
       .run(id).changes;
     db.prepare("UPDATE nests SET stewardship_enabled = 0 WHERE id = ?").run(id);
-    return { stewards, collaborators, pendingReviews };
+    return { stewards, pendingReviews };
   });
   return wipe(nestId);
 }
@@ -131,14 +126,23 @@ export function isAnonymousNest(nest: Pick<Nest, "user_id">): boolean {
 
 export function listSharedNests(userId: string): Nest[] {
   const db = getDb();
+  // Shared = collaborator grant OR active steward assignment (matched by
+  // email, since steward rows may predate the account). Both are
+  // independent paths to a nest the user doesn't own.
   return db
     .prepare(
       `SELECT DISTINCT n.* FROM nests n
-       JOIN nest_collaborators nc ON nc.nest_id = n.id
-       WHERE n.user_id != ? AND nc.user_id = ?
+       LEFT JOIN nest_collaborators nc
+         ON nc.nest_id = n.id AND nc.user_id = ?
+       LEFT JOIN users u ON u.id = ?
+       LEFT JOIN stewards s
+         ON s.nest_id = n.id AND s.is_active = 1
+        AND LOWER(s.user_email) = LOWER(u.email)
+       WHERE n.user_id != ?
+         AND (nc.user_id IS NOT NULL OR s.id IS NOT NULL)
        ORDER BY n.created_at DESC`,
     )
-    .all(userId, userId) as Nest[];
+    .all(userId, userId, userId) as Nest[];
 }
 
 /** Public nests not owned/shared by caller. Route dedupes vs listNests. */

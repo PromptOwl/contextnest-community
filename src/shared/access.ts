@@ -50,6 +50,21 @@ export function resolveNestPermission(
 
   if (directGrant) return directGrant.permission;
 
+  // Stewards get nest-level read so they can reach the documents/context they
+  // govern, even without a collaborator grant. Matched by email because a
+  // steward row may predate the user registering an account. Edit/approve is
+  // still enforced per node by the governance handlers (resolveUserRoles).
+  const stewardGrant = db
+    .prepare(
+      `SELECT 1 FROM stewards s
+         JOIN users u ON u.id = ?
+        WHERE s.nest_id = ? AND s.is_active = 1
+          AND LOWER(s.user_email) = LOWER(u.email)
+        LIMIT 1`,
+    )
+    .get(userId, nestId);
+  if (stewardGrant) return "read";
+
   if (nest.visibility === "public") return "read";
 
   return "none";
@@ -79,5 +94,17 @@ export function isPublicReader(nestId: string, userId: string): boolean {
     )
     .get(nestId, userId);
   if (directGrant) return false;
+  // A steward is not a mere public reader — they govern (and may see drafts
+  // of) the documents in their scope. Matched by email like resolveNestPermission.
+  const stewardGrant = db
+    .prepare(
+      `SELECT 1 FROM stewards s
+         JOIN users u ON u.id = ?
+        WHERE s.nest_id = ? AND s.is_active = 1
+          AND LOWER(s.user_email) = LOWER(u.email)
+        LIMIT 1`,
+    )
+    .get(userId, nestId);
+  if (stewardGrant) return false;
   return true;
 }
