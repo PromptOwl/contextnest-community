@@ -11,6 +11,8 @@ import {
   isStewardshipEnabled,
   setStewardshipEnabled,
   disableStewardshipAndWipeGovernance,
+  nestAllowsSelfApprove,
+  setAllowSelfApprove,
 } from "./service.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import {
@@ -70,17 +72,25 @@ nestRoutes.get("/", async (c) => {
   const ownerEmailStmt = db.prepare(
     "SELECT email FROM users WHERE id = ?",
   );
+  // Resolve the caller's email once so we can merge steward roles into the
+  // per-card label. A steward (editor/reviewer) without a collaborator grant
+  // resolves to permission='read' (see resolveNestPermission), so the card
+  // would mislabel them "Viewer" unless we surface their steward roles too.
+  const callerEmail = resolveCallerEmail(userId);
   const annotate = (n: { id: string; user_id: string }) => {
     const permission = effectivePermission(n.id, userId);
     const is_owner = permission === "owner";
     let owner_email: string | null = null;
+    // Merged effective roles (collaborator + steward), nest-wide. Only needed
+    // for shared cards (owner cards don't show a role badge).
+    const roles = is_owner ? ["owner"] : resolveUserRoles(n.id, callerEmail);
     if (!is_owner && n.user_id !== ANON_USER_ID) {
       const row = ownerEmailStmt.get(n.user_id) as
         | { email?: string }
         | undefined;
       owner_email = row?.email ?? null;
     }
-    return { ...n, permission, is_owner, owner_email };
+    return { ...n, permission, is_owner, owner_email, roles };
   };
   // Dedupe by id; owner/shared rows win over public discovery row.
   const seen = new Set<string>();
@@ -172,6 +182,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
   }
   return c.json({
     stewardship_enabled: isStewardshipEnabled(nestId),
+    allow_self_approve: nestAllowsSelfApprove(nestId),
   });
 });
 
@@ -194,7 +205,10 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     );
   }
 
-  const body = await c.req.json<{ stewardship_enabled?: boolean }>();
+  const body = await c.req.json<{
+    stewardship_enabled?: boolean;
+    allow_self_approve?: boolean;
+  }>();
   let wiped: {
     stewards: number;
     pendingReviews: number;
@@ -209,9 +223,15 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
       wiped = disableStewardshipAndWipeGovernance(nestId);
     }
   }
+  // Self-approve bypass is independent of stewardship — turning it off does not
+  // retroactively revoke approvals; it only gates future SoD checks.
+  if (typeof body.allow_self_approve === "boolean") {
+    setAllowSelfApprove(nestId, body.allow_self_approve);
+  }
 
   return c.json({
     stewardship_enabled: isStewardshipEnabled(nestId),
+    allow_self_approve: nestAllowsSelfApprove(nestId),
     wiped,
   });
 });

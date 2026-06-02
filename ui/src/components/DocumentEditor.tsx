@@ -57,7 +57,8 @@ interface DocumentEditorProps {
   nestId: string;
   nestName: string;
   nodeId: string | "new";
-  /** Owner can self-approve pending reviews (CU-86ahn99dg). */
+  /** Owner skips the reviewer-role requirement; self-approving their own
+   *  submission still requires the nest's allow_self_approve flag. */
   isOwner?: boolean;
   onBack: () => void;
   onSaved?: (savedNodeId: string) => void;
@@ -104,10 +105,14 @@ export function DocumentEditor({
   // looking at a real nest the caller can administer.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
-  const [canReviewHerePerm, setCanReviewHerePerm] = useState(false);
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
   const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
+  // Caller's nest-wide scoped steward rows (from GET /nests/:id). Needed for
+  // NEW docs, where there's no node yet to resolve a per-node role against.
+  const [myStewards, setMyStewards] = useState<
+    Array<{ role: string; scope: string }>
+  >([]);
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   const [content, setContent] = useState("");
@@ -123,6 +128,9 @@ export function DocumentEditor({
   // user clicking through an error.
   const [pendingReviewBy, setPendingReviewBy] = useState<string | null>(null);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
+  // When on, the submitter may approve their own pending review (per-nest
+  // self-approve bypass). Off = separation of duties enforced for everyone.
+  const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   // Caller's nest-level permission (GET /nests/:id). 'read' = no write access
   // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
   // edit. null until loaded.
@@ -131,7 +139,19 @@ export function DocumentEditor({
   // per-node steward row. Any editor/reviewer node row overrides this so a
   // steward scoped to this doc still gets their affordances.
   const isReadOnly = permission === "read";
-  const isViewOnly = isReadOnly && myNodeRoles.length === 0;
+  // Authoring a NEW doc can't resolve a per-node role (no node yet), so gate
+  // on nest-wide capability: owner/admin, a write+ collaborator, or a
+  // nest-scope editor steward. Mirrors NestView's "New Document" gate.
+  const canAuthorNew =
+    isOwner ||
+    isAdmin ||
+    permission === "owner" ||
+    permission === "admin" ||
+    permission === "write" ||
+    myStewards.some((s) => s.role === "editor" && s.scope === "nest");
+  const isViewOnly = isNew
+    ? !canAuthorNew
+    : isReadOnly && myNodeRoles.length === 0;
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
@@ -162,12 +182,17 @@ export function DocumentEditor({
     (async () => {
       try {
         const [settings, meta] = await Promise.all([
-          api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
+          api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false, allow_self_approve: false })),
           api.getNest(nestId).catch(() => null),
         ]);
         if (cancelled) return;
         setStewardshipEnabled(!!settings.stewardship_enabled);
+        setAllowSelfApprove(!!settings.allow_self_approve);
         setPermission(meta?.permission ?? null);
+        setMyStewards(((meta as any)?.myStewards ?? []) as Array<{
+          role: string;
+          scope: string;
+        }>);
       } catch {
         /* non-fatal */
       }
@@ -386,21 +411,25 @@ export function DocumentEditor({
   const hasReviewerRole = myNodeRoles.includes("reviewer");
   const hasEditorRole = myNodeRoles.includes("editor");
 
-  // Owner short-circuit mirrors server-side canUserApprove: nest owner
-  // can approve any pending review, including their own submissions
-  // (the seeding flow). Reviewer stewards still need a reviewer row.
-  // SoD: anyone who isn't the owner can't approve a review THEY
-  // submitted — even when they also hold an editor row. The user must
-  // hand off to another reviewer.
+  // Mirrors server-side canUserApprove:
+  //   admin (collaborator/steward) -> approve anything
+  //   reviewer steward             -> approve
+  //   bare owner                   -> ONLY when the nest allows self-approve
+  // SoD: you can't approve a review YOU submitted — unless you're the owner
+  // and the nest allows self-approve (the seeding switch).
   const isOwnSubmission =
     !!pendingReviewBy &&
     !!currentEmail &&
     pendingReviewBy.toLowerCase() === currentEmail;
+  const hasAdminApprove =
+    isAdmin || permission === "admin" || myNodeRoles.includes("admin");
+  const canApproveCapability =
+    hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
   const canReviewHere =
     !isNew &&
     status === "pending_review" &&
-    (hasReviewerRole || isOwner) &&
-    (isOwner || !isOwnSubmission);
+    canApproveCapability &&
+    (!isOwnSubmission || (isOwner && allowSelfApprove));
 
   // Read-only when the caller's only steward rows are reviewer/viewer
   // (no editor row anywhere). Editors author content; reviewers just

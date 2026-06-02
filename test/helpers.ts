@@ -5,6 +5,15 @@ import { vi } from "vitest";
 import { resetDb } from "../src/db/client.js";
 import { _reset as resetRateLimits } from "../src/shared/rate-limit.js";
 
+/** Clear auth rate-limit buckets mid-suite — needed when a suite registers
+ *  more than REGISTER_LIMIT (3) users from the same IP. Dynamic import grabs
+ *  the post-resetModules instance the running app actually uses (the top-level
+ *  import above is stale after createTestApp's vi.resetModules). */
+export async function resetAuthRateLimit() {
+  const rl = await import("../src/shared/rate-limit.js");
+  rl._reset();
+}
+
 /** Set up an isolated data directory for each test suite */
 export function setupTestEnv() {
   // Reset the cached DB connection so each suite gets its own

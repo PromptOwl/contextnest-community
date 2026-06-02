@@ -38,6 +38,24 @@ export function setStewardshipEnabled(nestId: string, enabled: boolean): void {
   );
 }
 
+/** Whether the nest lets a submitter approve their own version (bypass SoD). */
+export function nestAllowsSelfApprove(nestId: string): boolean {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT allow_self_approve FROM nests WHERE id = ?")
+    .get(nestId) as { allow_self_approve: number } | undefined;
+  return !!row?.allow_self_approve;
+}
+
+/** Toggle self-approve bypass on/off for a nest (admin-only). */
+export function setAllowSelfApprove(nestId: string, allow: boolean): void {
+  const db = getDb();
+  db.prepare("UPDATE nests SET allow_self_approve = ? WHERE id = ?").run(
+    allow ? 1 : 0,
+    nestId,
+  );
+}
+
 /**
  * Disable stewardship and tear down the governance state tied to it:
  * steward assignments and any pending review requests.

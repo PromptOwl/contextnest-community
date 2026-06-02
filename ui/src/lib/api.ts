@@ -238,16 +238,16 @@ export async function deleteApiKey(keyId: string) {
 // ─── Nest settings ─────────────────────────────────────────────────────
 
 export async function getNestSettings(nestId: string) {
-  return request<{ stewardship_enabled: boolean }>(
+  return request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
     `/nests/${nestId}/settings`,
   );
 }
 
 export async function updateNestSettings(
   nestId: string,
-  data: { stewardship_enabled?: boolean },
+  data: { stewardship_enabled?: boolean; allow_self_approve?: boolean },
 ) {
-  return request<{ stewardship_enabled: boolean }>(
+  return request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
     `/nests/${nestId}/settings`,
     { method: "PATCH", body: JSON.stringify(data) },
   );

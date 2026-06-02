@@ -78,6 +78,7 @@ export function NestView({
   const [externalEdits, setExternalEdits] = useState<api.ExternalEditEntry[]>([]);
   const [externalEditsLoading, setExternalEditsLoading] = useState(false);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
+  const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [visibility, setVisibility] = useState<"private" | "public">("private");
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
@@ -117,7 +118,7 @@ export function NestView({
           toast.error(e?.message || "Failed to load review queue");
           return { requests: [], total: 0 };
         }),
-        api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
+        api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false, allow_self_approve: false })),
         api.listExternalEdits(nestId).catch(() => ({ entries: [], total: 0 })),
         api.getNest(nestId).catch(() => null),
       ]);
@@ -125,6 +126,7 @@ export function NestView({
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
     setStewardshipEnabled(settingsData.stewardship_enabled);
+    setAllowSelfApprove(settingsData.allow_self_approve);
     setExternalEdits(externalData.entries);
     if (nestMeta?.nest?.visibility) {
       setVisibility(nestMeta.nest.visibility);
@@ -229,16 +231,19 @@ export function NestView({
       return false;
     });
 
-  // Eligibility check: does the caller hold a reviewer steward row whose
-  // scope covers this node? Mirrors server resolution (document > tag >
-  // nest), but client-side so the queue can be filtered without N extra
-  // round-trips. Nest owner short-circuits — server now allows owner to
-  // approve anything in their nest (CU-86ahn99dg).
+  // Approval capability on a node (ignoring own-submission SoD, handled at
+  // the call sites). Mirrors server canUserApprove:
+  //   admin (collaborator/steward) -> approve anything
+  //   reviewer steward (scoped)    -> approve covered nodes
+  //   bare owner                   -> ONLY when the nest allows self-approve
+  //                                   (else approvals go to reviewers)
   const canReviewNode = (node: { id: string; tags?: string[] }) => {
     if (!node) return false;
-    if (canManage) return true; // owner/admin can review anything
     if (isReadOnly) return false;
-    return hasRoleOnNode(node, "reviewer");
+    if (isAdmin || roles.includes("admin")) return true;
+    if (isOwner) return allowSelfApprove;
+    if (hasRoleOnNode(node, "reviewer")) return true;
+    return false;
   };
 
   // Per-node edit gate. Nest-wide writers (owner/admin or a write+
@@ -263,16 +268,17 @@ export function NestView({
     });
   };
 
-  // Review queue: the assigned reviewer sees their scope. Nest owner
-  // also sees the full queue and may self-approve any submission
-  // (CU-86ahn99dg). SoD drops own submissions for everyone else — even
-  // editor+reviewer combos. The submitter has to hand off to another
-  // reviewer regardless of any additional roles they hold.
+  // Review queue: who can act on each request. canReviewNode gates capability;
+  // own submissions are dropped (SoD) unless the caller is the owner and the
+  // nest allows self-approve (the seeding switch). A non-owner reviewer can
+  // never approve their own work.
   const reviewableQueue = reviewQueue.filter((r) => {
-    if (!isOwner && r.requestedBy.toLowerCase() === currentEmail) return false;
     const node = nodes.find((n) => n.id === r.nodeId);
     if (!node) return false;
-    return canReviewNode(node);
+    if (!canReviewNode(node)) return false;
+    const own = r.requestedBy.toLowerCase() === currentEmail;
+    if (own && !(isOwner && allowSelfApprove)) return false;
+    return true;
   });
 
   // Computed here so the Review Queue card binds to reviewableQueue.length
@@ -653,8 +659,8 @@ export function NestView({
                         {stewardshipEnabled &&
                           node.status === "pending_review" &&
                           canReviewNode(node) &&
-                          (isOwner ||
-                            submitterByNode.get(node.id) !== currentEmail) && (
+                          (submitterByNode.get(node.id) !== currentEmail ||
+                            (isOwner && allowSelfApprove)) && (
                             <Button
                               variant="outline"
                               size="sm"
@@ -995,6 +1001,7 @@ export function NestView({
           nestId={nestId}
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
+          allowSelfApprove={allowSelfApprove}
           canManageStewardship={isAdmin}
           onClose={() => setShowSettings(false)}
           onChanged={() => { setShowSettings(false); fetchData(); }}

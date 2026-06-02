@@ -12,13 +12,13 @@ import { ConflictError } from "../shared/errors.js";
 import { buildTitleMap } from "./title-resolver.js";
 import { resolveNestPermission } from "../shared/access.js";
 import { isLicenseAdminEmail } from "../auth/license.js";
+import { nestAllowsSelfApprove } from "../nests/service.js";
 import { config } from "../config.js";
 import {
   type EffectiveRole,
   collabPermToRole,
   canViewWith,
   canEditWith,
-  canApproveWith,
   primaryRole,
 } from "./roles.js";
 import type {
@@ -458,14 +458,18 @@ export function resolveUserRoles(
 // Resolution merges collaborator + steward roles via resolveUserRoles.
 //
 // Rules:
-//   super-admin (access.yaml)  -> all allowed
-//   nest owner                 -> edit + access + approve (including own
-//                                 submissions; the owner already has full
-//                                 control over the nest, so the
-//                                 separation-of-duties rule was theater
-//                                 for the seeding case — CU-86ahn99dg).
-//                                 The version log still records the actor.
-//   steward role=reviewer      -> approve + reject + access (NOT own work)
+//   super-admin (access.yaml)  -> edit + access; approve like an admin steward
+//   nest owner                 -> edit + access. APPROVAL is gated by the
+//                                 nest's allow_self_approve flag: off ->
+//                                 approvals go to assigned reviewers (the
+//                                 owner can't approve via ownership alone);
+//                                 on -> the owner can approve anything,
+//                                 including their own submissions (seeding).
+//                                 An owner who ALSO holds a reviewer/admin
+//                                 steward role approves teammates' work via
+//                                 that role regardless of the flag.
+//   steward role=admin/reviewer-> approve + reject + access (NOT own work,
+//                                 unless they're the owner and the flag is on)
 //   steward role=editor        -> edit + access
 //   steward role=viewer        -> access only
 
@@ -592,53 +596,73 @@ export function canUserApprove(
   nodeId: string,
   userEmail: string,
 ): PermissionResult {
-  // Nest owner can always approve — including their own submissions. The
-  // owner already controls the nest at every other layer; pretending SoD
-  // applies to them just blocks the seeding flow. The version log still
-  // records the actor for audit. See CU-86ahn99dg.
   const roles = resolveUserRoles(nestId, userEmail, { nodeId });
-  if (roles.includes("owner")) {
-    return { allowed: true, reason: "nest owner", role: "owner" };
-  }
-  if (isSuperAdmin(userEmail)) {
-    return { allowed: true, reason: "super admin", role: "super_admin" };
-  }
+  const isOwner = roles.includes("owner");
+  const isSuper = isSuperAdmin(userEmail);
+  const allowSelf = nestAllowsSelfApprove(nestId);
+  // Explicit approve-capable steward role (admin or reviewer), NOT the
+  // ownership-derived right. Owner-only callers resolve to ["owner"] and
+  // fall through to the ownership branch below; an owner who is ALSO an
+  // admin/reviewer steward keeps that role's powers here.
+  const hasStewardApprove =
+    roles.includes("admin") || roles.includes("reviewer");
 
-  // Approve requires reviewer (or admin — full access). Editors/viewers and
-  // plain collaborators cannot. Message tailors to what they do hold.
-  if (!canApproveWith(roles)) {
-    const held = primaryRole(roles);
-    return {
-      allowed: false,
-      reason: held
-        ? `You're a "${held}" on this document — only reviewers (or admins) can approve. Ask the nest owner to grant you the reviewer steward role.`
-        : "You're not a steward on this document, so you can't approve it. Ask the nest owner to add you as a reviewer.",
-      role: held,
-    };
-  }
-
-  // Separation of duties: the user who SUBMITTED the version for review
-  // can't approve it themselves, even if they ALSO hold an editor/admin role
-  // here. The submitter is the proximate actor and a second pair of eyes is
-  // required. We compare against review_requests.requested_by (the active
-  // actor) rather than node_versions.author so that when a teammate submits
-  // someone else's earlier edit, the original author can still approve.
+  // The actor is the user who SUBMITTED the version for review (or the version
+  // author as a fallback). We compare against review_requests.requested_by so
+  // that when a teammate submits someone else's earlier edit, the original
+  // author can still approve.
   const actor =
     getPendingReviewRequester(nestId, nodeId) ??
     getCurrentVersionAuthor(nestId, nodeId);
-  if (actor && actor.toLowerCase() === userEmail.toLowerCase()) {
+  const isOwnSubmission =
+    !!actor && actor.toLowerCase() === userEmail.toLowerCase();
+
+  // Path 1 — explicit steward (admin/reviewer): approve teammates' work always.
+  // Own submission is blocked by separation of duties, UNLESS the caller is
+  // also the owner/super-admin and the nest opts into self-approve (seeding).
+  if (hasStewardApprove) {
+    if (isOwnSubmission && !((isOwner || isSuper) && allowSelf)) {
+      return {
+        allowed: false,
+        reason:
+          "You submitted this version for review, so you can't approve it yourself. Ask another reviewer to approve it (separation of duties).",
+        role: roles.includes("admin") ? "admin" : "reviewer",
+      };
+    }
     return {
-      allowed: false,
-      reason:
-        "You submitted this version for review, so you can't approve it yourself. Ask another reviewer to approve it (separation of duties).",
+      allowed: true,
+      reason: "reviewer access (collaborator or steward)",
       role: roles.includes("admin") ? "admin" : "reviewer",
     };
   }
 
+  // Path 2 — ownership/super-admin without a steward role. Approval is gated by
+  // the nest's allow_self_approve flag: off -> approvals go to assigned
+  // reviewers; on -> the owner may approve anything, including own submissions.
+  if (isOwner || isSuper) {
+    if (allowSelf) {
+      return {
+        allowed: true,
+        reason: isOwner ? "nest owner (self-approve enabled)" : "super admin",
+        role: isOwner ? "owner" : "super_admin",
+      };
+    }
+    return {
+      allowed: false,
+      reason:
+        "Approvals go to assigned reviewers while self-approve is off. Enable self-approve in nest settings to approve directly (e.g. while seeding), or add a reviewer steward.",
+      role: isOwner ? "owner" : "super_admin",
+    };
+  }
+
+  // Path 3 — editor/viewer/plain collaborator: no approval rights.
+  const held = primaryRole(roles);
   return {
-    allowed: true,
-    reason: "reviewer access (collaborator or steward)",
-    role: roles.includes("admin") ? "admin" : "reviewer",
+    allowed: false,
+    reason: held
+      ? `You're a "${held}" on this document — only reviewers (or admins) can approve. Ask the nest owner to grant you the reviewer steward role.`
+      : "You're not a steward on this document, so you can't approve it. Ask the nest owner to add you as a reviewer.",
+    role: held,
   };
 }
 

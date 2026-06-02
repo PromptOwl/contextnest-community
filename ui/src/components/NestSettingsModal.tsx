@@ -20,6 +20,7 @@ import {
   AlertTriangle,
   Loader2,
   Info,
+  UserCheck,
 } from "lucide-react";
 import * as api from "../lib/api";
 
@@ -27,6 +28,7 @@ interface NestSettingsModalProps {
   nestId: string;
   nestName: string;
   stewardshipEnabled: boolean;
+  allowSelfApprove: boolean;
   /** False hides the stewardship section. Server still enforces. */
   canManageStewardship: boolean;
   onClose: () => void;
@@ -37,11 +39,13 @@ export function NestSettingsModal({
   nestId,
   nestName,
   stewardshipEnabled,
+  allowSelfApprove,
   canManageStewardship,
   onClose,
   onChanged,
 }: NestSettingsModalProps) {
   const [enabled, setEnabled] = useState(stewardshipEnabled);
+  const [selfApprove, setSelfApprove] = useState(allowSelfApprove);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Acknowledgement required only when the caller is turning stewardship
@@ -50,7 +54,9 @@ export function NestSettingsModal({
   const turningStewardshipOff = stewardshipEnabled && !enabled;
 
   const handleSave = async () => {
-    if (enabled === stewardshipEnabled) {
+    const stewardshipChanged = enabled !== stewardshipEnabled;
+    const selfApproveChanged = selfApprove !== allowSelfApprove;
+    if (!stewardshipChanged && !selfApproveChanged) {
       onClose();
       return;
     }
@@ -58,13 +64,17 @@ export function NestSettingsModal({
     setError(null);
     try {
       const result = await api.updateNestSettings(nestId, {
-        stewardship_enabled: enabled,
+        ...(stewardshipChanged ? { stewardship_enabled: enabled } : {}),
+        ...(selfApproveChanged ? { allow_self_approve: selfApprove } : {}),
       });
       // Trust the server's response, not our optimistic local state, in
       // case the permission check rejected silently or the DB rejected.
-      if (result.stewardship_enabled !== enabled) {
+      if (
+        result.stewardship_enabled !== enabled ||
+        result.allow_self_approve !== selfApprove
+      ) {
         setError(
-          "Server did not accept the stewardship change. You may not have permission to change this setting.",
+          "Server did not accept the change. You may not have permission to change these settings.",
         );
         setLoading(false);
         return;
@@ -164,6 +174,28 @@ export function NestSettingsModal({
                 </div>
               </div>
             )}
+          </div>
+          )}
+
+          {/* Self-approve bypass — manage-rights only. */}
+          {canManageStewardship && (
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <UserCheck className="h-4 w-4" />
+                  Allow self-approve
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Default off. When enabled, the same person can submit a draft and
+                  approve it — useful while seeding a single-person nest or running
+                  solo. Turning this back off does not retroactively revoke
+                  approvals; it only changes future behavior. Stewardship audit logs
+                  still record the actor; the trail is intact, the separation isn't.
+                </p>
+              </div>
+              <Switch checked={selfApprove} onCheckedChange={setSelfApprove} />
+            </div>
           </div>
           )}
         </div>
