@@ -27,6 +27,9 @@ interface DeleteNestDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onDeleted: () => void;
+  /** Imported nests hold a copy of the user's folder — deleting removes that
+   *  workspace copy; the user's original folder on disk is left untouched. */
+  isImported?: boolean;
 }
 
 export function DeleteNestDialog({
@@ -35,6 +38,7 @@ export function DeleteNestDialog({
   open,
   onOpenChange,
   onDeleted,
+  isImported = false,
 }: DeleteNestDialogProps) {
   const [confirmText, setConfirmText] = useState("");
   const [deleting, setDeleting] = useState(false);
@@ -57,6 +61,7 @@ export function DeleteNestDialog({
       await api.deleteNest(nestId);
       onDeleted();
     } catch (err: any) {
+      console.error("[DeleteNestDialog] deleteNest failed", nestId, err);
       setError(
         err?.message ??
           "Failed to delete this nest. You may not have permission, " +
@@ -90,10 +95,23 @@ export function DeleteNestDialog({
         <div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-900 space-y-1">
           <p className="font-medium">This will remove:</p>
           <ul className="list-disc list-inside space-y-0.5">
-            <li>All documents and version history</li>
             <li>Stewardship assignments and review-queue entries</li>
             <li>Collaborator access and linked API keys</li>
-            <li>The nest folder on disk</li>
+            <li>Version history and governance metadata</li>
+            {isImported ? (
+              <>
+                <li>All documents and content (the workspace copy)</li>
+                <li className="text-foreground">
+                  Your original imported folder is not affected — only the copy
+                  in this workspace is removed
+                </li>
+              </>
+            ) : (
+              <>
+                <li>All documents and content</li>
+                <li>The nest folder on disk</li>
+              </>
+            )}
           </ul>
         </div>
 

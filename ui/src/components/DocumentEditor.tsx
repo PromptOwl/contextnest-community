@@ -231,9 +231,13 @@ export function DocumentEditor({
     setLoading(true);
     try {
       const { node } = await api.getNode(nestId, nodeId);
-      const loadedTitle = node?.title ?? "";
-      const loadedContent = node?.content ?? "";
-      const loadedTags = Array.isArray(node?.tags) ? node.tags : [];
+      // Coerce to strings — YAML frontmatter can parse `title: 123` as a
+      // number, and `title.trim()` later would throw "trim is not a function".
+      const loadedTitle = node?.title == null ? "" : String(node.title);
+      const loadedContent = node?.content == null ? "" : String(node.content);
+      const loadedTags = Array.isArray(node?.tags)
+        ? node.tags.map((t: unknown) => String(t))
+        : [];
       setTitle(loadedTitle);
       setContent(loadedContent);
       setTags(loadedTags);

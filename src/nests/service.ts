@@ -2,15 +2,39 @@ import { join } from "path";
 import { rmSync, mkdirSync } from "fs";
 import { v4 as uuid } from "uuid";
 import { NestStorage } from "@promptowl/contextnest-engine";
+import {
+  writeImportedFiles,
+  discardImportDir,
+  type ImportedFile,
+} from "../fs/vault-import.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { ValidationError } from "../shared/errors.js";
 import type { Nest } from "../shared/types.js";
 
-function nestPath(nestId: string): string {
+/**
+ * On-disk storage root for a nest — always <DATA_ROOT>/nests/<id>. Imported
+ * nests copy their files here on import (rather than linking an external host
+ * path), so every nest lives under DATA_ROOT. Single source of truth for every
+ * disk read/write (engineCache + create/delete).
+ */
+export function resolveNestPath(nestId: string): string {
   return join(config.DATA_ROOT, "nests", nestId);
+}
+
+/**
+ * True when the nest was imported from a folder. Imported nests use flat
+ * discovery (markdown anywhere in the folder, not just nodes/) because an
+ * existing user vault rarely matches the engine's structured layout.
+ */
+export function isImportedNest(nestId: string): boolean {
+  const row = getDb()
+    .prepare("SELECT is_imported FROM nests WHERE id = ?")
+    .get(nestId) as { is_imported: number } | undefined;
+  return !!row?.is_imported;
 }
 
 function toSlug(name: string): string {
@@ -105,12 +129,62 @@ export async function createNest(
     "INSERT INTO nests (id, user_id, name, slug, description, visibility) VALUES (?, ?, ?, ?, ?, ?)",
   ).run(id, userId, name, slug, description || null, visibility);
 
-  const path = nestPath(id);
+  const path = resolveNestPath(id);
   mkdirSync(path, { recursive: true });
   const storage = new NestStorage(path);
   await storage.init(name);
 
   trackEvent("nest.create", { nestId: id, userId });
+
+  return db.prepare("SELECT * FROM nests WHERE id = ?").get(id) as Nest;
+}
+
+/**
+ * Import a folder the user picked in their browser as a nest. The browser
+ * walks the chosen directory (System folder dialog → showDirectoryPicker /
+ * webkitdirectory) and uploads each file's relative path + content; we write
+ * them into the nest's own storage under DATA_ROOT. The server never browses
+ * its own filesystem, so this works whether or not the server is colocated
+ * with the user. The nest is flagged is_imported=1 so it discovers its docs
+ * via the flat layout (markdown anywhere, not just nodes/). Governance metadata
+ * is seeded on import (registerImportedDocuments) and extended lazily on
+ * edit/review, exactly like a default nest.
+ */
+export async function importNest(
+  userId: string,
+  name: string,
+  files: ImportedFile[],
+): Promise<Nest> {
+  const nm = (name || "").trim();
+  if (!nm) {
+    throw new ValidationError("name is required");
+  }
+  if (!Array.isArray(files)) {
+    throw new ValidationError("files are required");
+  }
+
+  const db = getDb();
+  const id = uuid();
+  const slug = toSlug(nm);
+  const visibility = userId === ANON_USER_ID ? "public" : "private";
+  const dest = resolveNestPath(id);
+
+  // Write the uploaded files before the row exists, so a failed write leaves
+  // no orphan nest.
+  mkdirSync(dest, { recursive: true });
+  try {
+    writeImportedFiles(dest, files);
+  } catch (err) {
+    console.error("[nests] import write failed", dest, err);
+    discardImportDir(dest);
+    throw new ValidationError("Failed to import folder");
+  }
+
+  db.prepare(
+    "INSERT INTO nests (id, user_id, name, slug, description, visibility, is_imported) VALUES (?, ?, ?, ?, ?, ?, 1)",
+  ).run(id, userId, nm, slug, null, visibility);
+
+  trackEvent("nest.import", { nestId: id, userId });
 
   return db.prepare("SELECT * FROM nests WHERE id = ?").get(id) as Nest;
 }
@@ -216,12 +290,12 @@ export async function deleteNest(nestId: string): Promise<void> {
   });
   wipe(nestId);
 
-  // Best-effort filesystem cleanup — the engine's NestStorage writes
-  // YAML/markdown into <DATA_ROOT>/nests/<nestId>. Removing this folder
-  // is the on-disk counterpart to the DB wipe above. Failure here is
-  // non-fatal: the DB rows are already gone, so the nest is unreachable
-  // from the app either way; an orphaned directory is harmless.
-  const path = nestPath(nestId);
+  // Reclaim the on-disk folder. Every nest (default or imported) lives under
+  // DATA_ROOT — imported nests copied their files in, so removing the folder
+  // never touches the user's original (untouched) source. Failure here is
+  // non-fatal: the DB rows are already gone, so the nest is unreachable from
+  // the app either way; an orphaned directory is harmless.
+  const path = resolveNestPath(nestId);
   try {
     rmSync(path, { recursive: true, force: true });
   } catch (err) {

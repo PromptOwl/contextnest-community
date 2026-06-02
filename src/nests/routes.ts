@@ -3,6 +3,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { resolveNestPermission } from "../shared/access.js";
 import {
   createNest,
+  importNest,
   listNests,
   listSharedNests,
   listPublicNests,
@@ -14,12 +15,13 @@ import {
   nestAllowsSelfApprove,
   setAllowSelfApprove,
 } from "./service.js";
+import { registerImportedDocuments } from "../nodes/service.js";
+import { resolveCallerEmail } from "../governance/access-guard.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import {
   resolveUserRoles,
   getStewardsForUser,
 } from "../governance/stewardship-service.js";
-import { resolveCallerEmail } from "../governance/access-guard.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
@@ -112,6 +114,30 @@ nestRoutes.post("/", async (c) => {
 
   const nest = await createNest(c.get("userId"), body.name, body.description);
   return c.json({ nest }, 201);
+});
+
+// POST /nests/import — import a folder the user picked in their browser. The
+// browser uploads each file's relative path + content; the server writes them
+// into the nest's own storage under DATA_ROOT (it never browses its own disk),
+// so import works whether or not the server is colocated with the user.
+nestRoutes.post("/import", async (c) => {
+  const body = await c.req.json<{
+    name?: string;
+    files?: { path: string; content: string }[];
+  }>();
+  if (!body.name) {
+    throw new ValidationError("name is required");
+  }
+  const files = Array.isArray(body.files) ? body.files : [];
+  const userId = c.get("userId");
+  const nest = await importNest(userId, body.name, files);
+  // Seed governance rows for the documents already in the folder so they
+  // list as published and edit from their real version (not from scratch).
+  const documents = await registerImportedDocuments(
+    nest.id,
+    resolveCallerEmail(userId),
+  );
+  return c.json({ nest, documents }, 201);
 });
 
 // GET /nests/:nestId

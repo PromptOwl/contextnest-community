@@ -61,17 +61,25 @@ export interface NodeResponse {
 }
 
 export function toNodeResponse(node: ContextNode): NodeResponse {
+  const fm = node.frontmatter;
+  // Coerce string-ish fields. YAML parses bare values by type, so a
+  // frontmatter line like `title: 123` arrives as a number — clients then
+  // call `.trim()`/`.toLowerCase()` on it and crash. Normalize at the API
+  // boundary so every surface (editor, list search, MCP) gets strings.
+  const title =
+    fm.title === undefined || fm.title === null ? "" : String(fm.title);
+  const tags = Array.isArray(fm.tags) ? fm.tags.map((t) => String(t)) : [];
   return {
     id: node.id,
-    title: node.frontmatter.title,
-    type: node.frontmatter.type || "document",
-    tags: node.frontmatter.tags || [],
-    status: (node.frontmatter.status || "draft") as string,
-    version: node.frontmatter.version || 1,
-    author: node.frontmatter.author,
-    description: node.frontmatter.description,
-    created_at: node.frontmatter.created_at,
-    updated_at: node.frontmatter.updated_at,
+    title,
+    type: fm.type || "document",
+    tags,
+    status: (fm.status || "draft") as string,
+    version: fm.version || 1,
+    author: fm.author,
+    description: fm.description,
+    created_at: fm.created_at,
+    updated_at: fm.updated_at,
     content: node.body || "",
     pendingChange: node.pendingChange ?? undefined,
   };
@@ -271,6 +279,86 @@ export async function createNode(
 
   trackEvent("node.create", { nestId, nodeId: id });
   return { node, version: savedVersion };
+}
+
+/**
+ * Register the documents already present in an imported folder.
+ *
+ * On import the nest row exists but the governance DB is empty, so the
+ * existing on-disk documents have no version/approved/tag rows. Without
+ * them the docs still list (discovery is disk-based) but show as "draft"
+ * and editing wouldn't continue from their real version.
+ *
+ * This walks the folder's documents once and, for each, runs the engine's
+ * publish (safePublishDocument) so the doc gains a published checksum + a
+ * version-chain keyframe and context.yaml is regenerated — exactly the
+ * no-stewards auto-publish path createNode uses. That is what makes an
+ * imported doc usable by AI: GraphQueryEngine/Resolver only return
+ * *published* documents, and public/shared readers reconstruct the approved
+ * body from the keyframe. Any .versions history copied on import is preserved;
+ * publish appends to the chain. Each doc is then seeded with a
+ * published+approved governance row at its published version, plus its tag
+ * index. Idempotent: docs that already carry a version row are skipped, so
+ * re-running is safe.
+ *
+ * Returns the number of documents newly registered.
+ */
+export async function registerImportedDocuments(
+  nestId: string,
+  userEmail: string,
+): Promise<number> {
+  const { storage } = engineCache.get(nestId);
+  let docs: ContextNode[];
+  try {
+    docs = await storage.discoverDocuments();
+  } catch (err) {
+    console.error("registerImportedDocuments: discovery failed", nestId, err);
+    return 0;
+  }
+
+  let registered = 0;
+  for (const doc of docs) {
+    const nodeId = doc.id;
+    if (versions.getCurrentVersion(nestId, nodeId) > 0) continue; // already tracked
+    const rawTags = Array.isArray(doc.frontmatter?.tags)
+      ? doc.frontmatter.tags
+      : [];
+    const tags = rawTags.map((t) => normalizeTag(String(t)));
+
+    // Publish in the engine so the doc is AI-visible (published status +
+    // checksum + keyframe). Falls back to the on-disk version if publish
+    // fails, so the doc still lists + edits from a sane base.
+    const fmVersion = Number(doc.frontmatter?.version);
+    let version = Number.isFinite(fmVersion) && fmVersion > 0 ? fmVersion : 1;
+    let content = doc.body || "";
+    try {
+      const result = await safePublishDocument(storage, nodeId, {
+        editedBy: userEmail,
+        note: "Imported from existing folder",
+      });
+      version = result.node.frontmatter.version || version;
+      content = result.node.body || content;
+    } catch (err) {
+      console.error("safePublishDocument failed (import register)", nodeId, err);
+    }
+
+    versions.createVersion({
+      nestId,
+      nodeId,
+      version,
+      content,
+      author: userEmail,
+      status: "published",
+      changeNote: "Imported from existing folder",
+      tags,
+    });
+    versions.setApprovedVersion(nestId, nodeId, version, userEmail);
+    syncNodeTags(nestId, nodeId, tags);
+    registered++;
+  }
+
+  trackEvent("nest.import.documents", { nestId, registered });
+  return registered;
 }
 
 export async function updateNode(

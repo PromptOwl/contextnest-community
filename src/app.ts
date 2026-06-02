@@ -59,13 +59,12 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   await next();
 });
 
-// Unauth GETs in key mode: allow read-only access to /nests routes
-// (list + bare + sub) so public nests work without login. Admin paths
-// and writes still 401.
+// Unauth GETs in key mode: allow read-only access to a specific nest
+// (/nests/:id and its sub-routes) so public nests work without login.
+// The bare /nests list is excluded — anon callers must not discover the
+// nest inventory. Admin paths and writes still 401.
 function isPublicReadEligiblePath(method: string, path: string): boolean {
   if (method !== "GET") return false;
-  // Require a nest id — the bare /nests list stays auth-only (no anon
-  // discovery of every nest). Only /nests/:id and sub-routes are eligible.
   if (!/^\/nests\/[^/]+(\/.*)?$/.test(path)) return false;
   return !/\/(collaborators|visibility|settings|mcp)/.test(path);
 }
