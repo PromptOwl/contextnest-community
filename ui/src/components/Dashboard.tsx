@@ -5,7 +5,7 @@ import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, CheckCircle2,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import {
@@ -234,22 +234,59 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
               const canDelete =
                 isOwner ||
                 (isAnonymous && authMode !== "open" && isAdmin);
-              const roleLabel =
-                permission === "admin"
-                  ? "Admin"
-                  : permission === "write"
-                    ? "Editor"
-                    : permission === "read"
-                      ? "Viewer"
-                      : null;
-              const RoleIcon =
-                permission === "admin"
-                  ? Shield
-                  : permission === "write"
-                    ? Pencil
-                    : permission === "read"
-                      ? Eye
-                      : null;
+              // Card role badge — derive from merged effective roles
+              // (collaborator + steward), not just the collaborator permission.
+              // A steward editor/reviewer resolves to permission='read'
+              // server-side, so keying off permission alone mislabeled them
+              // "Viewer". Precedence: admin > editor > reviewer > viewer.
+              const roleList: string[] = Array.isArray(nest.roles)
+                ? nest.roles
+                : [];
+              const effRole = roleList.includes("admin")
+                ? "admin"
+                : roleList.includes("editor")
+                  ? "editor"
+                  : roleList.includes("reviewer")
+                    ? "reviewer"
+                    : roleList.includes("viewer")
+                      ? "viewer"
+                      : permission === "admin"
+                        ? "admin"
+                        : permission === "write"
+                          ? "editor"
+                          : permission === "read"
+                            ? "viewer"
+                            : null;
+              const roleBadge = effRole
+                ? ({
+                    admin: {
+                      label: "Admin",
+                      Icon: Shield,
+                      cls: "bg-purple-50 text-purple-700 border-purple-200",
+                      title: "Admin — full access except deleting the nest",
+                    },
+                    editor: {
+                      label: "Editor",
+                      Icon: Pencil,
+                      cls: "bg-indigo-50 text-indigo-700 border-indigo-200",
+                      title: "Editor — you can read and edit documents",
+                    },
+                    reviewer: {
+                      label: "Reviewer",
+                      Icon: CheckCircle2,
+                      cls: "bg-amber-50 text-amber-700 border-amber-200",
+                      title:
+                        "Reviewer — you can approve or reject submissions",
+                    },
+                    viewer: {
+                      label: "Viewer",
+                      Icon: Eye,
+                      cls: "bg-slate-50 text-slate-700 border-slate-200",
+                      title: "View only — you can read but not edit",
+                    },
+                  }[effRole])
+                : null;
+              const RoleIcon = roleBadge?.Icon ?? null;
               return (
                 <div
                   key={nest.id}
@@ -334,25 +371,13 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                             Ungoverned
                           </span>
                         )}
-                        {isShared && roleLabel && RoleIcon && (
+                        {isShared && roleBadge && RoleIcon && (
                           <span
-                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border ${
-                              permission === "read"
-                                ? "bg-slate-50 text-slate-700 border-slate-200"
-                                : permission === "write"
-                                  ? "bg-indigo-50 text-indigo-700 border-indigo-200"
-                                  : "bg-purple-50 text-purple-700 border-purple-200"
-                            }`}
-                            title={
-                              permission === "read"
-                                ? "View only — you can read but not edit"
-                                : permission === "write"
-                                  ? "Editor — you can read and edit documents"
-                                  : "Admin — full access except deleting the nest"
-                            }
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border ${roleBadge.cls}`}
+                            title={roleBadge.title}
                           >
                             <RoleIcon className="h-3 w-3" />
-                            {roleLabel}
+                            {roleBadge.label}
                           </span>
                         )}
                         <span

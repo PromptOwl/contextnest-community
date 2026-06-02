@@ -34,7 +34,26 @@ governanceRoutes.get("/stewards", async (c) => {
     scope: scope || undefined,
     search: search || undefined,
   });
-  return c.json({ stewards });
+  // Annotate each row with the user's collaborator access and merged
+  // effective roles so the UI can show the full picture (a steward may also
+  // be a write collaborator, etc.). Cached per email across rows.
+  const cache = new Map<
+    string,
+    { collaboratorRole: string | null; roles: string[] }
+  >();
+  const enriched = stewards.map((s) => {
+    const key = s.userEmail.toLowerCase();
+    let merged = cache.get(key);
+    if (!merged) {
+      merged = {
+        collaboratorRole: stewardship.getCollaboratorRole(nestId, s.userEmail),
+        roles: stewardship.resolveUserRoles(nestId, s.userEmail),
+      };
+      cache.set(key, merged);
+    }
+    return { ...s, ...merged };
+  });
+  return c.json({ stewards: enriched });
 });
 
 // POST /nests/:nestId/stewards

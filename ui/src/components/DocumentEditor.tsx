@@ -19,6 +19,7 @@ import {
   Send,
   X,
   Pencil,
+  Users,
 } from "lucide-react";
 import {
   MarkdownEditor,
@@ -26,6 +27,7 @@ import {
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
+import { ShareNestDialog } from "./ShareNestDialog";
 import { SubmitForReviewModal, ReviewActions, ExternalEditBanner } from "./governance";
 import type { PendingChange } from "../lib/api";
 import { DocumentPickerModal } from "./DocumentPickerModal";
@@ -55,7 +57,8 @@ interface DocumentEditorProps {
   nestId: string;
   nestName: string;
   nodeId: string | "new";
-  /** Owner can self-approve pending reviews (CU-86ahn99dg). */
+  /** Owner skips the reviewer-role requirement; self-approving their own
+   *  submission still requires the nest's allow_self_approve flag. */
   isOwner?: boolean;
   onBack: () => void;
   onSaved?: (savedNodeId: string) => void;
@@ -92,14 +95,24 @@ export function DocumentEditor({
   onJumpBreadcrumb,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
-  const { adminStatus } = useAuth();
+  const { adminStatus, isAdmin } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
-  // Caller's resolved steward roles for this node (empty = not a steward).
-  // A user may hold more than one row (e.g. editor on the doc + reviewer
-  // on the nest); we keep the full set so editor+reviewer keeps BOTH the
-  // edit affordance and the inline approve/reject affordance instead of
-  // picking one and losing the other.
+  // Inline sharing from the document view — "add folks to a context where
+  // you're reading it" instead of bouncing back to the nest. Same dialog
+  // and owner/admin gate as NestView (the server requires admin on
+  // /collaborators and /visibility). New, unsaved docs have no shareable
+  // nest target distinct from the nest list, so only offer it once we're
+  // looking at a real nest the caller can administer.
+  const canShare = isOwner || isAdmin;
+  const [showShare, setShowShare] = useState(false);
+  // Caller's resolved steward role for this node (null = none / not a steward).
+  // Drives read-only gating for reviewer/viewer roles on Save + Submit.
   const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
+  // Caller's nest-wide scoped steward rows (from GET /nests/:id). Needed for
+  // NEW docs, where there's no node yet to resolve a per-node role against.
+  const [myStewards, setMyStewards] = useState<
+    Array<{ role: string; scope: string }>
+  >([]);
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   const [content, setContent] = useState("");
@@ -115,11 +128,30 @@ export function DocumentEditor({
   // user clicking through an error.
   const [pendingReviewBy, setPendingReviewBy] = useState<string | null>(null);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
-  // Public-reader gate (visibility=public + permission='read').
-  const [isReadOnly, setIsReadOnly] = useState(false);
-  // Any per-node steward row overrides the nest-level public-read gate
-  // so an editor/reviewer scoped to this doc still gets their affordances.
-  const isViewOnly = isReadOnly && myNodeRoles.length === 0;
+  // When on, the submitter may approve their own pending review (per-nest
+  // self-approve bypass). Off = separation of duties enforced for everyone.
+  const [allowSelfApprove, setAllowSelfApprove] = useState(false);
+  // Caller's nest-level permission (GET /nests/:id). 'read' = no write access
+  // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
+  // edit. null until loaded.
+  const [permission, setPermission] = useState<string | null>(null);
+  // Read-only when the caller's nest permission is 'read' and they hold no
+  // per-node steward row. Any editor/reviewer node row overrides this so a
+  // steward scoped to this doc still gets their affordances.
+  const isReadOnly = permission === "read";
+  // Authoring a NEW doc can't resolve a per-node role (no node yet), so gate
+  // on nest-wide capability: owner/admin, a write+ collaborator, or a
+  // nest-scope editor steward. Mirrors NestView's "New Document" gate.
+  const canAuthorNew =
+    isOwner ||
+    isAdmin ||
+    permission === "owner" ||
+    permission === "admin" ||
+    permission === "write" ||
+    myStewards.some((s) => s.role === "editor" && s.scope === "nest");
+  const isViewOnly = isNew
+    ? !canAuthorNew
+    : isReadOnly && myNodeRoles.length === 0;
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
@@ -150,14 +182,17 @@ export function DocumentEditor({
     (async () => {
       try {
         const [settings, meta] = await Promise.all([
-          api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
+          api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false, allow_self_approve: false })),
           api.getNest(nestId).catch(() => null),
         ]);
         if (cancelled) return;
         setStewardshipEnabled(!!settings.stewardship_enabled);
-        if (meta?.nest?.visibility === "public" && meta?.permission === "read") {
-          setIsReadOnly(true);
-        }
+        setAllowSelfApprove(!!settings.allow_self_approve);
+        setPermission(meta?.permission ?? null);
+        setMyStewards(((meta as any)?.myStewards ?? []) as Array<{
+          role: string;
+          scope: string;
+        }>);
       } catch {
         /* non-fatal */
       }
@@ -376,21 +411,25 @@ export function DocumentEditor({
   const hasReviewerRole = myNodeRoles.includes("reviewer");
   const hasEditorRole = myNodeRoles.includes("editor");
 
-  // Owner short-circuit mirrors server-side canUserApprove: nest owner
-  // can approve any pending review, including their own submissions
-  // (the seeding flow). Reviewer stewards still need a reviewer row.
-  // SoD: anyone who isn't the owner can't approve a review THEY
-  // submitted — even when they also hold an editor row. The user must
-  // hand off to another reviewer.
+  // Mirrors server-side canUserApprove:
+  //   admin (collaborator/steward) -> approve anything
+  //   reviewer steward             -> approve
+  //   bare owner                   -> ONLY when the nest allows self-approve
+  // SoD: you can't approve a review YOU submitted — unless you're the owner
+  // and the nest allows self-approve (the seeding switch).
   const isOwnSubmission =
     !!pendingReviewBy &&
     !!currentEmail &&
     pendingReviewBy.toLowerCase() === currentEmail;
+  const hasAdminApprove =
+    isAdmin || permission === "admin" || myNodeRoles.includes("admin");
+  const canApproveCapability =
+    hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
   const canReviewHere =
     !isNew &&
     status === "pending_review" &&
-    (hasReviewerRole || isOwner) &&
-    (isOwner || !isOwnSubmission);
+    canApproveCapability &&
+    (!isOwnSubmission || (isOwner && allowSelfApprove));
 
   // Read-only when the caller's only steward rows are reviewer/viewer
   // (no editor row anywhere). Editors author content; reviewers just
@@ -506,6 +545,17 @@ export function DocumentEditor({
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {/* Write/review affordances hidden for public reader. */}
+          {canShare && (
+            <Button
+              variant="outline"
+              onClick={() => setShowShare(true)}
+              data-testid="document-editor-share"
+              title="Share this nest — visibility and collaborators"
+            >
+              <Users className="h-4 w-4 mr-2" />
+              Share
+            </Button>
+          )}
           {!isViewOnly && canSubmitForReview && (
             <Button
               variant="outline"
@@ -746,6 +796,17 @@ export function DocumentEditor({
         onSelect={handleDocLinkInsert}
       />
 
+      {showShare && (
+        <ShareNestDialog
+          nestId={nestId}
+          nestName={nestName}
+          onClose={() => setShowShare(false)}
+          onChanged={() => {
+            /* Sharing changes don't alter this document's content; nothing
+               to reload here. The nest list re-reads on next visit. */
+          }}
+        />
+      )}
       {leaveIntent && (
         <Dialog open onOpenChange={() => setLeaveIntent(null)}>
           <DialogContent className="sm:max-w-[460px]">

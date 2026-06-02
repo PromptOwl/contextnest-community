@@ -1,15 +1,20 @@
 import { Hono } from "hono";
-import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError } from "../shared/errors.js";
-import type { NestCollaborator, NestCollaboratorPermission } from "../shared/types.js";
+import {
+  resolveUserRoles,
+  getStewardRolesForUser,
+} from "../governance/stewardship-service.js";
+import { addCollaborator } from "./sharing-service.js";
+import type { NestCollaborator } from "../shared/types.js";
 
 export const sharingRoutes = new Hono<AuthEnv>();
 
 // GET /nests/:nestId/collaborators
 sharingRoutes.get("/collaborators", async (c) => {
   const db = getDb();
+  const nestId = c.req.param("nestId")!;
   const collabs = db
     .prepare(
       `SELECT nc.*, u.email FROM nest_collaborators nc
@@ -17,8 +22,18 @@ sharingRoutes.get("/collaborators", async (c) => {
        WHERE nc.nest_id = ?
        ORDER BY nc.granted_at`,
     )
-    .all(c.req.param("nestId")!) as Array<NestCollaborator & { email?: string }>;
-  return c.json({ collaborators: collabs });
+    .all(nestId) as Array<NestCollaborator & { email?: string }>;
+  // Annotate with the user's steward roles + merged effective roles so the
+  // UI shows the full picture (a collaborator may also be a reviewer steward).
+  const enriched = collabs.map((collab) => {
+    if (!collab.email) return { ...collab, stewardRoles: [], roles: [] };
+    return {
+      ...collab,
+      stewardRoles: getStewardRolesForUser(nestId, collab.email),
+      roles: resolveUserRoles(nestId, collab.email),
+    };
+  });
+  return c.json({ collaborators: enriched });
 });
 
 // POST /nests/:nestId/collaborators — share by email
@@ -29,50 +44,13 @@ sharingRoutes.post("/collaborators", async (c) => {
     permission?: string;
   }>();
 
-  if (!body.permission || !["read", "write", "admin"].includes(body.permission)) {
-    throw new ValidationError("permission must be read, write, or admin");
-  }
-
-  const db = getDb();
-  let userId = body.user_id;
-
-  // Allow sharing by email — look up or create placeholder user
-  if (!userId && body.email) {
-    let user = db.prepare("SELECT id FROM users WHERE email = ?").get(body.email) as
-      | { id: string }
-      | undefined;
-
-    if (!user) {
-      // Create a placeholder user (they'll claim the account by registering
-      // with the same email — see /auth/register claim flow).
-      const { hashPassword } = await import("../auth/keys.js");
-      userId = uuid();
-      db.prepare(
-        "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-      ).run(userId, body.email, null, await hashPassword(uuid()));
-    } else {
-      userId = user.id;
-    }
-  }
-
-  if (!userId) {
-    throw new ValidationError("user_id or email is required");
-  }
-
-  const collabId = uuid();
-  db.prepare(
-    "INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by) VALUES (?, ?, ?, ?, ?)",
-  ).run(
-    collabId,
-    c.req.param("nestId")!,
-    userId,
-    body.permission,
-    c.get("userId"),
-  );
-
-  const collab = db
-    .prepare("SELECT * FROM nest_collaborators WHERE id = ?")
-    .get(collabId) as NestCollaborator;
+  const collab = await addCollaborator({
+    nestId: c.req.param("nestId")!,
+    email: body.email,
+    userId: body.user_id,
+    permission: body.permission ?? "",
+    grantedByUserId: c.get("userId"),
+  });
   return c.json({ collaborator: collab }, 201);
 });
 

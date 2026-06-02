@@ -6,6 +6,7 @@ import {
   createTestApp,
   registerUser,
   jsonRequest,
+  resetAuthRateLimit,
 } from "./helpers.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -22,7 +23,8 @@ describe("governance: stewardship with stewards.yaml", () => {
 
   beforeAll(async () => {
     env = setupTestEnv();
-    app = await createTestApp("key");
+    // lead is the server (super) admin — only they can manage the roster.
+    app = await createTestApp("key", { superAdmins: ["lead@acme.com"] });
     admin = await registerUser(app, "lead@acme.com", "Lead");
     dev = await registerUser(app, "dev@acme.com", "Dev");
     reviewer = await registerUser(app, "jane@acme.com", "Jane");
@@ -268,7 +270,8 @@ describe("governance: rejection workflow", () => {
 
   beforeAll(async () => {
     env = setupTestEnv();
-    app = await createTestApp("key");
+    // dev owns the nest AND is the server admin syncing the roster.
+    app = await createTestApp("key", { superAdmins: ["dev@acme.com"] });
     dev = await registerUser(app, "dev@acme.com", "Dev");
     reviewer = await registerUser(app, "reviewer@acme.com", "Reviewer");
 
@@ -553,7 +556,10 @@ describe("governance: permission enforcement", () => {
 
   beforeAll(async () => {
     env = setupTestEnv();
-    app = await createTestApp("key");
+    // dev is the super admin — steward sync is super-admin-gated (see app.ts),
+    // so without this the stewards.yaml below never syncs and dev holds no
+    // approve role.
+    app = await createTestApp("key", { superAdmins: ["dev@acme.com"] });
     dev = await registerUser(app, "dev@acme.com", "Dev");
     outsider = await registerUser(app, "outsider@acme.com", "Outsider");
 
@@ -630,13 +636,12 @@ describe("governance: permission enforcement", () => {
   });
 });
 
-// ─── Owner can self-approve (CU-86ahn99dg) ────────────────────────────
-// The original separation-of-duties rule blocked everyone — including the
-// nest owner — from approving a version they authored. That blocks the
-// seeding flow when the owner is alone in the nest. Owner-as-approver is
-// consistent with how the owner already short-circuits canUserEdit and
-// canUserAccess.
-describe("governance: nest owner can self-approve their own submissions", () => {
+// ─── Owner self-approve is gated by allow_self_approve ─────────────────
+// SoD applies to the owner's OWN submissions too: the owner can approve
+// others' work freely, but approving a version they themselves submitted
+// requires the nest's allow_self_approve flag. (Supersedes the
+// unconditional owner bypass from CU-86ahn99dg.)
+describe("governance: nest owner self-approve respects allow_self_approve", () => {
   let env: ReturnType<typeof setupTestEnv>;
   let app: any;
   let owner: { apiKey: string; userId: string };
@@ -707,7 +712,25 @@ nest:
 
   afterAll(() => env.cleanup());
 
-  it("owner can approve their own submission", async () => {
+  it("owner is blocked from approving their own submission while flag off", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/seed-doc/approve`,
+      { note: "approving my own seed doc" },
+      owner.apiKey,
+    );
+    expect(status).toBe(403);
+  });
+
+  it("owner can approve their own submission once flag is on", async () => {
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/settings`,
+      { allow_self_approve: true },
+      owner.apiKey,
+    );
     const { status, data } = await jsonRequest(
       app,
       "POST",
@@ -717,5 +740,239 @@ nest:
     );
     expect(status).toBe(200);
     expect(data.review.status).toBe("approved");
+  });
+});
+
+// ─── Per-nest allow_self_approve flag (owner-approval switch) ──────────
+// allow_self_approve gates the OWNER's approval power, not a generic
+// self-approve bypass:
+//   flag OFF -> approvals go to assigned reviewers; the owner can't approve
+//              via ownership alone (own OR others'). Reviewers approve
+//              teammates' work but never their own.
+//   flag ON  -> the owner may approve anything, including their own
+//              submissions (seeding). Reviewers are unchanged; editors never.
+// An owner who is ALSO a reviewer/admin steward approves teammates' work via
+// that role regardless of the flag (covered by the owner-self-approve block).
+describe("governance: per-nest allow_self_approve flag", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let superAdmin: { apiKey: string; userId: string };
+  let owner: { apiKey: string; userId: string };
+  let reviewer: { apiKey: string; userId: string };
+  let editor: { apiKey: string; userId: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    // owner is a BARE nest owner — not a super-admin and not a steward. A
+    // separate super admin performs the steward sync (it's super-admin-gated),
+    // so the reviewer role is real while the owner stays ungoverned-by-steward.
+    app = await createTestApp("key", { superAdmins: ["super@team.test"] });
+    superAdmin = await registerUser(app, "super@team.test", "Super");
+    owner = await registerUser(app, "owner@team.test", "Owner");
+    reviewer = await registerUser(app, "rev@team.test", "Rev");
+    // 4 users exceed REGISTER_LIMIT (3/hr per IP) — clear the bucket first.
+    await resetAuthRateLimit();
+    editor = await registerUser(app, "ed@team.test", "Ed");
+
+    const { data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Bootstrap Nest" },
+      owner.apiKey,
+    );
+    nestId = data.nest.id;
+
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/settings`,
+      { stewardship_enabled: true },
+      owner.apiKey,
+    );
+
+    // rev is a nest-scope reviewer; ed only has write (no approve role).
+    const nestPath = join(env.dataDir, "nests", nestId);
+    mkdirSync(nestPath, { recursive: true });
+    writeFileSync(
+      join(nestPath, "stewards.yaml"),
+      `version: 1
+nest:
+  - email: rev@team.test, role: reviewer, can_approve: true
+`,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "rev@team.test", permission: "write" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "ed@team.test", permission: "write" },
+      owner.apiKey,
+    );
+    // Steward sync needs BOTH super-admin (middleware) AND nest access (route
+    // 404s non-members). Add the super admin as an admin collaborator so it can
+    // reach the nest; the owner itself stays bare (no steward/super role).
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "super@team.test", permission: "admin" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards/sync`,
+      {},
+      superAdmin.apiKey,
+    );
+
+    // Authors submit their own docs: rev-doc (reviewer), ed-doc (editor),
+    // owner-doc (owner), rev2-doc (reviewer — kept pending for the flag-on case).
+    for (const [author, title] of [
+      [reviewer, "Rev Doc"],
+      [editor, "Ed Doc"],
+      [owner, "Owner Doc"],
+      [reviewer, "Rev2 Doc"],
+    ] as const) {
+      const slug = title.toLowerCase().replace(/ /g, "-");
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title, content: `# ${title}\n\nDraft.` },
+        author.apiKey,
+      );
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes/nodes/${slug}/submit-review`,
+        { note: "seeding" },
+        author.apiKey,
+      );
+    }
+  });
+
+  afterAll(() => env.cleanup());
+
+  // ── Flag OFF (default) ──────────────────────────────────────────────
+  it("reviewer cannot approve their own submission (flag off)", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/rev-doc/approve`,
+      { note: "self approve" },
+      reviewer.apiKey,
+    );
+    expect(status).toBe(403);
+  });
+
+  it("editor cannot approve at all (flag off)", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/ed-doc/approve`,
+      { note: "self approve" },
+      editor.apiKey,
+    );
+    expect(status).toBe(403);
+  });
+
+  it("reviewer can approve a teammate's submission (flag off)", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/ed-doc/approve`,
+      { note: "reviewing the editor's draft" },
+      reviewer.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.review.status).toBe("approved");
+  });
+
+  it("bare owner cannot approve a teammate's submission while flag off", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/rev-doc/approve`,
+      { note: "owner approving" },
+      owner.apiKey,
+    );
+    expect(status).toBe(403);
+  });
+
+  it("bare owner cannot approve their own submission while flag off", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/owner-doc/approve`,
+      { note: "owner self approve" },
+      owner.apiKey,
+    );
+    expect(status).toBe(403);
+  });
+
+  it("settings round-trips allow_self_approve", async () => {
+    const { data } = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/settings`,
+      { allow_self_approve: true },
+      owner.apiKey,
+    );
+    expect(data.allow_self_approve).toBe(true);
+
+    const { data: read } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/settings`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(read.allow_self_approve).toBe(true);
+  });
+
+  // ── Flag ON ─────────────────────────────────────────────────────────
+  it("owner can approve a teammate's submission once flag is on", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/rev-doc/approve`,
+      { note: "owner approving" },
+      owner.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.review.status).toBe("approved");
+  });
+
+  it("owner can approve their own submission once flag is on", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/owner-doc/approve`,
+      { note: "owner self approve" },
+      owner.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.review.status).toBe("approved");
+  });
+
+  it("reviewer still cannot self-approve even with flag on", async () => {
+    // The flag is the owner's switch; it never loosens SoD for a non-owner.
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/rev2-doc/approve`,
+      { note: "self approve" },
+      reviewer.apiKey,
+    );
+    expect(status).toBe(403);
   });
 });

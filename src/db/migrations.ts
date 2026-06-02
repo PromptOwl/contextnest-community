@@ -152,6 +152,12 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE nests ADD COLUMN stewardship_enabled INTEGER NOT NULL DEFAULT 0");
   }
 
+  // Per-nest self-approve bypass (default: off — separation of duties enforced).
+  // When on, the submitter may approve their own version. See CU-86ahn99dg.
+  if (!nestCols.includes("allow_self_approve")) {
+    db.exec("ALTER TABLE nests ADD COLUMN allow_self_approve INTEGER NOT NULL DEFAULT 0");
+  }
+
   // Admin flag on users (first PromptOwl-authed user becomes the server admin)
   const userCols = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
   if (!userCols.includes("is_admin")) {

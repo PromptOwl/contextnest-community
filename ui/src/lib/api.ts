@@ -238,16 +238,16 @@ export async function deleteApiKey(keyId: string) {
 // ─── Nest settings ─────────────────────────────────────────────────────
 
 export async function getNestSettings(nestId: string) {
-  return request<{ stewardship_enabled: boolean }>(
+  return request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
     `/nests/${nestId}/settings`,
   );
 }
 
 export async function updateNestSettings(
   nestId: string,
-  data: { stewardship_enabled?: boolean },
+  data: { stewardship_enabled?: boolean; allow_self_approve?: boolean },
 ) {
-  return request<{ stewardship_enabled: boolean }>(
+  return request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
     `/nests/${nestId}/settings`,
     { method: "PATCH", body: JSON.stringify(data) },
   );
@@ -284,6 +284,10 @@ export async function getNest(nestId: string) {
   return request<{
     nest: { id: string; name: string; visibility: "private" | "public" };
     permission: string;
+    // Caller's merged effective roles (collaborator + steward), nest-wide.
+    roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
+    // Caller's own steward rows (scoped). Full roster is admin-only.
+    myStewards?: any[];
   }>(`/nests/${nestId}`);
 }
 
@@ -536,4 +540,22 @@ export async function addCollaborator(
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+export async function updateCollaborator(
+  nestId: string,
+  collabId: string,
+  permission: string,
+) {
+  return request<{ updated: boolean }>(
+    `/nests/${nestId}/collaborators/${collabId}`,
+    { method: "PATCH", body: JSON.stringify({ permission }) },
+  );
+}
+
+export async function removeCollaborator(nestId: string, collabId: string) {
+  return request<{ removed: boolean }>(
+    `/nests/${nestId}/collaborators/${collabId}`,
+    { method: "DELETE" },
+  );
 }

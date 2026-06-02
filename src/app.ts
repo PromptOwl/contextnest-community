@@ -7,7 +7,10 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { listNests, listSharedNests } from "./nests/service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
-import { resolveStewardsForNode } from "./governance/stewardship-service.js";
+import {
+  resolveStewardsForNode,
+  canManageStewards,
+} from "./governance/stewardship-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
@@ -61,7 +64,9 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 // and writes still 401.
 function isPublicReadEligiblePath(method: string, path: string): boolean {
   if (method !== "GET") return false;
-  if (!/^\/nests(\/[^/]+(\/.*)?)?$/.test(path)) return false;
+  // Require a nest id — the bare /nests list stays auth-only (no anon
+  // discovery of every nest). Only /nests/:id and sub-routes are eligible.
+  if (!/^\/nests\/[^/]+(\/.*)?$/.test(path)) return false;
   return !/\/(collaborators|visibility|settings|mcp)/.test(path);
 }
 
@@ -353,10 +358,23 @@ export function createApp(): Hono<AuthEnv> {
       path.includes("/reject") ||
       path.includes("/submit-review") ||
       path.includes("/cancel-review");
-    if (
-      path.includes("/collaborators") ||
-      path.includes("/visibility")
-    ) {
+    // The steward roster — list, assign, remove, sync — is restricted to the
+    // server (license) admin: not nest owners or collaborators. All methods
+    // on /nests/:id/stewards are locked. The node-level resolve route
+    // (/nodes/:id/stewards) stays readable so the editor UI can resolve a
+    // caller's per-node role.
+    const isStewardRoster =
+      path.includes("/stewards") && !path.includes("/nodes/");
+    if (isStewardRoster && !canManageStewards(resolveCallerEmail(userId))) {
+      return c.json(
+        {
+          error:
+            "You don't have permission to manage stewards. Only the super admin can do this.",
+        },
+        403,
+      );
+    }
+    if (path.includes("/collaborators") || path.includes("/visibility")) {
       required = "admin";
     } else if (c.req.method !== "GET" && !isStewardActionPath) {
       required = "write";
