@@ -8,7 +8,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { getAccessConfig } from "./access-service.js";
-import { ConflictError } from "../shared/errors.js";
+import { ConflictError, ValidationError } from "../shared/errors.js";
 import { buildTitleMap } from "./title-resolver.js";
 import { resolveNestPermission } from "../shared/access.js";
 import { isLicenseAdminEmail } from "../auth/license.js";
@@ -62,6 +62,30 @@ export function removeSteward(id: string): void {
   // only drops the steward row. Any nest_collaborators access the user has
   // is managed separately via the Share UI and is left untouched.
   db.prepare("DELETE FROM stewards WHERE id = ?").run(id);
+}
+
+const VALID_STEWARD_ROLES: StewardRole[] = ["editor", "reviewer", "viewer"];
+
+/**
+ * Change an existing steward's role in place (e.g. reviewer → editor), so an
+ * admin doesn't have to remove-and-re-add to adjust it. Scope/target are kept;
+ * only the role column moves.
+ */
+export function updateStewardRole(id: string, role: StewardRole): Steward {
+  if (!VALID_STEWARD_ROLES.includes(role)) {
+    throw new ValidationError(
+      `Invalid role "${role}" — must be editor, reviewer, or viewer.`,
+    );
+  }
+  const db = getDb();
+  const res = db
+    .prepare("UPDATE stewards SET role = ? WHERE id = ? AND is_active = 1")
+    .run(role, id);
+  if (res.changes === 0) {
+    throw new ValidationError("Steward not found");
+  }
+  const row = db.prepare("SELECT * FROM stewards WHERE id = ?").get(id) as any;
+  return rowToSteward(row);
 }
 
 export function getSteward(id: string): Steward | null {
@@ -189,9 +213,28 @@ export async function createStewardRecord(params: {
   const db = getDb();
   const results: Steward[] = [];
 
+  // The nest owner is an implicit admin with full edit/approve rights, so they
+  // never need an explicit steward grant — and giving the owner a reviewer row
+  // makes their effective role ambiguous (owner Edit vs reviewer approve/reject
+  // on the same doc). Likewise, whoever manages the roster can't grant a steward
+  // role to themselves. Block both so the roster only holds delegated users.
+  const actor = (params.assignedBy || "").trim().toLowerCase();
+  const ownerEmail = (getNestOwnerEmail(params.nestId) || "").toLowerCase();
+
   for (const user of params.users) {
     const email = user.email.trim().toLowerCase();
     if (!email) continue;
+
+    if (email === actor) {
+      throw new ValidationError(
+        "You already manage this nest, so you can't add yourself as a steward.",
+      );
+    }
+    if (ownerEmail && email === ownerEmail) {
+      throw new ValidationError(
+        "The nest owner already has full access and doesn't need a steward role.",
+      );
+    }
 
     // Check for existing active row (idempotent).
     const existing = db

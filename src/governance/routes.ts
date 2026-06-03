@@ -105,6 +105,15 @@ governanceRoutes.post("/stewards", async (c) => {
   return c.json({ steward: created[0] }, 201);
 });
 
+// PATCH /nests/:nestId/stewards/:stewardId — change a steward's role in place
+governanceRoutes.patch("/stewards/:stewardId", async (c) => {
+  const stewardId = c.req.param("stewardId")!;
+  const body = await c.req.json<{ role?: string }>();
+  if (!body.role) throw new ValidationError("role is required");
+  const steward = stewardship.updateStewardRole(stewardId, body.role as any);
+  return c.json({ steward });
+});
+
 // DELETE /nests/:nestId/stewards/:stewardId — soft-remove one row
 governanceRoutes.delete("/stewards/:stewardId", async (c) => {
   const stewardId = c.req.param("stewardId")!;

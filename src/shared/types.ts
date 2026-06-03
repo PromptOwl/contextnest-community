@@ -13,6 +13,10 @@ export interface Nest {
   description: string | null;
   visibility: "private" | "public";
   created_at: string;
+  // 1 when the nest was imported from an existing folder (its files copied
+  // into <DATA_ROOT>/nests/<id>); drives the "Imported" badge and flat
+  // discovery. 0 for default nests.
+  is_imported: number;
 }
 
 export interface ApiKey {

@@ -7,7 +7,7 @@ import * as api from "../lib/api";
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
-  Pencil, Trash2, FileWarning, Users, Globe,
+  Pencil, Trash2, FileWarning, Globe, FolderInput, Users,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
@@ -29,9 +29,10 @@ import {
 } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import {
-  StewardList, StewardAssignmentModal, ReviewQueue, ReviewActions,
+  StewardList, StewardAssignmentModal, EditStewardRoleModal,
+  ReviewQueue, ReviewActions,
   SubmitForReviewModal, VersionHistory, LifecycleStatusBadge,
-  type Steward, type ReviewRequest, type Version,
+  type Steward, type StewardRole, type ReviewRequest, type Version,
   type DocumentLifecycleStatus,
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
@@ -80,6 +81,7 @@ export function NestView({
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [visibility, setVisibility] = useState<"private" | "public">("private");
+  const [isImported, setIsImported] = useState(false);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
   // Caller's merged effective roles (collaborator + steward), nest-wide.
@@ -88,6 +90,10 @@ export function NestView({
   const [stewardScope, setStewardScope] = useState<
     "all" | "document" | "tag" | "nest"
   >("all");
+  const [stewardRoleFilter, setStewardRoleFilter] = useState<
+    "all" | StewardRole
+  >("all");
+  const [editingSteward, setEditingSteward] = useState<Steward | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState(initialSearch ?? "");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -112,15 +118,31 @@ export function NestView({
     // dropped the settings update, so toggling stewardship appeared to revert.
     const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta] =
       await Promise.all([
-        api.listNodes(nestId).catch(() => ({ nodes: [] })),
-        api.listStewards(nestId).catch(() => ({ stewards: [] })),
+        api.listNodes(nestId).catch((e) => {
+          console.error("[NestView] listNodes failed", nestId, e);
+          return { nodes: [] };
+        }),
+        api.listStewards(nestId).catch((e) => {
+          console.error("[NestView] listStewards failed", nestId, e);
+          return { stewards: [] };
+        }),
         api.getReviewQueue(nestId).catch((e) => {
+          console.error("[NestView] getReviewQueue failed", nestId, e);
           toast.error(e?.message || "Failed to load review queue");
           return { requests: [], total: 0 };
         }),
-        api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false, allow_self_approve: false })),
-        api.listExternalEdits(nestId).catch(() => ({ entries: [], total: 0 })),
-        api.getNest(nestId).catch(() => null),
+        api.getNestSettings(nestId).catch((e) => {
+          console.error("[NestView] getNestSettings failed", nestId, e);
+          return { stewardship_enabled: false, allow_self_approve: false };
+        }),
+        api.listExternalEdits(nestId).catch((e) => {
+          console.error("[NestView] listExternalEdits failed", nestId, e);
+          return { entries: [], total: 0 };
+        }),
+        api.getNest(nestId).catch((e) => {
+          console.error("[NestView] getNest failed", nestId, e);
+          return null;
+        }),
       ]);
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
@@ -130,6 +152,9 @@ export function NestView({
     setExternalEdits(externalData.entries);
     if (nestMeta?.nest?.visibility) {
       setVisibility(nestMeta.nest.visibility);
+    }
+    if (nestMeta?.nest) {
+      setIsImported(!!(nestMeta.nest as any).is_imported);
     }
     if (nestMeta?.permission) {
       setPermission(nestMeta.permission);
@@ -142,7 +167,10 @@ export function NestView({
   const refreshExternalEdits = useCallback(async () => {
     setExternalEditsLoading(true);
     try {
-      await api.scanExternalEdits(nestId).catch(() => null);
+      await api.scanExternalEdits(nestId).catch((e) => {
+        console.error("[NestView] scanExternalEdits failed", nestId, e);
+        return null;
+      });
       const { entries } = await api.listExternalEdits(nestId);
       setExternalEdits(entries);
     } finally {
@@ -297,7 +325,9 @@ export function NestView({
     try {
       const data = await api.getNodeVersions(nestId, node.id);
       setVersionData(data);
-    } catch { }
+    } catch (e) {
+      console.error("[NestView] getNodeVersions failed", nestId, node?.id, e);
+    }
   };
 
   // Approve/reject/submit handlers used to await silently — a 403
@@ -312,6 +342,7 @@ export function NestView({
       setReviewNode(null);
       fetchData();
     } catch (err: any) {
+      console.error("[NestView] approveNode failed", nestId, reviewNode?.id, err);
       toast.error(err?.message || "Approve failed");
     }
   };
@@ -324,6 +355,7 @@ export function NestView({
       setReviewNode(null);
       fetchData();
     } catch (err: any) {
+      console.error("[NestView] rejectNode failed", nestId, reviewNode?.id, err);
       toast.error(err?.message || "Reject failed");
     }
   };
@@ -336,6 +368,7 @@ export function NestView({
       setSubmitNode(null);
       fetchData();
     } catch (err: any) {
+      console.error("[NestView] submitForReview failed", nestId, submitNode?.id, err);
       toast.error(err?.message || "Submit failed");
     }
   };
@@ -349,6 +382,7 @@ export function NestView({
       await api.removeSteward(nestId, stewardId);
       fetchData();
     } catch (err: any) {
+      console.error("[NestView] removeSteward failed", nestId, stewardId, err);
       window.alert(err?.message || "Failed to remove steward");
     }
   };
@@ -367,6 +401,13 @@ export function NestView({
     fetchData();
   };
 
+  const handleSaveStewardRole = async (role: StewardRole) => {
+    if (!editingSteward) return;
+    await api.updateStewardRole(nestId, editingSteward.id, role);
+    toast.success("Steward role updated");
+    fetchData();
+  };
+
   const handleDeleteNode = async (node: any) => {
     // Plain confirm — destructive, irreversible. Promoting to a fancy
     // AlertDialog when the rest of the destructive surfaces (nest
@@ -379,6 +420,7 @@ export function NestView({
       await api.deleteNode(nestId, node.id);
       fetchData();
     } catch (err: any) {
+      console.error("[NestView] deleteNode failed", nestId, node?.id, err);
       window.alert(err?.message || "Failed to delete document");
     }
   };
@@ -400,6 +442,16 @@ export function NestView({
             >
               <Globe className="h-3 w-3" />
               Public
+            </Badge>
+          )}
+          {isImported && (
+            <Badge
+              variant="outline"
+              className="gap-1 border-blue-200 bg-blue-50 text-blue-700"
+              title="Imported from a folder — its files were copied into the workspace"
+            >
+              <FolderInput className="h-3 w-3" />
+              Imported
             </Badge>
           )}
         </div>
@@ -582,13 +634,13 @@ export function NestView({
               <div className="flex items-center justify-between gap-2">
                 <CardTitle className="text-lg">Documents</CardTitle>
                 <div className="flex items-center gap-2">
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <div className="relative w-48 sm:w-64">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
                     <Input
                       placeholder="Search documents or tags..."
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
-                      className="pl-9 w-48 h-8"
+                      className="pl-9 w-full h-8"
                     />
                   </div>
                   {stewardshipEnabled && (
@@ -861,7 +913,7 @@ export function NestView({
                     </CardDescription>
                   </div>
                   {stewards.length > 0 && (
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       {(["all", "document", "tag", "nest"] as const).map(
                         (s) => (
                           <button
@@ -876,6 +928,23 @@ export function NestView({
                           </button>
                         ),
                       )}
+                      <span className="w-px h-4 bg-border" />
+                      <Select
+                        value={stewardRoleFilter}
+                        onValueChange={(v) =>
+                          setStewardRoleFilter(v as "all" | StewardRole)
+                        }
+                      >
+                        <SelectTrigger className="w-[120px] h-7 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All</SelectItem>
+                          <SelectItem value="editor">Editor</SelectItem>
+                          <SelectItem value="reviewer">Reviewer</SelectItem>
+                          <SelectItem value="viewer">Viewer</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
                   )}
                 </div>
@@ -902,16 +971,19 @@ export function NestView({
                   </div>
                 ) : (
                   <StewardList
-                    stewards={
-                      stewardScope === "all"
-                        ? stewards
-                        : stewards.filter((s) => s.scope === stewardScope)
-                    }
+                    stewards={stewards.filter(
+                      (s) =>
+                        (stewardScope === "all" || s.scope === stewardScope) &&
+                        (stewardRoleFilter === "all" ||
+                          s.role === stewardRoleFilter),
+                    )}
                     showScope
                     onAddSteward={
                       isAdmin ? () => setShowAssignSteward(true) : undefined
                     }
                     onRemove={isAdmin ? handleRemoveSteward : undefined}
+                    onEditRole={isAdmin ? setEditingSteward : undefined}
+                    currentUserEmail={currentEmail}
                   />
                 )}
               </CardContent>
@@ -935,6 +1007,7 @@ export function NestView({
                   nestId={nestId}
                   nestName={nestName}
                   onChanged={fetchData}
+                  currentUserEmail={currentEmail}
                 />
               </CardContent>
             </Card>
@@ -1012,6 +1085,7 @@ export function NestView({
         <DeleteNestDialog
           nestId={nestId}
           nestName={nestName}
+          isImported={isImported}
           open
           onOpenChange={setShowDelete}
           onDeleted={() => { setShowDelete(false); onBack(); }}
@@ -1028,6 +1102,14 @@ export function NestView({
             await api.syncStewards(nestId);
             await fetchData();
           }}
+        />
+      )}
+
+      {editingSteward && (
+        <EditStewardRoleModal
+          steward={editingSteward}
+          onClose={() => setEditingSteward(null)}
+          onSave={handleSaveStewardRole}
         />
       )}
 
@@ -1121,7 +1203,8 @@ function ReviewDocumentModal({
       setLinkError(
         `"${title}" doesn't exist in this nest. Reviewers can't create new documents — ask an editor to add it.`,
       );
-    } catch {
+    } catch (e) {
+      console.error("[NestView] wiki-link lookup failed", nestId, title, e);
       setLinkError("Couldn't look up that document — try again later.");
     }
   };

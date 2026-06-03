@@ -1,10 +1,10 @@
-import { join } from "path";
 import {
   NestStorage,
   GraphQueryEngine,
   VersionManager,
 } from "@promptowl/contextnest-engine";
-import { config } from "../config.js";
+import { resolveNestPath, isImportedNest } from "../nests/service.js";
+import { FlatNestStorage } from "./flat-storage.js";
 
 interface NestEngine {
   storage: NestStorage;
@@ -23,8 +23,12 @@ class NestEngineCache {
   get(nestId: string): NestEngine {
     let engine = this.cache.get(nestId);
     if (!engine) {
-      const nestPath = join(config.DATA_ROOT, "nests", nestId);
-      const storage = new NestStorage(nestPath);
+      const nestPath = resolveNestPath(nestId);
+      // Imported nests discover markdown anywhere in the copied folder;
+      // default nests keep the engine's structured (nodes/) layout.
+      const storage = isImportedNest(nestId)
+        ? new FlatNestStorage(nestPath)
+        : new NestStorage(nestPath);
       const query = new GraphQueryEngine(storage as any);
       const versions = new VersionManager(storage);
       engine = { storage, query, versions };

@@ -270,6 +270,21 @@ export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
 }
 
+/** One file from the browser folder pick, path relative to the chosen folder. */
+export interface ImportedFile {
+  path: string;
+  content: string;
+}
+
+/** Import a folder the user picked in their browser. The browser reads the
+ *  folder and uploads each file; the server writes them into the workspace. */
+export async function importNest(name: string, files: ImportedFile[]) {
+  return request<{ nest: any; documents: number }>("/nests/import", {
+    method: "POST",
+    body: JSON.stringify({ name, files }),
+  });
+}
+
 export async function setNestVisibility(
   nestId: string,
   visibility: "private" | "public",
@@ -382,6 +397,17 @@ export async function assignSteward(nestId: string, data: any) {
 export async function removeSteward(nestId: string, stewardId: string) {
   return request(`/nests/${nestId}/stewards/${stewardId}`, {
     method: "DELETE",
+  });
+}
+
+export async function updateStewardRole(
+  nestId: string,
+  stewardId: string,
+  role: string,
+) {
+  return request<{ steward: any }>(`/nests/${nestId}/stewards/${stewardId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
   });
 }
 

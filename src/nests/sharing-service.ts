@@ -54,6 +54,29 @@ export async function addCollaborator(params: {
     throw new ValidationError("user_id or email is required");
   }
 
+  // The nest owner already has full access — never add them as a collaborator
+  // (a redundant grant whose role would just shadow ownership). And whoever is
+  // granting access can't add themselves. Both keep the roster to delegated users.
+  const ownerRow = db
+    .prepare("SELECT user_id FROM nests WHERE id = ?")
+    .get(nestId) as { user_id: string } | undefined;
+  if (!ownerRow) {
+    throw new ValidationError("Nest not found");
+  }
+  if (ownerRow.user_id === userId) {
+    throw new ValidationError(
+      "The nest owner already has full access and can't be added as a collaborator.",
+    );
+  }
+  const selfByEmail =
+    !!params.email &&
+    !!params.grantedByEmail &&
+    params.email.trim().toLowerCase() === params.grantedByEmail.trim().toLowerCase();
+  const selfById = !!params.grantedByUserId && params.grantedByUserId === userId;
+  if (selfByEmail || selfById) {
+    throw new ValidationError("You can't add yourself as a collaborator.");
+  }
+
   // One row per (nest, user) — block duplicates. To change someone's level,
   // update their permission instead of adding a second row.
   const dupe = db
@@ -76,16 +99,7 @@ export async function addCollaborator(params: {
         )?.id
       : undefined;
   const granterId =
-    params.grantedByUserId ||
-    granterByEmail ||
-    (
-      db.prepare("SELECT user_id FROM nests WHERE id = ?").get(nestId) as
-        | { user_id: string }
-        | undefined
-    )?.user_id;
-  if (!granterId) {
-    throw new ValidationError("Nest not found");
-  }
+    params.grantedByUserId || granterByEmail || ownerRow.user_id;
 
   const collabId = uuid();
   db.prepare(

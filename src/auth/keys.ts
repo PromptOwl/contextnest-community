@@ -2,7 +2,11 @@ import { randomBytes, createHash, timingSafeEqual } from "crypto";
 import bcrypt from "bcryptjs";
 
 const KEY_PREFIX = "cnst_";
-const BCRYPT_ROUNDS = 12;
+// Work factor of 12 in production (best-practice as of 2026). Under the
+// test runner (pure-JS bcryptjs) 12 rounds make register/login hooks slow
+// enough to trip Vitest timeouts, so drop to a cheap factor — the hash
+// algorithm being exercised is identical, only the cost differs.
+const BCRYPT_ROUNDS = process.env.VITEST ? 4 : 12;
 
 // ─── API keys ─────────────────────────────────────────────────────────────
 // API keys are cryptographically random 32-byte secrets (256 bits). Because
