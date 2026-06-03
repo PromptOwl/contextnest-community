@@ -20,6 +20,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Trash2, Loader2, AlertCircle, UserPlus } from "lucide-react";
+import { toast } from "sonner";
 import * as api from "../lib/api";
 
 export interface Collaborator {
@@ -47,13 +48,18 @@ interface CollaboratorManagerProps {
   nestName: string;
   /** Fired after any change so the parent can refresh nest/list state. */
   onChanged: () => void;
+  /** Logged-in user's email — their own row hides the Remove button so they
+   *  can't revoke their own access from the UI. */
+  currentUserEmail?: string;
 }
 
 export function CollaboratorManager({
   nestId,
   nestName,
   onChanged,
+  currentUserEmail,
 }: CollaboratorManagerProps) {
+  const self = (currentUserEmail || "").toLowerCase();
   const [collaborators, setCollaborators] = useState<Collaborator[]>([]);
   const [loading, setLoading] = useState(true);
   const [inviteEmail, setInviteEmail] = useState("");
@@ -102,6 +108,13 @@ export function CollaboratorManager({
     collabId: string,
     permission: Collaborator["permission"],
   ) => {
+    // You can't change your own access level from here (the Select is also
+    // disabled; this guards a stray programmatic call).
+    const target = collaborators.find((c) => c.id === collabId);
+    if (target && (target.email || "").toLowerCase() === self) {
+      toast.error("You can't change your own access level.");
+      return;
+    }
     setError(null);
     // Optimistic — reflect immediately, reload on failure to resync.
     setCollaborators((prev) =>
@@ -217,11 +230,19 @@ export function CollaboratorManager({
                 ))}
                 <Select
                   value={c.permission}
+                  disabled={(c.email || "").toLowerCase() === self}
                   onValueChange={(v) =>
                     handleRoleChange(c.id, v as Collaborator["permission"])
                   }
                 >
-                  <SelectTrigger className="w-[120px] h-8">
+                  <SelectTrigger
+                    className="w-[120px] h-8"
+                    title={
+                      (c.email || "").toLowerCase() === self
+                        ? "You can't change your own access level"
+                        : undefined
+                    }
+                  >
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -232,15 +253,17 @@ export function CollaboratorManager({
                     ))}
                   </SelectContent>
                 </Select>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => handleRemove(c)}
-                  title="Remove access"
-                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
+                {(c.email || "").toLowerCase() !== self && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleRemove(c)}
+                    title="Remove access"
+                    className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                )}
               </div>
             ))}
           </div>

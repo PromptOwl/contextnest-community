@@ -400,6 +400,17 @@ export async function removeSteward(nestId: string, stewardId: string) {
   });
 }
 
+export async function updateStewardRole(
+  nestId: string,
+  stewardId: string,
+  role: string,
+) {
+  return request<{ steward: any }>(`/nests/${nestId}/stewards/${stewardId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  });
+}
+
 export async function getNodeStewards(nestId: string, nodeId: string) {
   return request<{ stewards: any[] }>(
     `/nests/${nestId}/nodes/${nodeId}/stewards`,

@@ -976,3 +976,100 @@ nest:
     expect(status).toBe(403);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Owner / self can't be granted a steward or collaborator role
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("governance: owner/self cannot be granted steward or collaborator", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string; userId: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    // owner is also the super admin so they can reach the roster endpoints.
+    app = await createTestApp("key", { superAdmins: ["owner@acme.com"] });
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    await registerUser(app, "mate@acme.com", "Mate");
+
+    const { data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Owned Vault" },
+      owner.apiKey,
+    );
+    nestId = data.nest.id;
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("rejects the owner adding themselves as a steward", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards`,
+      { scope: "nest", users: [{ email: "owner@acme.com", role: "reviewer" }] },
+      owner.apiKey,
+    );
+    expect(status).toBe(400);
+  });
+
+  it("still allows granting a steward role to a delegated user", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards`,
+      { scope: "nest", users: [{ email: "mate@acme.com", role: "reviewer" }] },
+      owner.apiKey,
+    );
+    expect(status).toBe(201);
+  });
+
+  it("rejects adding the owner as a collaborator", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "owner@acme.com", permission: "write" },
+      owner.apiKey,
+    );
+    expect(status).toBe(400);
+  });
+
+  it("still allows adding a delegated collaborator", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "mate@acme.com", permission: "write" },
+      owner.apiKey,
+    );
+    expect(status).toBe(201);
+  });
+
+  it("updates a steward's role in place (reviewer → editor)", async () => {
+    // mate was granted the nest reviewer role above; change it without re-add.
+    const { data: list } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/stewards`,
+      undefined,
+      owner.apiKey,
+    );
+    const mate = list.stewards.find((s: any) => s.userEmail === "mate@acme.com");
+    expect(mate?.role).toBe("reviewer");
+
+    const { status, data } = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/stewards/${mate.id}`,
+      { role: "editor" },
+      owner.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.steward.role).toBe("editor");
+  });
+});

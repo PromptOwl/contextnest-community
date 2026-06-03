@@ -29,9 +29,10 @@ import {
 } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import {
-  StewardList, StewardAssignmentModal, ReviewQueue, ReviewActions,
+  StewardList, StewardAssignmentModal, EditStewardRoleModal,
+  ReviewQueue, ReviewActions,
   SubmitForReviewModal, VersionHistory, LifecycleStatusBadge,
-  type Steward, type ReviewRequest, type Version,
+  type Steward, type StewardRole, type ReviewRequest, type Version,
   type DocumentLifecycleStatus,
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
@@ -89,6 +90,10 @@ export function NestView({
   const [stewardScope, setStewardScope] = useState<
     "all" | "document" | "tag" | "nest"
   >("all");
+  const [stewardRoleFilter, setStewardRoleFilter] = useState<
+    "all" | StewardRole
+  >("all");
+  const [editingSteward, setEditingSteward] = useState<Steward | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState(initialSearch ?? "");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -393,6 +398,13 @@ export function NestView({
       payload.tagName = target;
     }
     await api.assignSteward(nestId, payload);
+    fetchData();
+  };
+
+  const handleSaveStewardRole = async (role: StewardRole) => {
+    if (!editingSteward) return;
+    await api.updateStewardRole(nestId, editingSteward.id, role);
+    toast.success("Steward role updated");
     fetchData();
   };
 
@@ -901,7 +913,7 @@ export function NestView({
                     </CardDescription>
                   </div>
                   {stewards.length > 0 && (
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       {(["all", "document", "tag", "nest"] as const).map(
                         (s) => (
                           <button
@@ -916,6 +928,23 @@ export function NestView({
                           </button>
                         ),
                       )}
+                      <span className="w-px h-4 bg-border" />
+                      <Select
+                        value={stewardRoleFilter}
+                        onValueChange={(v) =>
+                          setStewardRoleFilter(v as "all" | StewardRole)
+                        }
+                      >
+                        <SelectTrigger className="w-[120px] h-7 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All</SelectItem>
+                          <SelectItem value="editor">Editor</SelectItem>
+                          <SelectItem value="reviewer">Reviewer</SelectItem>
+                          <SelectItem value="viewer">Viewer</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
                   )}
                 </div>
@@ -942,16 +971,19 @@ export function NestView({
                   </div>
                 ) : (
                   <StewardList
-                    stewards={
-                      stewardScope === "all"
-                        ? stewards
-                        : stewards.filter((s) => s.scope === stewardScope)
-                    }
+                    stewards={stewards.filter(
+                      (s) =>
+                        (stewardScope === "all" || s.scope === stewardScope) &&
+                        (stewardRoleFilter === "all" ||
+                          s.role === stewardRoleFilter),
+                    )}
                     showScope
                     onAddSteward={
                       isAdmin ? () => setShowAssignSteward(true) : undefined
                     }
                     onRemove={isAdmin ? handleRemoveSteward : undefined}
+                    onEditRole={isAdmin ? setEditingSteward : undefined}
+                    currentUserEmail={currentEmail}
                   />
                 )}
               </CardContent>
@@ -975,6 +1007,7 @@ export function NestView({
                   nestId={nestId}
                   nestName={nestName}
                   onChanged={fetchData}
+                  currentUserEmail={currentEmail}
                 />
               </CardContent>
             </Card>
@@ -1069,6 +1102,14 @@ export function NestView({
             await api.syncStewards(nestId);
             await fetchData();
           }}
+        />
+      )}
+
+      {editingSteward && (
+        <EditStewardRoleModal
+          steward={editingSteward}
+          onClose={() => setEditingSteward(null)}
+          onSave={handleSaveStewardRole}
         />
       )}
 

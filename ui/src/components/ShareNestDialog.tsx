@@ -31,6 +31,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Globe, Lock, Users, Loader2, AlertCircle } from "lucide-react";
 import * as api from "../lib/api";
 import { CollaboratorManager } from "./CollaboratorManager";
+import { useAuth } from "../auth/AuthContext";
 
 interface ShareNestDialogProps {
   nestId: string;
@@ -46,6 +47,8 @@ export function ShareNestDialog({
   onClose,
   onChanged,
 }: ShareNestDialogProps) {
+  const { adminStatus } = useAuth();
+  const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   const [isPublic, setIsPublic] = useState(false);
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -146,6 +149,7 @@ export function ShareNestDialog({
             nestId={nestId}
             nestName={nestName}
             onChanged={onChanged}
+            currentUserEmail={currentEmail}
           />
         </div>
 
