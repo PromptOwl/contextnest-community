@@ -1,5 +1,49 @@
 # @promptowl/contextnest-community
 
+## 1.1.0
+
+### Minor Changes
+
+- v1.1.0 — sharing, vault import, and governance release. Adds the ability to bring existing markdown into a nest, share nests with collaborators or the public, and brand the UI, alongside a governance and editor pass.
+
+  ### Vault import
+
+  - **Import an existing folder / vault** (`src/fs/vault-import.ts`, `ui/src/components/ImportFolderModal.tsx`): create a new nest from a folder of markdown files in one step — from the dashboard ("Import folder") or via the API. Frontmatter, `[[wiki links]]`, and folder structure are preserved. Covered by `test/import-nest.test.ts`.
+
+  ### Sharing & visibility
+
+  - **Per-nest sharing + collaborators** (`src/nests/sharing-service.ts`, `sharing-routes.ts`, `ui/src/components/ShareNestDialog.tsx`, `CollaboratorManager.tsx`): set a nest's visibility and add collaborators with read or write access. A Share affordance is now inline in the document view.
+  - **Public read-only nests** (`visibility=public`): flip a nest to public to serve it to unauthenticated readers. The bypass applies to GETs only — write actions still require a valid key.
+
+  ### Governance & stewardship
+
+  - **Owner self-approve** — a nest owner can approve their own changes, replacing the previous per-nest toggle.
+  - **Auto-approve toggle** — new per-nest option to auto-approve incoming changes.
+  - **Role-based action gating** — UI buttons and actions now reflect the viewer's role; non-permitted actions are hidden rather than failing on submit.
+  - **Steward scope editing** — stewards can edit scope during a role change; fixes the case where a steward role update did not allow scope modification.
+  - **Stewardship service overhaul** (`src/governance/stewardship-service.ts`, `roles.ts`, `title-resolver.ts`): consolidated role handling, manage-own-record restriction, and a shared title resolver.
+  - **MCP tools control logic** (`src/mcp/tools.ts`): reworked collaborator access actions and tool exposure to match the new permission model.
+
+  ### Editor & UI
+
+  - **Wiki linking** — `[[wikilink]]` autocomplete; clicking a broken link creates a new doc with the title pre-filled; tag chips filter the nest list.
+  - **Document view** — Notion-style H1 title, click-to-edit, breadcrumb back navigation, and an unsaved-changes warning.
+  - **Custom logo / branding** (`LOGO_URL`) — show your own logo in the UI header and login screen; invalid schemes fall back to the bundled icon.
+  - **Error boundary** (`ui/src/components/ErrorBoundary.tsx`) — a render error in one view no longer blanks the whole app.
+
+  ### Auth & fixes
+
+  - Auth / license refactor (`src/auth/license.ts`, `routes.ts`, `keys.ts`) and login-flow fixes for external editors and public readers.
+  - Review queue card now binds to the reviewable count instead of the raw queue.
+  - Rate-limit, access-guard, and key-mode handling hardened; covered by expanded `test/governance.test.ts`, `security.test.ts`, and new `key-mode.test.ts`.
+  - Bumped `uuid` to 14; added `@tailwindcss/typography`.
+
+  ### Docs
+
+  - README: new "What's new in 1.1.0", import / sharing / public-read / branding in the feature table.
+  - CONFIGURATION.md: documented `LOGO_URL`.
+  - `.env.example`: corrected `AUTH_MODE` default to `key`.
+
 ## 1.0.1
 
 ### Patch Changes
