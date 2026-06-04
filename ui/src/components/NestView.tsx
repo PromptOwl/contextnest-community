@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import {
-  StewardList, StewardAssignmentModal, EditStewardRoleModal,
+  StewardList, StewardModal,
   ReviewQueue, ReviewActions,
   SubmitForReviewModal, VersionHistory, LifecycleStatusBadge,
   type Steward, type StewardRole, type ReviewRequest, type Version,
@@ -401,10 +401,18 @@ export function NestView({
     fetchData();
   };
 
-  const handleSaveStewardRole = async (role: StewardRole) => {
+  const handleSaveStewardRole = async (update: {
+    scope: string;
+    target?: string;
+    role: StewardRole;
+  }) => {
     if (!editingSteward) return;
-    await api.updateStewardRole(nestId, editingSteward.id, role);
-    toast.success("Steward role updated");
+    // Map the modal's generic `target` to the backend's scope-specific field.
+    const payload: any = { role: update.role, scope: update.scope };
+    if (update.scope === "document") payload.nodePattern = update.target;
+    else if (update.scope === "tag") payload.tagName = update.target;
+    await api.updateSteward(nestId, editingSteward.id, payload);
+    toast.success("Steward updated");
     fetchData();
   };
 
@@ -1093,7 +1101,7 @@ export function NestView({
       )}
 
       {showAssignSteward && (
-        <StewardAssignmentModal
+        <StewardModal
           isOpen={showAssignSteward}
           onClose={() => setShowAssignSteward(false)}
           nestId={nestId}
@@ -1106,10 +1114,12 @@ export function NestView({
       )}
 
       {editingSteward && (
-        <EditStewardRoleModal
+        <StewardModal
+          isOpen={!!editingSteward}
           steward={editingSteward}
+          nestId={nestId}
           onClose={() => setEditingSteward(null)}
-          onSave={handleSaveStewardRole}
+          onSubmit={handleSaveStewardRole}
         />
       )}
 

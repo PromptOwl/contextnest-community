@@ -66,26 +66,97 @@ export function removeSteward(id: string): void {
 
 const VALID_STEWARD_ROLES: StewardRole[] = ["editor", "reviewer", "viewer"];
 
+export interface StewardUpdate {
+  role?: StewardRole;
+  /** Provide to re-scope the steward. Omit to leave scope/target untouched. */
+  scope?: StewardshipScope;
+  documentId?: string;
+  tagName?: string;
+}
+
 /**
- * Change an existing steward's role in place (e.g. reviewer → editor), so an
- * admin doesn't have to remove-and-re-add to adjust it. Scope/target are kept;
- * only the role column moves.
+ * Update an existing steward's role and/or scope in place, so an admin doesn't
+ * have to remove-and-re-add to adjust it. Role moves alone when only `role` is
+ * given; passing `scope` re-targets the row (and clears the unused target
+ * columns). Re-scoping is guarded against duplicates: another active row for the
+ * same (nest, scope, target, user) is rejected with a ConflictError.
  */
-export function updateStewardRole(id: string, role: StewardRole): Steward {
+export function updateSteward(id: string, update: StewardUpdate): Steward {
+  const db = getDb();
+  const current = db
+    .prepare("SELECT * FROM stewards WHERE id = ? AND is_active = 1")
+    .get(id) as any;
+  if (!current) {
+    throw new ValidationError("Steward not found");
+  }
+
+  const role: StewardRole = update.role ?? current.role;
   if (!VALID_STEWARD_ROLES.includes(role)) {
     throw new ValidationError(
       `Invalid role "${role}" — must be editor, reviewer, or viewer.`,
     );
   }
-  const db = getDb();
-  const res = db
-    .prepare("UPDATE stewards SET role = ? WHERE id = ? AND is_active = 1")
-    .run(role, id);
-  if (res.changes === 0) {
-    throw new ValidationError("Steward not found");
+
+  // Default to the current scope/target; only recompute when re-scoping.
+  let scope: StewardshipScope = current.scope;
+  let nodePattern: string | null = current.node_pattern ?? null;
+  let tagName: string | null = current.tag_name ?? null;
+
+  if (update.scope) {
+    scope = update.scope;
+    nodePattern = null;
+    tagName = null;
+    switch (scope) {
+      case "document":
+        if (!update.documentId)
+          throw new ValidationError("documentId required for document scope");
+        nodePattern = update.documentId;
+        break;
+      case "tag":
+        if (!update.tagName)
+          throw new ValidationError("tagName required for tag scope");
+        tagName = update.tagName.trim().replace(/^#+/, "").toLowerCase();
+        break;
+      case "nest":
+        break;
+    }
+
+    // Block collision: same user can't hold two rows for the same scope+target.
+    const dup = db
+      .prepare(
+        `SELECT role FROM stewards
+         WHERE nest_id = ? AND is_active = 1 AND id != ? AND scope = ?
+           AND user_email = ?
+           AND COALESCE(node_pattern, '') = COALESCE(?, '')
+           AND COALESCE(tag_name, '') = COALESCE(?, '')`,
+      )
+      .get(current.nest_id, id, scope, current.user_email, nodePattern, tagName) as
+      | { role: string }
+      | undefined;
+    if (dup) {
+      const scopeLabel =
+        scope === "document"
+          ? `document "${nodePattern}"`
+          : scope === "tag"
+            ? `tag "#${tagName}"`
+            : "this nest";
+      throw new ConflictError(
+        `"${current.user_email}" is already a steward of ${scopeLabel} with the "${dup.role}" role.`,
+      );
+    }
   }
+
+  db.prepare(
+    "UPDATE stewards SET role = ?, scope = ?, node_pattern = ?, tag_name = ? WHERE id = ?",
+  ).run(role, scope, nodePattern, tagName, id);
+
   const row = db.prepare("SELECT * FROM stewards WHERE id = ?").get(id) as any;
   return rowToSteward(row);
+}
+
+/** Back-compat thin wrapper — role-only update. */
+export function updateStewardRole(id: string, role: StewardRole): Steward {
+  return updateSteward(id, { role });
 }
 
 export function getSteward(id: string): Steward | null {
