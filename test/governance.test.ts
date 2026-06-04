@@ -1072,4 +1072,45 @@ describe("governance: owner/self cannot be granted steward or collaborator", () 
     expect(status).toBe(200);
     expect(data.steward.role).toBe("editor");
   });
+
+  it("re-scopes a steward in place (nest → tag)", async () => {
+    const { data: list } = await jsonRequest(
+      app, "GET", `/nests/${nestId}/stewards`, undefined, owner.apiKey,
+    );
+    const mate = list.stewards.find((s: any) => s.userEmail === "mate@acme.com");
+    const { status, data } = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/stewards/${mate.id}`,
+      { scope: "tag", tagName: "architecture" },
+      owner.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.steward.scope).toBe("tag");
+    expect(data.steward.tagName).toBe("architecture");
+  });
+
+  it("rejects re-scoping onto a scope+target the user already holds", async () => {
+    // mate now holds tag:architecture. Add a fresh nest row, then try to move
+    // it onto the same tag — the duplicate guard must reject it.
+    await jsonRequest(
+      app, "POST", `/nests/${nestId}/stewards`,
+      { scope: "nest", users: [{ email: "mate@acme.com", role: "reviewer" }] },
+      owner.apiKey,
+    );
+    const { data: list } = await jsonRequest(
+      app, "GET", `/nests/${nestId}/stewards`, undefined, owner.apiKey,
+    );
+    const nestRow = list.stewards.find(
+      (s: any) => s.userEmail === "mate@acme.com" && s.scope === "nest",
+    );
+    const { status } = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/stewards/${nestRow.id}`,
+      { scope: "tag", tagName: "architecture" },
+      owner.apiKey,
+    );
+    expect(status).toBe(409);
+  });
 });

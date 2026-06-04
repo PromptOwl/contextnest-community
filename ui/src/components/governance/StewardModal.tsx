@@ -1,7 +1,9 @@
 /**
- * StewardAssignmentModal — ported from packages/ui-components/src/stewardship/StewardAssignmentModal.tsx
- * Adapted for community server: simpler scope targets (tag/folder patterns),
- * email-based user assignment, callback for submit.
+ * StewardModal — single modal for both assigning a new steward and editing an
+ * existing one. Pass a `steward` to enter edit mode (email is fixed, fields
+ * prefill from the row); omit it to assign a new steward (email is editable,
+ * stewards.yaml sync is offered). Both flows share the scope/target/role
+ * picker. The backend rejects a scope+target the same user already holds.
  */
 import React, { useEffect, useState } from "react";
 import * as api from "../../lib/api";
@@ -33,21 +35,25 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import type { StewardshipScope } from "./StewardList";
+import type { Steward, StewardshipScope } from "./StewardList";
 
 export type StewardRole = "editor" | "reviewer" | "viewer";
 
-interface StewardAssignmentModalProps {
+export interface StewardSubmit {
+  email: string;
+  scope: StewardshipScope;
+  target?: string;
+  role: StewardRole;
+}
+
+interface StewardModalProps {
   isOpen: boolean;
   onClose: () => void;
   nestId: string;
-  onSubmit: (data: {
-    email: string;
-    scope: StewardshipScope;
-    target?: string;
-    role: StewardRole;
-  }) => Promise<void>;
-  /** stewards.yaml → DB sync. Omit to hide the action. */
+  /** Present → edit mode (email fixed, fields prefilled). Omit → assign mode. */
+  steward?: Steward;
+  onSubmit: (data: StewardSubmit) => Promise<void>;
+  /** stewards.yaml → DB sync. Assign-mode only; omit to hide. */
   onSync?: () => Promise<void> | void;
 }
 
@@ -60,13 +66,22 @@ const scopeConfig: Record<
   document: { label: "Document", icon: FileText, placeholder: "e.g., nodes/getting-started" },
 };
 
-export function StewardAssignmentModal({
+// Current target value for a steward, in the form the backend expects.
+function currentTarget(s: Steward): string {
+  if (s.scope === "tag") return s.tagName || "";
+  if (s.scope === "document") return s.nodePattern || "";
+  return "";
+}
+
+export function StewardModal({
   isOpen,
   onClose,
   nestId,
+  steward,
   onSubmit,
   onSync,
-}: StewardAssignmentModalProps) {
+}: StewardModalProps) {
+  const isEdit = !!steward;
   const [email, setEmail] = useState("");
   const [scope, setScope] = useState<StewardshipScope>("tag");
   const [target, setTarget] = useState("");
@@ -78,24 +93,20 @@ export function StewardAssignmentModal({
   const [tags, setTags] = useState<string[]>([]);
   const [optionsLoading, setOptionsLoading] = useState(false);
 
-  const handleSync = async () => {
-    if (!onSync) return;
-    setSyncing(true);
+  // Seed fields from the steward (edit) or reset to defaults (assign).
+  useEffect(() => {
+    if (!isOpen) return;
+    setEmail(steward?.userEmail ?? "");
+    setScope(steward?.scope ?? "tag");
+    setTarget(steward ? currentTarget(steward) : "");
+    setRole(steward?.role ?? "reviewer");
     setError(null);
-    try {
-      await onSync();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to sync stewards.yaml");
-    } finally {
-      setSyncing(false);
-    }
-  };
+  }, [isOpen, steward]);
 
-  // Fetch document list (scope=document) or tag list (scope=tag) on demand.
+  // Fetch document/tag options on demand when targeting one.
   useEffect(() => {
     if (!isOpen) return;
     if (scope !== "document" && scope !== "tag") return;
-    if (optionsLoading) return;
     let cancelled = false;
     setOptionsLoading(true);
     const fetcher =
@@ -110,9 +121,9 @@ export function StewardAssignmentModal({
             setTags(list);
           });
     fetcher
-      .catch((err) => {
-        console.error(`[StewardAssignmentModal] ${scope} fetch failed`, err);
-      })
+      .catch((err) =>
+        console.error(`[StewardModal] ${scope} fetch failed`, err),
+      )
       .finally(() => {
         if (!cancelled) setOptionsLoading(false);
       });
@@ -124,8 +135,32 @@ export function StewardAssignmentModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, scope, nestId]);
 
-  const handleAssign = async () => {
-    if (!email.trim()) {
+  // Edit mode: only submit when something actually changed.
+  const dirty =
+    !isEdit ||
+    role !== steward!.role ||
+    scope !== steward!.scope ||
+    target !== currentTarget(steward!);
+
+  const handleSync = async () => {
+    if (!onSync) return;
+    setSyncing(true);
+    setError(null);
+    try {
+      await onSync();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to sync stewards.yaml");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (isEdit && !dirty) {
+      onClose();
+      return;
+    }
+    if (!isEdit && !email.trim()) {
       setError("Please enter an email");
       return;
     }
@@ -133,48 +168,45 @@ export function StewardAssignmentModal({
       setError(`Please specify the ${scope} target`);
       return;
     }
-
     setLoading(true);
     setError(null);
-
     try {
       await onSubmit({
-        email: email.trim(),
+        email: (steward?.userEmail ?? email).trim(),
         scope,
         target: scope === "nest" ? undefined : target.trim(),
         role,
       });
-      handleClose();
+      onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to assign steward");
-    } finally {
+      setError(
+        err instanceof Error
+          ? err.message
+          : isEdit
+            ? "Failed to update steward"
+            : "Failed to assign steward",
+      );
       setLoading(false);
     }
   };
 
-  const handleClose = () => {
-    if (!loading) {
-      setEmail("");
-      setScope("tag");
-      setTarget("");
-      setRole("reviewer");
-      setError(null);
-      setNodes([]);
-      setTags([]);
-      onClose();
-    }
-  };
-
+  const busy = loading || syncing;
   const ScopeIcon = scopeConfig[scope].icon;
 
   return (
-    <Dialog open={isOpen} onOpenChange={handleClose}>
+    <Dialog open={isOpen} onOpenChange={(o) => !o && !busy && onClose()}>
       <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
-          <DialogTitle>Assign Context Steward</DialogTitle>
+          <DialogTitle>{isEdit ? "Edit steward" : "Assign Context Steward"}</DialogTitle>
           <DialogDescription>
-            Stewards can approve or reject documents within their assigned scope,
-            ensuring quality context is available for AI.
+            {isEdit ? (
+              <>
+                Change the role and scope for{" "}
+                <strong className="text-foreground">{steward!.userEmail}</strong>.
+              </>
+            ) : (
+              "Stewards can approve or reject documents within their assigned scope, ensuring quality context is available for AI."
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -186,18 +218,20 @@ export function StewardAssignmentModal({
             </Alert>
           )}
 
-          {/* Email */}
-          <div className="space-y-2">
-            <Label htmlFor="email">Steward Email</Label>
-            <Input
-              id="email"
-              type="email"
-              placeholder="reviewer@acme.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              disabled={loading}
-            />
-          </div>
+          {/* Email — editable when assigning, fixed when editing. */}
+          {!isEdit && (
+            <div className="space-y-2">
+              <Label htmlFor="email">Steward Email</Label>
+              <Input
+                id="email"
+                type="email"
+                placeholder="reviewer@acme.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                disabled={loading}
+              />
+            </div>
+          )}
 
           {/* Scope */}
           <div className="space-y-2">
@@ -236,17 +270,11 @@ export function StewardAssignmentModal({
             <div className="space-y-2">
               <Label htmlFor="target">
                 <ScopeIcon className="h-4 w-4 inline mr-2" />
-                {scope === "tag"
-                  ? "Tag"
-                  : `${scopeConfig[scope].label}`}
+                {scope === "tag" ? "Tag" : scopeConfig[scope].label}
               </Label>
 
               {scope === "tag" ? (
-                <Select
-                  value={target}
-                  onValueChange={setTarget}
-                  disabled={loading || optionsLoading}
-                >
+                <Select value={target} onValueChange={setTarget} disabled={loading || optionsLoading}>
                   <SelectTrigger id="target">
                     <SelectValue
                       placeholder={
@@ -267,11 +295,7 @@ export function StewardAssignmentModal({
                   </SelectContent>
                 </Select>
               ) : (
-                <Select
-                  value={target}
-                  onValueChange={setTarget}
-                  disabled={loading || optionsLoading}
-                >
+                <Select value={target} onValueChange={setTarget} disabled={loading || optionsLoading}>
                   <SelectTrigger id="target">
                     <SelectValue
                       placeholder={
@@ -288,9 +312,7 @@ export function StewardAssignmentModal({
                       <SelectItem key={n.id} value={n.id}>
                         <div className="flex flex-col">
                           <span>{n.title}</span>
-                          <span className="text-xs text-muted-foreground">
-                            {n.id}
-                          </span>
+                          <span className="text-xs text-muted-foreground">{n.id}</span>
                         </div>
                       </SelectItem>
                     ))}
@@ -327,12 +349,12 @@ export function StewardAssignmentModal({
         </div>
 
         <DialogFooter className="sm:justify-between">
-          {onSync ? (
+          {onSync && !isEdit ? (
             <Button
               variant="ghost"
               size="sm"
               onClick={handleSync}
-              disabled={loading || syncing}
+              disabled={busy}
               title="Re-import steward rows from the nest's stewards.yaml"
             >
               {syncing ? (
@@ -346,16 +368,19 @@ export function StewardAssignmentModal({
             <span />
           )}
           <div className="flex gap-2">
-            <Button variant="outline" onClick={handleClose} disabled={loading || syncing}>
+            <Button variant="outline" onClick={onClose} disabled={busy}>
               Cancel
             </Button>
-            <Button onClick={handleAssign} disabled={loading || syncing || !email.trim()}>
+            <Button
+              onClick={handleSubmit}
+              disabled={busy || (!isEdit && !email.trim())}
+            >
               {loading ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
+              ) : !isEdit ? (
                 <UserPlus className="h-4 w-4 mr-2" />
-              )}
-              Assign Steward
+              ) : null}
+              {isEdit ? "Save" : "Assign Steward"}
             </Button>
           </div>
         </DialogFooter>

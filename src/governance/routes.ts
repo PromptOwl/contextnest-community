@@ -105,12 +105,24 @@ governanceRoutes.post("/stewards", async (c) => {
   return c.json({ steward: created[0] }, 201);
 });
 
-// PATCH /nests/:nestId/stewards/:stewardId — change a steward's role in place
+// PATCH /nests/:nestId/stewards/:stewardId — change a steward's role and/or scope
 governanceRoutes.patch("/stewards/:stewardId", async (c) => {
   const stewardId = c.req.param("stewardId")!;
-  const body = await c.req.json<{ role?: string }>();
-  if (!body.role) throw new ValidationError("role is required");
-  const steward = stewardship.updateStewardRole(stewardId, body.role as any);
+  const body = await c.req.json<{
+    role?: string;
+    scope?: string;
+    nodePattern?: string;
+    tagName?: string;
+  }>();
+  if (!body.role && !body.scope) {
+    throw new ValidationError("role or scope is required");
+  }
+  const steward = stewardship.updateSteward(stewardId, {
+    role: body.role as any,
+    scope: body.scope as any,
+    documentId: body.nodePattern,
+    tagName: body.tagName,
+  });
   return c.json({ steward });
 });
 

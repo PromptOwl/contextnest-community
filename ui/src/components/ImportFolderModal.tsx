@@ -198,8 +198,8 @@ export function ImportFolderModal({ isOpen, onClose, onImported }: ImportFolderM
             onChange={onInputChange}
           />
 
-          <div className="flex items-center gap-3">
-            <Button variant="outline" onClick={pickFolder} disabled={scanning || importing}>
+          <div className="space-y-2">
+            <Button className="shrink-0" variant="outline" onClick={pickFolder} disabled={scanning || importing}>
               {scanning ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               ) : (
@@ -208,11 +208,11 @@ export function ImportFolderModal({ isOpen, onClose, onImported }: ImportFolderM
               Choose folder
             </Button>
             {files && (
-              <span className="text-sm text-muted-foreground truncate">
+              <p className="break-words text-sm text-muted-foreground">
                 <span className="font-medium text-foreground">{folderName}</span>
                 {" — "}
                 {files.length} file{files.length === 1 ? "" : "s"}
-              </span>
+              </p>
             )}
           </div>
 
