@@ -11,7 +11,9 @@
 ContextNest Community Edition is a self-hosted server that lets you:
 
 - Store, version, and govern markdown-based context documents ("nests")
+- Import an existing folder or vault of markdown files in one step
 - Apply stewardship workflows — draft, pending review, approved
+- Share nests with collaborators or publish them read-only to the public
 - Serve approved context to AI agents via MCP, HTTP, or CLI
 - Sync with the PromptOwl hosted platform for multi-user collaboration
 
@@ -88,17 +90,33 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 |---|:---:|:---:|
 | Self-hosted context server | ✅ | ✅ |
 | Markdown + YAML frontmatter vaults | ✅ | ✅ |
+| Import existing folder / vault | ✅ | ✅ |
 | Markdown rendering + wiki cross-linking | ✅ | ✅ |
 | External-edit detection + version diff | ✅ | ✅ |
 | Stewardship workflow (draft/review/approve) | ✅ | ✅ |
+| Per-nest sharing + collaborators | ✅ | ✅ |
+| Public read-only nests | ✅ | ✅ |
+| Custom logo / branding | ✅ | ✅ |
 | MCP server for AI agents | ✅ | ✅ |
-| Multi-user governance UI | — | ✅ |
+| Centralized multi-tenant admin console | — | ✅ |
 | SSO / SAML / SCIM | — | ✅ |
 | Audit log streaming | — | ✅ |
 | Policy transforms (redaction, summarization) | — | ✅ |
 | Priority support and SLA | — | ✅ |
 
 For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <https://promptowl.ai/contextnest/>.
+
+## What's new in 1.1.0
+
+- **Vault import** — import an existing folder of markdown files into a new nest in one step, from the dashboard ("Import folder") or via the API. Frontmatter, wiki links, and folder structure are preserved.
+- **Nest sharing + collaborators** — set per-nest visibility and add collaborators with read or write access. A Share affordance is now inline in the document view.
+- **Public read-only nests** — flip a nest to `visibility=public` to serve it to unauthenticated readers (bypasses auth for GETs only); writes still require a key.
+- **Custom logo / branding** — set `LOGO_URL` to show your own logo in the UI header and login screen. See [CONFIGURATION.md](./CONFIGURATION.md).
+- **Governance** — nest owners can self-approve their own changes; new per-nest auto-approve toggle; role-based action gating (buttons reflect the viewer's role); stewards can edit scope during a role change.
+- **Editor** — `[[wikilink]]` autocomplete, broken-link click creates a new doc with the title pre-filled, tag chips filter the nest list, Notion-style H1 title, click-to-edit, and an unsaved-changes warning.
+- **Stability** — added an error boundary so a render error in one view no longer blanks the whole app; bumped `uuid` to 14.
+
+Full history in [CHANGELOG.md](./CHANGELOG.md).
 
 ## What's new in 1.0.1
 
