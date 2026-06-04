@@ -26,27 +26,49 @@ export interface RateLimitConfig {
   windowMs: number;
 }
 
+/** Drop expired hits in place (lazy GC). Returns the live bucket. */
+function liveBucket(key: string, cutoff: number): Bucket {
+  let bucket = buckets.get(key);
+  if (!bucket) {
+    bucket = { hits: [] };
+    buckets.set(key, bucket);
+  }
+  while (bucket.hits.length && bucket.hits[0] < cutoff) {
+    bucket.hits.shift();
+  }
+  return bucket;
+}
+
 /**
  * Returns true if the caller is under the limit (consumes one token).
  * Returns false if rate-limited (does NOT consume).
  */
 export function tryConsume(key: string, cfg: RateLimitConfig): boolean {
   const now = Date.now();
-  const cutoff = now - cfg.windowMs;
-  let bucket = buckets.get(key);
-  if (!bucket) {
-    bucket = { hits: [] };
-    buckets.set(key, bucket);
-  }
-  // Drop expired hits (lazy GC).
-  while (bucket.hits.length && bucket.hits[0] < cutoff) {
-    bucket.hits.shift();
-  }
+  const bucket = liveBucket(key, now - cfg.windowMs);
   if (bucket.hits.length >= cfg.max) {
     return false;
   }
   bucket.hits.push(now);
   return true;
+}
+
+/**
+ * Peek the limit WITHOUT consuming. True if already at/over max.
+ * Use when only failures should count (record them via recordFailure).
+ */
+export function isLimited(key: string, cfg: RateLimitConfig): boolean {
+  return liveBucket(key, Date.now() - cfg.windowMs).hits.length >= cfg.max;
+}
+
+/** Record one failed attempt against the key. */
+export function recordFailure(key: string, cfg: RateLimitConfig): void {
+  liveBucket(key, Date.now() - cfg.windowMs).hits.push(Date.now());
+}
+
+/** Clear a key's failure history (e.g. on successful auth). */
+export function clear(key: string): void {
+  buckets.delete(key);
 }
 
 /** Test-only helper — clear all state. */
