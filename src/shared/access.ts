@@ -50,6 +50,21 @@ export function resolveNestPermission(
 
   if (directGrant) return directGrant.permission;
 
+  // Stewards get nest-level read so they can reach the documents/context they
+  // govern, even without a collaborator grant. Matched by email because a
+  // steward row may predate the user registering an account. Edit/approve is
+  // still enforced per node by the governance handlers (resolveUserRoles).
+  const stewardGrant = db
+    .prepare(
+      `SELECT 1 FROM stewards s
+         JOIN users u ON u.id = ?
+        WHERE s.nest_id = ? AND s.is_active = 1
+          AND LOWER(s.user_email) = LOWER(u.email)
+        LIMIT 1`,
+    )
+    .get(userId, nestId);
+  if (stewardGrant) return "read";
+
   if (nest.visibility === "public") return "read";
 
   return "none";
@@ -57,4 +72,39 @@ export function resolveNestPermission(
 
 export function permissionLevel(p: NestPermission): number {
   return PERMISSION_LEVELS[p] ?? 0;
+}
+
+/**
+ * True when the caller's only access path is "nest is public" — i.e. not
+ * the owner, not a direct collaborator, but reaches the nest because
+ * visibility='public'. These callers see approved content only; drafts
+ * and pending versions stay private to collaborators/stewards.
+ */
+export function isPublicReader(nestId: string, userId: string): boolean {
+  const db = getDb();
+  const nest = db
+    .prepare("SELECT user_id, visibility FROM nests WHERE id = ?")
+    .get(nestId) as { user_id: string; visibility: string } | undefined;
+  if (!nest) return false;
+  if (nest.visibility !== "public") return false;
+  if (nest.user_id === userId) return false;
+  const directGrant = db
+    .prepare(
+      "SELECT 1 FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
+    )
+    .get(nestId, userId);
+  if (directGrant) return false;
+  // A steward is not a mere public reader — they govern (and may see drafts
+  // of) the documents in their scope. Matched by email like resolveNestPermission.
+  const stewardGrant = db
+    .prepare(
+      `SELECT 1 FROM stewards s
+         JOIN users u ON u.id = ?
+        WHERE s.nest_id = ? AND s.is_active = 1
+          AND LOWER(s.user_email) = LOWER(u.email)
+        LIMIT 1`,
+    )
+    .get(userId, nestId);
+  if (stewardGrant) return false;
+  return true;
 }

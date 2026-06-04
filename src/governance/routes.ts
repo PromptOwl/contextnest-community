@@ -29,12 +29,31 @@ governanceRoutes.get("/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
   const scope = c.req.query("scope") as any;
   const search = c.req.query("search");
-  const stewards = stewardship.listStewards({
+  const stewards = await stewardship.listStewards({
     nestId,
     scope: scope || undefined,
     search: search || undefined,
   });
-  return c.json({ stewards });
+  // Annotate each row with the user's collaborator access and merged
+  // effective roles so the UI can show the full picture (a steward may also
+  // be a write collaborator, etc.). Cached per email across rows.
+  const cache = new Map<
+    string,
+    { collaboratorRole: string | null; roles: string[] }
+  >();
+  const enriched = stewards.map((s) => {
+    const key = s.userEmail.toLowerCase();
+    let merged = cache.get(key);
+    if (!merged) {
+      merged = {
+        collaboratorRole: stewardship.getCollaboratorRole(nestId, s.userEmail),
+        roles: stewardship.resolveUserRoles(nestId, s.userEmail),
+      };
+      cache.set(key, merged);
+    }
+    return { ...s, ...merged };
+  });
+  return c.json({ stewards: enriched });
 });
 
 // POST /nests/:nestId/stewards
@@ -86,6 +105,27 @@ governanceRoutes.post("/stewards", async (c) => {
   return c.json({ steward: created[0] }, 201);
 });
 
+// PATCH /nests/:nestId/stewards/:stewardId — change a steward's role and/or scope
+governanceRoutes.patch("/stewards/:stewardId", async (c) => {
+  const stewardId = c.req.param("stewardId")!;
+  const body = await c.req.json<{
+    role?: string;
+    scope?: string;
+    nodePattern?: string;
+    tagName?: string;
+  }>();
+  if (!body.role && !body.scope) {
+    throw new ValidationError("role or scope is required");
+  }
+  const steward = stewardship.updateSteward(stewardId, {
+    role: body.role as any,
+    scope: body.scope as any,
+    documentId: body.nodePattern,
+    tagName: body.tagName,
+  });
+  return c.json({ steward });
+});
+
 // DELETE /nests/:nestId/stewards/:stewardId — soft-remove one row
 governanceRoutes.delete("/stewards/:stewardId", async (c) => {
   const stewardId = c.req.param("stewardId")!;
@@ -111,7 +151,7 @@ governanceRoutes.get("/review-queue", async (c) => {
   const limit = parseInt(c.req.query("limit") || "50", 10);
   const offset = parseInt(c.req.query("offset") || "0", 10);
 
-  const result = reviews.getReviewQueue({
+  const result = await reviews.getReviewQueue({
     nestId,
     status: status as any,
     limit,

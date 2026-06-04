@@ -3,14 +3,25 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { resolveNestPermission } from "../shared/access.js";
 import {
   createNest,
+  importNest,
   listNests,
   listSharedNests,
+  listPublicNests,
   getNest,
   deleteNest,
   isStewardshipEnabled,
   setStewardshipEnabled,
+  disableStewardshipAndWipeGovernance,
+  nestAllowsSelfApprove,
+  setAllowSelfApprove,
 } from "./service.js";
+import { registerImportedDocuments } from "../nodes/service.js";
+import { resolveCallerEmail } from "../governance/access-guard.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
+import {
+  resolveUserRoles,
+  getStewardsForUser,
+} from "../governance/stewardship-service.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
@@ -46,7 +57,12 @@ export const nestRoutes = new Hono<AuthEnv>();
 nestRoutes.get("/", async (c) => {
   const userId = c.get("userId");
   const owned = listNests(userId);
+  // Collaborator/steward grants are independent of stewardship — a shared
+  // nest stays visible whether or not governed mode is on.
   const shared = listSharedNests(userId);
+  // Public-but-not-mine; surfaces them in dashboard list.
+  const publicExtras = listPublicNests(userId);
+
   // Annotate each row with the caller's effective permission so the UI
   // can render an accurate share line and gate destructive actions
   // (delete) on owner-only without an extra round-trip per card.
@@ -58,21 +74,35 @@ nestRoutes.get("/", async (c) => {
   const ownerEmailStmt = db.prepare(
     "SELECT email FROM users WHERE id = ?",
   );
+  // Resolve the caller's email once so we can merge steward roles into the
+  // per-card label. A steward (editor/reviewer) without a collaborator grant
+  // resolves to permission='read' (see resolveNestPermission), so the card
+  // would mislabel them "Viewer" unless we surface their steward roles too.
+  const callerEmail = resolveCallerEmail(userId);
   const annotate = (n: { id: string; user_id: string }) => {
     const permission = effectivePermission(n.id, userId);
     const is_owner = permission === "owner";
     let owner_email: string | null = null;
+    // Merged effective roles (collaborator + steward), nest-wide. Only needed
+    // for shared cards (owner cards don't show a role badge).
+    const roles = is_owner ? ["owner"] : resolveUserRoles(n.id, callerEmail);
     if (!is_owner && n.user_id !== ANON_USER_ID) {
       const row = ownerEmailStmt.get(n.user_id) as
         | { email?: string }
         | undefined;
       owner_email = row?.email ?? null;
     }
-    return { ...n, permission, is_owner, owner_email };
+    return { ...n, permission, is_owner, owner_email, roles };
   };
-  return c.json({
-    nests: [...owned.map(annotate), ...shared.map(annotate)],
-  });
+  // Dedupe by id; owner/shared rows win over public discovery row.
+  const seen = new Set<string>();
+  const out: ReturnType<typeof annotate>[] = [];
+  for (const n of [...owned, ...shared, ...publicExtras]) {
+    if (seen.has(n.id)) continue;
+    seen.add(n.id);
+    out.push(annotate(n));
+  }
+  return c.json({ nests: out });
 });
 
 // POST /nests
@@ -86,16 +116,55 @@ nestRoutes.post("/", async (c) => {
   return c.json({ nest }, 201);
 });
 
+// POST /nests/import — import a folder the user picked in their browser. The
+// browser uploads each file's relative path + content; the server writes them
+// into the nest's own storage under DATA_ROOT (it never browses its own disk),
+// so import works whether or not the server is colocated with the user.
+nestRoutes.post("/import", async (c) => {
+  const body = await c.req.json<{
+    name?: string;
+    files?: { path: string; content: string }[];
+  }>();
+  if (!body.name) {
+    throw new ValidationError("name is required");
+  }
+  const files = Array.isArray(body.files) ? body.files : [];
+  const userId = c.get("userId");
+  const nest = await importNest(userId, body.name, files);
+  // Seed governance rows for the documents already in the folder so they
+  // list as published and edit from their real version (not from scratch).
+  const documents = await registerImportedDocuments(
+    nest.id,
+    resolveCallerEmail(userId),
+  );
+  return c.json({ nest, documents }, 201);
+});
+
 // GET /nests/:nestId
 nestRoutes.get("/:nestId", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const permission = effectivePermission(nestId, c.get("userId"));
+  const userId = c.get("userId");
+  const permission = effectivePermission(nestId, userId);
   if (permission === "none") {
     throw new NotFoundError("Nest not found");
   }
 
+  // Caller's merged effective roles (collaborator + steward), nest-wide. The
+  // client gates action buttons off this instead of re-deriving from two
+  // lists. Force 'owner' when open-mode/anon promotion granted it but the
+  // raw resolver (which is not open-mode-aware) didn't.
+  const email = resolveCallerEmail(userId);
+  let roles = resolveUserRoles(nestId, email);
+  if (permission === "owner" && !roles.includes("owner")) {
+    roles = ["owner", ...roles];
+  }
+
+  // Caller's OWN steward rows (scoped) — the full roster is admin-only, but a
+  // reviewer/editor needs their own rows to gate per-node affordances.
+  const myStewards = getStewardsForUser(nestId, email);
+
   const nest = getNest(nestId);
-  return c.json({ nest, permission });
+  return c.json({ nest, permission, roles, myStewards });
 });
 
 // DELETE /nests/:nestId
@@ -139,6 +208,7 @@ nestRoutes.get("/:nestId/settings", async (c) => {
   }
   return c.json({
     stewardship_enabled: isStewardshipEnabled(nestId),
+    allow_self_approve: nestAllowsSelfApprove(nestId),
   });
 });
 
@@ -161,12 +231,33 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     );
   }
 
-  const body = await c.req.json<{ stewardship_enabled?: boolean }>();
+  const body = await c.req.json<{
+    stewardship_enabled?: boolean;
+    allow_self_approve?: boolean;
+  }>();
+  let wiped: {
+    stewards: number;
+    pendingReviews: number;
+  } | null = null;
   if (typeof body.stewardship_enabled === "boolean") {
-    setStewardshipEnabled(nestId, body.stewardship_enabled);
+    if (body.stewardship_enabled) {
+      setStewardshipEnabled(nestId, true);
+    } else {
+      // Disable tears down governance (stewards + pending reviews) atomically
+      // with the flag flip. Collaborator shares are left intact — sharing is
+      // independent of governance. See disableStewardshipAndWipeGovernance.
+      wiped = disableStewardshipAndWipeGovernance(nestId);
+    }
+  }
+  // Self-approve bypass is independent of stewardship — turning it off does not
+  // retroactively revoke approvals; it only gates future SoD checks.
+  if (typeof body.allow_self_approve === "boolean") {
+    setAllowSelfApprove(nestId, body.allow_self_approve);
   }
 
   return c.json({
     stewardship_enabled: isStewardshipEnabled(nestId),
+    allow_self_approve: nestAllowsSelfApprove(nestId),
+    wiped,
   });
 });

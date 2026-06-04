@@ -1,7 +1,7 @@
 /**
  * NestSettingsModal — per-nest admin settings (stewardship toggle, etc.)
  */
-import React, { useState } from "react";
+import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -14,13 +14,23 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Shield, AlertCircle, Loader2, Info } from "lucide-react";
+import {
+  Shield,
+  AlertCircle,
+  AlertTriangle,
+  Loader2,
+  Info,
+  UserCheck,
+} from "lucide-react";
 import * as api from "../lib/api";
 
 interface NestSettingsModalProps {
   nestId: string;
   nestName: string;
   stewardshipEnabled: boolean;
+  allowSelfApprove: boolean;
+  /** False hides the stewardship section. Server still enforces. */
+  canManageStewardship: boolean;
   onClose: () => void;
   onChanged: () => void;
 }
@@ -29,15 +39,24 @@ export function NestSettingsModal({
   nestId,
   nestName,
   stewardshipEnabled,
+  allowSelfApprove,
+  canManageStewardship,
   onClose,
   onChanged,
 }: NestSettingsModalProps) {
   const [enabled, setEnabled] = useState(stewardshipEnabled);
+  const [selfApprove, setSelfApprove] = useState(allowSelfApprove);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Acknowledgement required only when the caller is turning stewardship
+  // OFF (was on, now off). Toggling on, or no change, doesn't need it.
+  const [disableAcknowledged, setDisableAcknowledged] = useState(false);
+  const turningStewardshipOff = stewardshipEnabled && !enabled;
 
   const handleSave = async () => {
-    if (enabled === stewardshipEnabled) {
+    const stewardshipChanged = enabled !== stewardshipEnabled;
+    const selfApproveChanged = selfApprove !== allowSelfApprove;
+    if (!stewardshipChanged && !selfApproveChanged) {
       onClose();
       return;
     }
@@ -45,13 +64,17 @@ export function NestSettingsModal({
     setError(null);
     try {
       const result = await api.updateNestSettings(nestId, {
-        stewardship_enabled: enabled,
+        ...(stewardshipChanged ? { stewardship_enabled: enabled } : {}),
+        ...(selfApproveChanged ? { allow_self_approve: selfApprove } : {}),
       });
-      // Trust the server's response, not our optimistic local state, in case
-      // permission check rejected silently or the DB rejected the update.
-      if (result.stewardship_enabled !== enabled) {
+      // Trust the server's response, not our optimistic local state, in
+      // case the permission check rejected silently or the DB rejected.
+      if (
+        result.stewardship_enabled !== enabled ||
+        result.allow_self_approve !== selfApprove
+      ) {
         setError(
-          "Server did not accept the change. You may not have permission to change this setting.",
+          "Server did not accept the change. You may not have permission to change these settings.",
         );
         setLoading(false);
         return;
@@ -81,7 +104,8 @@ export function NestSettingsModal({
             </Alert>
           )}
 
-          {/* Stewardship toggle */}
+          {/* Stewardship — manage-rights only. */}
+          {canManageStewardship && (
           <div className="rounded-lg border p-4 space-y-3">
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1">
@@ -102,7 +126,7 @@ export function NestSettingsModal({
               <Switch checked={enabled} onCheckedChange={setEnabled} />
             </div>
 
-            {!enabled && (
+            {!enabled && !turningStewardshipOff && (
               <div className="flex items-start gap-2 text-xs text-muted-foreground pt-2 border-t">
                 <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
                 <div>
@@ -111,6 +135,32 @@ export function NestSettingsModal({
                   still on — every edit creates a new version.
                 </div>
               </div>
+            )}
+
+            {turningStewardshipOff && (
+              <Alert variant="destructive" className="pt-2">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertDescription className="space-y-2">
+                  <div>
+                    <strong>Disabling stewardship removes governance.</strong>{" "}
+                    All steward assignments and pending review requests for this
+                    nest will be deleted, and new documents become auto-approved.
+                    Collaborator access is kept — manage it from Share.
+                    Approved/rejected review history is kept.
+                  </div>
+                  <label className="flex items-center gap-2 text-xs font-medium cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={disableAcknowledged}
+                      onChange={(e) =>
+                        setDisableAcknowledged(e.target.checked)
+                      }
+                      className="h-3.5 w-3.5"
+                    />
+                    I understand this will remove all stewards.
+                  </label>
+                </AlertDescription>
+              </Alert>
             )}
 
             {enabled && (
@@ -125,13 +175,39 @@ export function NestSettingsModal({
               </div>
             )}
           </div>
+          )}
+
+          {/* Self-approve bypass — manage-rights only. */}
+          {canManageStewardship && (
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <UserCheck className="h-4 w-4" />
+                  Allow self-approve
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Default off. When enabled, the same person can submit a draft and
+                  approve it — useful while seeding a single-person nest or running
+                  solo. Turning this back off does not retroactively revoke
+                  approvals; it only changes future behavior. Stewardship audit logs
+                  still record the actor; the trail is intact, the separation isn't.
+                </p>
+              </div>
+              <Switch checked={selfApprove} onCheckedChange={setSelfApprove} />
+            </div>
+          </div>
+          )}
         </div>
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>
             Cancel
           </Button>
-          <Button onClick={handleSave} disabled={loading}>
+          <Button
+            onClick={handleSave}
+            disabled={loading || (turningStewardshipOff && !disableAcknowledged)}
+          >
             {loading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (

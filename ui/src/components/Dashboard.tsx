@@ -5,7 +5,7 @@ import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import {
@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { DeleteNestDialog } from "./DeleteNestDialog";
+import { ImportFolderModal } from "./ImportFolderModal";
 
 interface DashboardProps {
   onSelectNest: (
@@ -38,12 +39,13 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
   const [stats, setStats] = useState<ServerStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   // Pending target sits in state so the modal can render the nest name in
   // the confirmation copy without prop-drilling through a separate child.
   const [deleteTarget, setDeleteTarget] = useState<
-    { id: string; name: string } | null
+    { id: string; name: string; isImported: boolean } | null
   >(null);
 
   const serverUrl =
@@ -56,11 +58,16 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
       // or 404s (not deployed yet) we fall back to nest count only.
       const [nestsData, statsData] = await Promise.all([
         api.listNests(),
-        api.getServerStats().catch(() => null),
+        api.getServerStats().catch((e) => {
+          console.error("[Dashboard] getServerStats failed", e);
+          return null;
+        }),
       ]);
       setNests(nestsData.nests);
       setStats(statsData);
-    } catch {} finally {
+    } catch (e) {
+      console.error("[Dashboard] fetchNests failed", e);
+    } finally {
       setLoading(false);
     }
   };
@@ -78,11 +85,13 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
       await api.createNest(newName, newDesc);
       setNewName(""); setNewDesc(""); setShowCreate(false);
       fetchNests();
-    } catch {}
+    } catch (e) {
+      console.error("[Dashboard] createNest failed", e);
+    }
   };
 
-  const requestDelete = (nestId: string, nestName: string) => {
-    setDeleteTarget({ id: nestId, name: nestName });
+  const requestDelete = (nestId: string, nestName: string, isImported = false) => {
+    setDeleteTarget({ id: nestId, name: nestName, isImported });
   };
 
   return (
@@ -153,10 +162,16 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
             Shared knowledge vaults for your team
           </p>
         </div>
-        <Button onClick={() => setShowCreate(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          New Nest
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => setShowImport(true)}>
+            <FolderInput className="h-4 w-4 mr-2" />
+            Import Folder
+          </Button>
+          <Button onClick={() => setShowCreate(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            New Nest
+          </Button>
+        </div>
       </div>
 
       {/* Create form */}
@@ -234,22 +249,59 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
               const canDelete =
                 isOwner ||
                 (isAnonymous && authMode !== "open" && isAdmin);
-              const roleLabel =
-                permission === "admin"
-                  ? "Admin"
-                  : permission === "write"
-                    ? "Editor"
-                    : permission === "read"
-                      ? "Viewer"
-                      : null;
-              const RoleIcon =
-                permission === "admin"
-                  ? Shield
-                  : permission === "write"
-                    ? Pencil
-                    : permission === "read"
-                      ? Eye
-                      : null;
+              // Card role badge — derive from merged effective roles
+              // (collaborator + steward), not just the collaborator permission.
+              // A steward editor/reviewer resolves to permission='read'
+              // server-side, so keying off permission alone mislabeled them
+              // "Viewer". Precedence: admin > editor > reviewer > viewer.
+              const roleList: string[] = Array.isArray(nest.roles)
+                ? nest.roles
+                : [];
+              const effRole = roleList.includes("admin")
+                ? "admin"
+                : roleList.includes("editor")
+                  ? "editor"
+                  : roleList.includes("reviewer")
+                    ? "reviewer"
+                    : roleList.includes("viewer")
+                      ? "viewer"
+                      : permission === "admin"
+                        ? "admin"
+                        : permission === "write"
+                          ? "editor"
+                          : permission === "read"
+                            ? "viewer"
+                            : null;
+              const roleBadge = effRole
+                ? ({
+                    admin: {
+                      label: "Admin",
+                      Icon: Shield,
+                      cls: "bg-purple-50 text-purple-700 border-purple-200",
+                      title: "Admin — full access except deleting the nest",
+                    },
+                    editor: {
+                      label: "Editor",
+                      Icon: Pencil,
+                      cls: "bg-indigo-50 text-indigo-700 border-indigo-200",
+                      title: "Editor — you can read and edit documents",
+                    },
+                    reviewer: {
+                      label: "Reviewer",
+                      Icon: CheckCircle2,
+                      cls: "bg-amber-50 text-amber-700 border-amber-200",
+                      title:
+                        "Reviewer — you can approve or reject submissions",
+                    },
+                    viewer: {
+                      label: "Viewer",
+                      Icon: Eye,
+                      cls: "bg-slate-50 text-slate-700 border-slate-200",
+                      title: "View only — you can read but not edit",
+                    },
+                  }[effRole])
+                : null;
+              const RoleIcon = roleBadge?.Icon ?? null;
               return (
                 <div
                   key={nest.id}
@@ -280,7 +332,7 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                       title="Delete nest"
                       onClick={(e) => {
                         e.stopPropagation();
-                        requestDelete(nest.id, nest.name);
+                        requestDelete(nest.id, nest.name, !!nest.is_imported);
                       }}
                       className="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
@@ -334,25 +386,13 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                             Ungoverned
                           </span>
                         )}
-                        {isShared && roleLabel && RoleIcon && (
+                        {isShared && roleBadge && RoleIcon && (
                           <span
-                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border ${
-                              permission === "read"
-                                ? "bg-slate-50 text-slate-700 border-slate-200"
-                                : permission === "write"
-                                  ? "bg-indigo-50 text-indigo-700 border-indigo-200"
-                                  : "bg-purple-50 text-purple-700 border-purple-200"
-                            }`}
-                            title={
-                              permission === "read"
-                                ? "View only — you can read but not edit"
-                                : permission === "write"
-                                  ? "Editor — you can read and edit documents"
-                                  : "Admin — full access except deleting the nest"
-                            }
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border ${roleBadge.cls}`}
+                            title={roleBadge.title}
                           >
                             <RoleIcon className="h-3 w-3" />
-                            {roleLabel}
+                            {roleBadge.label}
                           </span>
                         )}
                         <span
@@ -364,6 +404,15 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                         >
                           {nest.visibility}
                         </span>
+                        {nest.is_imported ? (
+                          <span
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200"
+                            title="Imported from a folder — its files were copied into the workspace"
+                          >
+                            <FolderInput className="h-3 w-3" />
+                            Imported
+                          </span>
+                        ) : null}
                         <span>{new Date(nest.created_at).toLocaleDateString()}</span>
                       </div>
                     </div>
@@ -379,6 +428,7 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
         <DeleteNestDialog
           nestId={deleteTarget.id}
           nestName={deleteTarget.name}
+          isImported={deleteTarget.isImported}
           open
           onOpenChange={(open) => {
             if (!open) setDeleteTarget(null);
@@ -389,6 +439,12 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
           }}
         />
       )}
+
+      <ImportFolderModal
+        isOpen={showImport}
+        onClose={() => setShowImport(false)}
+        onImported={fetchNests}
+      />
     </div>
   );
 }

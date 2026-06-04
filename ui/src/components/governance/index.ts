@@ -1,7 +1,7 @@
 export { StewardList } from "./StewardList";
 export type { Steward, StewardshipScope } from "./StewardList";
-export { StewardAssignmentModal } from "./StewardAssignmentModal";
-export type { StewardRole } from "./StewardAssignmentModal";
+export { StewardModal } from "./StewardModal";
+export type { StewardRole, StewardSubmit } from "./StewardModal";
 export { ReviewQueue } from "./ReviewQueue";
 export type { ReviewRequest, ReviewRequestPriority } from "./ReviewQueue";
 export { ReviewActions } from "./ReviewActions";

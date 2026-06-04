@@ -7,10 +7,11 @@ import * as api from "../lib/api";
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
-  Pencil, Trash2, FileWarning,
+  Pencil, Trash2, FileWarning, Globe, FolderInput, Users,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
+import { ShareNestDialog } from "./ShareNestDialog";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -28,13 +29,16 @@ import {
 } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import {
-  StewardList, StewardAssignmentModal, ReviewQueue, ReviewActions,
+  StewardList, StewardModal,
+  ReviewQueue, ReviewActions,
   SubmitForReviewModal, VersionHistory, LifecycleStatusBadge,
-  type Steward, type ReviewRequest, type Version,
+  type Steward, type StewardRole, type ReviewRequest, type Version,
   type DocumentLifecycleStatus,
 } from "./governance";
 import { useAuth } from "../auth/AuthContext";
 import { MarkdownEditor } from "./MarkdownEditor";
+import { CollaboratorManager } from "./CollaboratorManager";
+import { toast } from "sonner";
 
 interface NestViewProps {
   nestId: string;
@@ -43,6 +47,9 @@ interface NestViewProps {
   isAnonOwned: boolean;
   onBack: () => void;
   onOpenDocument: (nodeId: string | "new") => void;
+  /** Seed the search filter on mount. Used when arriving from a tag
+   *  click on a document detail page. */
+  initialSearch?: string;
 }
 
 export function NestView({
@@ -52,6 +59,7 @@ export function NestView({
   isAnonOwned,
   onBack,
   onOpenDocument,
+  initialSearch,
 }: NestViewProps) {
   const { isAdmin, adminStatus, authMode } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
@@ -62,17 +70,32 @@ export function NestView({
     isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   const [nodes, setNodes] = useState<any[]>([]);
+  // Full roster — admin-only (listStewards 403s for non-admins → stays []).
   const [stewards, setStewards] = useState<Steward[]>([]);
+  // Caller's OWN steward rows (scoped), from GET /nests/:id. Drives per-node
+  // affordances for non-admin reviewers/editors who can't read the roster.
+  const [myStewards, setMyStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
   const [externalEdits, setExternalEdits] = useState<api.ExternalEditEntry[]>([]);
   const [externalEditsLoading, setExternalEditsLoading] = useState(false);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
+  const [allowSelfApprove, setAllowSelfApprove] = useState(false);
+  const [visibility, setVisibility] = useState<"private" | "public">("private");
+  const [isImported, setIsImported] = useState(false);
+  // Caller's nest-level permission (from GET /nests/:id).
+  const [permission, setPermission] = useState<string | null>(null);
+  // Caller's merged effective roles (collaborator + steward), nest-wide.
+  const [roles, setRoles] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [stewardScope, setStewardScope] = useState<
     "all" | "document" | "tag" | "nest"
   >("all");
+  const [stewardRoleFilter, setStewardRoleFilter] = useState<
+    "all" | StewardRole
+  >("all");
+  const [editingSteward, setEditingSteward] = useState<Steward | null>(null);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(initialSearch ?? "");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [reviewNode, setReviewNode] = useState<any | null>(null);
   const [submitNode, setSubmitNode] = useState<any | null>(null);
@@ -84,6 +107,7 @@ export function NestView({
   }>({ versions: [], approvedVersion: null, currentVersion: 0 });
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
+  const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
 
   const fetchData = useCallback(async () => {
@@ -92,26 +116,61 @@ export function NestView({
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, settingsData, externalData] =
+    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta] =
       await Promise.all([
-        api.listNodes(nestId).catch(() => ({ nodes: [] })),
-        api.listStewards(nestId).catch(() => ({ stewards: [] })),
-        api.getReviewQueue(nestId).catch(() => ({ requests: [], total: 0 })),
-        api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false })),
-        api.listExternalEdits(nestId).catch(() => ({ entries: [], total: 0 })),
+        api.listNodes(nestId).catch((e) => {
+          console.error("[NestView] listNodes failed", nestId, e);
+          return { nodes: [] };
+        }),
+        api.listStewards(nestId).catch((e) => {
+          console.error("[NestView] listStewards failed", nestId, e);
+          return { stewards: [] };
+        }),
+        api.getReviewQueue(nestId).catch((e) => {
+          console.error("[NestView] getReviewQueue failed", nestId, e);
+          toast.error(e?.message || "Failed to load review queue");
+          return { requests: [], total: 0 };
+        }),
+        api.getNestSettings(nestId).catch((e) => {
+          console.error("[NestView] getNestSettings failed", nestId, e);
+          return { stewardship_enabled: false, allow_self_approve: false };
+        }),
+        api.listExternalEdits(nestId).catch((e) => {
+          console.error("[NestView] listExternalEdits failed", nestId, e);
+          return { entries: [], total: 0 };
+        }),
+        api.getNest(nestId).catch((e) => {
+          console.error("[NestView] getNest failed", nestId, e);
+          return null;
+        }),
       ]);
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
     setStewardshipEnabled(settingsData.stewardship_enabled);
+    setAllowSelfApprove(settingsData.allow_self_approve);
     setExternalEdits(externalData.entries);
+    if (nestMeta?.nest?.visibility) {
+      setVisibility(nestMeta.nest.visibility);
+    }
+    if (nestMeta?.nest) {
+      setIsImported(!!(nestMeta.nest as any).is_imported);
+    }
+    if (nestMeta?.permission) {
+      setPermission(nestMeta.permission);
+    }
+    setRoles(nestMeta?.roles ?? []);
+    setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
     setLoading(false);
   }, [nestId]);
 
   const refreshExternalEdits = useCallback(async () => {
     setExternalEditsLoading(true);
     try {
-      await api.scanExternalEdits(nestId).catch(() => null);
+      await api.scanExternalEdits(nestId).catch((e) => {
+        console.error("[NestView] scanExternalEdits failed", nestId, e);
+        return null;
+      });
       const { entries } = await api.listExternalEdits(nestId);
       setExternalEdits(entries);
     } finally {
@@ -121,33 +180,56 @@ export function NestView({
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const stats = {
-    total: nodes.length,
-    pending: nodes.filter((n) => n.status === "pending_review").length,
-    approved: nodes.filter((n) => n.status === "approved").length,
-    reviewQueue: reviewQueue.length,
-  };
+  // stats are built later (after reviewableQueue is computed) so the
+  // Review Queue card can bind to the count the user can actually act
+  // on — not the raw queue size.
 
   const filtered = nodes.filter((n) => {
     if (statusFilter !== "all" && n.status !== statusFilter) return false;
-    if (search && !n.title.toLowerCase().includes(search.toLowerCase())) return false;
+    if (search) {
+      // Search matches title OR any tag — so clicking a tag chip on a
+      // document detail (which sets search to the tag string) actually
+      // filters to docs with that tag, not just docs whose title
+      // contains the tag string.
+      const needle = search.toLowerCase();
+      const inTitle = n.title?.toLowerCase().includes(needle);
+      const inTags = Array.isArray(n.tags)
+        ? n.tags.some((t: string) => t.toLowerCase().includes(needle))
+        : false;
+      if (!inTitle && !inTags) return false;
+    }
     return true;
   });
 
-  // Caller's steward rows in this nest. Used to gate write affordances:
-  // owner/admin (no steward row, or isAdmin) get full controls; an
-  // assigned 'editor' steward keeps edit/submit; 'reviewer'/'viewer'
-  // stewards see only read + review actions. Server still enforces.
-  const myStewards = stewards.filter(
-    (s) => s.userEmail.toLowerCase() === currentEmail,
-  );
-  const isStewardOnly = !isAdmin && myStewards.length > 0;
-  const canEditDocs =
-    !isStewardOnly || myStewards.some((s) => s.role === "editor");
-  // Approve/reject is reviewer-only by product rule. Editors, viewers, and
-  // nest owners (no steward row) cannot action a review even though server
-  // would still enforce; hide the affordance to keep UI honest.
-  const canReviewDocs = myStewards.some((s) => s.role === "reviewer");
+  // myStewards (caller's own scoped rows) comes from GET /nests/:id, so
+  // non-admin reviewers/editors keep per-node affordances without reading the
+  // admin-only roster.
+  // All capability flags derived in one place from the caller's nest-wide
+  // effective roles (collaborator + steward, merged server-side and returned
+  // by GET /nests/:id) plus their collaborator permission. Coarse gating
+  // reads these; the server still enforces per node.
+  //   canManage     — assign stewards + share with collaborators (owner/admin)
+  //   collabCanWrite — nest-wide write via a collaborator grant
+  //   canReviewDocs  — approve/reject (owner/admin or reviewer steward)
+  //   canEditDocs    — "New Document" (nest-wide write or nest-scope editor)
+  //   isReadOnly     — no write/review/manage (public + plain 'read' collabs)
+  const caps = (() => {
+    const hasRole = (...r: string[]) => roles.some((x) => r.includes(x));
+    const canManage = isOwner || isAdmin || hasRole("owner", "admin");
+    const collabCanWrite =
+      permission === "owner" || permission === "admin" || permission === "write";
+    const canReviewDocs =
+      canManage || myStewards.some((s) => s.role === "reviewer");
+    const canEditDocs =
+      canManage ||
+      collabCanWrite ||
+      myStewards.some((s) => s.role === "editor" && s.scope === "nest");
+    const isReadOnly = !canEditDocs && !canReviewDocs && !canManage;
+    return { canManage, collabCanWrite, canReviewDocs, canEditDocs, isReadOnly };
+  })();
+  // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
+  // canReviewNode for scope resolution, so it isn't destructured here.
+  const { canManage, collabCanWrite, canEditDocs, isReadOnly } = caps;
 
   // Map nodeId → submitter so the per-row Review button can hide on
   // docs the current user submitted (separation-of-duties: authors must
@@ -157,14 +239,51 @@ export function NestView({
   for (const r of reviewQueue) {
     submitterByNode.set(r.nodeId, r.requestedBy.toLowerCase());
   }
-  // Eligibility check: does the caller hold a reviewer steward row whose
-  // scope covers this node? Mirrors server resolution (document > tag >
-  // nest), but client-side so the queue can be filtered without N extra
-  // round-trips.
+  // Does a steward row with `role` cover this node? Same scope-resolution
+  // rules as the server: document scope matches by id, tag scope matches
+  // when any of the node's tags match, nest scope matches everything.
+  const hasRoleOnNode = (
+    node: { id: string; tags?: string[] },
+    role: string,
+  ) =>
+    myStewards.some((s) => {
+      if (s.role !== role) return false;
+      if (s.scope === "nest") return true;
+      if (s.scope === "document") return s.nodePattern === node.id;
+      if (s.scope === "tag") {
+        const target = (s.tagName || "").toLowerCase().replace(/^#+/, "");
+        return (node.tags || [])
+          .map((t) => t.toLowerCase().replace(/^#+/, ""))
+          .includes(target);
+      }
+      return false;
+    });
+
+  // Approval capability on a node (ignoring own-submission SoD, handled at
+  // the call sites). Mirrors server canUserApprove:
+  //   admin (collaborator/steward) -> approve anything
+  //   reviewer steward (scoped)    -> approve covered nodes
+  //   bare owner                   -> ONLY when the nest allows self-approve
+  //                                   (else approvals go to reviewers)
   const canReviewNode = (node: { id: string; tags?: string[] }) => {
     if (!node) return false;
+    if (isReadOnly) return false;
+    if (isAdmin || roles.includes("admin")) return true;
+    if (isOwner) return allowSelfApprove;
+    if (hasRoleOnNode(node, "reviewer")) return true;
+    return false;
+  };
+
+  // Per-node edit gate. Nest-wide writers (owner/admin or a write+
+  // collaborator) edit any node; a doc/tag-scoped editor steward only edits
+  // the nodes their scope covers — applying the coarse flag per row would
+  // wrongly show Submit/Edit/Delete everywhere. Server still enforces.
+  const canEditNode = (node: { id: string; tags?: string[] }) => {
+    if (!node) return false;
+    if (isReadOnly) return false;
+    if (canManage || collabCanWrite) return true;
     return myStewards.some((s) => {
-      if (s.role !== "reviewer") return false;
+      if (s.role !== "editor") return false;
       if (s.scope === "nest") return true;
       if (s.scope === "document") return s.nodePattern === node.id;
       if (s.scope === "tag") {
@@ -177,45 +296,81 @@ export function NestView({
     });
   };
 
-  // Review queue: only the assigned reviewer for the node sees the
-  // request. Owners and server admins do NOT get a free pass — the
-  // queue is purely a reviewer worklist; owners use the audit/version
-  // panels for visibility instead. Drops own-submitted requests too
-  // (separation of duties).
+  // Review queue: who can act on each request. canReviewNode gates capability;
+  // own submissions are dropped (SoD) unless the caller is the owner and the
+  // nest allows self-approve (the seeding switch). A non-owner reviewer can
+  // never approve their own work.
   const reviewableQueue = reviewQueue.filter((r) => {
-    if (r.requestedBy.toLowerCase() === currentEmail) return false;
     const node = nodes.find((n) => n.id === r.nodeId);
     if (!node) return false;
-    return canReviewNode(node);
+    if (!canReviewNode(node)) return false;
+    const own = r.requestedBy.toLowerCase() === currentEmail;
+    if (own && !(isOwner && allowSelfApprove)) return false;
+    return true;
   });
+
+  // Computed here so the Review Queue card binds to reviewableQueue.length
+  // (what the user can actually act on) instead of reviewQueue.length
+  // (raw size, which over-promised before — see CU-86ahn99fv).
+  const stats = {
+    total: nodes.length,
+    pending: nodes.filter((n) => n.status === "pending_review").length,
+    approved: nodes.filter((n) => n.status === "approved").length,
+    reviewQueue: reviewQueue.length,
+    reviewable: reviewableQueue.length,
+  };
 
   const openVersions = async (node: any) => {
     setVersionNode(node);
     try {
       const data = await api.getNodeVersions(nestId, node.id);
       setVersionData(data);
-    } catch { }
+    } catch (e) {
+      console.error("[NestView] getNodeVersions failed", nestId, node?.id, e);
+    }
   };
 
+  // Approve/reject/submit handlers used to await silently — a 403
+  // (e.g. SoD block, no reviewer role, license required) threw past
+  // setReviewNode(null), so the modal stayed open and the user saw
+  // nothing happen. Surface the error via toast and refresh on success.
   const handleApprove = async (note?: string) => {
     if (!reviewNode) return;
-    await api.approveNode(nestId, reviewNode.id, note);
-    setReviewNode(null);
-    fetchData();
+    try {
+      await api.approveNode(nestId, reviewNode.id, note);
+      toast.success("Approved");
+      setReviewNode(null);
+      fetchData();
+    } catch (err: any) {
+      console.error("[NestView] approveNode failed", nestId, reviewNode?.id, err);
+      toast.error(err?.message || "Approve failed");
+    }
   };
 
   const handleReject = async (note: string) => {
     if (!reviewNode) return;
-    await api.rejectNode(nestId, reviewNode.id, note);
-    setReviewNode(null);
-    fetchData();
+    try {
+      await api.rejectNode(nestId, reviewNode.id, note);
+      toast.success("Rejected");
+      setReviewNode(null);
+      fetchData();
+    } catch (err: any) {
+      console.error("[NestView] rejectNode failed", nestId, reviewNode?.id, err);
+      toast.error(err?.message || "Reject failed");
+    }
   };
 
   const handleSubmitReview = async (note: string, priority: string) => {
     if (!submitNode) return;
-    await api.submitForReview(nestId, submitNode.id, note, priority);
-    setSubmitNode(null);
-    fetchData();
+    try {
+      await api.submitForReview(nestId, submitNode.id, note, priority);
+      toast.success("Submitted for review");
+      setSubmitNode(null);
+      fetchData();
+    } catch (err: any) {
+      console.error("[NestView] submitForReview failed", nestId, submitNode?.id, err);
+      toast.error(err?.message || "Submit failed");
+    }
   };
 
   const handleRemoveSteward = async (stewardId: string) => {
@@ -227,6 +382,7 @@ export function NestView({
       await api.removeSteward(nestId, stewardId);
       fetchData();
     } catch (err: any) {
+      console.error("[NestView] removeSteward failed", nestId, stewardId, err);
       window.alert(err?.message || "Failed to remove steward");
     }
   };
@@ -245,6 +401,21 @@ export function NestView({
     fetchData();
   };
 
+  const handleSaveStewardRole = async (update: {
+    scope: string;
+    target?: string;
+    role: StewardRole;
+  }) => {
+    if (!editingSteward) return;
+    // Map the modal's generic `target` to the backend's scope-specific field.
+    const payload: any = { role: update.role, scope: update.scope };
+    if (update.scope === "document") payload.nodePattern = update.target;
+    else if (update.scope === "tag") payload.tagName = update.target;
+    await api.updateSteward(nestId, editingSteward.id, payload);
+    toast.success("Steward updated");
+    fetchData();
+  };
+
   const handleDeleteNode = async (node: any) => {
     // Plain confirm — destructive, irreversible. Promoting to a fancy
     // AlertDialog when the rest of the destructive surfaces (nest
@@ -257,6 +428,7 @@ export function NestView({
       await api.deleteNode(nestId, node.id);
       fetchData();
     } catch (err: any) {
+      console.error("[NestView] deleteNode failed", nestId, node?.id, err);
       window.alert(err?.message || "Failed to delete document");
     }
   };
@@ -270,53 +442,79 @@ export function NestView({
             <ArrowLeft className="h-4 w-4" />
           </Button>
           <h3 className="text-xl font-semibold">{nestName}</h3>
+          {visibility === "public" && (
+            <Badge
+              variant="outline"
+              className="gap-1 border-blue-200 bg-blue-50 text-blue-700"
+              title="Anyone with the URL can read this nest"
+            >
+              <Globe className="h-3 w-3" />
+              Public
+            </Badge>
+          )}
+          {isImported && (
+            <Badge
+              variant="outline"
+              className="gap-1 border-blue-200 bg-blue-50 text-blue-700"
+              title="Imported from a folder — its files were copied into the workspace"
+            >
+              <FolderInput className="h-3 w-3" />
+              Imported
+            </Badge>
+          )}
         </div>
         {/* Action row: wraps onto multiple lines below sm-breakpoint instead
             of forcing a single horizontal scroll. `flex-wrap` + `justify-end`
             on wider screens keeps the spacing visually intentional rather
             than awkwardly clipped at the right edge. */}
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:justify-end">
+          {/* Connect stays for view-only; write/admin gated below. */}
           <Button variant="outline" onClick={() => setShowConnect(true)}>
             <Link2 className="h-4 w-4 mr-2" />
             Connect
           </Button>
-          {/* Delete — gated to match server rules (owner, or admin
-              caretaker on the ungoverned commons in key mode). Server
-              still enforces; hiding the button just keeps the UI
-              honest for callers who can't act. */}
-          {canDeleteNest && (
-            <Button
-              variant="outline"
-              onClick={() => setShowDelete(true)}
-              className="text-destructive hover:text-destructive hover:bg-destructive/10"
-            >
-              <Trash2 className="h-4 w-4 mr-2" />
-              Delete
+          {/* Share — visibility + collaborators. Gated to owner/admin to
+              match the server's admin requirement on /collaborators and
+              /visibility; non-admins would only get a 403. */}
+          {canManage && (
+            <Button variant="outline" onClick={() => setShowShare(true)}>
+              <Users className="h-4 w-4 mr-2" />
+              Share
             </Button>
           )}
-          {isAdmin && (
-            <Button variant="outline" onClick={() => setShowSettings(true)}>
-              <SettingsIcon className="h-4 w-4 mr-2" />
-              Settings
-            </Button>
-          )}
-          {stewardshipEnabled && !isStewardOnly && (
+          {!isReadOnly && (
             <>
-              <Button variant="outline" onClick={() => api.syncStewards(nestId).then(fetchData)}>
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Sync stewards.yaml
-              </Button>
-              <Button variant="outline" onClick={() => setShowAssignSteward(true)}>
-                <Shield className="h-4 w-4 mr-2" />
-                Assign Steward
-              </Button>
+              {canDeleteNest && (
+                <Button
+                  variant="outline"
+                  onClick={() => setShowDelete(true)}
+                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Delete
+                </Button>
+              )}
+              {/* Settings is stewardship-only and server-admin gated; a
+                  nest-admin/owner would just see an empty modal. */}
+              {isAdmin && (
+                <Button variant="outline" onClick={() => setShowSettings(true)}>
+                  <SettingsIcon className="h-4 w-4 mr-2" />
+                  Settings
+                </Button>
+              )}
+              {stewardshipEnabled && isAdmin && (
+                <Button variant="outline" onClick={() => setShowAssignSteward(true)}>
+                  <Shield className="h-4 w-4 mr-2" />
+                  Assign Steward
+                </Button>
+              )}
+              {canEditDocs && (
+                <Button onClick={() => onOpenDocument("new")}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  New Document
+                </Button>
+              )}
             </>
-          )}
-          {canEditDocs && (
-            <Button onClick={() => onOpenDocument("new")}>
-              <Plus className="h-4 w-4 mr-2" />
-              New Document
-            </Button>
           )}
         </div>
       </div>
@@ -373,12 +571,23 @@ export function NestView({
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription>Review Queue</CardDescription>
-                <CardTitle className="text-3xl text-blue-600">{stats.reviewQueue}</CardTitle>
+                <CardTitle className="text-3xl text-blue-600">
+                  {stats.reviewable}
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Shield className="h-4 w-4" />
-                  <span>Need your review</span>
+                  <span>
+                    Need your review
+                    {stats.reviewQueue > stats.reviewable && (
+                      <span className="ml-1 text-xs">
+                        ({stats.reviewQueue} pending total,
+                        {" "}
+                        {stats.reviewQueue - stats.reviewable} outside your scope)
+                      </span>
+                    )}
+                  </span>
                 </div>
               </CardContent>
             </Card>
@@ -392,7 +601,8 @@ export function NestView({
       <Tabs defaultValue="documents" className="w-full">
         <TabsList className="mb-4">
           <TabsTrigger value="documents">Documents</TabsTrigger>
-          {stewardshipEnabled && (
+          {/* Governance tabs hidden for view-only. */}
+          {stewardshipEnabled && !isReadOnly && (
             <TabsTrigger value="review" className="gap-2">
               Review Queue
               {reviewableQueue.length > 0 && (
@@ -402,19 +612,27 @@ export function NestView({
               )}
             </TabsTrigger>
           )}
-          <TabsTrigger value="external-edits" className="gap-2">
-            External Edits
-            {externalEdits.length > 0 && (
-              <Badge
-                variant="secondary"
-                className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
-              >
-                {externalEdits.length}
-              </Badge>
-            )}
-          </TabsTrigger>
-          {stewardshipEnabled && (
+          {!isReadOnly && (
+            <TabsTrigger value="external-edits" className="gap-2">
+              External Edits
+              {externalEdits.length > 0 && (
+                <Badge
+                  variant="secondary"
+                  className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
+                >
+                  {externalEdits.length}
+                </Badge>
+              )}
+            </TabsTrigger>
+          )}
+          {/* Steward roster is admin-only (list + manage). */}
+          {stewardshipEnabled && isAdmin && (
             <TabsTrigger value="stewards">Stewards</TabsTrigger>
+          )}
+          {/* Collaborators — plain access sharing, independent of
+              stewardship. Managing it is owner/admin only (server gate). */}
+          {canManage && (
+            <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
           )}
         </TabsList>
 
@@ -424,13 +642,13 @@ export function NestView({
               <div className="flex items-center justify-between gap-2">
                 <CardTitle className="text-lg">Documents</CardTitle>
                 <div className="flex items-center gap-2">
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <div className="relative w-48 sm:w-64">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
                     <Input
-                      placeholder="Search..."
+                      placeholder="Search documents or tags..."
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
-                      className="pl-9 w-48 h-8"
+                      className="pl-9 w-full h-8"
                     />
                   </div>
                   {stewardshipEnabled && (
@@ -472,12 +690,11 @@ export function NestView({
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="font-medium truncate">{node.title}</span>
-                          {stewardshipEnabled && (
-                            <LifecycleStatusBadge
-                              status={(node.status as DocumentLifecycleStatus) || "draft"}
-                              size="sm"
-                            />
-                          )}
+                          <LifecycleStatusBadge
+                            status={(node.status as DocumentLifecycleStatus) || "draft"}
+                            size="sm"
+                          />
+
                         </div>
                         <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
                           <span>v{node.version || 1}</span>
@@ -493,7 +710,7 @@ export function NestView({
                         className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
                         onClick={(e) => e.stopPropagation()}
                       >
-                        {stewardshipEnabled && node.status === "draft" && canEditDocs && (
+                        {stewardshipEnabled && node.status === "draft" && canEditNode(node) && (
                           <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
                             <Send className="h-3.5 w-3.5 mr-1" />
                             Submit
@@ -501,8 +718,9 @@ export function NestView({
                         )}
                         {stewardshipEnabled &&
                           node.status === "pending_review" &&
-                          submitterByNode.get(node.id) !== currentEmail &&
-                          canReviewDocs && (
+                          canReviewNode(node) &&
+                          (submitterByNode.get(node.id) !== currentEmail ||
+                            (isOwner && allowSelfApprove)) && (
                             <Button
                               variant="outline"
                               size="sm"
@@ -512,7 +730,7 @@ export function NestView({
                               Review
                             </Button>
                           )}
-                        {node.status !== "pending_review" && canEditDocs && (
+                        {node.status !== "pending_review" && canEditNode(node) && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -525,7 +743,7 @@ export function NestView({
                         <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
                           <History className="h-3.5 w-3.5" />
                         </Button>
-                        {canEditDocs && (
+                        {canEditNode(node) && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -553,9 +771,31 @@ export function NestView({
               onRefresh={fetchData}
               onSelect={(req) => {
                 const node = nodes.find((n) => n.id === req.nodeId);
-                if (node) setReviewNode(node);
+                if (node) {
+                  setReviewNode(node);
+                  return;
+                }
+                // Orphan: review_request points to a node not in the
+                // visible list (file deleted, or filtered out by
+                // stewardship access). Without this the row click was
+                // a silent dead-end.
+                toast.error(
+                  `Can't open "${req.title || req.nodeId}" — document missing or outside your access.`,
+                );
               }}
             />
+            {/* When the raw queue has entries but the reviewable filter
+                emptied it, the queue card says "All caught up!" — which
+                is wrong. Surface the gap so the user knows items exist
+                but aren't actionable by them (scope or SoD). */}
+            {reviewQueue.length > 0 && reviewableQueue.length === 0 && (
+              <p className="text-xs text-muted-foreground text-center">
+                {reviewQueue.length} pending review
+                {reviewQueue.length === 1 ? "" : "s"} in this nest, but
+                none you can act on — outside your steward scope, or
+                submitted by you (authors can't approve their own work).
+              </p>
+            )}
           </TabsContent>
         )}
 
@@ -636,7 +876,7 @@ export function NestView({
           </Card>
         </TabsContent>
 
-        {stewardshipEnabled && (
+        {stewardshipEnabled && isAdmin && (
           <TabsContent value="stewards" className="space-y-4">
             <Card className="border-blue-200 bg-blue-50/40">
               <CardHeader className="pb-2">
@@ -681,7 +921,7 @@ export function NestView({
                     </CardDescription>
                   </div>
                   {stewards.length > 0 && (
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       {(["all", "document", "tag", "nest"] as const).map(
                         (s) => (
                           <button
@@ -696,6 +936,23 @@ export function NestView({
                           </button>
                         ),
                       )}
+                      <span className="w-px h-4 bg-border" />
+                      <Select
+                        value={stewardRoleFilter}
+                        onValueChange={(v) =>
+                          setStewardRoleFilter(v as "all" | StewardRole)
+                        }
+                      >
+                        <SelectTrigger className="w-[120px] h-7 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All</SelectItem>
+                          <SelectItem value="editor">Editor</SelectItem>
+                          <SelectItem value="reviewer">Reviewer</SelectItem>
+                          <SelectItem value="viewer">Viewer</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
                   )}
                 </div>
@@ -708,7 +965,7 @@ export function NestView({
                       approve. Add an editor/reviewer to delegate approvals
                       for a tag or specific doc.
                     </p>
-                    {!isStewardOnly && (
+                    {isAdmin && (
                       <Button
                         variant="outline"
                         size="sm"
@@ -722,25 +979,51 @@ export function NestView({
                   </div>
                 ) : (
                   <StewardList
-                    stewards={
-                      stewardScope === "all"
-                        ? stewards
-                        : stewards.filter((s) => s.scope === stewardScope)
-                    }
+                    stewards={stewards.filter(
+                      (s) =>
+                        (stewardScope === "all" || s.scope === stewardScope) &&
+                        (stewardRoleFilter === "all" ||
+                          s.role === stewardRoleFilter),
+                    )}
                     showScope
                     onAddSteward={
-                      isStewardOnly ? undefined : () => setShowAssignSteward(true)
+                      isAdmin ? () => setShowAssignSteward(true) : undefined
                     }
-                    onRemove={isStewardOnly ? undefined : handleRemoveSteward}
+                    onRemove={isAdmin ? handleRemoveSteward : undefined}
+                    onEditRole={isAdmin ? setEditingSteward : undefined}
+                    currentUserEmail={currentEmail}
                   />
                 )}
               </CardContent>
             </Card>
           </TabsContent>
         )}
+
+        {canManage && (
+          <TabsContent value="collaborators" className="space-y-4">
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg">Collaborators</CardTitle>
+                <CardDescription>
+                  People with direct access to this nest. Sharing grants plain
+                  access (viewer/editor/admin) — it does not make anyone a
+                  steward. Manage visibility from the Share dialog.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <CollaboratorManager
+                  nestId={nestId}
+                  nestName={nestName}
+                  onChanged={fetchData}
+                  currentUserEmail={currentEmail}
+                />
+              </CardContent>
+            </Card>
+          </TabsContent>
+        )}
       </Tabs>
 
-      {!stewardshipEnabled && (
+      {!stewardshipEnabled && !isReadOnly && (
         <Card className="mt-4">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
@@ -785,11 +1068,22 @@ export function NestView({
         />
       )}
 
+      {showShare && (
+        <ShareNestDialog
+          nestId={nestId}
+          nestName={nestName}
+          onClose={() => setShowShare(false)}
+          onChanged={fetchData}
+        />
+      )}
+
       {showSettings && (
         <NestSettingsModal
           nestId={nestId}
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
+          allowSelfApprove={allowSelfApprove}
+          canManageStewardship={isAdmin}
           onClose={() => setShowSettings(false)}
           onChanged={() => { setShowSettings(false); fetchData(); }}
         />
@@ -799,6 +1093,7 @@ export function NestView({
         <DeleteNestDialog
           nestId={nestId}
           nestName={nestName}
+          isImported={isImported}
           open
           onOpenChange={setShowDelete}
           onDeleted={() => { setShowDelete(false); onBack(); }}
@@ -806,11 +1101,25 @@ export function NestView({
       )}
 
       {showAssignSteward && (
-        <StewardAssignmentModal
+        <StewardModal
           isOpen={showAssignSteward}
           onClose={() => setShowAssignSteward(false)}
           nestId={nestId}
           onSubmit={handleAssignSteward}
+          onSync={async () => {
+            await api.syncStewards(nestId);
+            await fetchData();
+          }}
+        />
+      )}
+
+      {editingSteward && (
+        <StewardModal
+          isOpen={!!editingSteward}
+          steward={editingSteward}
+          nestId={nestId}
+          onClose={() => setEditingSteward(null)}
+          onSubmit={handleSaveStewardRole}
         />
       )}
 
@@ -827,9 +1136,14 @@ export function NestView({
       {reviewNode && (
         <ReviewDocumentModal
           node={reviewNode}
+          nestId={nestId}
           onApprove={handleApprove}
           onReject={handleReject}
           onClose={() => setReviewNode(null)}
+          onOpenDocument={(nodeId) => {
+            setReviewNode(null);
+            onOpenDocument(nodeId);
+          }}
         />
       )}
 
@@ -856,27 +1170,79 @@ export function NestView({
 
 function ReviewDocumentModal({
   node,
+  nestId,
   onApprove,
   onReject,
   onClose,
+  onOpenDocument,
 }: {
   node: any;
+  nestId: string;
   onApprove: (note?: string) => Promise<void>;
   onReject: (note: string) => Promise<void>;
   onClose: () => void;
+  onOpenDocument: (nodeId: string) => void;
 }) {
+  const [linkError, setLinkError] = useState<string | null>(null);
+
+  // Resolve `[[Title]]` clicks to a node id and jump straight to that
+  // doc. Without this the wiki-link decoration renders but click does
+  // nothing — `MarkdownEditor` only wires nav when `onWikiLinkClick`
+  // is provided. Cache miss (no id from the existence check) falls
+  // back to a fresh title→id lookup so links resolve even when the
+  // target was created after the reviewer opened the modal. Broken
+  // links are NOT routed to the create flow — the caller is acting
+  // as a reviewer here (read-only role for this surface), so silently
+  // dropping them into an authoring page would mislead them; instead
+  // we surface an inline note.
+  const handleWikiLinkClick = async (title: string, id: string | null) => {
+    setLinkError(null);
+    if (id) {
+      onOpenDocument(id);
+      return;
+    }
+    try {
+      const { nodes } = await api.searchNodes(nestId, title);
+      const exact = (nodes as Array<{ id: string; title: string }>).find(
+        (n) => n.title.toLowerCase() === title.toLowerCase(),
+      );
+      if (exact) {
+        onOpenDocument(exact.id);
+        return;
+      }
+      setLinkError(
+        `"${title}" doesn't exist in this nest. Reviewers can't create new documents — ask an editor to add it.`,
+      );
+    } catch (e) {
+      console.error("[NestView] wiki-link lookup failed", nestId, title, e);
+      setLinkError("Couldn't look up that document — try again later.");
+    }
+  };
+
   return (
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[600px] max-h-[80vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>{node.title}</DialogTitle>
         </DialogHeader>
+        {linkError && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+            {linkError}
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto rounded-md">
           {node.content ? (
             <MarkdownEditor
+              // Remount when the reviewer switches between docs in the
+              // queue. Same modal instance otherwise → TipTap keeps its
+              // previous doc's editor state and the body briefly shows
+              // the wrong content on swap.
+              key={node.id}
               content={node.content}
               onChange={() => { }}
               editable={false}
+              nestId={nestId}
+              onWikiLinkClick={handleWikiLinkClick}
             />
           ) : (
             <p className="text-sm text-muted-foreground p-4">(no content)</p>

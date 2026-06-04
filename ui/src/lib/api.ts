@@ -126,6 +126,7 @@ export async function getHealth() {
   return request<{
     status: string;
     auth_mode: string;
+    logo_url?: string | null;
     suspended_reason?: string;
   }>("/health");
 }
@@ -237,16 +238,16 @@ export async function deleteApiKey(keyId: string) {
 // ─── Nest settings ─────────────────────────────────────────────────────
 
 export async function getNestSettings(nestId: string) {
-  return request<{ stewardship_enabled: boolean }>(
+  return request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
     `/nests/${nestId}/settings`,
   );
 }
 
 export async function updateNestSettings(
   nestId: string,
-  data: { stewardship_enabled?: boolean },
+  data: { stewardship_enabled?: boolean; allow_self_approve?: boolean },
 ) {
-  return request<{ stewardship_enabled: boolean }>(
+  return request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
     `/nests/${nestId}/settings`,
     { method: "PATCH", body: JSON.stringify(data) },
   );
@@ -267,6 +268,42 @@ export async function createNest(name: string, description?: string) {
 
 export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
+}
+
+/** One file from the browser folder pick, path relative to the chosen folder. */
+export interface ImportedFile {
+  path: string;
+  content: string;
+}
+
+/** Import a folder the user picked in their browser. The browser reads the
+ *  folder and uploads each file; the server writes them into the workspace. */
+export async function importNest(name: string, files: ImportedFile[]) {
+  return request<{ nest: any; documents: number }>("/nests/import", {
+    method: "POST",
+    body: JSON.stringify({ name, files }),
+  });
+}
+
+export async function setNestVisibility(
+  nestId: string,
+  visibility: "private" | "public",
+) {
+  return request<{ visibility: "private" | "public" }>(
+    `/nests/${nestId}/visibility`,
+    { method: "PATCH", body: JSON.stringify({ visibility }) },
+  );
+}
+
+export async function getNest(nestId: string) {
+  return request<{
+    nest: { id: string; name: string; visibility: "private" | "public" };
+    permission: string;
+    // Caller's merged effective roles (collaborator + steward), nest-wide.
+    roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
+    // Caller's own steward rows (scoped). Full roster is admin-only.
+    myStewards?: any[];
+  }>(`/nests/${nestId}`);
 }
 
 export async function getServerStats() {
@@ -326,6 +363,17 @@ export async function getOverview(nestId: string) {
   return request(`/nests/${nestId}/overview`);
 }
 
+export async function listTags(nestId: string): Promise<string[]> {
+  const res = await request<{ tags?: Record<string, number> }>(
+    `/nests/${nestId}/overview`,
+  );
+  const tags = res?.tags ?? {};
+  return Object.keys(tags)
+    .map((t) => t.replace(/^#+/, ""))
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+}
+
 // ─── Governance ─────────────────────────────────────────────────────────
 
 export async function listStewards(nestId: string) {
@@ -349,6 +397,22 @@ export async function assignSteward(nestId: string, data: any) {
 export async function removeSteward(nestId: string, stewardId: string) {
   return request(`/nests/${nestId}/stewards/${stewardId}`, {
     method: "DELETE",
+  });
+}
+
+export async function updateSteward(
+  nestId: string,
+  stewardId: string,
+  update: {
+    role?: string;
+    scope?: string;
+    nodePattern?: string;
+    tagName?: string;
+  },
+) {
+  return request<{ steward: any }>(`/nests/${nestId}/stewards/${stewardId}`, {
+    method: "PATCH",
+    body: JSON.stringify(update),
   });
 }
 
@@ -507,4 +571,22 @@ export async function addCollaborator(
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+export async function updateCollaborator(
+  nestId: string,
+  collabId: string,
+  permission: string,
+) {
+  return request<{ updated: boolean }>(
+    `/nests/${nestId}/collaborators/${collabId}`,
+    { method: "PATCH", body: JSON.stringify({ permission }) },
+  );
+}
+
+export async function removeCollaborator(nestId: string, collabId: string) {
+  return request<{ removed: boolean }>(
+    `/nests/${nestId}/collaborators/${collabId}`,
+    { method: "DELETE" },
+  );
 }

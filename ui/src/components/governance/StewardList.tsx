@@ -16,6 +16,7 @@ import {
   Loader2,
   MoreVertical,
   Trash2,
+  Pencil,
   Shield,
   Tag,
   FileText,
@@ -33,6 +34,7 @@ export interface Steward {
   scope: StewardshipScope;
   tagName?: string;
   nodePattern?: string;
+  nodeTitle?: string;
   role: "editor" | "reviewer" | "viewer";
 }
 
@@ -43,7 +45,12 @@ interface StewardListProps {
   className?: string;
   onAddSteward?: () => void;
   onRemove?: (stewardId: string) => Promise<void>;
+  /** Open the edit-role modal for a steward. Omit to hide the action. */
+  onEditRole?: (steward: Steward) => void;
   compact?: boolean;
+  /** Logged-in user's email — their own row hides the row actions so they
+   *  can't change/drop their own steward access from the UI. */
+  currentUserEmail?: string;
 }
 
 const scopeConfig: Record<StewardshipScope, { label: string; icon: React.ComponentType<{ className?: string }> }> = {
@@ -59,9 +66,12 @@ export function StewardList({
   className,
   onAddSteward,
   onRemove,
+  onEditRole,
   compact = false,
+  currentUserEmail,
 }: StewardListProps) {
   const [removingId, setRemovingId] = useState<string | null>(null);
+  const self = (currentUserEmail || "").toLowerCase();
 
   const handleRemove = async (stewardId: string) => {
     if (!onRemove) return;
@@ -77,7 +87,7 @@ export function StewardList({
     const config = scopeConfig[steward.scope];
     let target = "";
     if (steward.scope === "tag") target = steward.tagName || "";
-    else if (steward.scope === "document") target = steward.nodePattern || "";
+    else if (steward.scope === "document") target = steward.nodeTitle || steward.nodePattern || "";
 
     return (
       <div className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -157,33 +167,42 @@ export function StewardList({
             </div>
           </div>
 
-          {onRemove && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8"
-                  disabled={removingId === steward.id}
-                >
-                  {removingId === steward.id ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <MoreVertical className="h-4 w-4" />
+          {(onEditRole || onRemove) &&
+            steward.userEmail.toLowerCase() !== self && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    disabled={removingId === steward.id}
+                  >
+                    {removingId === steward.id ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <MoreVertical className="h-4 w-4" />
+                    )}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  {onEditRole && (
+                    <DropdownMenuItem onClick={() => onEditRole(steward)}>
+                      <Pencil className="h-4 w-4 mr-2" />
+                      Edit Role
+                    </DropdownMenuItem>
                   )}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  className="text-destructive"
-                  onClick={() => handleRemove(steward.id)}
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Remove
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
+                  {onRemove && (
+                    <DropdownMenuItem
+                      className="text-destructive"
+                      onClick={() => handleRemove(steward.id)}
+                    >
+                      <Trash2 className="h-4 w-4 mr-2" />
+                      Remove
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
         </div>
       ))}
       {onAddSteward && (

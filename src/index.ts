@@ -6,7 +6,6 @@ import { getDb } from "./db/client.js";
 import { backfillNodeVersionsFromHistory } from "./db/backfill.js";
 import {
   validateLicense,
-  startLicenseWatcher,
   startLicenseSafetyPoll,
 } from "./auth/license.js";
 import { startTelemetryLoop, trackEvent } from "./telemetry/tracker.js";
@@ -52,13 +51,8 @@ async function main() {
 
   const app = createApp();
 
-  // Start long-poll watcher so deactivations/revocations from PromptOwl
-  // propagate within seconds instead of next restart.
-  startLicenseWatcher();
-  // Safety net: forceFresh revalidate every 60s. Catches revokes that
-  // the watcher missed because of upstream gateway timeouts, dropped
-  // events on multi-instance PromptOwl, or network blackouts that
-  // exhausted the watcher backoff.
+  // Periodic forceFresh revalidate (60s) so PromptOwl-side
+  // deactivations/revocations propagate without a restart.
   startLicenseSafetyPoll();
 
   // Periodic drift scanner: detects out-of-band file edits and stages

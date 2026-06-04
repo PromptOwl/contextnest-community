@@ -28,7 +28,8 @@ import {
   isLicenseAdminEmail,
   isLicenseAdminUserId,
 } from "./license.js";
-import { tryConsume } from "../shared/rate-limit.js";
+import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { ANON_USER_ID } from "../shared/constants.js";
 
 // Auth-endpoint rate limits. Keyed on IP for anonymous attempts + email
@@ -38,12 +39,20 @@ const REGISTER_LIMIT = { max: 3, windowMs: 60 * 60_000 };    // 3 / hr
 const DEVICE_LIMIT = { max: 10, windowMs: 15 * 60_000 };     // 10 / 15 min
 
 function clientIp(c: any): string {
-  // Respect reverse-proxy headers; fall back to socket if none. Intentionally
-  // trusts the first forwarded IP — deploy behind a proxy you control.
+  // Respect reverse-proxy headers; fall back to the raw socket address if
+  // none. Intentionally trusts the first forwarded IP — deploy behind a
+  // proxy you control.
   const xff = c.req.header("x-forwarded-for");
   if (xff) return xff.split(",")[0].trim();
   const realIp = c.req.header("x-real-ip");
   if (realIp) return realIp.trim();
+  // No proxy (e.g. running locally) — read the TCP peer address directly.
+  try {
+    const addr = getConnInfo(c).remote.address;
+    if (addr) return addr;
+  } catch {
+    // Runtime without conninfo support — fall through to "unknown".
+  }
   return "unknown";
 }
 
@@ -164,13 +173,21 @@ authRoutes.post("/login", async (c) => {
   }
 
   // Clamp both by IP and by email — botnet can't parallelize against one
-  // account, and a single IP can't brute-force many accounts.
+  // account, and a single IP can't brute-force many accounts. Only FAILED
+  // logins count toward the limit (recorded below), so frequent successful
+  // login/logout cycles never trip the brute-force guard.
+  //
+  // When the IP is unidentifiable (no proxy headers → "unknown"), every
+  // caller collapses to the same key. Clamping on it would let one user's
+  // failures lock out everyone else, so skip the IP clamp in that case and
+  // rely on the per-email key. Deploy behind a proxy that sets
+  // x-forwarded-for to get real per-IP protection.
   const ip = clientIp(c);
   const emailLower = body.email.toLowerCase();
-  if (
-    !tryConsume(`login:ip:${ip}`, LOGIN_LIMIT) ||
-    !tryConsume(`login:email:${emailLower}`, LOGIN_LIMIT)
-  ) {
+  const hasIp = ip !== "unknown";
+  const ipKey = `login:ip:${ip}`;
+  const emailKey = `login:email:${emailLower}`;
+  if ((hasIp && isLimited(ipKey, LOGIN_LIMIT)) || isLimited(emailKey, LOGIN_LIMIT)) {
     return c.json({ error: "Too many login attempts, try again later" }, 429);
   }
 
@@ -193,8 +210,16 @@ authRoutes.post("/login", async (c) => {
     ? await verifyPassword(body.password, user.password_hash)
     : { ok: false, needsRehash: false };
   if (!user || !check.ok) {
+    if (hasIp) recordFailure(ipKey, LOGIN_LIMIT);
+    recordFailure(emailKey, LOGIN_LIMIT);
+    console.warn(`[auth] login FAIL — counter++ ip=${ip} email=${emailLower}`);
     return c.json({ error: "Invalid credentials" }, 401);
   }
+
+  // Success — wipe accumulated failures so a legit login resets the guard.
+  console.log(`[auth] login OK — counter reset ip=${ip} email=${emailLower}`);
+  if (hasIp) clear(ipKey);
+  clear(emailKey);
 
   // Legacy SHA-256 password? Silently upgrade to bcrypt on this successful
   // login so the DB migrates itself over time without forcing a reset.
@@ -679,9 +704,11 @@ authRoutes.get("/teammates", async (c) => {
     last_active: string | null;
   }>;
 
-  // Steward emails assigned to any nest but without an API key on this
-  // server — they've been delegated governance but can't log in yet.
-  // Surface them so the admin can invite them with one click.
+  // Steward emails assigned to any nest but without any way to
+  // authenticate on this server yet — i.e. no claimed user account
+  // (is_invited = 0, password set via /auth/register) AND no api_key
+  // (admin hasn't issued one via /auth/invite-teammate). If either
+  // path exists, the steward can act and shouldn't be flagged.
   const pendingStewards = db
     .prepare(
       `SELECT DISTINCT s.user_email AS email
@@ -689,8 +716,13 @@ authRoutes.get("/teammates", async (c) => {
         WHERE s.is_active = 1
           AND NOT EXISTS (
             SELECT 1 FROM users u
-              JOIN api_keys k ON k.user_id = u.id
              WHERE lower(u.email) = lower(s.user_email)
+               AND (
+                 u.is_invited = 0
+                 OR EXISTS (
+                   SELECT 1 FROM api_keys k WHERE k.user_id = u.id
+                 )
+               )
           )
         ORDER BY s.user_email`,
     )

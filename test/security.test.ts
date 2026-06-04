@@ -135,4 +135,39 @@ describe("rate limiting on /auth/login", () => {
     });
     expect(status).toBe(429);
   });
+
+  it("successful logins never count toward the limit", async () => {
+    // 10 good logins (2x the limit) — none should trip the guard.
+    for (let i = 0; i < 10; i++) {
+      const { status } = await jsonRequest(app, "POST", "/auth/login", {
+        email: "target@example.com",
+        password: "testpass",
+      });
+      expect(status).toBe(200);
+    }
+  });
+
+  it("a successful login resets accumulated failures", async () => {
+    // 4 bad (one short of limit), then a good login clears the counter,
+    // so another 4 bad still return 401 rather than 429.
+    for (let i = 0; i < 4; i++) {
+      const { status } = await jsonRequest(app, "POST", "/auth/login", {
+        email: "target@example.com",
+        password: "wrong",
+      });
+      expect(status).toBe(401);
+    }
+    const ok = await jsonRequest(app, "POST", "/auth/login", {
+      email: "target@example.com",
+      password: "testpass",
+    });
+    expect(ok.status).toBe(200);
+    for (let i = 0; i < 4; i++) {
+      const { status } = await jsonRequest(app, "POST", "/auth/login", {
+        email: "target@example.com",
+        password: "wrong",
+      });
+      expect(status).toBe(401);
+    }
+  });
 });

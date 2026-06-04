@@ -4,13 +4,18 @@ import type {
   VersionManager,
   ContextNode,
 } from "@promptowl/contextnest-engine";
-import { serializeDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
+import { canManageWith } from "../governance/roles.js";
 import { isStewardshipEnabled } from "../nests/service.js";
-import { syncNodeTags } from "../governance/tag-index-service.js";
+import { addCollaborator } from "../nests/sharing-service.js";
+import {
+  createNode,
+  updateNode,
+  listNodesForCallerByEmail,
+} from "../nodes/service.js";
 
 export interface McpToolContext {
   storage: NestStorage;
@@ -249,6 +254,22 @@ export const TOOL_DEFINITIONS = [
       required: ["email", "scope"],
     },
   },
+  {
+    name: "context_share_nest",
+    description:
+      "Share this nest with another person by granting them access. This is plain access sharing (not a steward role): viewer = read, editor = read+edit, admin = full access except deleting the nest.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        email: { type: "string", description: "Email of the person to share with" },
+        permission: {
+          type: "string",
+          description: "Access level: read (viewer, default), write (editor), or admin",
+        },
+      },
+      required: ["email"],
+    },
+  },
 ];
 
 // Resolve the LLM-visible body for a node. When the nest enforces
@@ -380,29 +401,18 @@ export async function handleToolCall(
     }
 
     case "context_list": {
-      let docs = await storage.discoverDocuments();
-      if (args.type)
-        docs = docs.filter((n) => n.frontmatter.type === args.type);
-      if (args.tag) {
-        const tag = args.tag.startsWith("#") ? args.tag : `#${args.tag}`;
-        docs = docs.filter((n) => n.frontmatter.tags?.includes(tag));
-      }
-      // Hide unapproved docs from the LLM-facing list under stewardship —
-      // a listing that includes them would imply they're available.
-      if (isStewardshipEnabled(nestId)) {
-        docs = docs.filter(
-          (n) => versions.getApprovedVersion(nestId, n.id) != null,
-        );
-      }
-      docs = docs.slice(0, args.limit || 50);
-      if (!docs.length) return "No nodes found with the given filters.";
-      const list = docs
-        .map(
-          (n, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}]`,
-        )
+      // Same per-caller gating REST/UI use: steward access, public-reader
+      // approved-only, pending/status resolution.
+      const nodes = await listNodesForCallerByEmail(nestId, userEmail, {
+        type: args.type,
+        tag: args.tag,
+        limit: args.limit || 50,
+      });
+      if (!nodes.length) return "No nodes found with the given filters.";
+      const list = nodes
+        .map((n, i) => `${i + 1}. **${n.title}** [${n.type}]`)
         .join("\n");
-      return `${docs.length} node(s):\n\n${list}`;
+      return `${nodes.length} node(s):\n\n${list}`;
     }
 
     case "context_resolve": {
@@ -421,131 +431,49 @@ export async function handleToolCall(
     }
 
     case "context_create": {
-      const slug = args.title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-|-$/g, "");
-      const id = `nodes/${slug}`;
-      const now = new Date().toISOString();
-      const tags = (args.tags || []).map((t: string) =>
-        t.startsWith("#") ? t : `#${t}`,
-      );
-
-      // Match the REST POST /nodes behavior: draft when stewardship is
-      // enabled, auto-approve when ungoverned.
-      const hasStewards = isStewardshipEnabled(nestId);
-      const initialStatus = hasStewards ? "draft" : "approved";
-
-      const node: ContextNode = {
-        id,
-        filePath: "",
-        frontmatter: {
-          title: args.title,
-          type: args.type || "document",
-          tags,
-          status: initialStatus as any,
-          version: 1,
-          created_at: now,
-          updated_at: now,
-          metadata: { owners: ["*"], scope: args.scope || "team" },
-        },
-        body: args.content,
-        rawContent: "",
-      };
-      await storage.writeDocument(id, serializeDocument(node));
-
-      // Tag index + version history — the REST path does both.
-      syncNodeTags(nestId, id, tags);
-      try {
-        await versionManager.createVersion(node, userEmail);
-      } catch (err) {
-        console.error("VersionManager.createVersion failed (mcp create)", err);
+      // Defense-in-depth: the /mcp middleware already requires nest write,
+      // but gate here too so creation stays locked if that ever changes.
+      if (!stewardship.canCreateInNest(nestId, userEmail)) {
+        return "You don't have permission to create documents in this nest.";
       }
-      versions.createVersion({
+      const { node } = await createNode(
         nestId,
-        nodeId: id,
-        version: 1,
-        content: args.content,
-        author: userEmail,
-        status: initialStatus as "draft" | "approved",
-        tags,
-      });
-      if (initialStatus === "approved") {
-        versions.setApprovedVersion(nestId, id, 1, userEmail);
-      }
-
-      return `Created node: **${args.title}** (${id}) — status: ${initialStatus}`;
+        {
+          title: args.title,
+          content: args.content,
+          type: args.type,
+          tags: args.tags,
+          scope: args.scope,
+        },
+        userEmail,
+      );
+      return `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`;
     }
 
     case "context_update": {
+      // MCP resolves doc by title; service operates on id.
       const docs = await storage.discoverDocuments();
       const node = docs.find(
-        (n) =>
-          n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
       );
       if (!node) return `Node not found: ${args.title}`;
-
-      let body = node.body || "";
-      if (args.content !== undefined) body = args.content;
-      if (args.append) body = body + "\n\n" + args.append;
-
-      let tags = node.frontmatter.tags || [];
-      if (args.tags) {
-        const newTags = args.tags.map((t: string) =>
-          t.startsWith("#") ? t : `#${t}`,
-        );
-        tags = [...new Set([...tags, ...newTags])];
+      // Defense-in-depth: same per-node edit check REST resolves, so editing
+      // stays gated regardless of the /mcp middleware.
+      const editCheck = stewardship.canUserEdit(nestId, node.id, userEmail);
+      if (!editCheck.allowed) {
+        return `You don't have permission to edit "${args.title}": ${editCheck.reason}`;
       }
-
-      // Bump version so the engine + governance row align.
-      const prevVersion = versions.getCurrentVersion(nestId, node.id);
-      const newVersion = prevVersion + 1;
-      const hasStewards = isStewardshipEnabled(nestId);
-      const updated: ContextNode = {
-        ...node,
-        body,
-        frontmatter: {
-          ...node.frontmatter,
-          tags,
-          version: newVersion,
-          updated_at: new Date().toISOString(),
-        },
-      };
-      await storage.writeDocument(node.id, serializeDocument(updated));
-
-      try {
-        await versionManager.createVersion(updated, userEmail);
-      } catch (err) {
-        console.error("VersionManager.createVersion failed (mcp update)", err);
-      }
-
-      syncNodeTags(nestId, node.id, tags);
-      versions.createVersion({
+      const { node: updated } = await updateNode(
         nestId,
-        nodeId: node.id,
-        version: newVersion,
-        content: body,
-        author: userEmail,
-        status: hasStewards ? "draft" : "approved",
-        tags,
-      });
-
-      // Withdraw any pending review so the steward queue stays accurate
-      // — the request pointed at the old version, which no longer
-      // matches what's on disk. New version starts a fresh draft cycle.
-      if (reviews.getPendingReview(nestId, node.id)) {
-        reviews.cancelReview({
-          nestId,
-          nodeId: node.id,
-          cancelledBy: userEmail,
-        });
-      }
-
-      if (!hasStewards) {
-        versions.setApprovedVersion(nestId, node.id, newVersion, userEmail);
-      }
-
-      return `Updated node: **${node.frontmatter.title}**`;
+        node.id,
+        {
+          content: args.content,
+          append: args.append,
+          tags: args.tags,
+        },
+        userEmail,
+      );
+      return `Updated node: **${updated.frontmatter.title}**`;
     }
 
     // ─── Governance Tool Handlers ──────────────────────────────────────
@@ -573,8 +501,15 @@ export async function handleToolCall(
         return `# Stewards for "${args.title}"\n\n${list}`;
       }
 
+      // Listing the full roster is admin-only (same as REST GET /stewards).
+      // Resolving stewards for a specific node above stays open so callers
+      // can see who'd review their work.
+      if (!stewardship.canManageStewards(ctx.userEmail)) {
+        return "You don't have permission to list stewards. Only the super admin can do this.";
+      }
+
       // List all stewards for the nest
-      const allStewards = stewardship.getStewardsForNest(ctx.nestId);
+      const allStewards = await stewardship.getStewardsForNest(ctx.nestId);
       if (allStewards.length === 0) {
         return "No stewards configured. All changes are auto-approved.\n\nTo configure stewards, add a `stewards.yaml` file to the vault root, or use `context_assign_steward`.";
       }
@@ -585,7 +520,7 @@ export async function handleToolCall(
           ? "Nest-level"
           : s.scope === "tag"
             ? `Tag: ${s.tagName}`
-            : `Document: ${s.nodePattern}`;
+            : `Document: ${s.nodeTitle || s.nodePattern}`;
         (byScope[key] = byScope[key] || []).push(s);
       }
 
@@ -601,7 +536,7 @@ export async function handleToolCall(
 
     case "context_review_queue": {
       const status = args.status || "pending";
-      const result = reviews.getReviewQueue({
+      const result = await reviews.getReviewQueue({
         nestId: ctx.nestId,
         status: status as any,
       });
@@ -615,7 +550,7 @@ export async function handleToolCall(
       const list = result.requests
         .map(
           (r, i) =>
-            `${i + 1}. **${r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
+            `${i + 1}. **${r.title || r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
         )
         .join("\n\n");
 
@@ -628,6 +563,13 @@ export async function handleToolCall(
         (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
       );
       if (!node) return `Node not found: ${args.title}`;
+
+      // Defense-in-depth: submitting a draft for review is an edit-level
+      // action — gate it with the same per-node edit check.
+      const submitCheck = stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
+      if (!submitCheck.allowed) {
+        return `You don't have permission to submit "${args.title}" for review: ${submitCheck.reason}`;
+      }
 
       const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
       if (currentVersion === 0) return `No versions found for "${args.title}"`;
@@ -735,17 +677,24 @@ export async function handleToolCall(
         return `Invalid scope "${args.scope}". Use: nest, tag, or document.`;
       }
 
+      // Same authority as REST/UI — only the server admin manages stewards.
+      // MCP calls don't pass through the /stewards HTTP middleware, so gate
+      // here with the shared helper.
+      if (!stewardship.canManageStewards(ctx.userEmail)) {
+        return "You don't have permission to manage stewards. Only the super admin can do this.";
+      }
+
       try {
-        stewardship.assignSteward({
+        // Use createStewardRecord (not raw assignSteward) so MCP gets the
+        // same conflict check, email/tag normalization, and governed-mode
+        // flip the REST route uses.
+        await stewardship.createStewardRecord({
           nestId: ctx.nestId,
           scope,
-          nodePattern: scope === "document" ? args.target : undefined,
+          documentId: scope === "document" ? args.target : undefined,
           tagName: scope === "tag" ? args.target : undefined,
-          userEmail: args.email,
-          role: (args.role as any) || "reviewer",
+          users: [{ email: args.email, role: (args.role as any) || "reviewer" }],
           assignedBy: ctx.userEmail,
-          assignedAt: new Date().toISOString(),
-          isActive: true,
         });
 
         const targetDesc = scope === "nest"
@@ -755,6 +704,33 @@ export async function handleToolCall(
         return `Assigned **${args.email}** as ${args.role || "reviewer"} for ${targetDesc}.`;
       } catch (err: any) {
         return `Failed to assign steward: ${err.message}`;
+      }
+    }
+
+    case "context_share_nest": {
+      // Same gate as REST/UI: managing collaborators needs nest admin (owner
+      // or admin) — NOT the steward super-admin. A normal nest admin can share.
+      const roles = stewardship.resolveUserRoles(ctx.nestId, ctx.userEmail);
+      if (!canManageWith(roles)) {
+        return "You don't have permission to share this nest. Only the nest owner or an admin can add people.";
+      }
+      const permission = (args.permission as string) || "read";
+      try {
+        await addCollaborator({
+          nestId: ctx.nestId,
+          email: args.email,
+          permission,
+          grantedByEmail: ctx.userEmail,
+        });
+        const label =
+          permission === "admin"
+            ? "admin"
+            : permission === "write"
+              ? "editor"
+              : "viewer";
+        return `Shared this nest with **${args.email}** as ${label}.`;
+      } catch (err: any) {
+        return `Failed to share nest: ${err.message}`;
       }
     }
 

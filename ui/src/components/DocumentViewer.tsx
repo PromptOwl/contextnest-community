@@ -15,7 +15,6 @@
  * GFM: tables, task lists, strikethrough, and autolinks come from
  * `remark-gfm`.
  */
-import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Plugin } from "unified";
@@ -23,16 +22,10 @@ import type { Root, Text } from "mdast";
 import { visit } from "unist-util-visit";
 import { cn } from "@/lib/utils";
 
-const WIKI_LINK_SCHEME = "wiki://";
 const wikiLinkRegex = /\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]/g;
 
-/**
- * remark plugin that rewrites `[[Title]]` and `[[Title|Display]]`
- * occurrences inside text nodes into native mdast `link` nodes whose
- * URL is `wiki://<Title>`. React-markdown's `a` component override
- * then renders these as click handlers, so we never have to inject
- * raw HTML (no DOMPurify dance required for our own content).
- */
+// `[[Title]]` / `[[Title|Display]]` → synthetic `wikilink` hast element.
+// Custom hName sidesteps react-markdown's urlTransform allowlist (no `wiki:` scheme to sanitize).
 const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
   visit(tree, "text", (node: Text, index, parent) => {
     if (!parent || index === null || index === undefined) return;
@@ -48,12 +41,18 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
       if (m.index > lastIndex) {
         newChildren.push({ type: "text", value: text.slice(lastIndex, m.index) });
       }
-      const title = m[1].trim();
+      const target = m[1].trim();
       const display = (m[2] ?? m[1]).trim();
       newChildren.push({
-        type: "link",
-        url: `${WIKI_LINK_SCHEME}${title}`,
-        children: [{ type: "text", value: display }],
+        type: "wikiLink",
+        data: {
+          hName: "wikilink",
+          hProperties: {
+            "data-wiki-target": target,
+            "data-wiki-display": display,
+          },
+          hChildren: [{ type: "text", value: display }],
+        },
       });
       lastIndex = wikiLinkRegex.lastIndex;
     }
@@ -83,45 +82,48 @@ export function DocumentViewer({
   return (
     <div
       className={cn(
-        // Match the editor's prose styling so view ↔ edit feels continuous.
+        // Match editor's prose + fixed height/scroll for parity.
         "prose prose-sm dark:prose-invert max-w-none px-6 py-4",
+        "min-h-[60vh] max-h-[60vh] overflow-y-auto",
         className,
       )}
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkWikiLinks]}
-        components={{
-          a: ({ href, children, ...props }) => {
-            if (href?.startsWith(WIKI_LINK_SCHEME)) {
-              const title = decodeURIComponent(
-                href.slice(WIKI_LINK_SCHEME.length),
-              );
+        // Cast: Components type keyed on HTML names; `wikilink` not in union.
+        components={
+          {
+            wikilink: ({ children, ...props }: any) => {
+              const target = (props["data-wiki-target"] ?? "") as string;
               return (
                 <button
                   type="button"
-                  className="text-blue-600 hover:underline font-medium"
+                  className="wiki-link wiki-link-exists bg-transparent border-0 p-0 m-0 cursor-pointer"
+                  title={`Open "${target}"`}
                   onClick={(e) => {
                     e.preventDefault();
-                    onWikiLinkClick?.(title);
+                    e.stopPropagation();
+                    onWikiLinkClick?.(target);
                   }}
                 >
                   {children}
                 </button>
               );
-            }
-            // Real links: open in a new tab, mark as untrusted-source.
-            return (
+            },
+            // stopPropagation: block parent click-to-edit on link click.
+            a: ({ href, children, ...props }: any) => (
               <a
                 href={href}
                 target="_blank"
                 rel="noreferrer noopener"
+                onClick={(e) => e.stopPropagation()}
                 {...props}
               >
                 {children}
               </a>
-            );
-          },
-        }}
+            ),
+          } as any
+        }
       >
         {content}
       </ReactMarkdown>

@@ -1,9 +1,18 @@
-import { mkdirSync, rmSync } from "fs";
+import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { vi } from "vitest";
 import { resetDb } from "../src/db/client.js";
 import { _reset as resetRateLimits } from "../src/shared/rate-limit.js";
+
+/** Clear auth rate-limit buckets mid-suite — needed when a suite registers
+ *  more than REGISTER_LIMIT (3) users from the same IP. Dynamic import grabs
+ *  the post-resetModules instance the running app actually uses (the top-level
+ *  import above is stale after createTestApp's vi.resetModules). */
+export async function resetAuthRateLimit() {
+  const rl = await import("../src/shared/rate-limit.js");
+  rl._reset();
+}
 
 /** Set up an isolated data directory for each test suite */
 export function setupTestEnv() {
@@ -40,7 +49,10 @@ export function setupTestEnv() {
  * this file's module cache, so test files that import the real license
  * module (license.test.ts) are unaffected.
  */
-export async function createTestApp(authMode: "open" | "key" = "open") {
+export async function createTestApp(
+  authMode: "open" | "key" = "open",
+  opts: { superAdmins?: string[] } = {},
+) {
   process.env.AUTH_MODE = authMode;
   vi.resetModules();
   vi.doMock("../src/auth/license.js", async () => {
@@ -61,6 +73,21 @@ export async function createTestApp(authMode: "open" | "key" = "open") {
     };
   });
   const { createApp } = await import("../src/app.js");
+
+  // Managing the steward roster (sync/list/assign) is server-admin only.
+  // The license mock has no ownerEmail, so grant super-admin via access.yaml
+  // and load it into the freshly-imported access-service instance.
+  if (opts.superAdmins?.length) {
+    writeFileSync(
+      join(process.env.DATA_ROOT!, "access.yaml"),
+      "super_admins:\n" +
+        opts.superAdmins.map((e) => `  - ${e}`).join("\n") +
+        "\n",
+    );
+    const access = await import("../src/governance/access-service.js");
+    access.loadAccessConfig();
+  }
+
   return createApp();
 }
 

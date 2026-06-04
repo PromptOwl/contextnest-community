@@ -48,7 +48,8 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `DATABASE_PATH` | `$DATA_ROOT/community.db` | Override the SQLite file location explicitly. |
 | `AUTH_MODE` | `key` | `key` or `open`. See above. |
 | `PROMPTOWL_API_URL` | `https://app.promptowl.ai` | PromptOwl's API origin — used for device auth, license validation, telemetry. Override for air-gapped or test setups. |
-| `PROMPTOWL_KEY` | `""` | Your PromptOwl Community Server license key (`pk_...`). Unlicensed instances still run but some features may be limited. |
+| `PROMPTOWL_KEY` | `""` | Your PromptOwl Community License key (`pk_...`). Unlicensed instances still run and serve reads, but every write returns `503` until a valid key is installed. Can also be set via the browser License Setup Page, which persists it to `ENV_FILE_PATH`. |
+| `ENV_FILE_PATH` | `$cwd/.env` | Path to the `.env` file the license install flow writes `PROMPTOWL_KEY` into (alongside existing vars). Override when your `.env` lives outside the working directory. |
 | `TELEMETRY_ENABLED` | `"true"` (set to `"false"` to disable) | Batched, anonymized usage events sent to PromptOwl. Off disables the loop entirely. |
 | `TELEMETRY_INTERVAL_MS` | `3600000` (1 hour) | How often buffered telemetry is flushed to PromptOwl. |
 | `CORS_ORIGINS` | `*` in open mode; `http://localhost:5173,http://localhost:3838` in key mode | Comma-separated allowlist. Set to `*` to allow any origin (**only** safe in open mode — in key mode with Bearer tokens this enables CSRF). |
@@ -61,10 +62,10 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 ### Local dev / single user
 
 ```bash
-AUTH_MODE=open DATA_ROOT=./my-data pnpm dev
+AUTH_MODE=open DATA_ROOT=./my-data npm run dev
 ```
 
-Or the default dev mode if `pnpm dev` already sets `AUTH_MODE=open` in your scripts.
+Or the default dev mode if `npm run dev` already sets `AUTH_MODE=open` in your scripts.
 
 ### Team / multi-user behind a reverse proxy
 
@@ -73,7 +74,7 @@ AUTH_MODE=key \
 CORS_ORIGINS="https://team.example.com,https://admin.example.com" \
 DATA_ROOT=/var/lib/contextnest \
 PROMPTOWL_KEY=pk_... \
-pnpm start
+npm start
 ```
 
 Terminate TLS at the proxy, forward `X-Forwarded-For` and `X-Real-IP` headers (the rate limiter reads them), and bind the server to `127.0.0.1` so only the proxy can reach it.
