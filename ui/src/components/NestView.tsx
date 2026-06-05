@@ -839,7 +839,13 @@ export function NestView({
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {externalEdits.map((entry) => (
+                  {externalEdits.map((entry) => {
+                    // Resolve the human-readable title; fall back to the bare
+                    // doc name so internal `nodes/` paths never leak to the UI.
+                    const docTitle =
+                      nodes.find((n) => n.id === entry.document_id)?.title ||
+                      entry.document_id.split("/").pop();
+                    return (
                     <div
                       key={entry.suggestion_id}
                       className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors"
@@ -850,7 +856,7 @@ export function NestView({
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="font-medium truncate">
-                            {entry.document_id}
+                            {docTitle}
                           </span>
                           <Badge
                             variant="secondary"
@@ -869,7 +875,8 @@ export function NestView({
                         </div>
                       </div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </CardContent>
