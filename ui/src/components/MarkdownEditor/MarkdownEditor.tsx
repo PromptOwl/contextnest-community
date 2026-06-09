@@ -18,6 +18,7 @@ import {
   EditorContent,
   type Editor,
 } from "@tiptap/react";
+import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import Link from "@tiptap/extension-link";
@@ -455,6 +456,52 @@ export const MarkdownEditor = forwardRef<
             onTogglePreview={() => setPreviewing((p) => !p)}
           />
         </div>
+      )}
+
+      {/* Selection bubble toolbar — format-on-highlight, Notion-style. Only
+          when editing (not in read-only preview). Buttons reuse the
+          onMouseDown-preventDefault guard so the selection survives the click. */}
+      {editable && !previewing && (
+        <BubbleMenu
+          editor={editor}
+          className="flex items-center gap-0.5 rounded-md border bg-popover p-1 shadow-md"
+        >
+          <ToolbarButton
+            active={editor.isActive("bold")}
+            onClick={() => editor.chain().focus().toggleBold().run()}
+            title="Bold (Ctrl+B)"
+          >
+            <Bold className="h-3.5 w-3.5" />
+          </ToolbarButton>
+          <ToolbarButton
+            active={editor.isActive("italic")}
+            onClick={() => editor.chain().focus().toggleItalic().run()}
+            title="Italic (Ctrl+I)"
+          >
+            <Italic className="h-3.5 w-3.5" />
+          </ToolbarButton>
+          <ToolbarButton
+            active={editor.isActive("strike")}
+            onClick={() => editor.chain().focus().toggleStrike().run()}
+            title="Strikethrough"
+          >
+            <Strikethrough className="h-3.5 w-3.5" />
+          </ToolbarButton>
+          <ToolbarButton
+            active={editor.isActive("code")}
+            onClick={() => editor.chain().focus().toggleCode().run()}
+            title="Inline code"
+          >
+            <Code className="h-3.5 w-3.5" />
+          </ToolbarButton>
+          <ToolbarButton
+            active={editor.isActive("link")}
+            onClick={setLink}
+            title="Link"
+          >
+            <LinkIcon className="h-3.5 w-3.5" />
+          </ToolbarButton>
+        </BubbleMenu>
       )}
 
       <EditorContent
