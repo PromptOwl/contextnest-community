@@ -64,6 +64,28 @@ function toggleCodeBlockMerged(editor: Editor): void {
     .run();
 }
 
+// Resolve the top-level block under a viewport point. Returns the block's
+// doc start position + its DOM rect (for gutter-handle placement). Null when
+// the point isn't over a block (e.g. outside the doc).
+function topLevelBlockAt(
+  editor: Editor,
+  clientX: number,
+  clientY: number,
+): { from: number; top: number; left: number } | null {
+  const view = editor.view;
+  const res = view.posAtCoords({ left: clientX, top: clientY });
+  if (!res) return null;
+  const $pos = view.state.doc.resolve(
+    Math.min(res.pos, view.state.doc.content.size),
+  );
+  if ($pos.depth === 0) return null;
+  const from = $pos.before(1);
+  const dom = view.nodeDOM(from) as HTMLElement | null;
+  if (!dom || typeof dom.getBoundingClientRect !== "function") return null;
+  const rect = dom.getBoundingClientRect();
+  return { from, top: rect.top, left: rect.left };
+}
+
 // Obsidian wiki link: `[[nodes/<slug>|Title]]` — full path + alias.
 function formatWikiLink(slug: string, title: string): string {
   const safeSlug = (slug || title).trim();
@@ -103,6 +125,9 @@ import {
   ChevronUp,
   ChevronDown,
   X,
+  GripVertical,
+  Copy,
+  Trash2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
@@ -130,6 +155,8 @@ interface MarkdownEditorProps {
   content: string;
   onChange: (content: string) => void;
   onSave?: () => void;
+  /** Editor lost focus (click-out). Parent uses it for silent autosave. */
+  onBlur?: () => void;
   /** Nest scope used by the wiki-link existence check. Without it
    *  every `[[X]]` styles optimistically as "exists". */
   nestId?: string;
@@ -152,6 +179,7 @@ export const MarkdownEditor = forwardRef<
     content,
     onChange,
     onSave,
+    onBlur,
     nestId,
     onRequestDocLink,
     onWikiLinkClick,
@@ -201,6 +229,17 @@ export const MarkdownEditor = forwardRef<
   const [replaceText, setReplaceText] = useState("");
   const [matchInfo, setMatchInfo] = useState({ current: 0, total: 0 });
   const openSearchRef = useRef<() => void>(() => {});
+
+  // Block action menu (duplicate / delete). `blockMenu` tracks the hovered
+  // top-level block's doc position + gutter-handle coords; `blockMenuOpen`
+  // flips the ⠿ handle into the action dropdown.
+  const [blockMenu, setBlockMenu] = useState<{
+    from: number;
+    top: number;
+    left: number;
+  } | null>(null);
+  const [blockMenuOpen, setBlockMenuOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
 
   const editor = useEditor({
     extensions: [
@@ -257,6 +296,9 @@ export const MarkdownEditor = forwardRef<
     ],
     content,
     editable,
+    // Caret-ready on open so you can type immediately (Notion/Obsidian
+    // feel). "end" lands at doc end; placeholder shows when empty.
+    autofocus: "end",
     immediatelyRender: false,
     onUpdate: ({ editor }) => {
       const md = getEditorMarkdown(editor);
@@ -456,6 +498,83 @@ export const MarkdownEditor = forwardRef<
     openSearchRef.current = () => setSearchOpen(true);
   }, []);
 
+  // Forward editor blur (click-out) to the parent for silent autosave.
+  // Ref keeps the latest callback without re-binding the listener.
+  const onBlurRef = useRef(onBlur);
+  useEffect(() => {
+    onBlurRef.current = onBlur;
+  }, [onBlur]);
+  useEffect(() => {
+    if (!editor) return;
+    const handler = () => onBlurRef.current?.();
+    editor.on("blur", handler);
+    return () => {
+      editor.off("blur", handler);
+    };
+  }, [editor]);
+
+  // Track the hovered top-level block to position the gutter handle. Bound
+  // to the wrapper (not the ProseMirror DOM) so moving onto the handle —
+  // which sits in the left gutter — doesn't count as leaving the surface.
+  useEffect(() => {
+    if (!editor) return;
+    const el = wrapperRef.current;
+    if (!el) return;
+    const onMove = (e: MouseEvent) => {
+      if (!effectiveEditable || blockMenuOpen) return;
+      // Don't recompute while hovering the handle/menu itself — over the
+      // gutter posAtCoords can resolve to a different block (or null) and
+      // make the handle flicker out from under the pointer.
+      if ((e.target as HTMLElement).closest("[data-block-handle]")) return;
+      const next = topLevelBlockAt(editor, e.clientX, e.clientY);
+      if (next) setBlockMenu(next);
+    };
+    const onLeave = () => {
+      if (!blockMenuOpen) setBlockMenu(null);
+    };
+    el.addEventListener("mousemove", onMove);
+    el.addEventListener("mouseleave", onLeave);
+    return () => {
+      el.removeEventListener("mousemove", onMove);
+      el.removeEventListener("mouseleave", onLeave);
+    };
+  }, [editor, effectiveEditable, blockMenuOpen]);
+
+  // Close the open block menu on any outside mousedown. Handle/menu stop
+  // propagation so their own clicks don't trip this.
+  useEffect(() => {
+    if (!blockMenuOpen) return;
+    const close = () => {
+      setBlockMenuOpen(false);
+      setBlockMenu(null);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [blockMenuOpen]);
+
+  const duplicateBlock = () => {
+    if (!editor || !blockMenu) return;
+    const node = editor.state.doc.nodeAt(blockMenu.from);
+    if (!node) return;
+    const end = blockMenu.from + node.nodeSize;
+    editor.chain().focus().insertContentAt(end, node.toJSON()).run();
+    setBlockMenuOpen(false);
+    setBlockMenu(null);
+  };
+
+  const deleteBlock = () => {
+    if (!editor || !blockMenu) return;
+    const node = editor.state.doc.nodeAt(blockMenu.from);
+    if (!node) return;
+    editor
+      .chain()
+      .focus()
+      .deleteRange({ from: blockMenu.from, to: blockMenu.from + node.nodeSize })
+      .run();
+    setBlockMenuOpen(false);
+    setBlockMenu(null);
+  };
+
   const syncMatchInfo = (s: SearchState) =>
     setMatchInfo({
       current: s.results.length ? s.current + 1 : 0,
@@ -510,6 +629,7 @@ export const MarkdownEditor = forwardRef<
 
   return (
     <div
+      ref={wrapperRef}
       className={cn(
         "relative border rounded-lg bg-background shadow-sm",
         className,
@@ -674,6 +794,20 @@ export const MarkdownEditor = forwardRef<
           "min-h-[60vh] max-h-[60vh] overflow-y-auto",
           previewing && "bg-muted/20",
         )}
+        // Click the empty area below the last block → caret to doc end.
+        // The ProseMirror node only grows to its content height, so clicks
+        // in the surrounding scroll region never reach contenteditable.
+        onMouseDown={(e) => {
+          if (!effectiveEditable) return;
+          const pmDom = editor.view.dom as HTMLElement;
+          if (e.clientY <= pmDom.getBoundingClientRect().bottom) return;
+          e.preventDefault();
+          editor
+            .chain()
+            .focus()
+            .setTextSelection(editor.state.doc.content.size)
+            .run();
+        }}
         data-testid="markdown-editor-content"
       />
 
@@ -710,6 +844,60 @@ export const MarkdownEditor = forwardRef<
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {/* Block action gutter handle (⠿) + duplicate/delete menu. Hover a
+          block to reveal the handle in the left gutter; click for actions.
+          mousedown stopPropagation keeps the editor selection and dodges the
+          outside-click closer; preventDefault stops focus theft. */}
+      {effectiveEditable && blockMenu && (
+        <div
+          data-block-handle
+          className="fixed z-40 select-none"
+          style={{ top: blockMenu.top, left: blockMenu.left - 24 }}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+        >
+          <button
+            type="button"
+            title="Block actions"
+            className="flex h-6 w-5 cursor-pointer items-center justify-center rounded text-muted-foreground/70 hover:bg-muted hover:text-foreground"
+            onClick={() => setBlockMenuOpen((o) => !o)}
+          >
+            <GripVertical className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
+      {effectiveEditable && blockMenu && blockMenuOpen && (
+        <div
+          data-block-handle
+          className="fixed z-50 min-w-36 select-none overflow-hidden rounded-md border bg-popover py-1 text-popover-foreground shadow-md"
+          style={{ top: blockMenu.top + 24, left: blockMenu.left - 24 }}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+        >
+          <button
+            type="button"
+            className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-muted"
+            onClick={duplicateBlock}
+          >
+            <Copy className="h-3.5 w-3.5" />
+            Duplicate
+          </button>
+          <button
+            type="button"
+            className="flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-sm text-destructive hover:bg-muted"
+            onClick={deleteBlock}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete
+          </button>
         </div>
       )}
     </div>

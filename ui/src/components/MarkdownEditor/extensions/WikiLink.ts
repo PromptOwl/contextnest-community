@@ -1,5 +1,5 @@
 import { Extension } from "@tiptap/core";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
@@ -26,16 +26,28 @@ const wikiLinkRegex = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 const existsCache = new Map<string, { exists: boolean; id?: string }>();
 
 /**
- * Build wiki-link decorations for a whole document, with absolute doc
- * positions. Exported so the behavior is unit-testable against a real
- * ProseMirror doc without a DOM (the model layer needs no browser).
+ * One `[[…]]` occurrence as absolute doc positions:
+ *   start ──[[── labelStart ──visible label── labelEnd ──]]── end
+ * The `[[target|` prefix and trailing `]]` are the hidden (zero-width)
+ * spans; the label between them is what the reader sees.
  */
-export function collectWikiLinkDecorations(
-  doc: ProseMirrorNode,
-  checkExists?: WikiLinkOptions["checkExists"],
-): Decoration[] {
-  const decorations: Decoration[] = [];
+export interface WikiLinkRange {
+  start: number;
+  labelStart: number;
+  labelEnd: number;
+  end: number;
+  target: string;
+  displayText: string;
+  hasAlias: boolean;
+}
 
+/**
+ * Find every `[[…]]` in the doc as absolute-position ranges. Shared by
+ * the decoration builder and the caret-snap plugin so both agree on
+ * exactly where the hidden brackets sit. Exported for unit tests.
+ */
+export function collectWikiLinkRanges(doc: ProseMirrorNode): WikiLinkRange[] {
+  const ranges: WikiLinkRange[] = [];
   doc.descendants((node, pos, parent) => {
     if (!node.isText || !node.text) return;
     // W3: never treat code as wiki links — `[[ ]]` inside a code block or an
@@ -53,7 +65,31 @@ export function collectWikiLinkDecorations(
       const displayText = match[2]?.trim() || target;
       const start = pos + match.index;
       const end = start + fullMatch.length;
+      // Show alias only; hide `[[target|` + `]]`.
+      const labelStart = hasAlias
+        ? start + fullMatch.lastIndexOf("|") + 1
+        : start + 2;
+      const labelEnd = end - 2;
+      ranges.push({ start, labelStart, labelEnd, end, target, displayText, hasAlias });
+    }
+  });
+  return ranges;
+}
 
+/**
+ * Build wiki-link decorations for a whole document, with absolute doc
+ * positions. Exported so the behavior is unit-testable against a real
+ * ProseMirror doc without a DOM (the model layer needs no browser).
+ */
+export function collectWikiLinkDecorations(
+  doc: ProseMirrorNode,
+  checkExists?: WikiLinkOptions["checkExists"],
+): Decoration[] {
+  const decorations: Decoration[] = [];
+
+  for (const range of collectWikiLinkRanges(doc)) {
+    const { start, labelStart, labelEnd, end, target, displayText } = range;
+    {
       const cached = existsCache.get(target.toLowerCase());
       const exists = cached?.exists ?? !checkExists;
       const docId = cached?.id;
@@ -62,12 +98,6 @@ export function collectWikiLinkDecorations(
       const tooltip = exists
         ? `Open "${displayText}"`
         : `"${displayText}" not found in this nest`;
-
-      // Show alias only; hide `[[target|` + `]]`.
-      const labelStart = hasAlias
-        ? start + fullMatch.lastIndexOf("|") + 1
-        : start + 2;
-      const labelEnd = end - 2;
 
       decorations.push(
         Decoration.inline(start, labelStart, { class: "wiki-bracket-hidden" }),
@@ -98,9 +128,27 @@ export function collectWikiLinkDecorations(
           });
       }
     }
-  });
+  }
 
   return decorations;
+}
+
+/**
+ * Snap a collapsed caret out of the hidden `[[ ]]` bracket spans onto the
+ * nearest visible label edge. font-size:0 makes those chars zero-width, so
+ * a click or arrow can land "inside" a bracket where there's no glyph —
+ * the known papercut. We never trap the caret at the link's outer edges
+ * (start/end), so the user can still place the cursor before/after a link.
+ */
+function snapCaretOutOfBrackets(
+  ranges: WikiLinkRange[],
+  pos: number,
+): number | null {
+  for (const r of ranges) {
+    if (pos > r.start && pos < r.labelStart) return r.labelStart;
+    if (pos > r.labelEnd && pos < r.end) return r.labelEnd;
+  }
+  return null;
 }
 
 export const WikiLink = Extension.create<WikiLinkOptions>({
@@ -119,6 +167,21 @@ export const WikiLink = Extension.create<WikiLinkOptions>({
     return [
       new Plugin({
         key: new PluginKey("wikiLink"),
+        // Caret-snap: after any selection/doc change, push a collapsed
+        // cursor sitting inside a hidden bracket span onto the label edge.
+        appendTransaction(transactions, oldState, newState) {
+          const sel = newState.selection;
+          if (!sel.empty) return null;
+          const selChanged = !oldState.selection.eq(sel);
+          const docChanged = transactions.some((t) => t.docChanged);
+          if (!selChanged && !docChanged) return null;
+          const ranges = collectWikiLinkRanges(newState.doc);
+          const snapped = snapCaretOutOfBrackets(ranges, sel.from);
+          if (snapped === null) return null;
+          return newState.tr.setSelection(
+            TextSelection.create(newState.doc, snapped),
+          );
+        },
         props: {
           decorations(state) {
             return DecorationSet.create(
