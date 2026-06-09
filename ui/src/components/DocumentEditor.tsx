@@ -441,6 +441,15 @@ export function DocumentEditor({
   // NOT read-only — keep edit affordances open for them.
   const isReviewerOnly = !isOwner && myNodeRoles.length > 0 && !hasEditorRole;
 
+  // Always-editable surface ("buttery editor"): anyone who can edit drops
+  // straight into the live editor instead of view → click → edit, which
+  // remounts DocumentViewer→MarkdownEditor and loses the caret/reflows.
+  // Read-only sessions (view-only / locked / reviewer) keep the rendered view.
+  useEffect(() => {
+    if (loading || mode === "edit") return;
+    if (!isViewOnly && !isLocked && !isReviewerOnly) setMode("edit");
+  }, [loading, isViewOnly, isLocked, isReviewerOnly, mode]);
+
   // Submit-for-Review only on existing drafts with stewardship enabled.
   const canSubmitForReview =
     !isNew && stewardshipEnabled && status === "draft" && !isReviewerOnly;
