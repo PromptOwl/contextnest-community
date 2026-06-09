@@ -661,21 +661,20 @@ export function DocumentEditor({
                 {title || "Untitled"}
               </h1>
             ) : (
-              <>
-                <label className="block mb-1 text-sm font-medium">
-                  Title <span className="text-destructive">*</span>
-                </label>
-                <Input
-                  value={title}
-                  onChange={(e) => {
-                    setTitle(e.target.value);
-                    setTouched(true);
-                  }}
-                  placeholder="Document title"
-                  disabled={fieldsDisabled}
-                  data-testid="document-editor-title"
-                />
-              </>
+              // Borderless, h1-styled title input so the always-editable page
+              // reads like a document, not a form. Placeholder stands in for
+              // the old "Title *" label; Save stays gated on a non-empty title.
+              <Input
+                value={title}
+                onChange={(e) => {
+                  setTitle(e.target.value);
+                  setTouched(true);
+                }}
+                placeholder="Untitled"
+                disabled={fieldsDisabled}
+                data-testid="document-editor-title"
+                className="border-0 px-0 h-auto py-0 text-3xl font-bold leading-tight shadow-none focus-visible:ring-0 placeholder:text-muted-foreground/40"
+              />
             )}
           </div>
 
