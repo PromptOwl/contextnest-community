@@ -19,8 +19,11 @@ export const TaskCheckbox = Extension.create({
             const decorations: Decoration[] = [];
             const doc = state.doc;
 
-            doc.descendants((node, pos) => {
+            doc.descendants((node, pos, parent) => {
               if (!node.isText || !node.text) return;
+              // W3: don't decorate `[ ]`/`[x]` inside code — literal source.
+              if (parent?.type.name === "codeBlock") return;
+              if (node.marks.some((m) => m.type.name === "code")) return;
 
               const text = node.text;
               let match;
