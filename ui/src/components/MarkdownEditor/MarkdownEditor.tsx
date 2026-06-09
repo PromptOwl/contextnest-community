@@ -501,6 +501,38 @@ export const MarkdownEditor = forwardRef<
           >
             <LinkIcon className="h-3.5 w-3.5" />
           </ToolbarButton>
+
+          <Divider />
+
+          {/* Turn into — convert the selected block's type inline (Notion-style). */}
+          <ToolbarButton
+            active={editor.isActive("heading", { level: 1 })}
+            onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
+            title="Turn into Heading 1"
+          >
+            <Heading1 className="h-3.5 w-3.5" />
+          </ToolbarButton>
+          <ToolbarButton
+            active={editor.isActive("heading", { level: 2 })}
+            onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
+            title="Turn into Heading 2"
+          >
+            <Heading2 className="h-3.5 w-3.5" />
+          </ToolbarButton>
+          <ToolbarButton
+            active={editor.isActive("bulletList")}
+            onClick={() => editor.chain().focus().toggleBulletList().run()}
+            title="Turn into bullet list"
+          >
+            <List className="h-3.5 w-3.5" />
+          </ToolbarButton>
+          <ToolbarButton
+            active={editor.isActive("blockquote")}
+            onClick={() => editor.chain().focus().toggleBlockquote().run()}
+            title="Turn into quote"
+          >
+            <Quote className="h-3.5 w-3.5" />
+          </ToolbarButton>
         </BubbleMenu>
       )}
 
