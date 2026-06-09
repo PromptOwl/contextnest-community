@@ -99,12 +99,26 @@ import {
   Redo,
   Eye,
   Pencil,
+  Search,
+  ChevronUp,
+  ChevronDown,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
 import * as api from "../../lib/api";
 import { WikiLink } from "./extensions/WikiLink";
 import { TaskCheckbox } from "./extensions/TaskCheckbox";
 import { Mention } from "./extensions/Mention";
+import {
+  SearchReplace,
+  setSearch,
+  gotoMatch,
+  replaceCurrent,
+  replaceAll,
+  clearSearch,
+  type SearchState,
+} from "./extensions/SearchReplace";
 import "./editor-styles.css";
 
 export interface MarkdownEditorHandle {
@@ -178,6 +192,16 @@ export const MarkdownEditor = forwardRef<
   useEffect(() => {
     wikiResultsRef.current = wikiResults;
   }, [wikiResults]);
+
+  // In-doc find/replace (Cmd+F). Match state lives in the SearchReplace
+  // plugin; these drive the bar UI + counter. openSearchRef lets the static
+  // editor keydown handler open the bar.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [replaceText, setReplaceText] = useState("");
+  const [matchInfo, setMatchInfo] = useState({ current: 0, total: 0 });
+  const openSearchRef = useRef<() => void>(() => {});
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -219,6 +243,7 @@ export const MarkdownEditor = forwardRef<
       }),
       TaskCheckbox,
       Mention.configure({ onMentionClick }),
+      SearchReplace,
       // html:true keeps legacy HTML docs loadable; output is markdown.
       Markdown.configure({
         html: true,
@@ -281,6 +306,14 @@ export const MarkdownEditor = forwardRef<
             setWikiPopup(null);
             return true;
           }
+        }
+        if (
+          (event.ctrlKey || event.metaKey) &&
+          (event.key === "f" || event.key === "F")
+        ) {
+          event.preventDefault();
+          openSearchRef.current?.();
+          return true;
         }
         if ((event.ctrlKey || event.metaKey) && event.key === "s") {
           event.preventDefault();
@@ -418,6 +451,42 @@ export const MarkdownEditor = forwardRef<
     [editor],
   );
 
+  // Wire the keydown opener once.
+  useEffect(() => {
+    openSearchRef.current = () => setSearchOpen(true);
+  }, []);
+
+  const syncMatchInfo = (s: SearchState) =>
+    setMatchInfo({
+      current: s.results.length ? s.current + 1 : 0,
+      total: s.results.length,
+    });
+
+  // Re-run the search whenever the query (or open state) changes.
+  useEffect(() => {
+    if (!editor) return;
+    if (!searchOpen) {
+      clearSearch(editor);
+      return;
+    }
+    syncMatchInfo(setSearch(editor, searchQuery));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor, searchOpen, searchQuery]);
+
+  const searchNext = () => editor && syncMatchInfo(gotoMatch(editor, 1));
+  const searchPrev = () => editor && syncMatchInfo(gotoMatch(editor, -1));
+  const doReplace = () => {
+    if (!editor) return;
+    replaceCurrent(editor, replaceText);
+    syncMatchInfo(setSearch(editor, searchQuery));
+  };
+  const doReplaceAll = () => {
+    if (!editor) return;
+    replaceAll(editor, replaceText);
+    syncMatchInfo(setSearch(editor, searchQuery));
+  };
+  const closeSearch = () => setSearchOpen(false);
+
   const setLink = () => {
     if (!editor) return;
     const previous = editor.getAttributes("link").href ?? "";
@@ -455,6 +524,69 @@ export const MarkdownEditor = forwardRef<
             previewing={previewing}
             onTogglePreview={() => setPreviewing((p) => !p)}
           />
+        </div>
+      )}
+
+      {/* Find/replace bar (Cmd+F). Sticky under the toolbar. */}
+      {editable && searchOpen && (
+        <div className="sticky top-0 z-30 flex flex-wrap items-center gap-1 border-b bg-background/95 px-2 py-1 backdrop-blur">
+          <Search className="h-3.5 w-3.5 text-muted-foreground" />
+          <Input
+            autoFocus
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                closeSearch();
+              }
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (e.shiftKey) searchPrev();
+                else searchNext();
+              }
+            }}
+            placeholder="Find"
+            className="h-7 w-40"
+          />
+          <span className="w-14 text-center text-xs text-muted-foreground tabular-nums">
+            {matchInfo.total ? `${matchInfo.current}/${matchInfo.total}` : "0/0"}
+          </span>
+          <ToolbarButton onClick={searchPrev} title="Previous (Shift+Enter)">
+            <ChevronUp className="h-3.5 w-3.5" />
+          </ToolbarButton>
+          <ToolbarButton onClick={searchNext} title="Next (Enter)">
+            <ChevronDown className="h-3.5 w-3.5" />
+          </ToolbarButton>
+          <Input
+            value={replaceText}
+            onChange={(e) => setReplaceText(e.target.value)}
+            placeholder="Replace"
+            className="h-7 w-40"
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={doReplace}
+          >
+            Replace
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={doReplaceAll}
+          >
+            All
+          </Button>
+          <ToolbarButton onClick={closeSearch} title="Close (Esc)">
+            <X className="h-3.5 w-3.5" />
+          </ToolbarButton>
         </div>
       )}
 
