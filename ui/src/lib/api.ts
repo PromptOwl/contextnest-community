@@ -202,6 +202,7 @@ export async function resetUserPassword(userId: string, password?: string) {
   return request<{
     ok: boolean;
     email: string;
+    keys_revoked?: boolean;
     temporary_password?: string;
   }>(`/auth/admin/reset-password/${encodeURIComponent(userId)}`, {
     method: "POST",

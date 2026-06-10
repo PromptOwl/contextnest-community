@@ -653,10 +653,17 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   const newPassword = supplied ?? generated!;
 
   const newHash = await hashPassword(newPassword);
-  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
-    newHash,
-    target.id,
-  );
+  // Atomically set the new hash and REVOKE the user's API keys — a reset
+  // covers the compromised-account case, so a stolen key must stop working
+  // too (the user re-issues a key after signing in). Sessions are cleared
+  // separately below.
+  db.transaction(() => {
+    db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
+      newHash,
+      target.id,
+    );
+    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(target.id);
+  })();
   deleteAllSessionsForUser(target.id);
 
   trackEvent("admin.reset_password", { adminId: callerId, userId: target.id });
@@ -664,6 +671,7 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   return c.json({
     ok: true,
     email: target.email,
+    keys_revoked: true,
     // Plaintext returned ONCE, only when the server generated it.
     temporary_password: generated ?? undefined,
   });

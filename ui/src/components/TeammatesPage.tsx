@@ -280,7 +280,8 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
             <p className="text-xs text-muted-foreground mb-3">
               Share this with <strong>{resetPw.email}</strong> directly — no
               email is sent. They sign in with it, then change it from their
-              account. It won't be shown again.
+              account. It won't be shown again. Their existing API keys were
+              revoked — they'll generate a new one after signing in.
             </p>
             <div className="flex items-center gap-2">
               <code className="flex-1 bg-muted border rounded px-2 py-1.5 text-sm font-mono break-all">
