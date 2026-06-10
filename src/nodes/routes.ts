@@ -189,6 +189,51 @@ nodeRoutes.get("/:nodeId{.+?}/reviews", async (c) => {
 });
 
 // GET /nests/:nestId/nodes/:nodeId{.+} — read a single node (catch-all, must be LAST)
+// POST /nests/:nestId/nodes/:nodeId/revert — restore an old version by writing
+// its reconstructed content as a NEW version (history is append-only; nothing
+// is lost). Read-gated; updateNode applies the write. POST suffix route — no
+// POST catch-all to swallow it.
+nodeRoutes.post("/:nodeId{.+?}/revert", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const { versions: versionManager } = engineCache.get(nestId);
+
+  const userId = c.get("userId");
+  const userEmail = resolveCallerEmail(userId);
+  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
+
+  const body = await c.req
+    .json<{ targetVersion?: number }>()
+    .catch(() => ({}) as { targetVersion?: number });
+  const targetVersion = Number(body.targetVersion);
+  if (!Number.isInteger(targetVersion) || targetVersion < 1) {
+    throw new ValidationError("targetVersion (a positive integer) is required");
+  }
+
+  let raw: string;
+  try {
+    raw = await versionManager.reconstructVersion(nodeId, targetVersion);
+  } catch {
+    throw new NotFoundError(
+      `Version ${targetVersion} not found for ${nodeId}`,
+    );
+  }
+  const content = bodyOnly(nodeId, raw);
+  const { node, version } = await updateNode(
+    nestId,
+    nodeId,
+    { content, changeNote: `Reverted to version ${targetVersion}` },
+    userEmail,
+  );
+  trackEvent("node.revert", { nestId, nodeId, targetVersion });
+  return c.json({ ok: true, version, node: toNodeResponse(node) });
+});
+
 nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;

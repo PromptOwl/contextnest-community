@@ -486,6 +486,19 @@ export async function rejectNode(
   });
 }
 
+// Steward/editor reverts a node to an earlier version (writes its content as
+// a new version; history is preserved).
+export async function revertToVersion(
+  nestId: string,
+  nodeId: string,
+  targetVersion: number,
+) {
+  return request<{ ok: boolean; version: number }>(
+    `/nests/${nestId}/nodes/${nodeId}/revert`,
+    { method: "POST", body: JSON.stringify({ targetVersion }) },
+  );
+}
+
 export async function getNodeVersions(nestId: string, nodeId: string) {
   return request<{
     versions: any[];

@@ -1158,6 +1158,17 @@ export function NestView({
               versions={versionData.versions}
               currentVersion={versionData.currentVersion}
               approvedVersion={versionData.approvedVersion}
+              onRestore={async (v) => {
+                if (!versionNode) return;
+                try {
+                  await api.revertToVersion(nestId, versionNode.id, v);
+                  toast.success(`Reverted to version ${v}`);
+                  await openVersions(versionNode);
+                  fetchData();
+                } catch (e: any) {
+                  toast.error(e?.message || "Revert failed");
+                }
+              }}
             />
           </DialogContent>
         </Dialog>
