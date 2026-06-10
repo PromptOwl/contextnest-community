@@ -387,6 +387,33 @@ export async function getOverview(nestId: string) {
   return request(`/nests/${nestId}/overview`);
 }
 
+/** Nest markdown export — returns raw `text/markdown` (NOT JSON), so it
+ *  bypasses the JSON-parsing `request` helper. Backs the UI "Export" action;
+ *  agents fetch the same URL directly. */
+export async function exportNestMarkdown(
+  nestId: string,
+  opts: { selector?: string; maxTokens?: number } = {},
+): Promise<string> {
+  const params = new URLSearchParams({ format: "markdown" });
+  if (opts.selector) params.set("selector", opts.selector);
+  if (opts.maxTokens) params.set("max_tokens", String(opts.maxTokens));
+  const res = await fetch(
+    `${API_BASE}/nests/${nestId}/export?${params.toString()}`,
+    { credentials: "include" },
+  );
+  if (!res.ok) {
+    const body = await res.text();
+    let msg = `Export failed (${res.status})`;
+    try {
+      msg = (JSON.parse(body) as { error?: string }).error || msg;
+    } catch {
+      // non-JSON error body — keep the status message
+    }
+    throw new Error(msg);
+  }
+  return res.text();
+}
+
 export async function listTags(nestId: string): Promise<string[]> {
   const res = await request<{ tags?: Record<string, number> }>(
     `/nests/${nestId}/overview`,

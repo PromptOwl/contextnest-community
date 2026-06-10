@@ -41,6 +41,7 @@ import {
   Loader2,
   RefreshCw,
   ShieldAlert,
+  Download,
 } from "lucide-react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
@@ -66,6 +67,9 @@ export function ConnectModal({
       ? window.location.origin
       : "http://localhost:3838";
   const mcpUrl = `${serverUrl}/nests/${nestId}/mcp`;
+  const exportUrl = `${serverUrl}/nests/${nestId}/export?format=markdown`;
+
+  const [downloading, setDownloading] = useState(false);
 
   const [hasExistingKey, setHasExistingKey] = useState<boolean | null>(null);
   const [existingPrefix, setExistingPrefix] = useState<string | null>(null);
@@ -170,6 +174,30 @@ export function ConnectModal({
     const t = setTimeout(() => setJustActed(null), 6000);
     return () => clearTimeout(t);
   }, [justActed]);
+
+  // Download the whole nest as a single markdown file (approved content only,
+  // server-side). Same URL agents fetch — surfaced here as a one-click action.
+  const downloadExport = async () => {
+    setError(null);
+    setDownloading(true);
+    try {
+      const md = await api.exportNestMarkdown(nestId);
+      const url = URL.createObjectURL(
+        new Blob([md], { type: "text/markdown" }),
+      );
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${slugify(nestName)}.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setError(err?.message || "Export failed");
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const closeReveal = () => {
     // Drop plaintext from memory. Once gone, only Rotate can mint a new
@@ -492,6 +520,38 @@ export function ConnectModal({
                 </div>
               </TabsContent>
             </Tabs>
+          </div>
+
+          {/* Export — markdown egress. The URL is what agents fetch; the
+              button downloads it as a file. Approved content only (server-side). */}
+          <div className="border-t pt-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm">
+                <Download className="h-3.5 w-3.5" />
+                <span className="font-medium">Export as markdown</span>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={downloadExport}
+                disabled={downloading}
+                aria-label="Download this nest as a single markdown file"
+              >
+                {downloading ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <>
+                    <Download className="h-3.5 w-3.5 mr-1" />
+                    Download .md
+                  </>
+                )}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Frontmatter + body, one file. Approved versions only. Agents can
+              fetch this URL directly.
+            </p>
+            <Snippet label="Export URL (text/markdown)" value={exportUrl} />
           </div>
 
           <div className="border-t pt-3">

@@ -255,6 +255,86 @@ tags:
     expect(status).toBe(200);
     expect(data.requests.length).toBe(0);
   });
+
+  // Export is APPROVED-ONLY for every caller — owner AND public. We diverge
+  // `nodes/api-rate-limits` (approved v2 = "100 req/min") with secret draft
+  // bytes on disk, then assert export serves the approved body to everyone,
+  // while the normal node READ still shows the owner their working draft.
+  it("nest export serves approved body (not draft) to every caller", async () => {
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/visibility`,
+      { visibility: "public" },
+      admin.apiKey,
+    );
+
+    // Overwrite the working copy directly — models a draft/external edit that
+    // never got approved. approved_version stays pinned at v2.
+    const docFile = join(
+      env.dataDir,
+      "nests",
+      nestId,
+      "nodes",
+      "api-rate-limits.md",
+    );
+    writeFileSync(
+      docFile,
+      `---\ntitle: API Rate Limits\nid: nodes/api-rate-limits\ntags: [architecture]\n---\nSECRET_DRAFT_LEAK 999 req/min`,
+    );
+
+    // Sanity: the divergence is real — the owner's normal node READ shows the
+    // working draft (export must still hide it).
+    const ownerRead = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/api-rate-limits`,
+      undefined,
+      admin.apiKey,
+    );
+    expect(ownerRead.data.node.content).toContain("SECRET_DRAFT_LEAK");
+
+    // Owner export → approved body only, draft hidden.
+    const ownerExport = await app.request(
+      `/nests/${nestId}/export?format=markdown`,
+      { headers: { Authorization: `Bearer ${admin.apiKey}` } },
+    );
+    const ownerText = await ownerExport.text();
+    expect(ownerText).toContain("100 req/min");
+    expect(ownerText).not.toContain("SECRET_DRAFT_LEAK");
+
+    // Anonymous (public reader) export → same approved-only result.
+    const pubExport = await app.request(
+      `/nests/${nestId}/export?format=markdown`,
+    );
+    expect(pubExport.status).toBe(200);
+    const pubText = await pubExport.text();
+    expect(pubText).toContain("100 req/min");
+    expect(pubText).not.toContain("SECRET_DRAFT_LEAK");
+  });
+
+  // A never-approved draft node must be absent from export for everyone.
+  it("nest export omits never-approved draft nodes", async () => {
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      {
+        title: "Unapproved Spec",
+        content: "# Spec\n\nDRAFT_ONLY_NEVER_APPROVED",
+        tags: ["architecture"],
+      },
+      dev.apiKey,
+    );
+
+    const res = await app.request(
+      `/nests/${nestId}/export?format=markdown`,
+      { headers: { Authorization: `Bearer ${admin.apiKey}` } },
+    );
+    const text = await res.text();
+    expect(text).not.toContain("DRAFT_ONLY_NEVER_APPROVED");
+    expect(text).not.toContain("Unapproved Spec");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

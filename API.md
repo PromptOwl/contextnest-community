@@ -232,6 +232,8 @@ Response (201): `{ "node": { ... }, "stewards": [...] }`.
 
 ### GET `/nests/:nestId/nodes/:nodeId`
 Full node content. 403 if no steward access (when stewardship on).
+Add `?format=markdown` to receive `text/markdown` (frontmatter + body) instead
+of JSON — see [§8 export](#get-nestsnestidexportformatmarkdown--llm-pointed-plain-text-view).
 
 ### PATCH `/nests/:nestId/nodes/:nodeId`
 Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
@@ -441,11 +443,108 @@ Full-text search.
 ```
 
 ### POST `/nests/:nestId/context`
-Body:
+One-call context retrieval for app/agent flows. Returns markdown ready to
+prepend to an LLM prompt, plus a trace + node manifest. **Requires a license**
+(it's a `POST`).
+
+Body (give `prompt` OR `selector`; everything else optional):
 ```json
-{ "node_ids": ["nodes/foo", "nodes/bar"], "include_links": true }
+{
+  "prompt": "how does auth work",
+  "selector": "#auth",
+  "max_tokens": 4000,
+  "hops": 2,
+  "include_drafts": false
+}
 ```
-Bundles requested nodes + their backlinks. Used by MCP / agent flows.
+- `prompt` — natural language, compiled to a selector server-side.
+- `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`.
+- `max_tokens` — budget, floored at 50, default 4000. Nodes past the budget are dropped (`trace.truncated_by_budget`).
+- 400 `prompt or selector is required` if both missing.
+
+Response (200):
+```json
+{
+  "context": "# Auth Overview\n\n_tags: #auth #security_\n\n# Auth\n\n...",
+  "nodes": [{ "id": "nodes/auth-overview", "title": "Auth Overview", "tags": ["#auth"], "type": "document" }],
+  "trace": {
+    "selector_used": "#auth",
+    "from_prompt": "how does auth work",
+    "included": 1,
+    "permission_filtered": 0,
+    "truncated_by_budget": 0,
+    "approx_tokens": 24,
+    "max_tokens": 4000
+  }
+}
+```
+
+```bash
+curl -X POST 'http://localhost:3838/nests/<nestId>/context' \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer cnst_...' \
+  -d '{"prompt":"how does auth work","max_tokens":4000}'
+```
+Permission gating matches `/export` (public readers only see approved bodies).
+
+### GET `/nests/:nestId/export?format=markdown` — LLM-pointed plain-text view
+Stable URL an agent can fetch to get **`text/markdown`** (not JSON): every
+accessible node serialized as YAML frontmatter + body, joined with `---`
+separators. A `GET`, so it works on public nests without a license/credentials.
+
+**Approved-only, for every caller.** Export never emits unapproved drafts —
+not even for the owner. On a governed (stewardship-on) nest, each node's body
+is its **approved version**, and nodes with no approved version yet are
+omitted entirely. On an ungoverned nest there's no draft concept, so the
+current body is exported.
+
+Query params:
+- `format=markdown` — **required** (else 400 `format=markdown is required`).
+- `selector=<grammar>` — optional, narrows the set (e.g. `#auth`).
+- `max_tokens=<n>` — optional budget; full set by default.
+
+Response (`text/markdown; charset=utf-8`):
+```markdown
+---
+title: "Auth Overview"
+tags: ["#auth", "#security"]
+status: "published"
+id: "nodes/auth-overview"
+---
+# Auth
+
+We use device auth + email/password fallback.
+
+---
+
+---
+title: "Rate Limits"
+tags: ["#api"]
+status: "published"
+id: "nodes/rate-limits"
+---
+# Limits
+
+100 req/min per key.
+```
+
+```bash
+# whole nest
+curl 'http://localhost:3838/nests/<nestId>/export?format=markdown'
+
+# narrow by selector
+curl 'http://localhost:3838/nests/<nestId>/export?format=markdown&selector=%23auth'
+
+# cap output size
+curl 'http://localhost:3838/nests/<nestId>/export?format=markdown&max_tokens=2000'
+```
+
+Single node, same shape — add `?format=markdown` to the node read:
+```bash
+curl 'http://localhost:3838/nests/<nestId>/nodes/nodes/auth-overview?format=markdown'
+```
+Public readers receive the **approved** version body, never an unapproved
+working-copy draft (same gate as `/context`).
 
 ### POST `/nests/:nestId/query`
 Graph query (Cypher-ish).

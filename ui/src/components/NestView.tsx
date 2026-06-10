@@ -468,7 +468,8 @@ export function NestView({
             on wider screens keeps the spacing visually intentional rather
             than awkwardly clipped at the right edge. */}
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:justify-end">
-          {/* Connect stays for view-only; write/admin gated below. */}
+          {/* Connect stays for view-only; write/admin gated below.
+              Markdown export lives inside this dialog (data egress). */}
           <Button variant="outline" onClick={() => setShowConnect(true)}>
             <Link2 className="h-4 w-4 mr-2" />
             Connect
