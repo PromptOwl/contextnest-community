@@ -110,14 +110,24 @@ Returns all users + key counts. **Sorted: admins first, then `created_at DESC`.*
 ```
 `is_invited = 1` → user was placeholder-created, has not yet claimed the account.
 
+### POST `/auth/admin/reset-password/:userId` (admin only)
+In-platform password reset — **no email server**. Provide a password, or omit it to have one generated and returned **once** for the admin to share.
+```json
+{ "password": "optional, min 8 chars" }
+```
+Response: `{ "ok": true, "email": "...", "keys_revoked": true, "temporary_password": "<only when generated>" }`. Also revokes the user's API keys + sessions (covers the compromised-account case). The hash is never returned.
+
+### DELETE `/auth/users/:userId` (admin only)
+Removes a user — revokes api_keys, sessions, steward rows, and collaborator grants, then deletes the account. `400` if you target yourself; `409` if the user still owns nests (transfer/delete them first). Authored docs on disk are unaffected.
+
 ### POST `/auth/promptowl`
-SSO via PromptOwl. Used by web UI; not typically called from Postman.
+SSO via PromptOwl. Used by web UI; not typically called from Postman. Subject to `PROMPTOWL_SIGN_IN_GATE` — when `admin-only`/`disabled`, non-admins (or everyone) get `403` here.
 
 ### GET `/auth/admin-status`
 Returns whether the caller is the license admin + license metadata.
 
 ### POST `/auth/device` / GET `/auth/device/poll`
-Device-flow login.
+Device-flow login. Also gated by `PROMPTOWL_SIGN_IN_GATE`.
 
 ---
 
@@ -234,6 +244,13 @@ Response (201): `{ "node": { ... }, "stewards": [...] }`.
 Full node content. 403 if no steward access (when stewardship on).
 Add `?format=markdown` to receive `text/markdown` (frontmatter + body) instead
 of JSON — see [§8 export](#get-nestsnestidexportformatmarkdown--llm-pointed-plain-text-view).
+
+### POST `/nests/:nestId/nodes/:nodeId/revert`
+Restore an earlier version by writing its content as a **new** version (history is preserved).
+```json
+{ "targetVersion": 3 }
+```
+Response: `{ "ok": true, "version": <new>, "node": { ... } }`. `400` without a valid `targetVersion`; `404` if that version doesn't exist.
 
 ### PATCH `/nests/:nestId/nodes/:nodeId`
 Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
