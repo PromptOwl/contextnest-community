@@ -6,9 +6,10 @@ import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, getNest, type LicenseStatus } from "./lib/api";
+import { getLicenseStatus, getNest, changePassword, type LicenseStatus } from "./lib/api";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -102,6 +103,7 @@ export default function App() {
   // screen mounts when authenticated flips false in key mode).
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
+  const [showChangePassword, setShowChangePassword] = useState(false);
 
   const requestLogout = useCallback(() => setLogoutConfirm(true), []);
 
@@ -263,6 +265,10 @@ export default function App() {
         </DialogContent>
       </Dialog>
 
+      <ChangePasswordDialog
+        open={showChangePassword}
+        onClose={() => setShowChangePassword(false)}
+      />
     </>
   );
 
@@ -318,6 +324,7 @@ export default function App() {
                 me={adminStatus.me}
                 isAdmin={isAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
+                onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
               />
             ) : (
@@ -529,10 +536,17 @@ interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
   onTeammates: () => void;
+  onChangePassword: () => void;
   onLogout: () => void;
 }
 
-function UserMenu({ me, isAdmin, onTeammates, onLogout }: UserMenuProps) {
+function UserMenu({
+  me,
+  isAdmin,
+  onTeammates,
+  onChangePassword,
+  onLogout,
+}: UserMenuProps) {
   const displayName = me.name?.trim() || me.email;
   const initial = displayName.charAt(0);
 
@@ -588,6 +602,15 @@ function UserMenu({ me, isAdmin, onTeammates, onLogout }: UserMenuProps) {
         )}
         <DropdownMenuSeparator />
         <DropdownMenuItem
+          onSelect={onChangePassword}
+          className="cursor-pointer"
+          data-testid="user-menu-change-password"
+        >
+          <KeyRound className="h-3.5 w-3.5 mr-2" />
+          Change password
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
           onSelect={onLogout}
           className="cursor-pointer text-red-600 focus:text-red-700"
           data-testid="user-menu-logout"
@@ -597,5 +620,119 @@ function UserMenu({ me, isAdmin, onTeammates, onLogout }: UserMenuProps) {
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+// Self-service password change — usable by anyone signed in, including a user
+// who logged in with an admin-issued temporary password. Calls /auth/password,
+// which verifies the current password and invalidates other sessions.
+function ChangePasswordDialog({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const reset = () => {
+    setCurrent("");
+    setNext("");
+    setConfirm("");
+    setError(null);
+  };
+
+  const submit = async () => {
+    setError(null);
+    if (next.length < 8) {
+      setError("New password must be at least 8 characters.");
+      return;
+    }
+    if (next !== confirm) {
+      setError("New passwords don't match.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await changePassword(current, next);
+      toast.success("Password changed. Your other sessions were signed out.");
+      reset();
+      onClose();
+    } catch (e: any) {
+      setError(e?.message || "Could not change password.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o && !saving) {
+          reset();
+          onClose();
+        }
+      }}
+    >
+      <DialogContent className="sm:max-w-[400px]">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <KeyRound className="h-4 w-4 text-muted-foreground" />
+            Change password
+          </DialogTitle>
+          <DialogDescription>
+            If an admin gave you a temporary password, set your own here. This
+            signs out your other sessions.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 py-1">
+          <Input
+            type="password"
+            placeholder="Current password"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            autoComplete="current-password"
+          />
+          <Input
+            type="password"
+            placeholder="New password (min 8 characters)"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            autoComplete="new-password"
+          />
+          <Input
+            type="password"
+            placeholder="Confirm new password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            autoComplete="new-password"
+          />
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+        <DialogFooter className="gap-2">
+          <Button
+            variant="outline"
+            onClick={() => {
+              reset();
+              onClose();
+            }}
+            disabled={saving}
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={submit}
+            disabled={saving || !current || !next || !confirm}
+          >
+            {saving ? "Saving..." : "Change password"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

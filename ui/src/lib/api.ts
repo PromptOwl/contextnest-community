@@ -196,6 +196,15 @@ export async function inviteTeammate(email: string, label?: string) {
   });
 }
 
+// Logged-in user changes their own password (e.g., after an admin reset
+// handed them a temporary one). Invalidates other sessions server-side.
+export async function changePassword(current: string, next: string) {
+  return request<{ ok: boolean }>("/auth/password", {
+    method: "POST",
+    body: JSON.stringify({ current, next }),
+  });
+}
+
 // Admin removes a user entirely — revokes all access and deletes them.
 // Blocked server-side if they own nests or are the caller.
 export async function removeUser(userId: string) {
