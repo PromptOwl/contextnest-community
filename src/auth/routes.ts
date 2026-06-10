@@ -677,6 +677,66 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   });
 });
 
+// DELETE /auth/users/:userId — license-admin removes a user entirely
+// (in-platform, no email). Revokes ALL access — API keys, sessions, steward
+// rows, collaborator grants — then deletes the user. Blocked if the target is
+// the caller, or still OWNS nests (transfer/delete those first) to avoid
+// orphaning nest data. Authored docs live on disk under the nest and are
+// unaffected.
+authRoutes.delete("/users/:userId", async (c) => {
+  const callerId = resolveCallerUserId(c);
+  if (!callerId) {
+    return c.json({ error: "Authentication required." }, 401);
+  }
+  if (!isLicenseAdminUserId(callerId)) {
+    return c.json(
+      { error: "Only the license-admin user can remove users." },
+      403,
+    );
+  }
+  const targetId = c.req.param("userId");
+  if (targetId === callerId) {
+    return c.json({ error: "You can't remove your own admin account." }, 400);
+  }
+
+  const db = getDb();
+  const target = db
+    .prepare("SELECT id, email FROM users WHERE id = ?")
+    .get(targetId) as { id: string; email: string } | undefined;
+  if (!target) return c.json({ error: "User not found" }, 404);
+
+  const ownedNests = (
+    db
+      .prepare("SELECT COUNT(*) AS c FROM nests WHERE user_id = ?")
+      .get(target.id) as { c: number }
+  ).c;
+  if (ownedNests > 0) {
+    return c.json(
+      {
+        error: `This user owns ${ownedNests} nest${ownedNests === 1 ? "" : "s"}. Transfer or delete them before removing the user.`,
+        owned_nests: ownedNests,
+      },
+      409,
+    );
+  }
+
+  db.transaction(() => {
+    db.prepare(
+      "DELETE FROM stewards WHERE user_id = ? OR lower(user_email) = lower(?)",
+    ).run(target.id, target.email);
+    db.prepare("DELETE FROM nest_collaborators WHERE user_id = ?").run(
+      target.id,
+    );
+    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(target.id);
+    db.prepare("DELETE FROM users WHERE id = ?").run(target.id);
+  })();
+  deleteAllSessionsForUser(target.id);
+
+  trackEvent("admin.remove_user", { adminId: callerId, userId: target.id });
+
+  return c.json({ ok: true, email: target.email });
+});
+
 // POST /auth/invite — admin-only, create a user + API key for them by email
 authRoutes.post("/invite", async (c) => {
   const body = await c.req.json<{ email?: string; label?: string }>();

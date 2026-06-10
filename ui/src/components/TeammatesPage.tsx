@@ -188,6 +188,30 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                   >
                     Reset password
                   </Button>
+                  {!t.is_admin && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                      onClick={async () => {
+                        if (
+                          !window.confirm(
+                            `Remove ${t.email}? This revokes all their access (API keys, sessions, steward + collaborator roles) and deletes the account. This cannot be undone.`,
+                          )
+                        )
+                          return;
+                        try {
+                          await api.removeUser(t.id);
+                          await fetchTeammates();
+                        } catch (e: any) {
+                          setError(e.message);
+                        }
+                      }}
+                      title="Remove this user and revoke all access"
+                    >
+                      Remove
+                    </Button>
+                  )}
                 </div>
               ))}
             </div>

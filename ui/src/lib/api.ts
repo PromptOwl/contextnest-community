@@ -196,6 +196,15 @@ export async function inviteTeammate(email: string, label?: string) {
   });
 }
 
+// Admin removes a user entirely — revokes all access and deletes them.
+// Blocked server-side if they own nests or are the caller.
+export async function removeUser(userId: string) {
+  return request<{ ok: boolean; email: string }>(
+    `/auth/users/${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
+  );
+}
+
 // Admin resets another user's password in-platform (no email). Omit
 // `password` to have the server generate a temporary one, returned once.
 export async function resetUserPassword(userId: string, password?: string) {
