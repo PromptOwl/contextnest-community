@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
-import { ValidationError, NotFoundError } from "../shared/errors.js";
+import { ValidationError, NotFoundError, LockedError } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
@@ -14,6 +14,7 @@ import {
 } from "../governance/access-guard.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { isPublicReader } from "../shared/access.js";
+import { nodeToMarkdown, isMarkdownFormat } from "./markdown-export.js";
 import {
   scanDocumentForDrift,
   getPendingChange,
@@ -34,21 +35,13 @@ export const nodeRoutes = new Hono<AuthEnv>();
 // fetch a stable, human-readable representation. Built from the fully-resolved
 // node response so it inherits the same permission + public-reader handling.
 function nodeAsMarkdown(response: any, nodeId: string): string {
-  const tags = (response.tags ?? []) as string[];
-  return (
-    [
-      "---",
-      `title: ${JSON.stringify(response.title ?? "")}`,
-      `tags: [${tags.map((t) => JSON.stringify(t)).join(", ")}]`,
-      `status: ${response.status ?? ""}`,
-      `id: ${JSON.stringify(nodeId)}`,
-      "---",
-      "",
-    ].join("\n") + (response.content ?? "")
-  );
-}
-function isMarkdownFormat(c: { req: { query: (k: string) => string | undefined } }): boolean {
-  return c.req.query("format") === "markdown";
+  return nodeToMarkdown({
+    id: nodeId,
+    title: response.title,
+    tags: response.tags,
+    status: response.status,
+    body: response.content,
+  });
 }
 
 // GET /nests/:nestId/nodes
@@ -193,7 +186,7 @@ nodeRoutes.get("/:nodeId{.+?}/reviews", async (c) => {
 // its reconstructed content as a NEW version (history is append-only; nothing
 // is lost). Read-gated; updateNode applies the write. POST suffix route — no
 // POST catch-all to swallow it.
-nodeRoutes.post("/:nodeId{.+?}/revert", async (c) => {
+nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const { versions: versionManager } = engineCache.get(nestId);
@@ -227,7 +220,7 @@ nodeRoutes.post("/:nodeId{.+?}/revert", async (c) => {
   const { node, version } = await updateNode(
     nestId,
     nodeId,
-    { content, changeNote: `Reverted to version ${targetVersion}` },
+    { content, changeNote: `Restored from version ${targetVersion}` },
     userEmail,
   );
   trackEvent("node.revert", { nestId, nodeId, targetVersion });
@@ -389,6 +382,14 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const { storage } = engineCache.get(nestId);
+
+  // Stewardship lock: a node under open review can't be deleted out from
+  // under the reviewer (423). Mirrors the edit lock in updateNode.
+  if (isStewardshipEnabled(nestId) && reviews.getPendingReview(nestId, nodeId)) {
+    throw new LockedError(
+      "This document is awaiting steward review and is locked. Approve or reject the pending review before deleting.",
+    );
+  }
 
   try {
     await storage.deleteDocument(nodeId);

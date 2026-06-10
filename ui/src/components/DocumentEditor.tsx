@@ -265,13 +265,15 @@ export function DocumentEditor({
     loadNode();
   }, [isNew, loadNode]);
 
-  // A pending-review doc stays EDITABLE — the server withdraws the review
-  // and returns it to draft on the next save (nodes/service updateNode). So
-  // we don't lock the UI; we just warn that editing withdraws the review.
-  const isPendingReview = status === "pending_review";
+  // A pending-review doc is LOCKED: the server rejects edits/deletes with
+  // 423 while a review is open (nodes/routes). Plain drafts stay editable —
+  // only status==='pending_review' locks, so the editor flows normally until
+  // a review is actually requested.
+  const isLocked = status === "pending_review";
 
-  // Fields read-only outside edit mode; "Start Editing" or dblclick opts in.
-  const fieldsDisabled = mode !== "edit";
+  // Fields read-only when locked or outside edit mode; "Start Editing" or
+  // dblclick opts in (drafts only — a locked doc can't enter edit).
+  const fieldsDisabled = isLocked || mode !== "edit";
 
   const canSave = useMemo(
     () =>
@@ -491,6 +493,13 @@ export function DocumentEditor({
     if (!isViewOnly && !isLocked && !isReviewerOnly) setMode("edit");
   }, [loading, isViewOnly, isLocked, isReviewerOnly, mode]);
 
+  // A doc can become locked while already in edit mode (e.g. the user just
+  // submitted it for review). Kick back to read-only view so the editor
+  // surface, Save button and dblclick-to-edit are all disabled.
+  useEffect(() => {
+    if (isLocked && mode === "edit") setMode("view");
+  }, [isLocked, mode]);
+
   // Submit-for-Review only on existing drafts with stewardship enabled.
   const canSubmitForReview =
     !isNew && stewardshipEnabled && status === "draft" && !isReviewerOnly;
@@ -629,7 +638,7 @@ export function DocumentEditor({
               onReject={handleReject}
             />
           )}
-          {!isViewOnly && !isReviewerOnly && (
+          {!isViewOnly && !isReviewerOnly && !isLocked && (
             mode === "edit" ? (
               <Button
                 onClick={handleSave}
@@ -682,13 +691,12 @@ export function DocumentEditor({
             />
           )}
 
-          {isPendingReview && (
+          {isLocked && (
             <Alert>
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>
-                This document is awaiting steward review. You can still edit
-                it — saving will withdraw the pending review and return it to
-                draft.
+                This document is locked while it awaits steward review. Editing
+                is disabled until the review is approved or rejected.
               </AlertDescription>
             </Alert>
           )}
@@ -793,7 +801,7 @@ export function DocumentEditor({
           {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
           <div
             onClick={() => {
-              if (isViewOnly) return;
+              if (isViewOnly || isLocked) return;
               if (mode === "view" && !isReviewerOnly) {
                 setMode("edit");
               }
@@ -824,7 +832,7 @@ export function DocumentEditor({
                 onSave={handleSave}
                 onBlur={flushAutosave}
                 nestId={nestId}
-                editable={mode === "edit"}
+                editable={!fieldsDisabled}
                 onRequestDocLink={() => setShowDocPicker(true)}
                 onWikiLinkClick={handleWikiLinkClick}
                 placeholder="Start writing..."

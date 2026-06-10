@@ -380,17 +380,24 @@ export function createApp(): Hono<AuthEnv> {
       required = "write";
     }
 
-    // Editor steward bypass for nest-read callers: PATCH/DELETE allowed
-    // when an editor row covers the node; POST allowed only for
-    // nest-scope editors.
+    // Editor steward bypass for nest-read callers: PATCH/DELETE (and the
+    // POST .../revert action) allowed when an editor row covers the node;
+    // POST to create a node allowed only for nest-scope editors.
+    const isNodeRevert =
+      c.req.method === "POST" &&
+      parts.length >= 4 &&
+      parts[parts.length - 1] === "revert";
     let stewardEditorBypass = false;
     if (required === "write" && permission === "read" && parts[1] === "nodes") {
       const userEmail = resolveCallerEmail(userId);
       if (
         parts.length >= 3 &&
-        (c.req.method === "PATCH" || c.req.method === "DELETE")
+        (c.req.method === "PATCH" || c.req.method === "DELETE" || isNodeRevert)
       ) {
-        const rawNodeId = parts.slice(2).join("/");
+        // Revert path carries a trailing /revert segment — drop it to
+        // recover the node id; PATCH/DELETE take the id as-is.
+        const idParts = isNodeRevert ? parts.slice(2, -1) : parts.slice(2);
+        const rawNodeId = idParts.join("/");
         let nodeId = rawNodeId;
         try {
           nodeId = decodeURIComponent(rawNodeId);

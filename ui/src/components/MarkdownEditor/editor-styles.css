@@ -218,6 +218,18 @@
   color: hsl(var(--foreground));
 }
 
+/* Read-only surfaces (review modal, view mode) set contenteditable="false"
+   on the ProseMirror root. There the language picker is just a label — drop
+   the dropdown chrome and disable interaction; the Copy button still works. */
+.ProseMirror[contenteditable="false"] .cn-code-lang {
+  appearance: none;
+  -webkit-appearance: none;
+  border: none;
+  background: transparent;
+  padding: 0;
+  pointer-events: none;
+}
+
 .cn-code-block pre {
   margin: 0;
   border: 1px solid hsl(var(--border));

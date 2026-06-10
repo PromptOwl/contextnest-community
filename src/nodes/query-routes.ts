@@ -11,6 +11,7 @@ import {
   filterAccessible,
 } from "../governance/access-guard.js";
 import { compilePrompt } from "./prompt-compiler.js";
+import { nodesToMarkdown, isMarkdownFormat } from "./markdown-export.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
@@ -276,6 +277,49 @@ queryRoutes.get("/context", async (c) => {
   const { storage } = engineCache.get(c.req.param("nestId")!);
   const content = await storage.readContextMd();
   return c.json({ content: content || "" });
+});
+
+// GET /nests/:nestId/export?format=markdown[&selector=]
+// LLM-pointed plain-text view: every accessible node serialized as
+// frontmatter + body, concatenated with `---` separators. Optional
+// `selector` narrows the set via the engine selector grammar. Reuses the
+// same permission gate as /context (filterAccessible).
+queryRoutes.get("/export", async (c) => {
+  if (!isMarkdownFormat(c)) {
+    throw new ValidationError("format=markdown is required");
+  }
+
+  const nestId = c.req.param("nestId")!;
+  const { storage, query: queryEngine } = engineCache.get(nestId);
+  const selector = c.req.query("selector")?.trim() || null;
+
+  let documents: ContextNode[];
+  if (selector) {
+    const result = await queryEngine.query(selector, { hops: 2, full: true });
+    documents = result.documents;
+  } else {
+    documents = await storage.discoverDocuments();
+  }
+
+  const userId = c.get("userId");
+  const userEmail = resolveCallerEmail(userId);
+  const accessible = filterAccessible(nestId, userId, userEmail, documents);
+
+  const markdown = nodesToMarkdown(
+    accessible.map((n) => ({
+      id: n.id,
+      title: n.frontmatter.title,
+      tags: (n.frontmatter.tags || []) as string[],
+      status: n.frontmatter.status,
+      body: n.body,
+    })),
+  );
+
+  trackEvent("nest.export", { nestId, count: accessible.length, selector });
+
+  return c.body(markdown, 200, {
+    "Content-Type": "text/markdown; charset=utf-8",
+  });
 });
 
 // POST /nests/:nestId/publish — bulk publish

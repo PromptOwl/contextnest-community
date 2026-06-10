@@ -57,7 +57,8 @@ export const config = {
    *                  uses email/password. Admin reaches it via the login
    *                  page's admin route (?admin=1).
    *   "disabled"   — nobody may sign in with PromptOwl.
-   * Enforced server-side in POST /auth/promptowl (the identity point).
+   * Enforced server-side at the device entry points (POST /auth/device,
+   * GET /auth/device/poll) and the identity point (POST /auth/promptowl).
    */
   get PROMPTOWL_SIGN_IN_GATE(): "open" | "admin-only" | "disabled" {
     const v = (process.env.PROMPTOWL_SIGN_IN_GATE || "open")

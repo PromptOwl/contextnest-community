@@ -33,6 +33,23 @@ import { NodeRange } from "@tiptap/extension-node-range";
 import { Markdown, type MarkdownStorage } from "tiptap-markdown";
 
 // tiptap-markdown's storage isn't in TipTap's Storage type; cast.
+// TextStyle/Color have no markdown representation. Without an explicit
+// (empty) mark serializer, tiptap-markdown's html:true fallback writes raw
+// <span style> into the stored .md — breaking the markdown-only invariant
+// and showing as literal tags in the react-markdown viewer. Strip on
+// serialize so color stays an in-editor-only affordance.
+const stripMarkSpec = { serialize: { open: "", close: "" }, parse: {} };
+const PlainTextStyle = TextStyle.extend({
+  addStorage() {
+    return { ...(this.parent?.() || {}), markdown: stripMarkSpec };
+  },
+});
+const PlainColor = Color.extend({
+  addStorage() {
+    return { ...(this.parent?.() || {}), markdown: stripMarkSpec };
+  },
+});
+
 // Unescape `\[\[ \]\]` — prosemirror-markdown escapes `[`/`]` as link syntax.
 function getEditorMarkdown(editor: Editor): string {
   const storage = editor.storage as unknown as { markdown: MarkdownStorage };
@@ -276,8 +293,8 @@ export const MarkdownEditor = forwardRef<
       Highlight.configure({ multicolor: true }),
       // Text color mark (in-editor + HTML export). Note: plain markdown has
       // no color syntax, so color is not persisted to the .md on save.
-      TextStyle,
-      Color,
+      PlainTextStyle,
+      PlainColor,
       // Smart typography: -- → em-dash, (c) → ©, -> → →, smart quotes, etc.
       Typography,
       // Word / character counter (read from editor.storage.characterCount).

@@ -80,6 +80,26 @@ function resolveCallerUserId(c: any): string | null {
   return null;
 }
 
+// Enforce PROMPTOWL_SIGN_IN_GATE at the device-auth entry points. The
+// device flow is anonymous until the final /auth/promptowl token exchange,
+// so identity-based blocking is only partial here:
+//   - open       → no-op.
+//   - disabled   → always blocked (no PromptOwl sign-in for anyone).
+//   - admin-only → block an authenticated non-admin up front; an anonymous
+//     caller is allowed through and the owner-email check at /auth/promptowl
+//     is the real gate (the caller's email isn't known until then).
+function deviceGateBlocked(c: any): { error: string; gate: string } | null {
+  const gate = config.PROMPTOWL_SIGN_IN_GATE;
+  if (gate === "open") return null;
+  const error =
+    "PromptOwl sign-in is restricted on this server. Use email and password, or contact your admin.";
+  if (gate === "disabled") return { error, gate };
+  // admin-only
+  const callerId = resolveCallerUserId(c);
+  if (callerId && !isLicenseAdminUserId(callerId)) return { error, gate };
+  return null;
+}
+
 function setSessionCookie(c: any, sessionId: string) {
   c.header(
     "Set-Cookie",
@@ -368,6 +388,8 @@ authRoutes.delete("/keys/:keyId", authMiddleware, async (c) => {
 
 // POST /auth/device — initiate PromptOwl device auth
 authRoutes.post("/device", async (c) => {
+  const blocked = deviceGateBlocked(c);
+  if (blocked) return c.json(blocked, 403);
   if (!tryConsume(`device:ip:${clientIp(c)}`, DEVICE_LIMIT)) {
     return c.json({ error: "Too many device auth attempts, try again later" }, 429);
   }
@@ -398,6 +420,8 @@ authRoutes.post("/device", async (c) => {
 
 // GET /auth/device/poll — poll for device approval
 authRoutes.get("/device/poll", async (c) => {
+  const blocked = deviceGateBlocked(c);
+  if (blocked) return c.json(blocked, 403);
   const code = c.req.query("code");
   const clientSecret = c.req.query("client_secret");
 
