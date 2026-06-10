@@ -447,6 +447,29 @@ authRoutes.post("/promptowl", async (c) => {
     );
   }
 
+  // PROMPTOWL_SIGN_IN_GATE — optionally restrict PromptOwl sign-in. When
+  // not "open", only the license owner (admin) may complete it; everyone
+  // else uses email/password. Enforced HERE (the identity point) so a
+  // non-admin can't even auto-provision a user via PromptOwl.
+  const gate = config.PROMPTOWL_SIGN_IN_GATE;
+  if (gate !== "open") {
+    const gateLic = getCurrentLicense();
+    const isOwnerEmail =
+      !!gateLic?.valid &&
+      !!gateLic.ownerEmail &&
+      gateLic.ownerEmail.toLowerCase() === me.email.toLowerCase();
+    if (gate === "disabled" || !isOwnerEmail) {
+      return c.json(
+        {
+          error:
+            "PromptOwl sign-in is restricted on this server. Use email and password, or contact your admin.",
+          gate,
+        },
+        403,
+      );
+    }
+  }
+
   const db = getDb();
 
   let user = db

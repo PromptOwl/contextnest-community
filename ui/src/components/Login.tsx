@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
@@ -15,6 +15,32 @@ export function Login() {
   const [deviceCode, setDeviceCode] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+
+  // PromptOwl sign-in gate (PROMPTOWL_SIGN_IN_GATE on the server). When
+  // "admin-only", the button is hidden unless the admin opens the login
+  // page with ?admin=1; when "disabled" it's hidden entirely. The server
+  // enforces this regardless — this just keeps the UI honest.
+  const [promptowlGate, setPromptowlGate] = useState<
+    "open" | "admin-only" | "disabled"
+  >("open");
+  const adminMode =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).has("admin");
+  const showPromptOwl =
+    promptowlGate === "open" || (promptowlGate === "admin-only" && adminMode);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getHealth()
+      .then((h) => {
+        if (!cancelled) setPromptowlGate(h.promptowl_sign_in_gate ?? "open");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const copyCode = async () => {
     if (!deviceCode) return;
@@ -122,14 +148,17 @@ export function Login() {
           <p className="text-sm text-muted-foreground">Community Server</p>
         </div>
 
-        {/* PromptOwl Login */}
-        <button
-          onClick={handlePromptOwl}
-          disabled={loading}
-          className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg border border-border bg-card hover:bg-secondary text-sm font-medium transition-colors"
-        >
-          {loading && deviceUrl ? "Waiting for approval..." : "Login with PromptOwl"}
-        </button>
+        {/* PromptOwl Login — hidden when the gate restricts it (server
+            still enforces). Admin reaches it via ?admin=1. */}
+        {showPromptOwl && (
+          <button
+            onClick={handlePromptOwl}
+            disabled={loading}
+            className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg border border-border bg-card hover:bg-secondary text-sm font-medium transition-colors"
+          >
+            {loading && deviceUrl ? "Waiting for approval..." : "Login with PromptOwl"}
+          </button>
+        )}
 
         {deviceUrl && (
           <div className="rounded-md border bg-muted/40 p-3 space-y-2">
@@ -167,14 +196,16 @@ export function Login() {
             credential entry mid-poll. */}
         {!deviceUrl && (
           <>
-            <div className="relative">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-border" />
+            {showPromptOwl && (
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-border" />
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-background px-2 text-muted-foreground">or</span>
+                </div>
               </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-background px-2 text-muted-foreground">or</span>
-              </div>
-            </div>
+            )}
 
             {/* Email/Password */}
             <form onSubmit={handleSubmit} className="space-y-3">
@@ -250,6 +281,16 @@ export function Login() {
                 </button>
               </>
             )}
+          </p>
+        )}
+
+        {/* Admin reaches PromptOwl sign-in here when it's gated off the
+            main page. */}
+        {promptowlGate === "admin-only" && !adminMode && !deviceUrl && (
+          <p className="text-xs text-center text-muted-foreground">
+            <a href="?admin=1" className="text-primary underline">
+              Admin sign-in
+            </a>
           </p>
         )}
       </div>
