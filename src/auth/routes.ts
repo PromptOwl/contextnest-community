@@ -615,6 +615,60 @@ authRoutes.post("/password", authMiddleware, async (c) => {
   return c.json({ ok: true });
 });
 
+// POST /auth/admin/reset-password/:userId — license-admin sets/resets another
+// user's password IN-PLATFORM (no email server, no forgot-password flow). If
+// no password is supplied, a temporary one is generated and returned ONCE for
+// the admin to copy and hand over. The target's sessions are invalidated so a
+// prior login/cookie stops working. The hash is never returned.
+authRoutes.post("/admin/reset-password/:userId", async (c) => {
+  const callerId = resolveCallerUserId(c);
+  if (!callerId) {
+    return c.json({ error: "Authentication required." }, 401);
+  }
+  if (!isLicenseAdminUserId(callerId)) {
+    return c.json(
+      { error: "Only the license-admin user can reset passwords." },
+      403,
+    );
+  }
+
+  const targetId = c.req.param("userId");
+  const db = getDb();
+  const target = db
+    .prepare("SELECT id, email FROM users WHERE id = ?")
+    .get(targetId) as { id: string; email: string } | undefined;
+  if (!target) return c.json({ error: "User not found" }, 404);
+
+  let supplied: string | undefined;
+  try {
+    supplied = (await c.req.json<{ password?: string }>()).password;
+  } catch {
+    supplied = undefined;
+  }
+  if (supplied && supplied.length < 8) {
+    throw new ValidationError("password must be at least 8 characters");
+  }
+  // Readable 16-char temp secret when the admin doesn't supply one.
+  const generated = supplied ? null : uuid().replace(/-/g, "").slice(0, 16);
+  const newPassword = supplied ?? generated!;
+
+  const newHash = await hashPassword(newPassword);
+  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
+    newHash,
+    target.id,
+  );
+  deleteAllSessionsForUser(target.id);
+
+  trackEvent("admin.reset_password", { adminId: callerId, userId: target.id });
+
+  return c.json({
+    ok: true,
+    email: target.email,
+    // Plaintext returned ONCE, only when the server generated it.
+    temporary_password: generated ?? undefined,
+  });
+});
+
 // POST /auth/invite — admin-only, create a user + API key for them by email
 authRoutes.post("/invite", async (c) => {
   const body = await c.req.json<{ email?: string; label?: string }>();

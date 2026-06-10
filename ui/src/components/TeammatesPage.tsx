@@ -43,6 +43,8 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
   const [showInvite, setShowInvite] = useState(false);
   const [inviteSeedEmail, setInviteSeedEmail] = useState<string>("");
   const [newKey, setNewKey] = useState<{ email: string; key: string } | null>(null);
+  // Temp password to reveal after an admin reset (no email — shown once).
+  const [resetPw, setResetPw] = useState<{ email: string; password: string } | null>(null);
 
   const fetchTeammates = async () => {
     setLoading(true);
@@ -165,6 +167,27 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                       )}
                     </div>
                   </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      try {
+                        const r = await api.resetUserPassword(t.id);
+                        if (r.temporary_password) {
+                          setResetPw({
+                            email: t.email,
+                            password: r.temporary_password,
+                          });
+                        }
+                        await fetchTeammates();
+                      } catch (e: any) {
+                        setError(e.message);
+                      }
+                    }}
+                    title="Generate a temporary password to share with this user (no email is sent)"
+                  >
+                    Reset password
+                  </Button>
                 </div>
               ))}
             </div>
@@ -242,6 +265,42 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
           apiKey={newKey.key}
           onClose={() => setNewKey(null)}
         />
+      )}
+
+      {resetPw && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setResetPw(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-lg border bg-background p-5 shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="font-semibold mb-1">Temporary password</h3>
+            <p className="text-xs text-muted-foreground mb-3">
+              Share this with <strong>{resetPw.email}</strong> directly — no
+              email is sent. They sign in with it, then change it from their
+              account. It won't be shown again.
+            </p>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 bg-muted border rounded px-2 py-1.5 text-sm font-mono break-all">
+                {resetPw.password}
+              </code>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigator.clipboard.writeText(resetPw.password)}
+              >
+                Copy
+              </Button>
+            </div>
+            <div className="mt-4 text-right">
+              <Button variant="outline" size="sm" onClick={() => setResetPw(null)}>
+                Done
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

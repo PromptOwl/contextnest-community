@@ -196,6 +196,19 @@ export async function inviteTeammate(email: string, label?: string) {
   });
 }
 
+// Admin resets another user's password in-platform (no email). Omit
+// `password` to have the server generate a temporary one, returned once.
+export async function resetUserPassword(userId: string, password?: string) {
+  return request<{
+    ok: boolean;
+    email: string;
+    temporary_password?: string;
+  }>(`/auth/admin/reset-password/${encodeURIComponent(userId)}`, {
+    method: "POST",
+    body: JSON.stringify(password ? { password } : {}),
+  });
+}
+
 // ─── External-client API keys (one per user) ───────────────────────────
 
 export interface ApiKeyMeta {
