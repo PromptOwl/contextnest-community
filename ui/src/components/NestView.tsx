@@ -4,6 +4,7 @@
  */
 import { useState, useEffect, useCallback } from "react";
 import * as api from "../lib/api";
+import { matchesFilters } from "../lib/node-filter";
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
@@ -96,6 +97,12 @@ export function NestView({
   const [editingSteward, setEditingSteward] = useState<Steward | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState(initialSearch ?? "");
+  // Multi-tag AND filter; toggled by clicking tag chips on list rows.
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const toggleTagFilter = (tag: string) =>
+    setTagFilters((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
+    );
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [reviewNode, setReviewNode] = useState<any | null>(null);
   const [submitNode, setSubmitNode] = useState<any | null>(null);
@@ -184,22 +191,12 @@ export function NestView({
   // Review Queue card can bind to the count the user can actually act
   // on — not the raw queue size.
 
-  const filtered = nodes.filter((n) => {
-    if (statusFilter !== "all" && n.status !== statusFilter) return false;
-    if (search) {
-      // Search matches title OR any tag — so clicking a tag chip on a
-      // document detail (which sets search to the tag string) actually
-      // filters to docs with that tag, not just docs whose title
-      // contains the tag string.
-      const needle = search.toLowerCase();
-      const inTitle = n.title?.toLowerCase().includes(needle);
-      const inTags = Array.isArray(n.tags)
-        ? n.tags.some((t: string) => t.toLowerCase().includes(needle))
-        : false;
-      if (!inTitle && !inTags) return false;
-    }
-    return true;
-  });
+  // Search matches title OR any tag (so a tag-chip click from the document
+  // detail, which seeds `search`, still works); tagFilters is a multi-tag
+  // AND on top. Semantics live in lib/node-filter (unit-tested).
+  const filtered = nodes.filter((n) =>
+    matchesFilters(n, { search, status: statusFilter, tags: tagFilters }),
+  );
 
   // myStewards (caller's own scoped rows) comes from GET /nests/:id, so
   // non-admin reviewers/editors keep per-node affordances without reading the
@@ -670,13 +667,38 @@ export function NestView({
               </div>
             </CardHeader>
             <CardContent>
+              {tagFilters.length > 0 && (
+                <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
+                  <span className="text-muted-foreground">Filtering by:</span>
+                  {tagFilters.map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-primary hover:bg-muted"
+                      onClick={() => toggleTagFilter(t)}
+                      title={`Remove filter ${t}`}
+                    >
+                      {t} ×
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:underline ml-1"
+                    onClick={() => setTagFilters([])}
+                  >
+                    clear
+                  </button>
+                </div>
+              )}
               {loading ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
               ) : filtered.length === 0 ? (
                 <div className="text-center py-8 text-sm text-muted-foreground">
-                  {search || statusFilter !== "all" ? "No matching documents" : "No documents yet"}
+                  {search || statusFilter !== "all" || tagFilters.length > 0
+                    ? "No matching documents"
+                    : "No documents yet"}
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -702,7 +724,30 @@ export function NestView({
                           {node.tags?.length > 0 && (
                             <>
                               <span>·</span>
-                              <span className="truncate">{node.tags.slice(0, 3).join(" ")}</span>
+                              <span className="flex items-center gap-1 truncate">
+                                {node.tags.slice(0, 3).map((t: string) => (
+                                  <button
+                                    key={t}
+                                    type="button"
+                                    title={
+                                      tagFilters.includes(t)
+                                        ? `Remove filter ${t}`
+                                        : `Filter by ${t}`
+                                    }
+                                    className={`hover:underline ${
+                                      tagFilters.includes(t)
+                                        ? "text-primary font-medium"
+                                        : ""
+                                    }`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleTagFilter(t);
+                                    }}
+                                  >
+                                    {t}
+                                  </button>
+                                ))}
+                              </span>
                             </>
                           )}
                         </div>
