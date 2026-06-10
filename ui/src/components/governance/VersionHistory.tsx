@@ -3,7 +3,7 @@
  * Adapted: `versions` and callbacks passed as props (no server-action imports).
  */
 import React, { useState } from "react";
-import { History, RotateCcw, Eye, Loader2, CheckCircle2 } from "lucide-react";
+import { History, RotateCcw, Eye, Loader2, CheckCircle2, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -48,6 +48,32 @@ function formatDate(dateStr: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+// Long ids (e.g. review-request UUIDs) shortened to head…tail for readability.
+function truncateId(id: string) {
+  return id.length > 20 ? `${id.slice(0, 8)}…${id.slice(-7)}` : id;
+}
+
+interface ParsedNote {
+  action?: { label: string; rejected: boolean };
+  requestId?: string;
+  note?: string;
+}
+
+// Split a changeNote like "Approved review request <uuid>" into a labelled
+// action + the bare request id so each can render on its own line.
+function parseChangeNote(changeNote?: string): ParsedNote {
+  if (!changeNote) return {};
+  const m = changeNote.match(/^(Approved|Rejected)\s+review\s+request\s+(\S+)/i);
+  if (m) {
+    const rejected = m[1].toLowerCase() === "rejected";
+    return {
+      action: { label: rejected ? "Review Rejected" : "Review Approved", rejected },
+      requestId: m[2],
+    };
+  }
+  return { note: changeNote };
 }
 
 export function VersionHistory({
@@ -132,6 +158,7 @@ export function VersionHistory({
             <div className="space-y-1">
               {versions.map((version) => {
                 const isApproved = version.version === approvedVersion;
+                const parsed = parseChangeNote(version.changeNote);
                 return (
                   <div
                     key={version.version}
@@ -139,7 +166,7 @@ export function VersionHistory({
                       isApproved ? "bg-green-50 border border-green-200" : ""
                     }`}
                   >
-                    <div className="flex-1 min-w-0">
+                    <div className="flex-1 min-w-0 space-y-0.5">
                       <div className="text-sm font-medium flex items-center gap-2">
                         Version {version.version}
                         {isApproved && (
@@ -148,18 +175,50 @@ export function VersionHistory({
                           </span>
                         )}
                       </div>
+                      {parsed.action && (
+                        <div
+                          className={`text-xs font-medium flex items-center gap-1 ${
+                            parsed.action.rejected
+                              ? "text-red-700"
+                              : "text-green-700"
+                          }`}
+                        >
+                          {parsed.action.rejected ? (
+                            <XCircle className="h-3 w-3" />
+                          ) : (
+                            <CheckCircle2 className="h-3 w-3" />
+                          )}
+                          {parsed.action.label}
+                        </div>
+                      )}
+                      {parsed.note && (
+                        <div className="text-xs text-foreground/80 break-words">
+                          {parsed.note}
+                        </div>
+                      )}
                       <div className="text-xs text-muted-foreground break-words">
-                        {formatDate(version.editedAt)} · {version.editedBy}
-                        {version.changeNote && ` · ${version.changeNote}`}
+                        By:{" "}
+                        <span className="font-medium text-foreground/80">
+                          {version.editedBy}
+                        </span>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {formatDate(version.editedAt)}
                       </div>
                       {version.resolvedBy && (
                         <div className="text-xs text-muted-foreground break-words">
                           {version.resolutionStatus === "rejected"
                             ? "Rejected by"
-                            : "Approved by"}{" "}
-                          <span className="font-medium">
+                            : "Approved by"}
+                          :{" "}
+                          <span className="font-medium text-foreground/80">
                             {version.resolvedBy}
                           </span>
+                        </div>
+                      )}
+                      {parsed.requestId && (
+                        <div className="text-xs text-muted-foreground font-mono">
+                          Review Request: {truncateId(parsed.requestId)}
                         </div>
                       )}
                     </div>
