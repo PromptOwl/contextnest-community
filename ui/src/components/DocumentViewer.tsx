@@ -91,6 +91,17 @@ export function DocumentViewer({
   onWikiLinkClick,
   className,
 }: DocumentViewerProps) {
+  // Sequential ids on rendered h1–h3, in document order, matching
+  // lib/toc.extractHeadings — the outline's i-th entry targets `doc-h-<i>`.
+  // Reset per render; react-markdown emits one tree per pass.
+  let headingIndex = 0;
+  const heading =
+    (Tag: "h1" | "h2" | "h3") =>
+    ({ children, ...props }: any) => (
+      <Tag id={`doc-h-${headingIndex++}`} {...props}>
+        {children}
+      </Tag>
+    );
   return (
     <div
       className={cn(
@@ -105,6 +116,9 @@ export function DocumentViewer({
         // Cast: Components type keyed on HTML names; `wikilink` not in union.
         components={
           {
+            h1: heading("h1"),
+            h2: heading("h2"),
+            h3: heading("h3"),
             wikilink: ({ children, ...props }: any) => {
               const target = (props["data-wiki-target"] ?? "") as string;
               return (

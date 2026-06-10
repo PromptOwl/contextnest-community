@@ -31,6 +31,7 @@ import { ShareNestDialog } from "./ShareNestDialog";
 import { SubmitForReviewModal, ReviewActions, ExternalEditBanner } from "./governance";
 import type { PendingChange } from "../lib/api";
 import { findBacklinks } from "../lib/backlinks";
+import { extractHeadings } from "../lib/toc";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
 import type { BreadcrumbEntry } from "../App";
@@ -824,6 +825,39 @@ export function DocumentEditor({
               </div>
             )}
           </div>
+
+          {/* Outline/TOC — view mode, only when the doc has real structure. */}
+          {mode === "view" &&
+            !looksLikeHtml(content) &&
+            (() => {
+              const headings = extractHeadings(content);
+              if (headings.length < 3) return null;
+              return (
+                <nav className="border rounded-lg bg-muted/20 px-3 py-2">
+                  <div className="text-xs font-medium text-muted-foreground mb-1">
+                    Outline
+                  </div>
+                  <div className="space-y-0.5">
+                    {headings.map((h) => (
+                      <button
+                        key={h.id}
+                        type="button"
+                        className="block w-full text-left text-sm text-primary hover:underline truncate"
+                        style={{ paddingLeft: `${(h.level - 1) * 12}px` }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          document
+                            .getElementById(h.id)
+                            ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                        }}
+                      >
+                        {h.text}
+                      </button>
+                    ))}
+                  </div>
+                </nav>
+              );
+            })()}
 
           {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
           <div
