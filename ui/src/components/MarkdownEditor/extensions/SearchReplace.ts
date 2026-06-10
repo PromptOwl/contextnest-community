@@ -144,9 +144,15 @@ export function replaceCurrent(editor: Editor, replacement: string): SearchState
   const s = getSearchState(editor);
   const r = s.results[s.current];
   if (!r) return s;
-  editor.view.dispatch(editor.state.tr.insertText(replacement, r.from, r.to));
-  // docChanged re-resolves results; keep the same index (clamped).
-  editor.view.dispatch(editor.state.tr.setMeta(searchKey, { current: s.current }));
+  // One transaction: edit the text AND re-pin the index. The meta branch in
+  // apply() re-resolves results against the post-edit doc and clamps, so the
+  // index is never read from the stale pre-edit snapshot. Keeping the same
+  // index lands on the next match once this one no longer matches.
+  editor.view.dispatch(
+    editor.state.tr
+      .insertText(replacement, r.from, r.to)
+      .setMeta(searchKey, { current: s.current }),
+  );
   return getSearchState(editor);
 }
 
@@ -159,8 +165,8 @@ export function replaceAll(editor: Editor, replacement: string): SearchState {
     const r = s.results[i];
     tr = tr.insertText(replacement, r.from, r.to);
   }
+  tr.setMeta(searchKey, { current: 0 });
   editor.view.dispatch(tr);
-  editor.view.dispatch(editor.state.tr.setMeta(searchKey, { current: 0 }));
   return getSearchState(editor);
 }
 

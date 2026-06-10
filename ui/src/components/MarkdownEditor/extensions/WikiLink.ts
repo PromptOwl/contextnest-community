@@ -14,16 +14,40 @@ export interface WikiLinkOptions {
    * navigation succeeds).
    */
   checkExists?: (title: string) => Promise<{ exists: boolean; id?: string }>;
+  /**
+   * Nest the document lives in. Scopes the existence cache so the same
+   * `[[Title]]` resolved in nest A never leaks its id/exists state into
+   * nest B (the two nests can hold different docs under the same title).
+   */
+  nestId?: string;
 }
 
 // `[[Title]]` or `[[Title|Display text]]`. Greedy until ]] to allow
 // titles with spaces; the | alias form mirrors common wiki conventions.
 const wikiLinkRegex = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
-// Process-wide cache so re-renders don't re-fire the existence check
-// for every keystroke. Keyed on lowercased title (case-insensitive
+// Process-wide cache so re-renders don't re-fire the existence check for
+// every keystroke. Keyed on `${nestId}::${lowercased title}` — the nest
+// scope keeps cross-nest lookups from colliding (case-insensitive title
 // matches feel less brittle to users).
 const existsCache = new Map<string, { exists: boolean; id?: string }>();
+
+function cacheKey(nestId: string | undefined, target: string): string {
+  return `${nestId ?? ""}::${target.toLowerCase()}`;
+}
+
+/** Drop cached existence results — all of them, or just one nest's. Call
+ *  on nest switch / after create/delete so stale "exists" can't linger. */
+export function clearWikiExistsCache(nestId?: string): void {
+  if (nestId === undefined) {
+    existsCache.clear();
+    return;
+  }
+  const prefix = `${nestId}::`;
+  for (const key of existsCache.keys()) {
+    if (key.startsWith(prefix)) existsCache.delete(key);
+  }
+}
 
 /**
  * One `[[…]]` occurrence as absolute doc positions:
@@ -84,13 +108,15 @@ export function collectWikiLinkRanges(doc: ProseMirrorNode): WikiLinkRange[] {
 export function collectWikiLinkDecorations(
   doc: ProseMirrorNode,
   checkExists?: WikiLinkOptions["checkExists"],
+  nestId?: string,
 ): Decoration[] {
   const decorations: Decoration[] = [];
 
   for (const range of collectWikiLinkRanges(doc)) {
     const { start, labelStart, labelEnd, end, target, displayText } = range;
     {
-      const cached = existsCache.get(target.toLowerCase());
+      const key = cacheKey(nestId, target);
+      const cached = existsCache.get(key);
       const exists = cached?.exists ?? !checkExists;
       const docId = cached?.id;
 
@@ -115,13 +141,13 @@ export function collectWikiLinkDecorations(
         Decoration.inline(labelEnd, end, { class: "wiki-bracket-hidden" }),
       );
 
-      if (checkExists && !existsCache.has(target.toLowerCase())) {
+      if (checkExists && !existsCache.has(key)) {
         // Seed a tentative entry so we don't fire the same request again
         // while the first one is in flight.
-        existsCache.set(target.toLowerCase(), { exists: false });
+        existsCache.set(key, { exists: false });
         checkExists(target)
           .then((result) => {
-            existsCache.set(target.toLowerCase(), result);
+            existsCache.set(key, result);
           })
           .catch(() => {
             /* keep the tentative miss on failure */
@@ -158,11 +184,12 @@ export const WikiLink = Extension.create<WikiLinkOptions>({
     return {
       onWikiLinkClick: undefined,
       checkExists: undefined,
+      nestId: undefined,
     };
   },
 
   addProseMirrorPlugins() {
-    const { onWikiLinkClick, checkExists } = this.options;
+    const { onWikiLinkClick, checkExists, nestId } = this.options;
 
     return [
       new Plugin({
@@ -186,7 +213,7 @@ export const WikiLink = Extension.create<WikiLinkOptions>({
           decorations(state) {
             return DecorationSet.create(
               state.doc,
-              collectWikiLinkDecorations(state.doc, checkExists),
+              collectWikiLinkDecorations(state.doc, checkExists, nestId),
             );
           },
           handleClick(_view, _pos, event) {
