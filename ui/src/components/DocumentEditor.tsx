@@ -30,6 +30,7 @@ import { DocumentViewer } from "./DocumentViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { SubmitForReviewModal, ReviewActions, ExternalEditBanner } from "./governance";
 import type { PendingChange } from "../lib/api";
+import { findBacklinks } from "../lib/backlinks";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
 import type { BreadcrumbEntry } from "../App";
@@ -171,6 +172,32 @@ export function DocumentEditor({
   });
 
   const [loading, setLoading] = useState(!isNew);
+  // Docs in this nest that wiki-link to this one ("what links here").
+  // Computed client-side from the node list — see lib/backlinks.
+  const [backlinks, setBacklinks] = useState<
+    Array<{ id: string; title: string }>
+  >([]);
+  useEffect(() => {
+    if (isNew || loading) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { nodes } = await api.listNodes(nestId);
+        if (cancelled) return;
+        setBacklinks(
+          findBacklinks(
+            nodes as Array<{ id: string; title: string; content?: string }>,
+            { id: nodeId, title },
+          ),
+        );
+      } catch {
+        /* panel is best-effort; list failures already surface elsewhere */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isNew, loading, nestId, nodeId, title]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
@@ -839,6 +866,33 @@ export function DocumentEditor({
               />
             )}
           </div>
+
+          {/* Backlinks — "what links here". View mode only; hidden when empty. */}
+          {mode === "view" && backlinks.length > 0 && (
+            <div className="border rounded-lg bg-muted/20 p-3">
+              <div className="text-xs font-medium text-muted-foreground mb-2">
+                Linked from {backlinks.length} document
+                {backlinks.length !== 1 ? "s" : ""}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {backlinks.map((b) => (
+                  <button
+                    key={b.id}
+                    type="button"
+                    className="text-sm text-primary hover:underline text-left"
+                    onClick={() =>
+                      confirmLeave(
+                        `open "${b.title}"`,
+                        () => onNavigateDocument?.(nestId, b.id, title),
+                      )
+                    }
+                  >
+                    {b.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
