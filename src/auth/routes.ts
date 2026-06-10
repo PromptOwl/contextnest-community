@@ -477,12 +477,7 @@ authRoutes.post("/promptowl", async (c) => {
   // non-admin can't even auto-provision a user via PromptOwl.
   const gate = config.PROMPTOWL_SIGN_IN_GATE;
   if (gate !== "open") {
-    const gateLic = getCurrentLicense();
-    const isOwnerEmail =
-      !!gateLic?.valid &&
-      !!gateLic.ownerEmail &&
-      gateLic.ownerEmail.toLowerCase() === me.email.toLowerCase();
-    if (gate === "disabled" || !isOwnerEmail) {
+    if (gate === "disabled" || !isLicenseAdminEmail(me.email)) {
       return c.json(
         {
           error:

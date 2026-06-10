@@ -51,7 +51,7 @@ export function setupTestEnv() {
  */
 export async function createTestApp(
   authMode: "open" | "key" = "open",
-  opts: { superAdmins?: string[] } = {},
+  opts: { superAdmins?: string[]; ownerEmail?: string } = {},
 ) {
   process.env.AUTH_MODE = authMode;
   vi.resetModules();
@@ -68,8 +68,15 @@ export async function createTestApp(
         limits: null,
         suspended: false,
         suspendedReason: null,
-        ownerEmail: null,
+        ownerEmail: opts.ownerEmail ?? null,
       }),
+      // isLicenseAdminEmail reads the module-internal currentLicense, which
+      // is never populated in tests. Override it so the ownerEmail opt drives
+      // admin detection (e.g. the PROMPTOWL_SIGN_IN_GATE=admin-only path).
+      isLicenseAdminEmail: (email?: string | null) =>
+        !!opts.ownerEmail &&
+        !!email &&
+        opts.ownerEmail.toLowerCase() === email.toLowerCase(),
     };
   });
   const { createApp } = await import("../src/app.js");
