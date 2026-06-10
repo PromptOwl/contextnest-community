@@ -29,6 +29,28 @@ import {
 
 export const nodeRoutes = new Hono<AuthEnv>();
 
+// LLM-pointed plain-text view: GET a node with ?format=markdown to receive
+// `text/markdown` (YAML frontmatter + body) instead of JSON, so an agent can
+// fetch a stable, human-readable representation. Built from the fully-resolved
+// node response so it inherits the same permission + public-reader handling.
+function nodeAsMarkdown(response: any, nodeId: string): string {
+  const tags = (response.tags ?? []) as string[];
+  return (
+    [
+      "---",
+      `title: ${JSON.stringify(response.title ?? "")}`,
+      `tags: [${tags.map((t) => JSON.stringify(t)).join(", ")}]`,
+      `status: ${response.status ?? ""}`,
+      `id: ${JSON.stringify(nodeId)}`,
+      "---",
+      "",
+    ].join("\n") + (response.content ?? "")
+  );
+}
+function isMarkdownFormat(c: { req: { query: (k: string) => string | undefined } }): boolean {
+  return c.req.query("format") === "markdown";
+}
+
 // GET /nests/:nestId/nodes
 nodeRoutes.get("/", async (c) => {
   const nestId = c.req.param("nestId")!;
@@ -237,6 +259,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       }
       response.version = approved;
       response.status = "published";
+      if (isMarkdownFormat(c)) {
+        return c.body(nodeAsMarkdown(response, nodeId), 200, {
+          "Content-Type": "text/markdown; charset=utf-8",
+        });
+      }
       return c.json({ node: response });
     }
   }
@@ -252,6 +279,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   if (response.status === "pending_review") {
     const pending = reviews.getPendingReview(nestId, nodeId);
     (response as any).pendingReviewBy = pending?.requestedBy ?? null;
+  }
+  if (isMarkdownFormat(c)) {
+    return c.body(nodeAsMarkdown(response, nodeId), 200, {
+      "Content-Type": "text/markdown; charset=utf-8",
+    });
   }
   return c.json({ node: response });
 });
