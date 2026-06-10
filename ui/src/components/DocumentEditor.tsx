@@ -370,6 +370,46 @@ export function DocumentEditor({
 
   const handleSave = () => runSave((savedId) => onSaved?.(savedId));
 
+  // Silent debounced autosave — fires on a typing pause and on click-out
+  // (editor blur). No spinner, no "saving…" so the always-editable surface
+  // never flickers. Skips new docs (a silent create is surprising),
+  // locked/reviewer/view-only sessions, and clean state. autosaveRef is
+  // reassigned every render so the debounce timer always runs the latest
+  // closure (current title/content/tags).
+  const autosaveTimer = useRef<number | null>(null);
+  const autosaveRef = useRef<() => void>(() => {});
+  autosaveRef.current = async () => {
+    if (isNew || saving) return;
+    if (isLocked || isReviewerOnly || isViewOnly) return;
+    if (title.trim().length === 0 || content.trim().length === 0) return;
+    if (!isDirty) return;
+    try {
+      await persistCurrent();
+    } catch {
+      /* stay dirty; the manual Save path surfaces the error */
+    }
+  };
+  const scheduleAutosave = useCallback(() => {
+    if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = window.setTimeout(() => {
+      autosaveTimer.current = null;
+      void autosaveRef.current();
+    }, 1200);
+  }, []);
+  const flushAutosave = useCallback(() => {
+    if (autosaveTimer.current) {
+      window.clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
+    }
+    void autosaveRef.current();
+  }, []);
+  useEffect(
+    () => () => {
+      if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
+    },
+    [],
+  );
+
   // Confirm before unmount when dirty; read-only sessions skip the prompt.
   const confirmLeave = (label: string, run: () => void) => {
     if (!isDirty || isLocked || isReviewerOnly) {
@@ -440,6 +480,15 @@ export function DocumentEditor({
   // approve/reject; viewers just read. A user with editor + reviewer is
   // NOT read-only — keep edit affordances open for them.
   const isReviewerOnly = !isOwner && myNodeRoles.length > 0 && !hasEditorRole;
+
+  // Always-editable surface ("buttery editor"): anyone who can edit drops
+  // straight into the live editor instead of view → click → edit, which
+  // remounts DocumentViewer→MarkdownEditor and loses the caret/reflows.
+  // Read-only sessions (view-only / locked / reviewer) keep the rendered view.
+  useEffect(() => {
+    if (loading || mode === "edit") return;
+    if (!isViewOnly && !isLocked && !isReviewerOnly) setMode("edit");
+  }, [loading, isViewOnly, isLocked, isReviewerOnly, mode]);
 
   // Submit-for-Review only on existing drafts with stewardship enabled.
   const canSubmitForReview =
@@ -652,21 +701,20 @@ export function DocumentEditor({
                 {title || "Untitled"}
               </h1>
             ) : (
-              <>
-                <label className="block mb-1 text-sm font-medium">
-                  Title <span className="text-destructive">*</span>
-                </label>
-                <Input
-                  value={title}
-                  onChange={(e) => {
-                    setTitle(e.target.value);
-                    setTouched(true);
-                  }}
-                  placeholder="Document title"
-                  disabled={fieldsDisabled}
-                  data-testid="document-editor-title"
-                />
-              </>
+              // Borderless, h1-styled title input so the always-editable page
+              // reads like a document, not a form. Placeholder stands in for
+              // the old "Title *" label; Save stays gated on a non-empty title.
+              <Input
+                value={title}
+                onChange={(e) => {
+                  setTitle(e.target.value);
+                  setTouched(true);
+                }}
+                placeholder="Untitled"
+                disabled={fieldsDisabled}
+                data-testid="document-editor-title"
+                className="border-0 px-0 h-auto py-0 text-3xl font-bold leading-tight shadow-none focus-visible:ring-0 placeholder:text-muted-foreground/40"
+              />
             )}
           </div>
 
@@ -769,8 +817,10 @@ export function DocumentEditor({
                   setContent(next);
                   // TipTap onUpdate fires only on real user input here.
                   setTouched(true);
+                  scheduleAutosave();
                 }}
                 onSave={handleSave}
+                onBlur={flushAutosave}
                 nestId={nestId}
                 editable={!isLocked && mode === "edit"}
                 onRequestDocLink={() => setShowDocPicker(true)}
