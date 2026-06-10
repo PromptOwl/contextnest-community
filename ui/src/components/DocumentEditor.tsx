@@ -265,19 +265,20 @@ export function DocumentEditor({
     loadNode();
   }, [isNew, loadNode]);
 
-  // Lock while review pending; server would reject anyway but UX is nicer.
-  const isLocked = status === "pending_review";
+  // A pending-review doc stays EDITABLE — the server withdraws the review
+  // and returns it to draft on the next save (nodes/service updateNode). So
+  // we don't lock the UI; we just warn that editing withdraws the review.
+  const isPendingReview = status === "pending_review";
 
   // Fields read-only outside edit mode; "Start Editing" or dblclick opts in.
-  const fieldsDisabled = isLocked || mode !== "edit";
+  const fieldsDisabled = mode !== "edit";
 
   const canSave = useMemo(
     () =>
-      !isLocked &&
       title.trim().length > 0 &&
       content.trim().length > 0 &&
       !saving,
-    [isLocked, title, content, saving],
+    [title, content, saving],
   );
 
   // Dirty = touched AND diff vs snapshot (normalized to absorb TipTap reformat).
@@ -372,7 +373,7 @@ export function DocumentEditor({
 
   // Confirm before unmount when dirty; read-only sessions skip the prompt.
   const confirmLeave = (label: string, run: () => void) => {
-    if (!isDirty || isLocked || isReviewerOnly) {
+    if (!isDirty || isReviewerOnly) {
       run();
       return;
     }
@@ -579,7 +580,7 @@ export function DocumentEditor({
               onReject={handleReject}
             />
           )}
-          {!isViewOnly && !isLocked && !isReviewerOnly && (
+          {!isViewOnly && !isReviewerOnly && (
             mode === "edit" ? (
               <Button
                 onClick={handleSave}
@@ -632,12 +633,13 @@ export function DocumentEditor({
             />
           )}
 
-          {isLocked && (
+          {isPendingReview && (
             <Alert>
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>
-                This document is awaiting steward review. Editing is locked
-                until the review is resolved.
+                This document is awaiting steward review. You can still edit
+                it — saving will withdraw the pending review and return it to
+                draft.
               </AlertDescription>
             </Alert>
           )}
@@ -744,7 +746,7 @@ export function DocumentEditor({
           <div
             onClick={() => {
               if (isViewOnly) return;
-              if (mode === "view" && !isLocked && !isReviewerOnly) {
+              if (mode === "view" && !isReviewerOnly) {
                 setMode("edit");
               }
             }}
@@ -772,7 +774,7 @@ export function DocumentEditor({
                 }}
                 onSave={handleSave}
                 nestId={nestId}
-                editable={!isLocked && mode === "edit"}
+                editable={mode === "edit"}
                 onRequestDocLink={() => setShowDocPicker(true)}
                 onWikiLinkClick={handleWikiLinkClick}
                 placeholder="Start writing..."
