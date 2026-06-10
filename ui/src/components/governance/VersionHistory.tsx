@@ -16,6 +16,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { DiffViewer } from "./DiffViewer";
+import { unifiedDiff } from "./diff-util";
 
 export interface Version {
   version: number;
@@ -94,6 +96,8 @@ export function VersionHistory({
   const [previewVersion, setPreviewVersion] = useState<Version | null>(null);
   const [restoreVersion, setRestoreVersion] = useState<number | null>(null);
   const [restoring, setRestoring] = useState(false);
+  // Preview pane: show the full body, or a diff of this version vs current.
+  const [diffMode, setDiffMode] = useState(false);
 
   const handleRestore = async () => {
     if (!restoreVersion || !onRestore) return;
@@ -127,6 +131,9 @@ export function VersionHistory({
   const currentVersionStatus = versions.find(
     (v) => v.version === currentVersion,
   )?.status;
+  const currentContent = versions.find(
+    (v) => v.version === currentVersion,
+  )?.content;
   // Restore writes a new version, which the server rejects with 423 while a
   // review is open. Disable the restore affordances so the user never hits
   // that error — they must resolve the review first.
@@ -167,29 +174,46 @@ export function VersionHistory({
                 variant="ghost"
                 size="sm"
                 className="h-7 px-2"
-                onClick={() => setPreviewVersion(null)}
+                onClick={() => {
+                  setPreviewVersion(null);
+                  setDiffMode(false);
+                }}
               >
                 <ArrowLeft className="h-4 w-4 mr-1" /> Back
               </Button>
-              {onRestore && previewVersion.version !== currentVersion && (
-                <Button
-                  size="sm"
-                  className="h-7"
-                  disabled={restoreLocked}
-                  title={
-                    restoreLocked
-                      ? "Locked while awaiting steward review — resolve the review first"
-                      : undefined
-                  }
-                  onClick={() => {
-                    setRestoreVersion(previewVersion.version);
-                    setPreviewVersion(null);
-                  }}
-                >
-                  <RotateCcw className="h-4 w-4 mr-1" />
-                  {restoreLocked ? "Locked — review pending" : "Restore"}
-                </Button>
-              )}
+              <div className="flex items-center gap-1">
+                {previewVersion.content &&
+                  currentContent !== undefined &&
+                  previewVersion.version !== currentVersion && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7"
+                      onClick={() => setDiffMode((d) => !d)}
+                    >
+                      {diffMode ? "Full content" : "Diff vs current"}
+                    </Button>
+                  )}
+                {onRestore && previewVersion.version !== currentVersion && (
+                  <Button
+                    size="sm"
+                    className="h-7"
+                    disabled={restoreLocked}
+                    title={
+                      restoreLocked
+                        ? "Locked while awaiting steward review — resolve the review first"
+                        : undefined
+                    }
+                    onClick={() => {
+                      setRestoreVersion(previewVersion.version);
+                      setPreviewVersion(null);
+                    }}
+                  >
+                    <RotateCcw className="h-4 w-4 mr-1" />
+                    {restoreLocked ? "Locked — review pending" : "Restore"}
+                  </Button>
+                )}
+              </div>
             </div>
             <div>
               <div className="text-sm font-semibold flex items-center gap-2">
@@ -206,9 +230,21 @@ export function VersionHistory({
               </div>
             </div>
             <ScrollArea className="h-[60vh] max-h-[440px] pr-2">
-              <pre className="text-sm whitespace-pre-wrap font-mono p-4 bg-muted/30 rounded">
-                {previewVersion.content || "(no content)"}
-              </pre>
+              {diffMode && currentContent !== undefined ? (
+                <div className="space-y-1">
+                  <div className="text-xs text-muted-foreground px-1">
+                    Diff: current (v{currentVersion}) → v{previewVersion.version}
+                  </div>
+                  <DiffViewer
+                    patch={unifiedDiff(currentContent, previewVersion.content || "")}
+                    className="max-h-none"
+                  />
+                </div>
+              ) : (
+                <pre className="text-sm whitespace-pre-wrap font-mono p-4 bg-muted/30 rounded">
+                  {previewVersion.content || "(no content)"}
+                </pre>
+              )}
             </ScrollArea>
           </div>
         ) : versions.length === 0 ? (
