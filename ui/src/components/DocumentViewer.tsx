@@ -15,6 +15,7 @@
  * GFM: tables, task lists, strikethrough, and autolinks come from
  * `remark-gfm`.
  */
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Plugin } from "unified";
@@ -83,14 +84,42 @@ export interface DocumentViewerProps {
   /** Called when the user clicks a `[[WikiLink]]`. Receives the title
    *  (post-trim), not the optional display alias. */
   onWikiLinkClick?: (title: string) => void;
+  /** Hover-preview lookup for a wiki-link target; return null for no
+   *  preview (unknown target). Synchronous — caller caches the list. */
+  previewFor?: (target: string) => { title: string; snippet: string } | null;
   className?: string;
 }
 
 export function DocumentViewer({
   content,
   onWikiLinkClick,
+  previewFor,
   className,
 }: DocumentViewerProps) {
+  // One hover-preview at a time; opens after a short debounce so quick
+  // mouse passes don't flash popovers. Fixed-positioned at the cursor.
+  const [preview, setPreview] = useState<{
+    title: string;
+    snippet: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showPreview = (target: string, x: number, y: number) => {
+    if (!previewFor) return;
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    hoverTimer.current = setTimeout(() => {
+      const p = previewFor(target);
+      if (p) setPreview({ ...p, x, y });
+    }, 250);
+  };
+  const hidePreview = () => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    setPreview(null);
+  };
+  useEffect(() => () => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+  }, []);
   // Sequential ids on rendered h1–h3, in document order, matching
   // lib/toc.extractHeadings — the outline's i-th entry targets `doc-h-<i>`.
   // Reset per render; react-markdown emits one tree per pass.
@@ -125,12 +154,17 @@ export function DocumentViewer({
                 <button
                   type="button"
                   className="wiki-link wiki-link-exists bg-transparent border-0 p-0 m-0 cursor-pointer"
-                  title={`Open "${target}"`}
+                  title={previewFor ? undefined : `Open "${target}"`}
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
+                    hidePreview();
                     onWikiLinkClick?.(target);
                   }}
+                  onMouseEnter={(e) =>
+                    showPreview(target, e.clientX, e.clientY)
+                  }
+                  onMouseLeave={hidePreview}
                 >
                   {children}
                 </button>
@@ -153,6 +187,21 @@ export function DocumentViewer({
       >
         {content}
       </ReactMarkdown>
+
+      {preview && (
+        <div
+          className="fixed z-50 max-w-xs rounded-md border bg-popover text-popover-foreground shadow-md p-3 pointer-events-none"
+          style={{
+            left: Math.min(preview.x + 12, window.innerWidth - 320),
+            top: preview.y + 16,
+          }}
+        >
+          <div className="text-sm font-semibold mb-1">{preview.title}</div>
+          <div className="text-xs text-muted-foreground leading-relaxed">
+            {preview.snippet || "(empty document)"}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
