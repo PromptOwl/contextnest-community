@@ -218,12 +218,12 @@ authRoutes.post("/login", async (c) => {
     )
     .get(body.email) as
     | {
-        id: string;
-        email: string;
-        name: string | null;
-        password_hash: string;
-        is_admin: number;
-      }
+      id: string;
+      email: string;
+      name: string | null;
+      password_hash: string;
+      is_admin: number;
+    }
     | undefined;
 
   const check = user
@@ -616,10 +616,27 @@ authRoutes.post("/password", authMiddleware, async (c) => {
   const user = db
     .prepare("SELECT password_hash FROM users WHERE id = ?")
     .get(userId) as { password_hash: string } | undefined;
-  if (!user) return c.json({ error: "User not found" }, 404);
+  if (!user) throw new ValidationError("User not found");
 
   const check = await verifyPassword(body.current, user.password_hash);
-  if (!check.ok) return c.json({ error: "Invalid current password" }, 401);
+  // 400, not 401: a wrong *current password* is a validation failure on this
+  // form, not an expired session. Returning 401 made the client's global
+  // handler treat it as "logged out" and bounce the user to login, swallowing
+  // the real error.
+  if (!check.ok) {
+    throw new ValidationError("Current password is incorrect");
+  }
+
+  // Reject a no-op change: the new password must differ from the current one.
+  // Compare against the stored hash so it also catches next === current even
+  // when `current` was typed differently (it can't be — current was just
+  // verified — but this stays correct if that check ever changes).
+  const sameAsCurrent = await verifyPassword(body.next, user.password_hash);
+  if (sameAsCurrent.ok) {
+    throw new ValidationError(
+      "new password must be different from the current password",
+    );
+  }
 
   const newHash = await hashPassword(body.next);
   db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
@@ -860,13 +877,13 @@ authRoutes.get("/teammates", async (c) => {
        ORDER BY u.created_at DESC`,
     )
     .all(ANON_USER_ID) as Array<{
-    id: string;
-    email: string;
-    name: string | null;
-    is_invited: number;
-    key_count: number;
-    last_active: string | null;
-  }>;
+      id: string;
+      email: string;
+      name: string | null;
+      is_invited: number;
+      key_count: number;
+      last_active: string | null;
+    }>;
 
   // Steward emails assigned to any nest but without any way to
   // authenticate on this server yet — i.e. no claimed user account

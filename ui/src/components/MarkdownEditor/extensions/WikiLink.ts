@@ -160,19 +160,20 @@ export function collectWikiLinkDecorations(
 }
 
 /**
- * Snap a collapsed caret out of the hidden `[[ ]]` bracket spans onto the
- * nearest visible label edge. font-size:0 makes those chars zero-width, so
- * a click or arrow can land "inside" a bracket where there's no glyph —
- * the known papercut. We never trap the caret at the link's outer edges
- * (start/end), so the user can still place the cursor before/after a link.
+ * Snap a collapsed caret out of the hidden `[[ ]]` bracket spans. font-size:0
+ * makes those chars zero-width, so a click or arrow can land "inside" a bracket
+ * where there's no glyph. We snap OUTWARD — landing in the leading `[[target|`
+ * span jumps to before the link (start), landing in the trailing `]]` span jumps
+ * to after it (end). This keeps typing next to a link from inserting text inside
+ * the brackets and corrupting the `[[…]]` markup.
  */
 function snapCaretOutOfBrackets(
   ranges: WikiLinkRange[],
   pos: number,
 ): number | null {
   for (const r of ranges) {
-    if (pos > r.start && pos < r.labelStart) return r.labelStart;
-    if (pos > r.labelEnd && pos < r.end) return r.labelEnd;
+    if (pos > r.start && pos < r.labelStart) return r.start;
+    if (pos > r.labelEnd && pos < r.end) return r.end;
   }
   return null;
 }
@@ -223,6 +224,46 @@ export const WikiLink = Extension.create<WikiLinkOptions>({
             const id = target.getAttribute("data-wiki-id") || null;
             if (title && onWikiLinkClick) {
               onWikiLinkClick(title, id);
+              return true;
+            }
+            return false;
+          },
+          // Wiki links are plain `[[target|label]]` text with the brackets
+          // hidden by decorations. A naive Backspace deletes the trailing `]]`
+          // one char at a time, exposing the raw `[[target|label` path. Instead,
+          // when a Backspace/Delete touches a link, UNWRAP it to an editable
+          // `[[label` (visible label only, hidden path dropped) with one char
+          // removed — this drops the closing brackets so the `[[` autocomplete
+          // reopens, letting the user retype or pick a different document.
+          handleKeyDown(view, event) {
+            if (event.key !== "Backspace" && event.key !== "Delete") {
+              return false;
+            }
+            const { state } = view;
+            const sel = state.selection;
+            if (!sel.empty) return false;
+            const pos = sel.from;
+            const ranges = collectWikiLinkRanges(state.doc);
+
+            for (const r of ranges) {
+              const label = r.displayText;
+              // Backspace: caret within the link or just after it (not before).
+              // Delete: caret within the link or just before it (not after).
+              const hit =
+                event.key === "Backspace"
+                  ? pos > r.start && pos <= r.end
+                  : pos >= r.start && pos < r.end;
+              if (!hit) continue;
+
+              // Drop one char in the direction of the keystroke, then leave an
+              // open `[[query` so the autocomplete picks it up.
+              const trimmed =
+                event.key === "Backspace" ? label.slice(0, -1) : label.slice(1);
+              const next = `[[${trimmed}`;
+              const tr = state.tr.insertText(next, r.start, r.end);
+              const caret = r.start + next.length;
+              tr.setSelection(TextSelection.create(tr.doc, caret));
+              view.dispatch(tr.scrollIntoView());
               return true;
             }
             return false;
