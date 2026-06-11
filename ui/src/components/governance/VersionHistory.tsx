@@ -140,7 +140,7 @@ export function VersionHistory({
   // that error — they must resolve the review first.
   const restoreLocked = currentVersionStatus === "pending_review";
   const statusBadgeColor =
-    currentVersionStatus === "approved"
+    currentVersionStatus === "approved" || currentVersionStatus === "published"
       ? "bg-green-100 text-green-800 border-green-200"
       : currentVersionStatus === "rejected"
         ? "bg-red-100 text-red-800 border-red-200"
@@ -157,7 +157,7 @@ export function VersionHistory({
           {currentVersionStatus && (
             <Badge
               variant="outline"
-              className={`text-[10px] ${statusBadgeColor}`}
+              className={`text-[10px] capitalize ${statusBadgeColor}`}
             >
               {currentVersionStatus.replace("_", " ")}
             </Badge>

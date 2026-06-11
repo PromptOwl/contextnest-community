@@ -40,6 +40,7 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem,
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import {
   StewardList, StewardModal,
   ReviewQueue, ReviewActions,
@@ -338,6 +339,7 @@ export function NestView({
     draft: "Draft",
     pending_review: "Pending",
     approved: "Approved",
+    published: "Published",
     rejected: "Rejected",
   };
   const DATE_LABELS: Record<string, string> = {
@@ -623,15 +625,17 @@ export function NestView({
     <div className="md:py-6">
       {/* Header — PromptOwl ContextDashboard layout */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4 mb-4">
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={onBack}>
+        <div className="flex min-w-0 items-center gap-3">
+          <Button variant="ghost" size="icon" onClick={onBack} className="shrink-0">
             <ArrowLeft className="h-4 w-4" />
           </Button>
-          <h3 className="text-xl font-semibold">{nestName}</h3>
+          <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
+            {nestName}
+          </h3>
           {visibility === "public" && (
             <Badge
               variant="outline"
-              className="gap-1 border-blue-200 bg-blue-50 text-blue-700"
+              className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
               title="Anyone with the URL can read this nest"
             >
               <Globe className="h-3 w-3" />
@@ -641,7 +645,7 @@ export function NestView({
           {isImported && (
             <Badge
               variant="outline"
-              className="gap-1 border-blue-200 bg-blue-50 text-blue-700"
+              className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
               title="Imported from a folder — its files were copied into the workspace"
             >
               <FolderInput className="h-3 w-3" />
@@ -653,46 +657,15 @@ export function NestView({
             of forcing a single horizontal scroll. `flex-wrap` + `justify-end`
             on wider screens keeps the spacing visually intentional rather
             than awkwardly clipped at the right edge. */}
-        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:justify-end">
-          {/* Connect stays for view-only; write/admin gated below.
-              Markdown export lives inside this dialog (data egress). */}
-          <Button variant="outline" onClick={() => setShowConnect(true)}>
-            <Link2 className="h-4 w-4 mr-2" />
-            Connect
-          </Button>
-          {/* Share — visibility + collaborators. Gated to owner/admin to
-              match the server's admin requirement on /collaborators and
-              /visibility; non-admins would only get a 403. */}
-          {canManage && (
-            <Button variant="outline" onClick={() => setShowShare(true)}>
-              <Users className="h-4 w-4 mr-2" />
-              Share
-            </Button>
-          )}
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:shrink-0 sm:justify-end">
           {!isReadOnly && (
             <>
-              {canDeleteNest && (
-                <Button
-                  variant="outline"
-                  onClick={() => setShowDelete(true)}
-                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete
-                </Button>
-              )}
               {/* Settings is stewardship-only and server-admin gated; a
                   nest-admin/owner would just see an empty modal. */}
               {isAdmin && (
                 <Button variant="outline" onClick={() => setShowSettings(true)}>
                   <SettingsIcon className="h-4 w-4 mr-2" />
                   Settings
-                </Button>
-              )}
-              {stewardshipEnabled && isAdmin && (
-                <Button variant="outline" onClick={() => setShowAssignSteward(true)}>
-                  <Shield className="h-4 w-4 mr-2" />
-                  Assign Steward
                 </Button>
               )}
               {canEditDocs && (
@@ -703,6 +676,40 @@ export function NestView({
               )}
             </>
           )}
+          {/* Secondary actions collapsed into an overflow menu at the end.
+              Connect: view-only export/data-egress. Share: owner/admin only
+              (server requires admin on /collaborators + /visibility). Delete:
+              destructive, write+admin gated. */}
+          {(() => {
+            const actions: OverflowAction[] = [
+              {
+                label: "Connect",
+                icon: Link2,
+                onSelect: () => setShowConnect(true),
+              },
+            ];
+            if (canManage)
+              actions.push({
+                label: "Share",
+                icon: Users,
+                onSelect: () => setShowShare(true),
+              });
+            if (!isReadOnly && stewardshipEnabled && isAdmin)
+              actions.push({
+                label: "Assign Steward",
+                icon: Shield,
+                onSelect: () => setShowAssignSteward(true),
+              });
+            if (!isReadOnly && canDeleteNest)
+              actions.push({
+                label: "Delete",
+                icon: Trash2,
+                destructive: true,
+                separatorBefore: true,
+                onSelect: () => setShowDelete(true),
+              });
+            return <OverflowMenu actions={actions} variant="outline" />;
+          })()}
         </div>
       </div>
 
@@ -854,6 +861,7 @@ export function NestView({
                         <SelectItem value="draft">Draft</SelectItem>
                         <SelectItem value="pending_review">Pending</SelectItem>
                         <SelectItem value="approved">Approved</SelectItem>
+                        <SelectItem value="published">Published</SelectItem>
                         <SelectItem value="rejected">Rejected</SelectItem>
                       </SelectContent>
                     </Select>
@@ -1175,13 +1183,15 @@ export function NestView({
                             <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                           )}
                           <span
-                            className={`font-medium ${cards ? "break-words" : "truncate"}`}
+                            className="font-medium truncate min-w-0"
+                            title={node.title}
                           >
                             {node.title}
                           </span>
                           <LifecycleStatusBadge
                             status={(node.status as DocumentLifecycleStatus) || "draft"}
                             size="sm"
+                            className="shrink-0 whitespace-nowrap"
                           />
                           {cards && <div className="ml-auto">{actionMenu}</div>}
                         </div>
