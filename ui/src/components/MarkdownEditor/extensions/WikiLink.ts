@@ -121,22 +121,23 @@ export function collectWikiLinkDecorations(
       const docId = cached?.id;
 
       const linkClass = exists ? "wiki-link-exists" : "wiki-link-broken";
-      const tooltip = exists
-        ? `Open "${displayText}"`
-        : `"${displayText}" not found in this nest`;
+      // Existing links get the rich hover-preview popover, so omit the native
+      // `title` tooltip to avoid two overlapping affordances. Broken links have
+      // no preview — keep the "not found" tooltip there.
+      const attrs: Record<string, string> = {
+        class: `wiki-link ${linkClass}`,
+        "data-wiki-title": target,
+        "data-wiki-id": docId || "",
+        "data-wiki-display": displayText,
+      };
+      if (!exists) {
+        attrs.title = `"${displayText}" not found in this nest`;
+      }
 
       decorations.push(
         Decoration.inline(start, labelStart, { class: "wiki-bracket-hidden" }),
       );
-      decorations.push(
-        Decoration.inline(labelStart, labelEnd, {
-          class: `wiki-link ${linkClass}`,
-          "data-wiki-title": target,
-          "data-wiki-id": docId || "",
-          "data-wiki-display": displayText,
-          title: tooltip,
-        }),
-      );
+      decorations.push(Decoration.inline(labelStart, labelEnd, attrs));
       decorations.push(
         Decoration.inline(labelEnd, end, { class: "wiki-bracket-hidden" }),
       );
