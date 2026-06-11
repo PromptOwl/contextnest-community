@@ -2,12 +2,20 @@
  * NestView — governance dashboard for a single nest.
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import * as api from "../lib/api";
+import { matchesFilters } from "../lib/node-filter";
+import { linkHealth } from "../lib/link-health";
+import {
+  datePresetToEpoch, upsertFilter, removeFilter,
+  parseSavedFilters, serializeSavedFilters,
+  type DatePreset, type SavedFilter,
+} from "../lib/saved-filters";
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
   Pencil, Trash2, FileWarning, Globe, FolderInput, Users,
+  LayoutGrid, List as ListIcon, Star, X, MoreVertical,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
@@ -28,6 +36,10 @@ import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   StewardList, StewardModal,
   ReviewQueue, ReviewActions,
@@ -96,7 +108,75 @@ export function NestView({
   const [editingSteward, setEditingSteward] = useState<Steward | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState(initialSearch ?? "");
+  // Multi-tag AND filter; toggled by clicking tag chips on list rows.
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const toggleTagFilter = (tag: string) =>
+    setTagFilters((prev) =>
+      prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
+    );
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [authorFilter, setAuthorFilter] = useState<string>("all");
+  const [dateFilter, setDateFilter] = useState<DatePreset>("any");
+  // List vs cards, persisted per-browser (not per-nest — it's a reading pref).
+  const [viewMode, setViewMode] = useState<"list" | "cards">(() => {
+    try {
+      return localStorage.getItem("nest:viewMode") === "cards"
+        ? "cards"
+        : "list";
+    } catch {
+      return "list";
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("nest:viewMode", viewMode);
+    } catch {
+      /* ignore quota/availability */
+    }
+  }, [viewMode]);
+  // Saved filters, persisted per nest.
+  const savedKey = `nest:${nestId}:savedFilters`;
+  const [savedFilters, setSavedFilters] = useState<SavedFilter[]>([]);
+  useEffect(() => {
+    try {
+      setSavedFilters(parseSavedFilters(localStorage.getItem(savedKey)));
+    } catch {
+      setSavedFilters([]);
+    }
+  }, [savedKey]);
+  const persistSaved = (next: SavedFilter[]) => {
+    setSavedFilters(next);
+    try {
+      localStorage.setItem(savedKey, serializeSavedFilters(next));
+    } catch {
+      /* ignore quota/availability */
+    }
+  };
+  const [showSaveFilter, setShowSaveFilter] = useState(false);
+  const [saveFilterName, setSaveFilterName] = useState("");
+  const saveCurrentFilter = () => {
+    const name = saveFilterName.trim();
+    if (!name) return;
+    persistSaved(
+      upsertFilter(savedFilters, {
+        name,
+        search: search || undefined,
+        status: statusFilter !== "all" ? statusFilter : undefined,
+        tags: tagFilters.length ? tagFilters : undefined,
+        author: authorFilter !== "all" ? authorFilter : undefined,
+        datePreset: dateFilter !== "any" ? dateFilter : undefined,
+      }),
+    );
+    setSaveFilterName("");
+    setShowSaveFilter(false);
+  };
+  const applySavedFilter = (f: SavedFilter) => {
+    setSearch(f.search ?? "");
+    setStatusFilter(f.status ?? "all");
+    setTagFilters(f.tags ?? []);
+    setAuthorFilter(f.author ?? "all");
+    setDateFilter(f.datePreset ?? "any");
+  };
   const [reviewNode, setReviewNode] = useState<any | null>(null);
   const [submitNode, setSubmitNode] = useState<any | null>(null);
   const [versionNode, setVersionNode] = useState<any | null>(null);
@@ -184,22 +264,128 @@ export function NestView({
   // Review Queue card can bind to the count the user can actually act
   // on — not the raw queue size.
 
-  const filtered = nodes.filter((n) => {
-    if (statusFilter !== "all" && n.status !== statusFilter) return false;
-    if (search) {
-      // Search matches title OR any tag — so clicking a tag chip on a
-      // document detail (which sets search to the tag string) actually
-      // filters to docs with that tag, not just docs whose title
-      // contains the tag string.
-      const needle = search.toLowerCase();
-      const inTitle = n.title?.toLowerCase().includes(needle);
-      const inTags = Array.isArray(n.tags)
-        ? n.tags.some((t: string) => t.toLowerCase().includes(needle))
-        : false;
-      if (!inTitle && !inTags) return false;
+  // Full-text CONTENT hits from the server search endpoint, unioned with
+  // the instant client title/tag match below. Debounced; best-effort.
+  const [contentHits, setContentHits] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const q = search.trim();
+    if (q.length < 2) {
+      setContentHits(new Set());
+      return;
     }
-    return true;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const { nodes: hits } = await api.searchNodes(nestId, q);
+        if (!cancelled) {
+          setContentHits(new Set((hits as any[]).map((n) => n.id)));
+        }
+      } catch {
+        /* fall back to client-side matching only */
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [nestId, search]);
+
+  // Status + tag filters always apply; with a query, a doc passes on an
+  // instant client title/tag match OR a server content hit. Semantics of
+  // the client match live in lib/node-filter (unit-tested).
+  const updatedAfter = datePresetToEpoch(dateFilter, Date.now());
+  const filtered = nodes.filter((n) => {
+    if (
+      !matchesFilters(n, {
+        status: statusFilter,
+        tags: tagFilters,
+        author: authorFilter,
+        updatedAfter,
+      })
+    )
+      return false;
+    if (!search) return true;
+    return matchesFilters(n, { search }) || contentHits.has(n.id);
   });
+
+  // Orphans + broken [[links]], client-side from the loaded list.
+  const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
+
+  // Distinct authors for the author filter dropdown.
+  const authors = useMemo(() => {
+    const set = new Set<string>();
+    for (const n of nodes) if (n.author) set.add(n.author);
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [nodes]);
+
+  const hasActiveFilters =
+    !!search ||
+    statusFilter !== "all" ||
+    tagFilters.length > 0 ||
+    authorFilter !== "all" ||
+    dateFilter !== "any";
+  const clearAllFilters = () => {
+    setSearch("");
+    setStatusFilter("all");
+    setTagFilters([]);
+    setAuthorFilter("all");
+    setDateFilter("any");
+  };
+
+  // Human-readable chips for every active filter, each with its own clear.
+  // Tags keep their dedicated bar below, so they're not duplicated here.
+  const STATUS_LABELS: Record<string, string> = {
+    draft: "Draft",
+    pending_review: "Pending",
+    approved: "Approved",
+    rejected: "Rejected",
+  };
+  const DATE_LABELS: Record<string, string> = {
+    "7d": "Last 7 days",
+    "30d": "Last 30 days",
+    "90d": "Last 90 days",
+    "1y": "Last year",
+  };
+  const activeFilterChips: Array<{ label: string; clear: () => void }> = [];
+  if (search)
+    activeFilterChips.push({ label: `Search: ${search}`, clear: () => setSearch("") });
+  if (statusFilter !== "all")
+    activeFilterChips.push({
+      label: `Status: ${STATUS_LABELS[statusFilter] ?? statusFilter}`,
+      clear: () => setStatusFilter("all"),
+    });
+  if (authorFilter !== "all")
+    activeFilterChips.push({
+      label: `Author: ${authorFilter}`,
+      clear: () => setAuthorFilter("all"),
+    });
+  if (dateFilter !== "any")
+    activeFilterChips.push({
+      label: `Edited: ${DATE_LABELS[dateFilter] ?? dateFilter}`,
+      clear: () => setDateFilter("any"),
+    });
+
+  // All tags in the nest with usage counts — the always-visible filter bar.
+  const allTags = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const n of nodes) {
+      for (const t of (n.tags ?? []) as string[]) {
+        counts.set(t, (counts.get(t) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([tag, count]) => ({ tag, count }));
+  }, [nodes]);
+
+  // Quick-access strip; only useful once the list outgrows a glance.
+  const recentlyEdited = useMemo(() => {
+    if (nodes.length < 5) return [];
+    return [...nodes]
+      .filter((n) => n.updated_at)
+      .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+      .slice(0, 5);
+  }, [nodes]);
 
   // myStewards (caller's own scoped rows) comes from GET /nests/:id, so
   // non-admin reviewers/editors keep per-node affordances without reading the
@@ -640,17 +826,23 @@ export function NestView({
         <TabsContent value="documents" className="space-y-4">
           <Card>
             <CardHeader>
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                 <CardTitle className="text-lg">Documents</CardTitle>
-                <div className="flex items-center gap-2">
-                  <div className="relative w-48 sm:w-64">
+                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                  <div className="relative flex-1 min-w-[12rem] sm:flex-none sm:w-80">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
                     <Input
-                      placeholder="Search documents or tags..."
+                      placeholder="Search title, tags, content…"
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
-                      className="pl-9 w-full h-8"
+                      className="pl-9 pr-12 w-full h-8"
                     />
+                    <kbd
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground border rounded px-1 pointer-events-none"
+                      title="Quick open"
+                    >
+                      ⌘K
+                    </kbd>
                   </div>
                   {stewardshipEnabled && (
                     <Select value={statusFilter} onValueChange={setStatusFilter}>
@@ -666,62 +858,378 @@ export function NestView({
                       </SelectContent>
                     </Select>
                   )}
+                  {authors.length > 1 && (
+                    <Select value={authorFilter} onValueChange={setAuthorFilter}>
+                      <SelectTrigger className="w-[150px] h-8" title="Filter by author">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All authors</SelectItem>
+                        {authors.map((a) => (
+                          <SelectItem key={a} value={a}>
+                            {a}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                  <Select
+                    value={dateFilter}
+                    onValueChange={(v) => setDateFilter(v as DatePreset)}
+                  >
+                    <SelectTrigger className="w-[140px] h-8" title="Filter by last edited">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="any">Any time</SelectItem>
+                      <SelectItem value="7d">Last 7 days</SelectItem>
+                      <SelectItem value="30d">Last 30 days</SelectItem>
+                      <SelectItem value="90d">Last 90 days</SelectItem>
+                      <SelectItem value="1y">Last year</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {/* List vs cards density toggle. */}
+                  <div className="flex items-center rounded-md border h-8">
+                    <button
+                      type="button"
+                      title="List view"
+                      aria-pressed={viewMode === "list"}
+                      className={`px-2 h-full rounded-l-md ${
+                        viewMode === "list" ? "bg-muted" : "hover:bg-muted/50"
+                      }`}
+                      onClick={() => setViewMode("list")}
+                    >
+                      <ListIcon className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      title="Card view"
+                      aria-pressed={viewMode === "cards"}
+                      className={`px-2 h-full rounded-r-md ${
+                        viewMode === "cards" ? "bg-muted" : "hover:bg-muted/50"
+                      }`}
+                      onClick={() => setViewMode("cards")}
+                    >
+                      <LayoutGrid className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
               </div>
             </CardHeader>
             <CardContent>
+              {/* Saved filters — one-click apply of a named filter snapshot.
+                  Persisted per nest in localStorage. */}
+              {savedFilters.length > 0 && (
+                <div className="flex items-center flex-wrap gap-1.5 mb-2 text-xs">
+                  <span className="text-muted-foreground">Saved:</span>
+                  {savedFilters.map((f) => (
+                    <span
+                      key={f.name}
+                      className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 hover:bg-muted"
+                    >
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1"
+                        onClick={() => applySavedFilter(f)}
+                        title={`Apply saved filter "${f.name}"`}
+                      >
+                        <Star className="h-3 w-3 text-amber-500" />
+                        {f.name}
+                      </button>
+                      <button
+                        type="button"
+                        className="text-muted-foreground hover:text-foreground"
+                        onClick={() =>
+                          persistSaved(removeFilter(savedFilters, f.name))
+                        }
+                        title={`Delete saved filter "${f.name}"`}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {/* Active filters — what's currently narrowing the list, each
+                  removable. Save the whole set, or clear it. */}
+              {hasActiveFilters && (
+                <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
+                  <span className="text-muted-foreground">Active filters:</span>
+                  {activeFilterChips.map((c) => (
+                    <span
+                      key={c.label}
+                      className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5"
+                    >
+                      {c.label}
+                      <button
+                        type="button"
+                        className="text-muted-foreground hover:text-foreground"
+                        onClick={c.clear}
+                        title="Remove this filter"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                  {tagFilters.length > 0 && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5">
+                      Tags: {tagFilters.join(", ")}
+                      <button
+                        type="button"
+                        className="text-muted-foreground hover:text-foreground"
+                        onClick={() => setTagFilters([])}
+                        title="Remove tag filters"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => setShowSaveFilter(true)}
+                  >
+                    <Star className="h-3 w-3 mr-1" />
+                    Save filter
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs text-muted-foreground"
+                    onClick={clearAllFilters}
+                  >
+                    Clear all
+                  </Button>
+                </div>
+              )}
+              {/* Tag filter bar — every tag in the nest, clickable; active
+                  tags AND together. The primary filter surface. */}
+              {allTags.length > 0 && (
+                <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
+                  <span className="text-muted-foreground">Tags:</span>
+                  {allTags.slice(0, 14).map(({ tag, count }) => {
+                    const active = tagFilters.includes(tag);
+                    return (
+                      <button
+                        key={tag}
+                        type="button"
+                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-colors ${
+                          active
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "text-foreground/80 hover:bg-muted"
+                        }`}
+                        onClick={() => toggleTagFilter(tag)}
+                        title={
+                          active
+                            ? `Remove filter ${tag}`
+                            : `Filter by ${tag}`
+                        }
+                      >
+                        {tag}
+                        <span
+                          className={
+                            active
+                              ? "text-primary-foreground/80"
+                              : "text-muted-foreground"
+                          }
+                        >
+                          {active ? "×" : count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                  {allTags.length > 14 && (
+                    <span className="text-muted-foreground">
+                      +{allTags.length - 14} more
+                    </span>
+                  )}
+                  {tagFilters.length > 0 && (
+                    <button
+                      type="button"
+                      className="text-muted-foreground hover:underline ml-1"
+                      onClick={() => setTagFilters([])}
+                    >
+                      clear
+                    </button>
+                  )}
+                </div>
+              )}
+              {recentlyEdited.length > 0 && (
+                <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
+                  <span className="text-muted-foreground">Recently edited:</span>
+                  {recentlyEdited.map((n) => (
+                    <button
+                      key={n.id}
+                      type="button"
+                      className="rounded-full border px-2 py-0.5 text-primary hover:bg-muted truncate max-w-[180px]"
+                      onClick={() => onOpenDocument(n.id)}
+                    >
+                      {n.title}
+                    </button>
+                  ))}
+                </div>
+              )}
               {loading ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
               ) : filtered.length === 0 ? (
                 <div className="text-center py-8 text-sm text-muted-foreground">
-                  {search || statusFilter !== "all" ? "No matching documents" : "No documents yet"}
+                  {hasActiveFilters ? "No matching documents" : "No documents yet"}
                 </div>
               ) : (
-                <div className="space-y-2">
-                  {filtered.map((node) => (
+                <div
+                  className={
+                    viewMode === "cards"
+                      ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2"
+                      : "space-y-2"
+                  }
+                >
+                  {filtered.map((node) => {
+                    const cards = viewMode === "cards";
+                    const canSubmit =
+                      stewardshipEnabled &&
+                      node.status === "draft" &&
+                      canEditNode(node);
+                    const canReview =
+                      stewardshipEnabled &&
+                      node.status === "pending_review" &&
+                      canReviewNode(node) &&
+                      (submitterByNode.get(node.id) !== currentEmail ||
+                        (isOwner && allowSelfApprove));
+                    const canEdit =
+                      node.status !== "pending_review" && canEditNode(node);
+                    const canDelete = canEditNode(node);
+                    // Cards: collapse every row action into a 3-dot menu kept on
+                    // the title line. List keeps inline hover buttons below.
+                    const actionMenu = (
+                      <div onClick={(e) => e.stopPropagation()}>
+                        <DropdownMenu modal={false}>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 w-7 p-0 flex-shrink-0"
+                              title="Actions"
+                            >
+                              <MoreVertical className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="min-w-40">
+                            {canEdit && (
+                              <DropdownMenuItem onSelect={() => onOpenDocument(node.id)}>
+                                <Pencil className="h-3.5 w-3.5 mr-2" />
+                                Edit
+                              </DropdownMenuItem>
+                            )}
+                            {canSubmit && (
+                              <DropdownMenuItem onSelect={() => setSubmitNode(node)}>
+                                <Send className="h-3.5 w-3.5 mr-2" />
+                                Submit for review
+                              </DropdownMenuItem>
+                            )}
+                            {canReview && (
+                              <DropdownMenuItem onSelect={() => setReviewNode(node)}>
+                                <CheckCircle2 className="h-3.5 w-3.5 mr-2" />
+                                Review
+                              </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem onSelect={() => openVersions(node)}>
+                              <History className="h-3.5 w-3.5 mr-2" />
+                              History
+                            </DropdownMenuItem>
+                            {canDelete && (
+                              <>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  onSelect={() => handleDeleteNode(node)}
+                                  className="text-destructive focus:text-destructive"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5 mr-2" />
+                                  Delete
+                                </DropdownMenuItem>
+                              </>
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    );
+                    return (
                     <div
                       key={node.id}
                       onClick={() => onOpenDocument(node.id)}
-                      className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer"
+                      className={`${
+                        cards
+                          ? "flex flex-col gap-2"
+                          : "flex items-center gap-3"
+                      } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer`}
                       data-testid={`document-row-${node.id}`}
                     >
-                      <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                      {!cards && (
+                        <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                      )}
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="font-medium truncate">{node.title}</span>
+                          {cards && (
+                            <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                          )}
+                          <span
+                            className={`font-medium ${cards ? "break-words" : "truncate"}`}
+                          >
+                            {node.title}
+                          </span>
                           <LifecycleStatusBadge
                             status={(node.status as DocumentLifecycleStatus) || "draft"}
                             size="sm"
                           />
-
+                          {cards && <div className="ml-auto">{actionMenu}</div>}
                         </div>
                         <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
                           <span>v{node.version || 1}</span>
                           {node.tags?.length > 0 && (
                             <>
                               <span>·</span>
-                              <span className="truncate">{node.tags.slice(0, 3).join(" ")}</span>
+                              <span className="flex items-center gap-1 truncate">
+                                {node.tags.slice(0, 3).map((t: string) => (
+                                  <button
+                                    key={t}
+                                    type="button"
+                                    title={
+                                      tagFilters.includes(t)
+                                        ? `Remove filter ${t}`
+                                        : `Filter by ${t}`
+                                    }
+                                    className={`rounded-full border px-1.5 py-px transition-colors ${
+                                      tagFilters.includes(t)
+                                        ? "bg-primary text-primary-foreground border-primary"
+                                        : "hover:bg-muted"
+                                    }`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleTagFilter(t);
+                                    }}
+                                  >
+                                    {t}
+                                  </button>
+                                ))}
+                              </span>
                             </>
                           )}
                         </div>
                       </div>
+                      {!cards && (
                       <div
-                        className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                        className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100"
                         onClick={(e) => e.stopPropagation()}
                       >
-                        {stewardshipEnabled && node.status === "draft" && canEditNode(node) && (
+                        {canSubmit && (
                           <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
                             <Send className="h-3.5 w-3.5 mr-1" />
                             Submit
                           </Button>
                         )}
-                        {stewardshipEnabled &&
-                          node.status === "pending_review" &&
-                          canReviewNode(node) &&
-                          (submitterByNode.get(node.id) !== currentEmail ||
-                            (isOwner && allowSelfApprove)) && (
+                        {canReview && (
                             <Button
                               variant="outline"
                               size="sm"
@@ -731,7 +1239,7 @@ export function NestView({
                               Review
                             </Button>
                           )}
-                        {node.status !== "pending_review" && canEditNode(node) && (
+                        {canEdit && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -744,7 +1252,7 @@ export function NestView({
                         <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
                           <History className="h-3.5 w-3.5" />
                         </Button>
-                        {canEditNode(node) && (
+                        {canDelete && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -756,9 +1264,66 @@ export function NestView({
                           </Button>
                         )}
                       </div>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
+              )}
+
+              {/* Wiki link health — orphans + broken [[links]], computed
+                  client-side. Collapsed by default; hidden when clean. */}
+              {!loading &&
+                (wikiHealth.broken.length > 0 ||
+                  wikiHealth.orphans.length > 0) && (
+                <details className="mt-4 text-xs text-muted-foreground">
+                  <summary className="cursor-pointer select-none">
+                    Link health: {wikiHealth.broken.length} broken link
+                    {wikiHealth.broken.length !== 1 ? "s" : ""} ·{" "}
+                    {wikiHealth.orphans.length} orphan doc
+                    {wikiHealth.orphans.length !== 1 ? "s" : ""}
+                  </summary>
+                  <div className="mt-2 space-y-2 pl-1">
+                    {wikiHealth.broken.length > 0 && (
+                      <div>
+                        <div className="font-medium mb-1">
+                          Broken links (target doesn't exist):
+                        </div>
+                        {wikiHealth.broken.slice(0, 10).map((b, i) => (
+                          <div key={i}>
+                            <button
+                              type="button"
+                              className="text-primary hover:underline"
+                              onClick={() => onOpenDocument(b.sourceId)}
+                            >
+                              {b.sourceTitle}
+                            </button>{" "}
+                            → [[{b.target}]]
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {wikiHealth.orphans.length > 0 && (
+                      <div>
+                        <div className="font-medium mb-1">
+                          Orphans (nothing links to them):
+                        </div>
+                        <div className="flex flex-wrap gap-x-3 gap-y-1">
+                          {wikiHealth.orphans.slice(0, 15).map((o) => (
+                            <button
+                              key={o.id}
+                              type="button"
+                              className="text-primary hover:underline"
+                              onClick={() => onOpenDocument(o.id)}
+                            >
+                              {o.title}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </details>
               )}
             </CardContent>
           </Card>
@@ -1107,6 +1672,37 @@ export function NestView({
           onDeleted={() => { setShowDelete(false); onBack(); }}
         />
       )}
+
+      <Dialog open={showSaveFilter} onOpenChange={setShowSaveFilter}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Save this filter</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Saved filters remember your current search, tags, status, author and
+            date range. Pick one from the <strong>Saved</strong> row to re-apply
+            the whole set in one click — handy for views you return to, like
+            “My drafts” or “Edited this week”.
+          </p>
+          <Input
+            autoFocus
+            placeholder="Filter name (e.g. My drafts)"
+            value={saveFilterName}
+            onChange={(e) => setSaveFilterName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") saveCurrentFilter();
+            }}
+          />
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setShowSaveFilter(false)}>
+              Cancel
+            </Button>
+            <Button onClick={saveCurrentFilter} disabled={!saveFilterName.trim()}>
+              Save filter
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {showAssignSteward && (
         <StewardModal

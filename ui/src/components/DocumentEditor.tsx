@@ -20,7 +20,9 @@ import {
   X,
   Pencil,
   Users,
+  Link as LinkIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   MarkdownEditor,
   slugFromNodeId,
@@ -30,6 +32,11 @@ import { DocumentViewer } from "./DocumentViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { SubmitForReviewModal, ReviewActions, ExternalEditBanner } from "./governance";
 import type { PendingChange } from "../lib/api";
+import { findBacklinks, titleFormBacklinks } from "../lib/backlinks";
+import { relatedDocs } from "../lib/related";
+import { unlinkedMentions } from "../lib/unlinked-mentions";
+import { extractHeadings } from "../lib/toc";
+import { resolveWikiTarget, previewSnippet } from "../lib/wiki-preview";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
 import type { BreadcrumbEntry } from "../App";
@@ -171,6 +178,66 @@ export function DocumentEditor({
   });
 
   const [loading, setLoading] = useState(!isNew);
+  // Cached nest node list (with content) — feeds both the backlinks panel
+  // and wiki-link hover previews from one fetch. Best-effort.
+  const [nestNodes, setNestNodes] = useState<
+    Array<{ id: string; title: string; content?: string; tags?: string[] }>
+  >([]);
+  useEffect(() => {
+    if (isNew || loading) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { nodes } = await api.listNodes(nestId);
+        if (!cancelled) {
+          setNestNodes(
+            nodes as Array<{
+              id: string;
+              title: string;
+              content?: string;
+              tags?: string[];
+            }>,
+          );
+        }
+      } catch {
+        /* best-effort; list failures already surface elsewhere */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isNew, loading, nestId]);
+
+  // Docs in this nest that wiki-link to this one ("what links here").
+  const backlinks = useMemo(
+    () => (isNew ? [] : findBacklinks(nestNodes, { id: nodeId, title })),
+    [isNew, nestNodes, nodeId, title],
+  );
+
+  // Related docs (shared tags + shared links) and link-discovery candidates
+  // (docs that name this one in prose but never [[link]] it).
+  const related = useMemo(
+    () =>
+      isNew
+        ? []
+        : relatedDocs({ id: nodeId, title, tags, content }, nestNodes),
+    [isNew, nestNodes, nodeId, title, tags, content],
+  );
+  const unlinked = useMemo(
+    () => (isNew ? [] : unlinkedMentions({ id: nodeId, title }, nestNodes)),
+    [isNew, nestNodes, nodeId, title],
+  );
+
+  // Hover-preview lookup for `[[wiki links]]` in the read view — resolves
+  // against the cached list, no per-hover fetch.
+  const previewFor = useCallback(
+    (target: string) => {
+      const node = resolveWikiTarget(nestNodes, target);
+      if (!node) return null;
+      return { title: node.title, snippet: previewSnippet(node.content ?? "") };
+    },
+    [nestNodes],
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
@@ -608,15 +675,31 @@ export function DocumentEditor({
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {/* Write/review affordances hidden for public reader. */}
+          {!isNew && (
+            <Button
+              variant="outline"
+              onClick={() => {
+                // Deep link the App's ?nest=&doc= probe understands.
+                const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
+                navigator.clipboard.writeText(url);
+                toast.success("Link copied — recipient needs access to this nest");
+              }}
+              data-testid="document-editor-copy-link"
+              title="Copy a link to this document (recipient needs nest access)"
+            >
+              <LinkIcon className="h-4 w-4 mr-2" />
+              Copy link
+            </Button>
+          )}
           {canShare && (
             <Button
               variant="outline"
               onClick={() => setShowShare(true)}
               data-testid="document-editor-share"
-              title="Share this nest — visibility and collaborators"
+              title="Share the whole nest — visibility and collaborators. Use stewards to restrict single documents."
             >
               <Users className="h-4 w-4 mr-2" />
-              Share
+              Share nest
             </Button>
           )}
           {!isViewOnly && canSubmitForReview && (
@@ -726,6 +809,32 @@ export function DocumentEditor({
                 className="border-0 px-0 h-auto py-0 text-3xl font-bold leading-tight shadow-none focus-visible:ring-0 placeholder:text-muted-foreground/40"
               />
             )}
+            {/* Rename safety: [[Title]]-form links break on retitle (the
+                id/slug stays stable; the title doesn't). Warn while the
+                title diverges from the saved one. */}
+            {!isNew &&
+              mode === "edit" &&
+              title.trim() !== initialSnapshotRef.current.title.trim() &&
+              (() => {
+                const affected = titleFormBacklinks(nestNodes, {
+                  id: nodeId,
+                  title: initialSnapshotRef.current.title,
+                });
+                if (affected.length === 0) return null;
+                return (
+                  <p className="mt-1 text-xs text-amber-700">
+                    Renaming will break {affected.length} wiki link
+                    {affected.length !== 1 ? "s" : ""} that reference this
+                    document by its old title (
+                    {affected
+                      .slice(0, 3)
+                      .map((a) => a.title)
+                      .join(", ")}
+                    {affected.length > 3 ? ", …" : ""}
+                    ). Links by slug are unaffected.
+                  </p>
+                );
+              })()}
           </div>
 
           {/* Tags */}
@@ -798,6 +907,39 @@ export function DocumentEditor({
             )}
           </div>
 
+          {/* Outline/TOC — view mode, only when the doc has real structure. */}
+          {mode === "view" &&
+            !looksLikeHtml(content) &&
+            (() => {
+              const headings = extractHeadings(content);
+              if (headings.length < 3) return null;
+              return (
+                <nav className="border rounded-lg bg-muted/20 px-3 py-2">
+                  <div className="text-xs font-medium text-muted-foreground mb-1">
+                    Outline
+                  </div>
+                  <div className="space-y-0.5">
+                    {headings.map((h) => (
+                      <button
+                        key={h.id}
+                        type="button"
+                        className="block w-full text-left text-sm text-primary hover:underline truncate"
+                        style={{ paddingLeft: `${(h.level - 1) * 12}px` }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          document
+                            .getElementById(h.id)
+                            ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                        }}
+                      >
+                        {h.text}
+                      </button>
+                    ))}
+                  </div>
+                </nav>
+              );
+            })()}
+
           {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
           <div
             onClick={() => {
@@ -817,6 +959,7 @@ export function DocumentEditor({
                   onWikiLinkClick={(title) =>
                     handleWikiLinkClick(title, null)
                   }
+                  previewFor={previewFor}
                 />
               </div>
             ) : (
@@ -839,6 +982,91 @@ export function DocumentEditor({
               />
             )}
           </div>
+
+          {/* Backlinks — "what links here". View mode only; hidden when empty. */}
+          {mode === "view" && backlinks.length > 0 && (
+            <div className="border rounded-lg bg-muted/20 p-3">
+              <div className="text-xs font-medium text-muted-foreground mb-2">
+                Linked from {backlinks.length} document
+                {backlinks.length !== 1 ? "s" : ""}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {backlinks.map((b) => (
+                  <button
+                    key={b.id}
+                    type="button"
+                    className="text-sm text-primary hover:underline text-left"
+                    onClick={() =>
+                      confirmLeave(
+                        `open "${b.title}"`,
+                        () => onNavigateDocument?.(nestId, b.id, title),
+                      )
+                    }
+                  >
+                    {b.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Related docs — shared tags / links. View mode only. */}
+          {mode === "view" && related.length > 0 && (
+            <div className="border rounded-lg bg-muted/20 p-3">
+              <div className="text-xs font-medium text-muted-foreground mb-2">
+                Related documents
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {related.map((r) => (
+                  <button
+                    key={r.id}
+                    type="button"
+                    className="text-sm text-primary hover:underline text-left"
+                    title={
+                      r.sharedTags.length
+                        ? `Shared tags: ${r.sharedTags.join(", ")}`
+                        : "Shared links"
+                    }
+                    onClick={() =>
+                      confirmLeave(
+                        `open "${r.title}"`,
+                        () => onNavigateDocument?.(nestId, r.id, title),
+                      )
+                    }
+                  >
+                    {r.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Link discovery — docs that mention this one but don't link it. */}
+          {mode === "view" && unlinked.length > 0 && (
+            <div className="border rounded-lg bg-muted/20 p-3">
+              <div className="text-xs font-medium text-muted-foreground mb-2">
+                Mentioned in {unlinked.length} document
+                {unlinked.length !== 1 ? "s" : ""} without a link
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {unlinked.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    className="text-sm text-primary hover:underline text-left"
+                    onClick={() =>
+                      confirmLeave(
+                        `open "${m.title}"`,
+                        () => onNavigateDocument?.(nestId, m.id, title),
+                      )
+                    }
+                  >
+                    {m.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
