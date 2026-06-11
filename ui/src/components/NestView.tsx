@@ -2,9 +2,10 @@
  * NestView — governance dashboard for a single nest.
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import * as api from "../lib/api";
 import { matchesFilters } from "../lib/node-filter";
+import { linkHealth } from "../lib/link-health";
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
@@ -197,6 +198,18 @@ export function NestView({
   const filtered = nodes.filter((n) =>
     matchesFilters(n, { search, status: statusFilter, tags: tagFilters }),
   );
+
+  // Orphans + broken [[links]], client-side from the loaded list.
+  const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
+
+  // Quick-access strip; only useful once the list outgrows a glance.
+  const recentlyEdited = useMemo(() => {
+    if (nodes.length < 5) return [];
+    return [...nodes]
+      .filter((n) => n.updated_at)
+      .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+      .slice(0, 5);
+  }, [nodes]);
 
   // myStewards (caller's own scoped rows) comes from GET /nests/:id, so
   // non-admin reviewers/editors keep per-node affordances without reading the
@@ -667,6 +680,21 @@ export function NestView({
               </div>
             </CardHeader>
             <CardContent>
+              {recentlyEdited.length > 0 && (
+                <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
+                  <span className="text-muted-foreground">Recently edited:</span>
+                  {recentlyEdited.map((n) => (
+                    <button
+                      key={n.id}
+                      type="button"
+                      className="rounded-full border px-2 py-0.5 text-primary hover:bg-muted truncate max-w-[180px]"
+                      onClick={() => onOpenDocument(n.id)}
+                    >
+                      {n.title}
+                    </button>
+                  ))}
+                </div>
+              )}
               {tagFilters.length > 0 && (
                 <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
                   <span className="text-muted-foreground">Filtering by:</span>
@@ -804,6 +832,61 @@ export function NestView({
                     </div>
                   ))}
                 </div>
+              )}
+
+              {/* Wiki link health — orphans + broken [[links]], computed
+                  client-side. Collapsed by default; hidden when clean. */}
+              {!loading &&
+                (wikiHealth.broken.length > 0 ||
+                  wikiHealth.orphans.length > 0) && (
+                <details className="mt-4 text-xs text-muted-foreground">
+                  <summary className="cursor-pointer select-none">
+                    Link health: {wikiHealth.broken.length} broken link
+                    {wikiHealth.broken.length !== 1 ? "s" : ""} ·{" "}
+                    {wikiHealth.orphans.length} orphan doc
+                    {wikiHealth.orphans.length !== 1 ? "s" : ""}
+                  </summary>
+                  <div className="mt-2 space-y-2 pl-1">
+                    {wikiHealth.broken.length > 0 && (
+                      <div>
+                        <div className="font-medium mb-1">
+                          Broken links (target doesn't exist):
+                        </div>
+                        {wikiHealth.broken.slice(0, 10).map((b, i) => (
+                          <div key={i}>
+                            <button
+                              type="button"
+                              className="text-primary hover:underline"
+                              onClick={() => onOpenDocument(b.sourceId)}
+                            >
+                              {b.sourceTitle}
+                            </button>{" "}
+                            → [[{b.target}]]
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {wikiHealth.orphans.length > 0 && (
+                      <div>
+                        <div className="font-medium mb-1">
+                          Orphans (nothing links to them):
+                        </div>
+                        <div className="flex flex-wrap gap-x-3 gap-y-1">
+                          {wikiHealth.orphans.slice(0, 15).map((o) => (
+                            <button
+                              key={o.id}
+                              type="button"
+                              className="text-primary hover:underline"
+                              onClick={() => onOpenDocument(o.id)}
+                            >
+                              {o.title}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </details>
               )}
             </CardContent>
           </Card>
