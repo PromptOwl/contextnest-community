@@ -33,6 +33,8 @@ import { ShareNestDialog } from "./ShareNestDialog";
 import { SubmitForReviewModal, ReviewActions, ExternalEditBanner } from "./governance";
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, titleFormBacklinks } from "../lib/backlinks";
+import { relatedDocs } from "../lib/related";
+import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
 import { resolveWikiTarget, previewSnippet } from "../lib/wiki-preview";
 import { DocumentPickerModal } from "./DocumentPickerModal";
@@ -179,7 +181,7 @@ export function DocumentEditor({
   // Cached nest node list (with content) — feeds both the backlinks panel
   // and wiki-link hover previews from one fetch. Best-effort.
   const [nestNodes, setNestNodes] = useState<
-    Array<{ id: string; title: string; content?: string }>
+    Array<{ id: string; title: string; content?: string; tags?: string[] }>
   >([]);
   useEffect(() => {
     if (isNew || loading) return;
@@ -189,7 +191,12 @@ export function DocumentEditor({
         const { nodes } = await api.listNodes(nestId);
         if (!cancelled) {
           setNestNodes(
-            nodes as Array<{ id: string; title: string; content?: string }>,
+            nodes as Array<{
+              id: string;
+              title: string;
+              content?: string;
+              tags?: string[];
+            }>,
           );
         }
       } catch {
@@ -204,6 +211,20 @@ export function DocumentEditor({
   // Docs in this nest that wiki-link to this one ("what links here").
   const backlinks = useMemo(
     () => (isNew ? [] : findBacklinks(nestNodes, { id: nodeId, title })),
+    [isNew, nestNodes, nodeId, title],
+  );
+
+  // Related docs (shared tags + shared links) and link-discovery candidates
+  // (docs that name this one in prose but never [[link]] it).
+  const related = useMemo(
+    () =>
+      isNew
+        ? []
+        : relatedDocs({ id: nodeId, title, tags, content }, nestNodes),
+    [isNew, nestNodes, nodeId, title, tags, content],
+  );
+  const unlinked = useMemo(
+    () => (isNew ? [] : unlinkedMentions({ id: nodeId, title }, nestNodes)),
     [isNew, nestNodes, nodeId, title],
   );
 
@@ -983,6 +1004,64 @@ export function DocumentEditor({
                     }
                   >
                     {b.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Related docs — shared tags / links. View mode only. */}
+          {mode === "view" && related.length > 0 && (
+            <div className="border rounded-lg bg-muted/20 p-3">
+              <div className="text-xs font-medium text-muted-foreground mb-2">
+                Related documents
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {related.map((r) => (
+                  <button
+                    key={r.id}
+                    type="button"
+                    className="text-sm text-primary hover:underline text-left"
+                    title={
+                      r.sharedTags.length
+                        ? `Shared tags: ${r.sharedTags.join(", ")}`
+                        : "Shared links"
+                    }
+                    onClick={() =>
+                      confirmLeave(
+                        `open "${r.title}"`,
+                        () => onNavigateDocument?.(nestId, r.id, title),
+                      )
+                    }
+                  >
+                    {r.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Link discovery — docs that mention this one but don't link it. */}
+          {mode === "view" && unlinked.length > 0 && (
+            <div className="border rounded-lg bg-muted/20 p-3">
+              <div className="text-xs font-medium text-muted-foreground mb-2">
+                Mentioned in {unlinked.length} document
+                {unlinked.length !== 1 ? "s" : ""} without a link
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {unlinked.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    className="text-sm text-primary hover:underline text-left"
+                    onClick={() =>
+                      confirmLeave(
+                        `open "${m.title}"`,
+                        () => onNavigateDocument?.(nestId, m.id, title),
+                      )
+                    }
+                  >
+                    {m.title}
                   </button>
                 ))}
               </div>

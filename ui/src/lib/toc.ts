@@ -24,24 +24,53 @@ function plainText(s: string): string {
     .trim();
 }
 
-/** h1–h3 headings in document order, skipping fenced code blocks. */
+/** True when `line` could be a setext heading's text (a plain paragraph line). */
+function isSetextText(line: string): boolean {
+  if (!line.trim()) return false;
+  // remark only treats a preceding *paragraph* as setext text — not a list
+  // item, blockquote, ATX heading, table row, or fence.
+  return !/^\s*([#>|]|[-*+]\s|\d+[.)]\s|```|~~~)/.test(line);
+}
+
+/**
+ * h1–h3 headings in document order, skipping fenced code blocks. Must stay in
+ * lock-step with DocumentViewer's `doc-h-<i>` assignment, so it counts every
+ * construct react-markdown renders as a heading: ATX (`#`), blockquote-prefixed
+ * ATX (`> #`), and setext (text underlined by `===`/`---`). h4–h6 are excluded
+ * in both places.
+ */
 export function extractHeadings(markdown: string): TocHeading[] {
   const out: TocHeading[] = [];
   let inFence = false;
   let i = 0;
-  for (const line of (markdown ?? "").split("\n")) {
+  const push = (level: 1 | 2 | 3, text: string) =>
+    out.push({ level, text: plainText(text), id: `doc-h-${i++}` });
+
+  const lines = (markdown ?? "").split("\n");
+  let prev = "";
+  for (const line of lines) {
     if (/^\s*(```|~~~)/.test(line)) {
       inFence = !inFence;
+      prev = line;
       continue;
     }
-    if (inFence) continue;
-    const m = line.match(/^(#{1,3})\s+(.+?)\s*#*\s*$/);
-    if (!m) continue;
-    out.push({
-      level: m[1].length as 1 | 2 | 3,
-      text: plainText(m[2]),
-      id: `doc-h-${i++}`,
-    });
+    if (inFence) {
+      prev = line;
+      continue;
+    }
+    // Setext: an `=`/`-` underline directly under a paragraph line → h1/h2.
+    const setext = line.match(/^\s{0,3}(=+|-+)\s*$/);
+    if (setext && isSetextText(prev)) {
+      push(setext[1][0] === "=" ? 1 : 2, prev);
+      prev = "";
+      continue;
+    }
+    // ATX, optionally inside a blockquote (`> #`, `>> ##`).
+    const atx = line.replace(/^(\s*>+\s?)+/, "").match(/^(#{1,3})\s+(.+?)\s*#*\s*$/);
+    if (atx) {
+      push(atx[1].length as 1 | 2 | 3, atx[2]);
+    }
+    prev = line;
   }
   return out;
 }

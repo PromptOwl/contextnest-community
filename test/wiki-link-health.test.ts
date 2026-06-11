@@ -30,4 +30,12 @@ describe("linkHealth", () => {
   it("empty input → empty report", () => {
     expect(linkHealth([])).toEqual({ orphans: [], broken: [] });
   });
+
+  it("a nest with no wiki links anywhere reports no orphans", () => {
+    const linkless = [
+      { id: "nodes/a", title: "A", content: "# A\n\nprose only" },
+      { id: "nodes/b", title: "B", content: "# B\n\nmore prose" },
+    ];
+    expect(linkHealth(linkless)).toEqual({ orphans: [], broken: [] });
+  });
 });

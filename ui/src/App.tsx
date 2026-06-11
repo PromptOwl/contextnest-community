@@ -598,7 +598,7 @@ function UserMenu({
   const initial = displayName.charAt(0);
 
   return (
-    <DropdownMenu>
+    <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"

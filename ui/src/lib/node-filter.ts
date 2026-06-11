@@ -10,12 +10,19 @@ export interface FilterableNode {
   title?: string;
   status?: string;
   tags?: string[];
+  author?: string;
+  updated_at?: string;
 }
 
 export interface NodeFilters {
   search?: string;
   status?: string;
   tags?: string[];
+  /** Exact author match (case-insensitive); "all"/empty passes everything. */
+  author?: string;
+  /** Epoch ms threshold; node passes when updated_at >= this. Caller derives
+   *  it from a preset so this module stays free of the wall clock. */
+  updatedAfter?: number;
 }
 
 function normTag(t: string): string {
@@ -26,9 +33,18 @@ export function matchesFilters(
   node: FilterableNode,
   filters: NodeFilters,
 ): boolean {
-  const { search, status, tags } = filters;
+  const { search, status, tags, author, updatedAfter } = filters;
 
   if (status && status !== "all" && node.status !== status) return false;
+
+  if (author && author !== "all") {
+    if ((node.author ?? "").toLowerCase() !== author.toLowerCase()) return false;
+  }
+
+  if (updatedAfter != null) {
+    const t = node.updated_at ? Date.parse(node.updated_at) : NaN;
+    if (Number.isNaN(t) || t < updatedAfter) return false;
+  }
 
   if (search) {
     const needle = search.toLowerCase();

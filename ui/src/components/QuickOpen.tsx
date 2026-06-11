@@ -10,7 +10,7 @@ import * as api from "../lib/api";
 
 interface QuickOpenProps {
   nestId: string;
-  onSelect: (nodeId: string, title: string) => void;
+  onSelect: (nodeId: string) => void;
   onClose: () => void;
 }
 
@@ -51,7 +51,7 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
 
   const pick = (i: number) => {
     const r = results[i];
-    if (r) onSelect(r.id, r.title);
+    if (r) onSelect(r.id);
   };
 
   return (

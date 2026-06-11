@@ -24,6 +24,28 @@ describe("extractHeadings", () => {
     expect(extractHeadings(md)[0].text).toBe("Bold and link and Foo");
   });
 
+  it("counts setext headings (=== / ---) so ids stay in sync with the viewer", () => {
+    const md = "Title One\n=====\n\ntext\n\nTitle Two\n-----\n\n# Atx Three";
+    expect(extractHeadings(md)).toEqual([
+      { level: 1, text: "Title One", id: "doc-h-0" },
+      { level: 2, text: "Title Two", id: "doc-h-1" },
+      { level: 1, text: "Atx Three", id: "doc-h-2" },
+    ]);
+  });
+
+  it("does not treat a thematic break (--- after a blank line) as setext", () => {
+    const md = "# Real\n\n---\n\n## Also real";
+    expect(extractHeadings(md).map((h) => h.text)).toEqual(["Real", "Also real"]);
+  });
+
+  it("counts blockquote-prefixed ATX headings", () => {
+    const md = "> # Quoted\n\n## Plain";
+    expect(extractHeadings(md)).toEqual([
+      { level: 1, text: "Quoted", id: "doc-h-0" },
+      { level: 2, text: "Plain", id: "doc-h-1" },
+    ]);
+  });
+
   it("returns empty for no headings / empty input", () => {
     expect(extractHeadings("plain text")).toEqual([]);
     expect(extractHeadings("")).toEqual([]);

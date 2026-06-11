@@ -43,4 +43,23 @@ describe("matchesFilters", () => {
     expect(matchesFilters({ title: "X" }, { tags: ["api"] })).toBe(false);
     expect(matchesFilters({ title: "X" }, {})).toBe(true);
   });
+
+  it("filters by author (case-insensitive, 'all' passes)", () => {
+    const n = { ...node, author: "Me@X.com" };
+    expect(matchesFilters(n, { author: "all" })).toBe(true);
+    expect(matchesFilters(n, { author: "me@x.com" })).toBe(true);
+    expect(matchesFilters(n, { author: "other@x.com" })).toBe(false);
+    expect(matchesFilters(node, { author: "me@x.com" })).toBe(false);
+  });
+
+  it("filters by updatedAfter threshold", () => {
+    const n = { ...node, updated_at: "2026-06-01T00:00:00Z" };
+    const may = Date.parse("2026-05-01T00:00:00Z");
+    const july = Date.parse("2026-07-01T00:00:00Z");
+    expect(matchesFilters(n, { updatedAfter: may })).toBe(true);
+    expect(matchesFilters(n, { updatedAfter: july })).toBe(false);
+    // Missing/invalid date fails a date filter but passes when none is set.
+    expect(matchesFilters(node, { updatedAfter: may })).toBe(false);
+    expect(matchesFilters(node, {})).toBe(true);
+  });
 });

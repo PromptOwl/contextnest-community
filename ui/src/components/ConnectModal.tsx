@@ -230,7 +230,7 @@ export function ConnectModal({
   return (
     <>
       <Dialog open={isOpen} onOpenChange={onClose}>
-        <DialogContent className="sm:max-w-[640px] max-h-[85vh] flex flex-col">
+        <DialogContent className="sm:max-w-[640px] max-h-[85vh] flex flex-col overflow-hidden [&>*]:min-w-0">
           <DialogHeader>
             <DialogTitle>Connect to {nestName}</DialogTitle>
             <DialogDescription>
@@ -269,9 +269,9 @@ export function ConnectModal({
           {authenticated && !showOpenModeBanner && (
             <div className="rounded-md border bg-card p-3 space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-sm">
-                  <Key className="h-3.5 w-3.5" />
-                  <span className="font-medium">External-client API key</span>
+                <div className="flex items-center gap-2 text-sm min-w-0">
+                  <Key className="h-3.5 w-3.5 shrink-0" />
+                  <span className="font-medium truncate">External-client API key</span>
                 </div>
                 {hasExistingKey ? (
                   <TooltipProvider delayDuration={200}>
@@ -345,8 +345,8 @@ export function ConnectModal({
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto">
-            <Tabs defaultValue="hootie" className="w-full">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0">
+            <Tabs defaultValue="hootie" className="w-full min-w-0">
               <TabsList className="grid w-full grid-cols-4">
                 <TabsTrigger value="hootie">
                   <Bot className="h-3.5 w-3.5 mr-1" />
@@ -526,13 +526,14 @@ export function ConnectModal({
               button downloads it as a file. Approved content only (server-side). */}
           <div className="border-t pt-3 space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-sm">
-                <Download className="h-3.5 w-3.5" />
-                <span className="font-medium">Export as markdown</span>
+              <div className="flex items-center gap-2 text-sm min-w-0">
+                <Download className="h-3.5 w-3.5 shrink-0" />
+                <span className="font-medium truncate">Export as markdown</span>
               </div>
               <Button
                 variant="outline"
                 size="sm"
+                className="shrink-0"
                 onClick={downloadExport}
                 disabled={downloading}
                 aria-label="Download this nest as a single markdown file"
@@ -665,15 +666,17 @@ function Snippet({
   multiline?: boolean;
 }) {
   return (
-    <div className="mb-3">
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+    <div className="mb-3 min-w-0">
+      <div className="flex items-center justify-between gap-2 mb-1 min-w-0">
+        <span className="text-xs font-medium text-muted-foreground truncate">
+          {label}
+        </span>
         <CopyButton value={value} />
       </div>
       <pre
         className={`${
           multiline ? "p-3" : "px-3 py-2"
-        } bg-muted rounded text-xs font-mono ${
+        } bg-muted rounded text-xs font-mono min-w-0 ${
           multiline ? "whitespace-pre overflow-x-auto" : "truncate"
         }`}
       >
