@@ -561,19 +561,39 @@ export const MarkdownEditor = forwardRef<
   }, [nestId]);
 
   // Clear the drop indicator (prosemirror-dropcursor) the moment a block is
-  // dropped. The drag-handle's HTML5 drag finishes without delivering a
-  // `dragend` to the dropcursor plugin, so the black drop line lingers until
-  // the next mouse/scroll event. Re-firing `dragend` removes it immediately.
+  // dropped. dropcursor only removes its line on drop/dragend/dragleave fired
+  // on the editor DOM, but the ⠿ drag-handle lives outside the editor DOM, so
+  // its native `dragend` fires on the handle — never on the editor. The last
+  // event the editor sees is a `dragover`, which arms a 5000ms removal timer,
+  // so the black line lingers a few seconds. The handle's drag *does* bubble
+  // `dragend`/`drop` to document (tiptap's drag-handle listens there too).
   useEffect(() => {
     if (!editor) return;
     const dom = editor.view.dom as HTMLElement;
     const clearDropCursor = () => {
-      window.requestAnimationFrame(() =>
-        dom.dispatchEvent(new DragEvent("dragend", { bubbles: true })),
-      );
+      // Proper path: dropcursor removes its line on `dragleave` with no
+      // relatedTarget (not contained in the editor → setCursor(null)).
+      dom.dispatchEvent(new DragEvent("dragleave", { bubbles: false }));
+      // Belt-and-suspenders: if the line is still in the DOM (the synthetic
+      // event doesn't always reach dropcursor's view listeners), collapse it
+      // now. dropcursor's updateOverlay rewrites height/width on the next drag
+      // and its own timer removes the element later, so this can't break a
+      // subsequent drag.
+      document
+        .querySelectorAll<HTMLElement>(
+          ".prosemirror-dropcursor-block, .prosemirror-dropcursor-inline",
+        )
+        .forEach((el) => {
+          el.style.height = "0";
+          el.style.width = "0";
+        });
     };
-    dom.addEventListener("drop", clearDropCursor);
-    return () => dom.removeEventListener("drop", clearDropCursor);
+    document.addEventListener("dragend", clearDropCursor);
+    document.addEventListener("drop", clearDropCursor);
+    return () => {
+      document.removeEventListener("dragend", clearDropCursor);
+      document.removeEventListener("drop", clearDropCursor);
+    };
   }, [editor]);
 
   // Recompute word/char count + heading outline on every doc change.
