@@ -18,6 +18,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { DiffViewer } from "./DiffViewer";
 import { unifiedDiff } from "./diff-util";
+import { DocumentViewer } from "../DocumentViewer";
 
 export interface Version {
   version: number;
@@ -240,10 +241,15 @@ export function VersionHistory({
                     className="max-h-none"
                   />
                 </div>
+              ) : previewVersion.content ? (
+                <DocumentViewer
+                  content={previewVersion.content}
+                  className="min-h-0 max-h-none overflow-visible bg-muted/30 rounded px-4 py-3"
+                />
               ) : (
-                <pre className="text-sm whitespace-pre-wrap font-mono p-4 bg-muted/30 rounded">
-                  {previewVersion.content || "(no content)"}
-                </pre>
+                <div className="text-sm text-muted-foreground p-4">
+                  (no content)
+                </div>
               )}
             </ScrollArea>
           </div>
