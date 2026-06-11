@@ -7,12 +7,12 @@ import { serializeDocument, parseDocument } from "@promptowl/contextnest-engine"
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { safePublishDocument } from "../governance/safe-publish.js";
 import { engineCache } from "./engine.js";
-import { NotFoundError } from "../shared/errors.js";
+import { NotFoundError, LockedError } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { syncNodeTags } from "../governance/tag-index-service.js";
 import { isStewardshipEnabled } from "../nests/service.js";
-import { cancelReview, getPendingReview } from "../governance/review-service.js";
+import { getPendingReview } from "../governance/review-service.js";
 import {
   resolveCallerEmail,
   filterAccessible,
@@ -397,10 +397,14 @@ export async function updateNode(
   const hasStewards = isStewardshipEnabled(nestId);
   const currentTags = (node.frontmatter.tags || []) as string[];
 
-  // Editing past a pending review withdraws it — the queue entry pointed
-  // at the old version; new write starts a fresh draft cycle.
-  if (getPendingReview(nestId, nodeId)) {
-    cancelReview({ nestId, nodeId, cancelledBy: userEmail });
+  // Stewardship lock: a node with an open review request is frozen. The
+  // reviewer is evaluating a specific version, so edits are rejected (423)
+  // until the review is approved or rejected — that's the only path that
+  // releases the lock.
+  if (hasStewards && getPendingReview(nestId, nodeId)) {
+    throw new LockedError(
+      "This document is awaiting steward review and is locked. Approve or reject the pending review before editing.",
+    );
   }
 
   let responseVersion: number;

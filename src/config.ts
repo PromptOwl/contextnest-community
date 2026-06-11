@@ -51,6 +51,24 @@ export const config = {
     return process.env.PROMPTOWL_KEY || "";
   },
   /**
+   * Restrict "Sign in with PromptOwl":
+   *   "open"       — anyone may sign in with PromptOwl (default)
+   *   "admin-only" — only the license owner (admin) may; everyone else
+   *                  uses email/password. Admin reaches it via the login
+   *                  page's admin route (?admin=1).
+   *   "disabled"   — nobody may sign in with PromptOwl.
+   * Enforced server-side at the device entry points (POST /auth/device,
+   * GET /auth/device/poll) and the identity point (POST /auth/promptowl).
+   */
+  get PROMPTOWL_SIGN_IN_GATE(): "open" | "admin-only" | "disabled" {
+    const v = (process.env.PROMPTOWL_SIGN_IN_GATE || "open")
+      .trim()
+      .toLowerCase();
+    return v === "admin-only" || v === "disabled"
+      ? (v as "admin-only" | "disabled")
+      : "open";
+  },
+  /**
    * Path to the .env file the server reads its config from. Used by
    * the license install flow to persist PROMPTOWL_KEY alongside any
    * existing env vars, instead of a separate sidecar file.

@@ -80,6 +80,26 @@ function resolveCallerUserId(c: any): string | null {
   return null;
 }
 
+// Enforce PROMPTOWL_SIGN_IN_GATE at the device-auth entry points. The
+// device flow is anonymous until the final /auth/promptowl token exchange,
+// so identity-based blocking is only partial here:
+//   - open       → no-op.
+//   - disabled   → always blocked (no PromptOwl sign-in for anyone).
+//   - admin-only → block an authenticated non-admin up front; an anonymous
+//     caller is allowed through and the owner-email check at /auth/promptowl
+//     is the real gate (the caller's email isn't known until then).
+function deviceGateBlocked(c: any): { error: string; gate: string } | null {
+  const gate = config.PROMPTOWL_SIGN_IN_GATE;
+  if (gate === "open") return null;
+  const error =
+    "PromptOwl sign-in is restricted on this server. Use email and password, or contact your admin.";
+  if (gate === "disabled") return { error, gate };
+  // admin-only
+  const callerId = resolveCallerUserId(c);
+  if (callerId && !isLicenseAdminUserId(callerId)) return { error, gate };
+  return null;
+}
+
 function setSessionCookie(c: any, sessionId: string) {
   c.header(
     "Set-Cookie",
@@ -368,6 +388,8 @@ authRoutes.delete("/keys/:keyId", authMiddleware, async (c) => {
 
 // POST /auth/device — initiate PromptOwl device auth
 authRoutes.post("/device", async (c) => {
+  const blocked = deviceGateBlocked(c);
+  if (blocked) return c.json(blocked, 403);
   if (!tryConsume(`device:ip:${clientIp(c)}`, DEVICE_LIMIT)) {
     return c.json({ error: "Too many device auth attempts, try again later" }, 429);
   }
@@ -398,6 +420,8 @@ authRoutes.post("/device", async (c) => {
 
 // GET /auth/device/poll — poll for device approval
 authRoutes.get("/device/poll", async (c) => {
+  const blocked = deviceGateBlocked(c);
+  if (blocked) return c.json(blocked, 403);
   const code = c.req.query("code");
   const clientSecret = c.req.query("client_secret");
 
@@ -445,6 +469,24 @@ authRoutes.post("/promptowl", async (c) => {
       { error: "Could not retrieve user email from PromptOwl" },
       401,
     );
+  }
+
+  // PROMPTOWL_SIGN_IN_GATE — optionally restrict PromptOwl sign-in. When
+  // not "open", only the license owner (admin) may complete it; everyone
+  // else uses email/password. Enforced HERE (the identity point) so a
+  // non-admin can't even auto-provision a user via PromptOwl.
+  const gate = config.PROMPTOWL_SIGN_IN_GATE;
+  if (gate !== "open") {
+    if (gate === "disabled" || !isLicenseAdminEmail(me.email)) {
+      return c.json(
+        {
+          error:
+            "PromptOwl sign-in is restricted on this server. Use email and password, or contact your admin.",
+          gate,
+        },
+        403,
+      );
+    }
   }
 
   const db = getDb();
@@ -590,6 +632,128 @@ authRoutes.post("/password", authMiddleware, async (c) => {
   clearSessionCookie(c);
 
   return c.json({ ok: true });
+});
+
+// POST /auth/admin/reset-password/:userId — license-admin sets/resets another
+// user's password IN-PLATFORM (no email server, no forgot-password flow). If
+// no password is supplied, a temporary one is generated and returned ONCE for
+// the admin to copy and hand over. The target's sessions are invalidated so a
+// prior login/cookie stops working. The hash is never returned.
+authRoutes.post("/admin/reset-password/:userId", async (c) => {
+  const callerId = resolveCallerUserId(c);
+  if (!callerId) {
+    return c.json({ error: "Authentication required." }, 401);
+  }
+  if (!isLicenseAdminUserId(callerId)) {
+    return c.json(
+      { error: "Only the license-admin user can reset passwords." },
+      403,
+    );
+  }
+
+  const targetId = c.req.param("userId");
+  const db = getDb();
+  const target = db
+    .prepare("SELECT id, email FROM users WHERE id = ?")
+    .get(targetId) as { id: string; email: string } | undefined;
+  if (!target) return c.json({ error: "User not found" }, 404);
+
+  let supplied: string | undefined;
+  try {
+    supplied = (await c.req.json<{ password?: string }>()).password;
+  } catch {
+    supplied = undefined;
+  }
+  if (supplied && supplied.length < 8) {
+    throw new ValidationError("password must be at least 8 characters");
+  }
+  // Readable 16-char temp secret when the admin doesn't supply one.
+  const generated = supplied ? null : uuid().replace(/-/g, "").slice(0, 16);
+  const newPassword = supplied ?? generated!;
+
+  const newHash = await hashPassword(newPassword);
+  // Atomically set the new hash and REVOKE the user's API keys — a reset
+  // covers the compromised-account case, so a stolen key must stop working
+  // too (the user re-issues a key after signing in). Sessions are cleared
+  // separately below.
+  db.transaction(() => {
+    db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
+      newHash,
+      target.id,
+    );
+    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(target.id);
+  })();
+  deleteAllSessionsForUser(target.id);
+
+  trackEvent("admin.reset_password", { adminId: callerId, userId: target.id });
+
+  return c.json({
+    ok: true,
+    email: target.email,
+    keys_revoked: true,
+    // Plaintext returned ONCE, only when the server generated it.
+    temporary_password: generated ?? undefined,
+  });
+});
+
+// DELETE /auth/users/:userId — license-admin removes a user entirely
+// (in-platform, no email). Revokes ALL access — API keys, sessions, steward
+// rows, collaborator grants — then deletes the user. Blocked if the target is
+// the caller, or still OWNS nests (transfer/delete those first) to avoid
+// orphaning nest data. Authored docs live on disk under the nest and are
+// unaffected.
+authRoutes.delete("/users/:userId", async (c) => {
+  const callerId = resolveCallerUserId(c);
+  if (!callerId) {
+    return c.json({ error: "Authentication required." }, 401);
+  }
+  if (!isLicenseAdminUserId(callerId)) {
+    return c.json(
+      { error: "Only the license-admin user can remove users." },
+      403,
+    );
+  }
+  const targetId = c.req.param("userId");
+  if (targetId === callerId) {
+    return c.json({ error: "You can't remove your own admin account." }, 400);
+  }
+
+  const db = getDb();
+  const target = db
+    .prepare("SELECT id, email FROM users WHERE id = ?")
+    .get(targetId) as { id: string; email: string } | undefined;
+  if (!target) return c.json({ error: "User not found" }, 404);
+
+  const ownedNests = (
+    db
+      .prepare("SELECT COUNT(*) AS c FROM nests WHERE user_id = ?")
+      .get(target.id) as { c: number }
+  ).c;
+  if (ownedNests > 0) {
+    return c.json(
+      {
+        error: `This user owns ${ownedNests} nest${ownedNests === 1 ? "" : "s"}. Transfer or delete them before removing the user.`,
+        owned_nests: ownedNests,
+      },
+      409,
+    );
+  }
+
+  db.transaction(() => {
+    db.prepare(
+      "DELETE FROM stewards WHERE user_id = ? OR lower(user_email) = lower(?)",
+    ).run(target.id, target.email);
+    db.prepare("DELETE FROM nest_collaborators WHERE user_id = ?").run(
+      target.id,
+    );
+    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(target.id);
+    db.prepare("DELETE FROM users WHERE id = ?").run(target.id);
+  })();
+  deleteAllSessionsForUser(target.id);
+
+  trackEvent("admin.remove_user", { adminId: callerId, userId: target.id });
+
+  return c.json({ ok: true, email: target.email });
 });
 
 // POST /auth/invite — admin-only, create a user + API key for them by email

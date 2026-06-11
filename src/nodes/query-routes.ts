@@ -11,6 +11,13 @@ import {
   filterAccessible,
 } from "../governance/access-guard.js";
 import { compilePrompt } from "./prompt-compiler.js";
+import {
+  nodeToMarkdown,
+  nodesToMarkdown,
+  isMarkdownFormat,
+} from "./markdown-export.js";
+import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
+import { isStewardshipEnabled } from "../nests/service.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
@@ -115,10 +122,18 @@ queryRoutes.post("/context", async (c) => {
   const accessible = filterAccessible(nestId, userId, userEmail, documents);
   const permissionFiltered = beforePermission - accessible.length;
 
+  // Public readers must see approved bodies only, never on-disk drafts.
+  const readable = await Promise.all(
+    accessible.map(async (doc) => ({
+      ...doc,
+      body: await resolveReadableBody(nestId, doc.id, userId, doc.body || ""),
+    })),
+  );
+
   // ── 4. Budget-fit within max_tokens ──
   const included: ContextNode[] = [];
   let tokenCount = 0;
-  for (const doc of accessible) {
+  for (const doc of readable) {
     const block = formatContextBlock(doc);
     const blockTokens = approxTokens(block);
     if (tokenCount + blockTokens > maxTokens && included.length > 0) break;
@@ -276,6 +291,83 @@ queryRoutes.get("/context", async (c) => {
   const { storage } = engineCache.get(c.req.param("nestId")!);
   const content = await storage.readContextMd();
   return c.json({ content: content || "" });
+});
+
+// GET /nests/:nestId/export?format=markdown[&selector=]
+// LLM-pointed plain-text view: every accessible node serialized as
+// frontmatter + body, concatenated with `---` separators. Optional
+// `selector` narrows the set via the engine selector grammar. Reuses the
+// same permission gate as /context (filterAccessible).
+queryRoutes.get("/export", async (c) => {
+  if (!isMarkdownFormat(c)) {
+    throw new ValidationError("format=markdown is required");
+  }
+
+  const nestId = c.req.param("nestId")!;
+  const { storage, query: queryEngine } = engineCache.get(nestId);
+  const selector = c.req.query("selector")?.trim() || null;
+
+  let documents: ContextNode[];
+  if (selector) {
+    const result = await queryEngine.query(selector, { hops: 2, full: true });
+    documents = result.documents;
+  } else {
+    documents = await storage.discoverDocuments();
+  }
+
+  const userId = c.get("userId");
+  const userEmail = resolveCallerEmail(userId);
+  const accessible = filterAccessible(nestId, userId, userEmail, documents);
+
+  // Export is APPROVED-ONLY for every caller — drafts never export. On a
+  // governed nest, nodes with no approved version are dropped; the body is the
+  // approved version's bytes. On an ungoverned nest the working copy is the
+  // published state.
+  const governed = isStewardshipEnabled(nestId);
+  const resolved = await Promise.all(
+    accessible.map(async (n) => {
+      const body = await resolveExportBody(nestId, n.id, n.body || "");
+      if (body == null) return null;
+      return {
+        id: n.id,
+        title: n.frontmatter.title,
+        tags: (n.frontmatter.tags || []) as string[],
+        status: governed ? "published" : n.frontmatter.status,
+        body,
+      };
+    }),
+  );
+  const fields = resolved.filter(
+    (f): f is NonNullable<typeof f> => f != null,
+  );
+
+  // Optional token budget — full set by default; an agent can cap a fetch
+  // with ?max_tokens= (same estimator as POST /context).
+  const maxParam = parseInt(c.req.query("max_tokens") ?? "", 10);
+  const maxTokens = Number.isFinite(maxParam) && maxParam > 0 ? maxParam : null;
+  let included = fields;
+  if (maxTokens) {
+    const kept: typeof fields = [];
+    let tokens = 0;
+    for (const f of fields) {
+      const t = approxTokens(nodeToMarkdown(f));
+      if (tokens + t > maxTokens && kept.length > 0) break;
+      kept.push(f);
+      tokens += t;
+    }
+    included = kept;
+  }
+
+  trackEvent("nest.export", {
+    nestId,
+    count: included.length,
+    selector,
+    truncated_by_budget: fields.length - included.length,
+  });
+
+  return c.body(nodesToMarkdown(included), 200, {
+    "Content-Type": "text/markdown; charset=utf-8",
+  });
 });
 
 // POST /nests/:nestId/publish — bulk publish

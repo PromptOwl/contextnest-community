@@ -49,6 +49,7 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `AUTH_MODE` | `key` | `key` or `open`. See above. |
 | `PROMPTOWL_API_URL` | `https://app.promptowl.ai` | PromptOwl's API origin — used for device auth, license validation, telemetry. Override for air-gapped or test setups. |
 | `PROMPTOWL_KEY` | `""` | Your PromptOwl Community License key (`pk_...`). Unlicensed instances still run and serve reads, but every write returns `503` until a valid key is installed. Can also be set via the browser License Setup Page, which persists it to `ENV_FILE_PATH`. |
+| `PROMPTOWL_SIGN_IN_GATE` | `open` | Restrict "Sign in with PromptOwl". `open` = anyone may; `admin-only` = only the license owner (admin) may, everyone else uses email/password (admin opens the login page with `?admin=1`); `disabled` = nobody may. Enforced server-side at `POST /auth/promptowl` and surfaced on the health endpoint. Unknown values fall back to `open`. |
 | `ENV_FILE_PATH` | `$cwd/.env` | Path to the `.env` file the license install flow writes `PROMPTOWL_KEY` into (alongside existing vars). Override when your `.env` lives outside the working directory. |
 | `TELEMETRY_ENABLED` | `"true"` (set to `"false"` to disable) | Batched, anonymized usage events sent to PromptOwl. Off disables the loop entirely. |
 | `TELEMETRY_INTERVAL_MS` | `3600000` (1 hour) | How often buffered telemetry is flushed to PromptOwl. |

@@ -64,6 +64,18 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
   });
 };
 
+// Stored docs are markdown-only, but legacy content can carry stray inline
+// HTML (e.g. color <span>s from older saves). react-markdown renders raw
+// HTML as literal text — turn html nodes into plain text with tags stripped
+// so only the inner text shows. Fenced code is a `code` node, never `html`,
+// so code samples are untouched.
+const remarkStripHtml: Plugin<[], Root> = () => (tree) => {
+  visit(tree, "html", (node: any) => {
+    node.type = "text";
+    node.value = (node.value || "").replace(/<[^>]*>/g, "");
+  });
+};
+
 export interface DocumentViewerProps {
   /** The raw markdown source to render. Should NOT be HTML; use a
    *  read-only TipTap surface for HTML-stored legacy docs. */
@@ -89,7 +101,7 @@ export function DocumentViewer({
       )}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkWikiLinks]}
+        remarkPlugins={[remarkGfm, remarkStripHtml, remarkWikiLinks]}
         // Cast: Components type keyed on HTML names; `wikilink` not in union.
         components={
           {

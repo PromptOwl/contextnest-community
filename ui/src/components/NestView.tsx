@@ -468,7 +468,8 @@ export function NestView({
             on wider screens keeps the spacing visually intentional rather
             than awkwardly clipped at the right edge. */}
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:justify-end">
-          {/* Connect stays for view-only; write/admin gated below. */}
+          {/* Connect stays for view-only; write/admin gated below.
+              Markdown export lives inside this dialog (data egress). */}
           <Button variant="outline" onClick={() => setShowConnect(true)}>
             <Link2 className="h-4 w-4 mr-2" />
             Connect
@@ -1165,6 +1166,17 @@ export function NestView({
               versions={versionData.versions}
               currentVersion={versionData.currentVersion}
               approvedVersion={versionData.approvedVersion}
+              onRestore={async (v) => {
+                if (!versionNode) return;
+                try {
+                  await api.revertToVersion(nestId, versionNode.id, v);
+                  toast.success(`Reverted to version ${v}`);
+                  await openVersions(versionNode);
+                  fetchData();
+                } catch (e: any) {
+                  toast.error(e?.message || "Revert failed");
+                }
+              }}
             />
           </DialogContent>
         </Dialog>

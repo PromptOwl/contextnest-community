@@ -42,3 +42,10 @@ export class ConflictError extends AppError {
     this.name = "ConflictError";
   }
 }
+
+export class LockedError extends AppError {
+  constructor(message = "Locked") {
+    super(423, message);
+    this.name = "LockedError";
+  }
+}

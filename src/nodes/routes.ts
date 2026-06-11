@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
-import { ValidationError, NotFoundError } from "../shared/errors.js";
+import { ValidationError, NotFoundError, LockedError } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
@@ -14,6 +14,7 @@ import {
 } from "../governance/access-guard.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { isPublicReader } from "../shared/access.js";
+import { nodeToMarkdown, isMarkdownFormat } from "./markdown-export.js";
 import {
   scanDocumentForDrift,
   getPendingChange,
@@ -28,6 +29,20 @@ import {
 } from "./service.js";
 
 export const nodeRoutes = new Hono<AuthEnv>();
+
+// LLM-pointed plain-text view: GET a node with ?format=markdown to receive
+// `text/markdown` (YAML frontmatter + body) instead of JSON, so an agent can
+// fetch a stable, human-readable representation. Built from the fully-resolved
+// node response so it inherits the same permission + public-reader handling.
+function nodeAsMarkdown(response: any, nodeId: string): string {
+  return nodeToMarkdown({
+    id: nodeId,
+    title: response.title,
+    tags: response.tags,
+    status: response.status,
+    body: response.content,
+  });
+}
 
 // GET /nests/:nestId/nodes
 nodeRoutes.get("/", async (c) => {
@@ -167,6 +182,51 @@ nodeRoutes.get("/:nodeId{.+?}/reviews", async (c) => {
 });
 
 // GET /nests/:nestId/nodes/:nodeId{.+} — read a single node (catch-all, must be LAST)
+// POST /nests/:nestId/nodes/:nodeId/revert — restore an old version by writing
+// its reconstructed content as a NEW version (history is append-only; nothing
+// is lost). Read-gated; updateNode applies the write. POST suffix route — no
+// POST catch-all to swallow it.
+nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const { versions: versionManager } = engineCache.get(nestId);
+
+  const userId = c.get("userId");
+  const userEmail = resolveCallerEmail(userId);
+  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
+
+  const body = await c.req
+    .json<{ targetVersion?: number }>()
+    .catch(() => ({}) as { targetVersion?: number });
+  const targetVersion = Number(body.targetVersion);
+  if (!Number.isInteger(targetVersion) || targetVersion < 1) {
+    throw new ValidationError("targetVersion (a positive integer) is required");
+  }
+
+  let raw: string;
+  try {
+    raw = await versionManager.reconstructVersion(nodeId, targetVersion);
+  } catch {
+    throw new NotFoundError(
+      `Version ${targetVersion} not found for ${nodeId}`,
+    );
+  }
+  const content = bodyOnly(nodeId, raw);
+  const { node, version } = await updateNode(
+    nestId,
+    nodeId,
+    { content, changeNote: `Restored from version ${targetVersion}` },
+    userEmail,
+  );
+  trackEvent("node.revert", { nestId, nodeId, targetVersion });
+  return c.json({ ok: true, version, node: toNodeResponse(node) });
+});
+
 nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
@@ -237,6 +297,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       }
       response.version = approved;
       response.status = "published";
+      if (isMarkdownFormat(c)) {
+        return c.body(nodeAsMarkdown(response, nodeId), 200, {
+          "Content-Type": "text/markdown; charset=utf-8",
+        });
+      }
       return c.json({ node: response });
     }
   }
@@ -252,6 +317,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   if (response.status === "pending_review") {
     const pending = reviews.getPendingReview(nestId, nodeId);
     (response as any).pendingReviewBy = pending?.requestedBy ?? null;
+  }
+  if (isMarkdownFormat(c)) {
+    return c.body(nodeAsMarkdown(response, nodeId), 200, {
+      "Content-Type": "text/markdown; charset=utf-8",
+    });
   }
   return c.json({ node: response });
 });
@@ -312,6 +382,14 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const { storage } = engineCache.get(nestId);
+
+  // Stewardship lock: a node under open review can't be deleted out from
+  // under the reviewer (423). Mirrors the edit lock in updateNode.
+  if (isStewardshipEnabled(nestId) && reviews.getPendingReview(nestId, nodeId)) {
+    throw new LockedError(
+      "This document is awaiting steward review and is locked. Approve or reject the pending review before deleting.",
+    );
+  }
 
   try {
     await storage.deleteDocument(nodeId);
