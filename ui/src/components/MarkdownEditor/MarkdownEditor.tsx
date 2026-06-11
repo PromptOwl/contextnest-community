@@ -252,6 +252,9 @@ export const MarkdownEditor = forwardRef<
     null,
   );
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  // The scrollable content viewport (EditorContent's div). Used as the bubble
+  // menu's flip boundary so a top-of-doc selection flips the menu below.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // Word/char count + document outline. Both recomputed on every doc change
   // (cheap walk); the outline panel is toggled from the toolbar.
@@ -299,9 +302,13 @@ export const MarkdownEditor = forwardRef<
       Typography,
       // Word / character counter (read from editor.storage.characterCount).
       CharacterCount,
-      // Multi-block selection: drag across blocks (or Shift+↑/↓) to select a
-      // range, then move/delete them as a group. Pairs with the drag handle.
-      NodeRange.configure({ key: null }),
+      // Multi-block selection via Shift+↑/↓ (or Mod+drag), to move/delete a
+      // range as a group. Default `key: "Mod"` keeps a plain mouse drag a
+      // normal text selection — so dragging across lines shows the native
+      // ::selection highlight, same as a single line. `key: null` would turn
+      // every drag into a NodeRangeSelection, which renders via decorations
+      // (no native highlight) and looked unselected.
+      NodeRange.configure({ key: "Mod" }),
       // GFM tables (parse via markdown-it, serialize via our Table.ts).
       ...tableExtensions,
       // Rich blocks that persist as markdown container directives (no HTML).
@@ -895,7 +902,17 @@ export const MarkdownEditor = forwardRef<
       {editable && !previewing && (
         <BubbleMenu
           editor={editor}
-          className="flex items-center gap-0.5 rounded-md border bg-popover p-1 shadow-md"
+          // The menu is appended inside the overflow-y-auto content viewport, so
+          // a top-of-doc selection would place it above the first line where it
+          // gets clipped by the scroll overflow and hidden behind the sticky
+          // z-20 toolbar. Bounding flip to that viewport (scrollRef) makes a
+          // top-edge selection overflow the boundary and flip to `bottom`, where
+          // it's fully visible; z-50 on the menu keeps it above the toolbar.
+          options={{
+            flip: { boundary: scrollRef.current ?? undefined, padding: 8 },
+            shift: { boundary: scrollRef.current ?? undefined, padding: 8 },
+          }}
+          className="z-50 flex items-center gap-0.5 rounded-md border bg-popover p-1 shadow-md"
         >
           <ToolbarButton
             active={editor.isActive("bold")}
@@ -996,6 +1013,7 @@ export const MarkdownEditor = forwardRef<
       )}
 
       <EditorContent
+        ref={scrollRef}
         editor={editor}
         className={cn(
           "min-h-[60vh] max-h-[60vh] overflow-y-auto",
