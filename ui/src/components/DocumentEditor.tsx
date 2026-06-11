@@ -32,7 +32,7 @@ import { DocumentViewer } from "./DocumentViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { SubmitForReviewModal, ReviewActions, ExternalEditBanner } from "./governance";
 import type { PendingChange } from "../lib/api";
-import { findBacklinks } from "../lib/backlinks";
+import { findBacklinks, titleFormBacklinks } from "../lib/backlinks";
 import { extractHeadings } from "../lib/toc";
 import { resolveWikiTarget, previewSnippet } from "../lib/wiki-preview";
 import { DocumentPickerModal } from "./DocumentPickerModal";
@@ -788,6 +788,32 @@ export function DocumentEditor({
                 className="border-0 px-0 h-auto py-0 text-3xl font-bold leading-tight shadow-none focus-visible:ring-0 placeholder:text-muted-foreground/40"
               />
             )}
+            {/* Rename safety: [[Title]]-form links break on retitle (the
+                id/slug stays stable; the title doesn't). Warn while the
+                title diverges from the saved one. */}
+            {!isNew &&
+              mode === "edit" &&
+              title.trim() !== initialSnapshotRef.current.title.trim() &&
+              (() => {
+                const affected = titleFormBacklinks(nestNodes, {
+                  id: nodeId,
+                  title: initialSnapshotRef.current.title,
+                });
+                if (affected.length === 0) return null;
+                return (
+                  <p className="mt-1 text-xs text-amber-700">
+                    Renaming will break {affected.length} wiki link
+                    {affected.length !== 1 ? "s" : ""} that reference this
+                    document by its old title (
+                    {affected
+                      .slice(0, 3)
+                      .map((a) => a.title)
+                      .join(", ")}
+                    {affected.length > 3 ? ", …" : ""}
+                    ). Links by slug are unaffected.
+                  </p>
+                );
+              })()}
           </div>
 
           {/* Tags */}

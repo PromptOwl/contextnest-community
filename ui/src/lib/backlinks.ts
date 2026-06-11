@@ -34,6 +34,35 @@ export function extractWikiLinkTargets(content: string): string[] {
   return out;
 }
 
+/**
+ * Linking docs that reference the target by TITLE form only — `[[Some
+ * Title]]` rather than `[[nodes/slug]]`. These links BREAK when the doc is
+ * retitled (the id/slug stays stable; the title does not). Used to warn
+ * before a rename.
+ */
+export function titleFormBacklinks(
+  nodes: BacklinkNode[],
+  target: { id: string; title: string },
+): Array<{ id: string; title: string }> {
+  const targetId = target.id.toLowerCase();
+  const targetTitle = (target.title ?? "").toLowerCase();
+  const targetSlug = bareSlug(target.id).toLowerCase();
+  if (!targetTitle) return [];
+
+  const out: Array<{ id: string; title: string }> = [];
+  for (const node of nodes) {
+    if (node.id.toLowerCase() === targetId) continue;
+    const titleOnly = extractWikiLinkTargets(node.content ?? "").some((t) => {
+      const lower = t.toLowerCase();
+      const stableForm =
+        lower === targetId || bareSlug(t).toLowerCase() === targetSlug;
+      return !stableForm && lower === targetTitle;
+    });
+    if (titleOnly) out.push({ id: node.id, title: node.title });
+  }
+  return out;
+}
+
 /** Nodes (other than the target itself) whose content links to the target. */
 export function findBacklinks(
   nodes: BacklinkNode[],

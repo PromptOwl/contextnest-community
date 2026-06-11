@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   extractWikiLinkTargets,
   findBacklinks,
+  titleFormBacklinks,
 } from "../ui/src/lib/backlinks";
 
 describe("extractWikiLinkTargets", () => {
@@ -46,5 +47,29 @@ describe("findBacklinks", () => {
 
   it("handles nodes without content", () => {
     expect(findBacklinks([{ id: "nodes/y", title: "Y" }], target)).toEqual([]);
+  });
+});
+
+describe("titleFormBacklinks", () => {
+  const target = { id: "nodes/target", title: "Target Doc" };
+
+  it("flags title-form links, not id/slug-form links", () => {
+    const nodes = [
+      { id: "nodes/a", title: "A", content: "[[Target Doc]] breaks on rename" },
+      { id: "nodes/b", title: "B", content: "[[nodes/target|T]] survives" },
+      { id: "nodes/c", title: "C", content: "[[target]] survives (slug)" },
+    ];
+    expect(titleFormBacklinks(nodes, target).map((n) => n.id)).toEqual([
+      "nodes/a",
+    ]);
+  });
+
+  it("empty when title is blank", () => {
+    expect(
+      titleFormBacklinks(
+        [{ id: "nodes/a", title: "A", content: "[[x]]" }],
+        { id: "nodes/t", title: "" },
+      ),
+    ).toEqual([]);
   });
 });
