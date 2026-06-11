@@ -148,6 +148,20 @@ export default function App() {
           nestId: nest.id,
           nestName: nest.name,
         });
+        // ?doc=<nodeId> → open that document directly (the doc view's own
+        // load surfaces a not-found error if the id is stale).
+        const docId = params.get("doc");
+        if (docId && docId !== "new") {
+          setView({
+            page: "document",
+            nestId: nest.id,
+            nestName: nest.name,
+            nodeId: docId,
+            isOwner: false,
+            isAnonOwned: false,
+          });
+          return;
+        }
         setView({
           page: "nest",
           nestId: nest.id,

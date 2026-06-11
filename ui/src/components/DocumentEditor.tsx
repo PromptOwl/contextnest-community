@@ -20,7 +20,9 @@ import {
   X,
   Pencil,
   Users,
+  Link as LinkIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 import {
   MarkdownEditor,
   slugFromNodeId,
@@ -636,15 +638,31 @@ export function DocumentEditor({
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {/* Write/review affordances hidden for public reader. */}
+          {!isNew && (
+            <Button
+              variant="outline"
+              onClick={() => {
+                // Deep link the App's ?nest=&doc= probe understands.
+                const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
+                navigator.clipboard.writeText(url);
+                toast.success("Link copied — recipient needs access to this nest");
+              }}
+              data-testid="document-editor-copy-link"
+              title="Copy a link to this document (recipient needs nest access)"
+            >
+              <LinkIcon className="h-4 w-4 mr-2" />
+              Copy link
+            </Button>
+          )}
           {canShare && (
             <Button
               variant="outline"
               onClick={() => setShowShare(true)}
               data-testid="document-editor-share"
-              title="Share this nest — visibility and collaborators"
+              title="Share the whole nest — visibility and collaborators. Use stewards to restrict single documents."
             >
               <Users className="h-4 w-4 mr-2" />
-              Share
+              Share nest
             </Button>
           )}
           {!isViewOnly && canSubmitForReview && (
