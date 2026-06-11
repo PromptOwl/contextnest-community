@@ -231,6 +231,19 @@ export function NestView({
   // Orphans + broken [[links]], client-side from the loaded list.
   const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
 
+  // All tags in the nest with usage counts — the always-visible filter bar.
+  const allTags = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const n of nodes) {
+      for (const t of (n.tags ?? []) as string[]) {
+        counts.set(t, (counts.get(t) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([tag, count]) => ({ tag, count }));
+  }, [nodes]);
+
   // Quick-access strip; only useful once the list outgrows a glance.
   const recentlyEdited = useMemo(() => {
     if (nodes.length < 5) return [];
@@ -715,6 +728,58 @@ export function NestView({
               </div>
             </CardHeader>
             <CardContent>
+              {/* Tag filter bar — every tag in the nest, clickable; active
+                  tags AND together. The primary filter surface. */}
+              {allTags.length > 0 && (
+                <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
+                  <span className="text-muted-foreground">Tags:</span>
+                  {allTags.slice(0, 14).map(({ tag, count }) => {
+                    const active = tagFilters.includes(tag);
+                    return (
+                      <button
+                        key={tag}
+                        type="button"
+                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-colors ${
+                          active
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "text-foreground/80 hover:bg-muted"
+                        }`}
+                        onClick={() => toggleTagFilter(tag)}
+                        title={
+                          active
+                            ? `Remove filter ${tag}`
+                            : `Filter by ${tag}`
+                        }
+                      >
+                        {tag}
+                        <span
+                          className={
+                            active
+                              ? "text-primary-foreground/80"
+                              : "text-muted-foreground"
+                          }
+                        >
+                          {active ? "×" : count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                  {allTags.length > 14 && (
+                    <span className="text-muted-foreground">
+                      +{allTags.length - 14} more
+                    </span>
+                  )}
+                  {tagFilters.length > 0 && (
+                    <button
+                      type="button"
+                      className="text-muted-foreground hover:underline ml-1"
+                      onClick={() => setTagFilters([])}
+                    >
+                      clear
+                    </button>
+                  )}
+                </div>
+              )}
               {recentlyEdited.length > 0 && (
                 <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
                   <span className="text-muted-foreground">Recently edited:</span>
@@ -728,29 +793,6 @@ export function NestView({
                       {n.title}
                     </button>
                   ))}
-                </div>
-              )}
-              {tagFilters.length > 0 && (
-                <div className="flex items-center flex-wrap gap-1.5 mb-3 text-xs">
-                  <span className="text-muted-foreground">Filtering by:</span>
-                  {tagFilters.map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-primary hover:bg-muted"
-                      onClick={() => toggleTagFilter(t)}
-                      title={`Remove filter ${t}`}
-                    >
-                      {t} ×
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    className="text-muted-foreground hover:underline ml-1"
-                    onClick={() => setTagFilters([])}
-                  >
-                    clear
-                  </button>
                 </div>
               )}
               {loading ? (
@@ -797,10 +839,10 @@ export function NestView({
                                         ? `Remove filter ${t}`
                                         : `Filter by ${t}`
                                     }
-                                    className={`hover:underline ${
+                                    className={`rounded-full border px-1.5 py-px transition-colors ${
                                       tagFilters.includes(t)
-                                        ? "text-primary font-medium"
-                                        : ""
+                                        ? "bg-primary text-primary-foreground border-primary"
+                                        : "hover:bg-muted"
                                     }`}
                                     onClick={(e) => {
                                       e.stopPropagation();
