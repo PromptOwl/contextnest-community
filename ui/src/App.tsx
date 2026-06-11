@@ -7,6 +7,7 @@ import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, type LicenseStatus } from "./lib/api";
+import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut, KeyRound } from "lucide-react";
 import { Input } from "@/components/ui/input";
@@ -104,8 +105,21 @@ export default function App() {
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
+  // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
+  const [showQuickOpen, setShowQuickOpen] = useState(false);
 
   const requestLogout = useCallback(() => setLogoutConfirm(true), []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setShowQuickOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const confirmLogout = useCallback(async () => {
     setLogoutPending(true);
@@ -283,6 +297,25 @@ export default function App() {
         open={showChangePassword}
         onClose={() => setShowChangePassword(false)}
       />
+
+      {showQuickOpen &&
+        (view.page === "nest" || view.page === "document") && (
+          <QuickOpen
+            nestId={view.nestId}
+            onClose={() => setShowQuickOpen(false)}
+            onSelect={(nodeId) => {
+              setShowQuickOpen(false);
+              setView({
+                page: "document",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                nodeId,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              });
+            }}
+          />
+        )}
     </>
   );
 

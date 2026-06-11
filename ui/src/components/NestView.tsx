@@ -192,12 +192,41 @@ export function NestView({
   // Review Queue card can bind to the count the user can actually act
   // on — not the raw queue size.
 
-  // Search matches title OR any tag (so a tag-chip click from the document
-  // detail, which seeds `search`, still works); tagFilters is a multi-tag
-  // AND on top. Semantics live in lib/node-filter (unit-tested).
-  const filtered = nodes.filter((n) =>
-    matchesFilters(n, { search, status: statusFilter, tags: tagFilters }),
-  );
+  // Full-text CONTENT hits from the server search endpoint, unioned with
+  // the instant client title/tag match below. Debounced; best-effort.
+  const [contentHits, setContentHits] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    const q = search.trim();
+    if (q.length < 2) {
+      setContentHits(new Set());
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const { nodes: hits } = await api.searchNodes(nestId, q);
+        if (!cancelled) {
+          setContentHits(new Set((hits as any[]).map((n) => n.id)));
+        }
+      } catch {
+        /* fall back to client-side matching only */
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [nestId, search]);
+
+  // Status + tag filters always apply; with a query, a doc passes on an
+  // instant client title/tag match OR a server content hit. Semantics of
+  // the client match live in lib/node-filter (unit-tested).
+  const filtered = nodes.filter((n) => {
+    if (!matchesFilters(n, { status: statusFilter, tags: tagFilters }))
+      return false;
+    if (!search) return true;
+    return matchesFilters(n, { search }) || contentHits.has(n.id);
+  });
 
   // Orphans + broken [[links]], client-side from the loaded list.
   const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
@@ -653,14 +682,20 @@ export function NestView({
               <div className="flex items-center justify-between gap-2">
                 <CardTitle className="text-lg">Documents</CardTitle>
                 <div className="flex items-center gap-2">
-                  <div className="relative w-48 sm:w-64">
+                  <div className="relative w-56 sm:w-80">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
                     <Input
-                      placeholder="Search documents or tags..."
+                      placeholder="Search title, tags, content…"
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
-                      className="pl-9 w-full h-8"
+                      className="pl-9 pr-12 w-full h-8"
                     />
+                    <kbd
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground border rounded px-1 pointer-events-none"
+                      title="Quick open"
+                    >
+                      ⌘K
+                    </kbd>
                   </div>
                   {stewardshipEnabled && (
                     <Select value={statusFilter} onValueChange={setStatusFilter}>
