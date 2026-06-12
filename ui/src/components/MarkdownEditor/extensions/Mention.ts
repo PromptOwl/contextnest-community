@@ -32,8 +32,11 @@ export const Mention = Extension.create<MentionOptions>({
             const decorations: Decoration[] = [];
             const doc = state.doc;
 
-            doc.descendants((node, pos) => {
+            doc.descendants((node, pos, parent) => {
               if (!node.isText || !node.text) return;
+              // W3: don't decorate `@name` inside code — it's literal source.
+              if (parent?.type.name === "codeBlock") return;
+              if (node.marks.some((m) => m.type.name === "code")) return;
 
               const text = node.text;
               let match;

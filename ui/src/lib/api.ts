@@ -127,6 +127,7 @@ export async function getHealth() {
     status: string;
     auth_mode: string;
     logo_url?: string | null;
+    promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
     suspended_reason?: string;
   }>("/health");
 }
@@ -192,6 +193,38 @@ export async function inviteTeammate(email: string, label?: string) {
   }>("/auth/invite", {
     method: "POST",
     body: JSON.stringify({ email, label }),
+  });
+}
+
+// Logged-in user changes their own password (e.g., after an admin reset
+// handed them a temporary one). Invalidates other sessions server-side.
+export async function changePassword(current: string, next: string) {
+  return request<{ ok: boolean }>("/auth/password", {
+    method: "POST",
+    body: JSON.stringify({ current, next }),
+  });
+}
+
+// Admin removes a user entirely — revokes all access and deletes them.
+// Blocked server-side if they own nests or are the caller.
+export async function removeUser(userId: string) {
+  return request<{ ok: boolean; email: string }>(
+    `/auth/users/${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
+  );
+}
+
+// Admin resets another user's password in-platform (no email). Omit
+// `password` to have the server generate a temporary one, returned once.
+export async function resetUserPassword(userId: string, password?: string) {
+  return request<{
+    ok: boolean;
+    email: string;
+    keys_revoked?: boolean;
+    temporary_password?: string;
+  }>(`/auth/admin/reset-password/${encodeURIComponent(userId)}`, {
+    method: "POST",
+    body: JSON.stringify(password ? { password } : {}),
   });
 }
 
@@ -363,6 +396,33 @@ export async function getOverview(nestId: string) {
   return request(`/nests/${nestId}/overview`);
 }
 
+/** Nest markdown export — returns raw `text/markdown` (NOT JSON), so it
+ *  bypasses the JSON-parsing `request` helper. Backs the UI "Export" action;
+ *  agents fetch the same URL directly. */
+export async function exportNestMarkdown(
+  nestId: string,
+  opts: { selector?: string; maxTokens?: number } = {},
+): Promise<string> {
+  const params = new URLSearchParams({ format: "markdown" });
+  if (opts.selector) params.set("selector", opts.selector);
+  if (opts.maxTokens) params.set("max_tokens", String(opts.maxTokens));
+  const res = await fetch(
+    `${API_BASE}/nests/${nestId}/export?${params.toString()}`,
+    { credentials: "include" },
+  );
+  if (!res.ok) {
+    const body = await res.text();
+    let msg = `Export failed (${res.status})`;
+    try {
+      msg = (JSON.parse(body) as { error?: string }).error || msg;
+    } catch {
+      // non-JSON error body — keep the status message
+    }
+    throw new Error(msg);
+  }
+  return res.text();
+}
+
 export async function listTags(nestId: string): Promise<string[]> {
   const res = await request<{ tags?: Record<string, number> }>(
     `/nests/${nestId}/overview`,
@@ -460,6 +520,19 @@ export async function rejectNode(
     method: "POST",
     body: JSON.stringify({ note }),
   });
+}
+
+// Steward/editor reverts a node to an earlier version (writes its content as
+// a new version; history is preserved).
+export async function revertToVersion(
+  nestId: string,
+  nodeId: string,
+  targetVersion: number,
+) {
+  return request<{ ok: boolean; version: number }>(
+    `/nests/${nestId}/nodes/${nodeId}/revert`,
+    { method: "POST", body: JSON.stringify({ targetVersion }) },
+  );
 }
 
 export async function getNodeVersions(nestId: string, nodeId: string) {

@@ -396,7 +396,7 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                           </span>
                         )}
                         <span
-                          className={`px-1.5 py-0.5 rounded ${
+                          className={`px-1.5 py-0.5 rounded capitalize ${
                             nest.visibility === "public"
                               ? "bg-green-100 text-green-700"
                               : "bg-secondary text-secondary-foreground"

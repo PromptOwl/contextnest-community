@@ -43,6 +43,12 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
   const [showInvite, setShowInvite] = useState(false);
   const [inviteSeedEmail, setInviteSeedEmail] = useState<string>("");
   const [newKey, setNewKey] = useState<{ email: string; key: string } | null>(null);
+  // Temp password to reveal after an admin reset (no email — shown once).
+  // password === null means we're still generating (shows a loader).
+  const [resetPw, setResetPw] = useState<{ email: string; password: string | null } | null>(null);
+  // User pending removal confirmation.
+  const [removeTarget, setRemoveTarget] = useState<Teammate | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   const fetchTeammates = async () => {
     setLoading(true);
@@ -165,6 +171,41 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                       )}
                     </div>
                   </div>
+                  {!t.is_admin && (
+                    <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!!resetPw}
+                      onClick={async () => {
+                        setResetPw({ email: t.email, password: null });
+                        try {
+                          const r = await api.resetUserPassword(t.id);
+                          setResetPw({
+                            email: t.email,
+                            password: r.temporary_password || "",
+                          });
+                          await fetchTeammates();
+                        } catch (e: any) {
+                          setResetPw(null);
+                          setError(e.message);
+                        }
+                      }}
+                      title="Generate a temporary password to share with this user (no email is sent)"
+                    >
+                      Reset password
+                    </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                        onClick={() => setRemoveTarget(t)}
+                        title="Remove this user and revoke all access"
+                      >
+                        Remove
+                      </Button>
+                    </>
+                  )}
                 </div>
               ))}
             </div>
@@ -243,6 +284,106 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
           onClose={() => setNewKey(null)}
         />
       )}
+
+      {resetPw && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setResetPw(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-lg border bg-background p-5 shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="font-semibold mb-1">Temporary password</h3>
+            {resetPw.password === null ? (
+              <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
+                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                <p className="text-sm text-muted-foreground">
+                  Generating a temporary password for
+                  <br />
+                  <strong className="text-foreground">{resetPw.email}</strong>
+                </p>
+              </div>
+            ) : (
+              <>
+                <p className="text-xs text-muted-foreground mb-3">
+                  Share this with <strong>{resetPw.email}</strong> directly — no
+                  email is sent. They sign in with it, then change it from their
+                  account. It won't be shown again. Their existing API keys were
+                  revoked — they'll generate a new one after signing in.
+                </p>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 bg-muted border rounded px-2 py-1.5 text-sm font-mono break-all">
+                    {resetPw.password}
+                  </code>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      navigator.clipboard.writeText(resetPw.password!)
+                    }
+                  >
+                    Copy
+                  </Button>
+                </div>
+                <div className="mt-4 text-right">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setResetPw(null)}
+                  >
+                    Done
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      <Dialog
+        open={!!removeTarget}
+        onOpenChange={(o) => !o && !removing && setRemoveTarget(null)}
+      >
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>Remove {removeTarget?.email}?</DialogTitle>
+            <DialogDescription>
+              This revokes all their access (API keys, sessions, steward +
+              collaborator roles) and deletes the account. This cannot be
+              undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRemoveTarget(null)}
+              disabled={removing}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={removing}
+              onClick={async () => {
+                if (!removeTarget) return;
+                setRemoving(true);
+                try {
+                  await api.removeUser(removeTarget.id);
+                  setRemoveTarget(null);
+                  await fetchTeammates();
+                } catch (e: any) {
+                  setError(e.message);
+                } finally {
+                  setRemoving(false);
+                }
+              }}
+            >
+              {removing ? <Loader2 className="h-4 w-4 animate-spin" /> : "Remove"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

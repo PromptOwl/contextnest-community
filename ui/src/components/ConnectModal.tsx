@@ -41,6 +41,7 @@ import {
   Loader2,
   RefreshCw,
   ShieldAlert,
+  Download,
 } from "lucide-react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
@@ -66,6 +67,9 @@ export function ConnectModal({
       ? window.location.origin
       : "http://localhost:3838";
   const mcpUrl = `${serverUrl}/nests/${nestId}/mcp`;
+  const exportUrl = `${serverUrl}/nests/${nestId}/export?format=markdown`;
+
+  const [downloading, setDownloading] = useState(false);
 
   const [hasExistingKey, setHasExistingKey] = useState<boolean | null>(null);
   const [existingPrefix, setExistingPrefix] = useState<string | null>(null);
@@ -171,6 +175,30 @@ export function ConnectModal({
     return () => clearTimeout(t);
   }, [justActed]);
 
+  // Download the whole nest as a single markdown file (approved content only,
+  // server-side). Same URL agents fetch — surfaced here as a one-click action.
+  const downloadExport = async () => {
+    setError(null);
+    setDownloading(true);
+    try {
+      const md = await api.exportNestMarkdown(nestId);
+      const url = URL.createObjectURL(
+        new Blob([md], { type: "text/markdown" }),
+      );
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${slugify(nestName)}.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setError(err?.message || "Export failed");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   const closeReveal = () => {
     // Drop plaintext from memory. Once gone, only Rotate can mint a new
     // one — the old one stays valid server-side until then.
@@ -202,7 +230,7 @@ export function ConnectModal({
   return (
     <>
       <Dialog open={isOpen} onOpenChange={onClose}>
-        <DialogContent className="sm:max-w-[640px] max-h-[85vh] flex flex-col">
+        <DialogContent className="sm:max-w-[640px] max-h-[85vh] flex flex-col overflow-hidden [&>*]:min-w-0">
           <DialogHeader>
             <DialogTitle>Connect to {nestName}</DialogTitle>
             <DialogDescription>
@@ -241,9 +269,9 @@ export function ConnectModal({
           {authenticated && !showOpenModeBanner && (
             <div className="rounded-md border bg-card p-3 space-y-2">
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-sm">
-                  <Key className="h-3.5 w-3.5" />
-                  <span className="font-medium">External-client API key</span>
+                <div className="flex items-center gap-2 text-sm min-w-0">
+                  <Key className="h-3.5 w-3.5 shrink-0" />
+                  <span className="font-medium truncate">External-client API key</span>
                 </div>
                 {hasExistingKey ? (
                   <TooltipProvider delayDuration={200}>
@@ -317,8 +345,8 @@ export function ConnectModal({
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto">
-            <Tabs defaultValue="hootie" className="w-full">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0">
+            <Tabs defaultValue="hootie" className="w-full min-w-0">
               <TabsList className="grid w-full grid-cols-4">
                 <TabsTrigger value="hootie">
                   <Bot className="h-3.5 w-3.5 mr-1" />
@@ -494,6 +522,39 @@ export function ConnectModal({
             </Tabs>
           </div>
 
+          {/* Export — markdown egress. The URL is what agents fetch; the
+              button downloads it as a file. Approved content only (server-side). */}
+          <div className="border-t pt-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm min-w-0">
+                <Download className="h-3.5 w-3.5 shrink-0" />
+                <span className="font-medium truncate">Export as markdown</span>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                onClick={downloadExport}
+                disabled={downloading}
+                aria-label="Download this nest as a single markdown file"
+              >
+                {downloading ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <>
+                    <Download className="h-3.5 w-3.5 mr-1" />
+                    Download .md
+                  </>
+                )}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Frontmatter + body, one file. Approved versions only. Agents can
+              fetch this URL directly.
+            </p>
+            <Snippet label="Export URL (text/markdown)" value={exportUrl} />
+          </div>
+
           <div className="border-t pt-3">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span>Nest ID:</span>
@@ -605,15 +666,17 @@ function Snippet({
   multiline?: boolean;
 }) {
   return (
-    <div className="mb-3">
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+    <div className="mb-3 min-w-0">
+      <div className="flex items-center justify-between gap-2 mb-1 min-w-0">
+        <span className="text-xs font-medium text-muted-foreground truncate">
+          {label}
+        </span>
         <CopyButton value={value} />
       </div>
       <pre
         className={`${
           multiline ? "p-3" : "px-3 py-2"
-        } bg-muted rounded text-xs font-mono ${
+        } bg-muted rounded text-xs font-mono min-w-0 ${
           multiline ? "whitespace-pre overflow-x-auto" : "truncate"
         }`}
       >
