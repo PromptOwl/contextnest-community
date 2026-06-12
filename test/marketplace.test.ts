@@ -5,30 +5,10 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { setupTestEnv, createTestApp, jsonRequest } from "./helpers";
 
-// The marketplace is license-gated. Mock a VALID license whose owner email
-// matches nobody in the test DB — the gate opens, but the caller is still
-// not the marketplace operator, so the moderation paths stay exercised.
-// `licenseValid` is mutable so the unlicensed 503 path is testable here too
-// (a separate file would leak this mock through the shared worker).
-const licenseState = vi.hoisted(() => ({ valid: true }));
-vi.mock("../src/auth/license", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/auth/license")>();
-  return {
-    ...actual,
-    getCurrentLicense: () =>
-      licenseState.valid
-        ? {
-            valid: true,
-            tier: "community",
-            org: "Test Org",
-            limits: { maxNests: 100, maxUsers: 100 },
-            suspended: false,
-            suspendedReason: null,
-            ownerEmail: "operator@promptowl.test",
-          }
-        : null,
-  };
-});
+// The license gate: createTestApp's helpers already mock a VALID test
+// license (ownerEmail null → the caller is never the marketplace operator,
+// so moderation paths stay exercised). The unlicensed 503 path flips the
+// helpers' __TEST_LICENSE_INVALID__ global.
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -57,7 +37,7 @@ afterAll(() => env.cleanup());
 
 describe("marketplace publish → browse → install", () => {
   it("the whole marketplace 503s without a valid license", async () => {
-    licenseState.valid = false;
+    (globalThis as any).__TEST_LICENSE_INVALID__ = true;
     try {
       const browse = await jsonRequest(app, "GET", "/marketplace/packs");
       expect(browse.status).toBe(503);
@@ -70,7 +50,7 @@ describe("marketplace publish → browse → install", () => {
       );
       expect(pub.status).toBe(503);
     } finally {
-      licenseState.valid = true;
+      (globalThis as any).__TEST_LICENSE_INVALID__ = false;
     }
   });
 

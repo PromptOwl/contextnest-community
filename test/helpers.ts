@@ -61,15 +61,20 @@ export async function createTestApp(
     >("../src/auth/license.js");
     return {
       ...actual,
-      getCurrentLicense: () => ({
-        valid: true,
-        tier: "test",
-        org: "Test Org",
-        limits: null,
-        suspended: false,
-        suspendedReason: null,
-        ownerEmail: opts.ownerEmail ?? null,
-      }),
+      // Tests can simulate an UNLICENSED server (e.g. the marketplace 503
+      // gate) by flipping this global; default stays a valid test license.
+      getCurrentLicense: () =>
+        (globalThis as any).__TEST_LICENSE_INVALID__
+          ? null
+          : {
+              valid: true,
+              tier: "test",
+              org: "Test Org",
+              limits: null,
+              suspended: false,
+              suspendedReason: null,
+              ownerEmail: opts.ownerEmail ?? null,
+            },
       // isLicenseAdminEmail reads the module-internal currentLicense, which
       // is never populated in tests. Override it so the ownerEmail opt drives
       // admin detection (e.g. the PROMPTOWL_SIGN_IN_GATE=admin-only path).
