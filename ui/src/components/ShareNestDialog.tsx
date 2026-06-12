@@ -55,6 +55,7 @@ export function ShareNestDialog({
   // Marketplace publishing — a pack IS this nest, listed publicly with
   // credit pricing. Server enforces owner/admin.
   const [isPack, setIsPack] = useState(false);
+  const [packStatus, setPackStatus] = useState<string>("approved");
   const [packSummary, setPackSummary] = useState("");
   const [packInstallPrice, setPackInstallPrice] = useState("0");
   const [packCallPrice, setPackCallPrice] = useState("0");
@@ -72,6 +73,7 @@ export function ShareNestDialog({
           try {
             const m = JSON.parse(res.nest.pack_meta);
             setPackSummary(m.summary ?? "");
+            setPackStatus(m.status ?? "approved");
             setPackInstallPrice(String(m.price_credits_install ?? 0));
             setPackCallPrice(String(m.price_credits_per_call ?? 0));
           } catch {
@@ -89,12 +91,13 @@ export function ShareNestDialog({
     setPackSaving(true);
     setError(null);
     try {
-      await api.publishPack(nestId, {
+      const res = await api.publishPack(nestId, {
         summary: packSummary.trim(),
         price_credits_install: parseInt(packInstallPrice, 10) || 0,
         price_credits_per_call: parseInt(packCallPrice, 10) || 0,
       });
       setIsPack(true);
+      setPackStatus(res.pack?.status ?? "pending");
       setIsPublic(true); // publishing forces public visibility server-side
       onChanged();
     } catch (err: any) {
@@ -212,14 +215,27 @@ export function ShareNestDialog({
               <Globe className="h-4 w-4 text-blue-600" />
               Marketplace
               {isPack && (
-                <span className="text-[10px] rounded-full border border-green-200 bg-green-50 text-green-700 px-2 py-0.5">
-                  Published
+                <span
+                  className={`text-[10px] rounded-full border px-2 py-0.5 ${
+                    packStatus === "pending"
+                      ? "border-amber-200 bg-amber-50 text-amber-700"
+                      : packStatus === "rejected"
+                        ? "border-red-200 bg-red-50 text-red-700"
+                        : "border-green-200 bg-green-50 text-green-700"
+                  }`}
+                >
+                  {packStatus === "pending"
+                    ? "Pending approval"
+                    : packStatus === "rejected"
+                      ? "Rejected"
+                      : "Published"}
                 </span>
               )}
             </Label>
             <p className="text-xs text-muted-foreground">
               Publish this nest as a pack others can install. Installs and
-              context calls are metered in PromptOwl credits.
+              context calls are metered in PromptOwl credits. Listings go
+              live after marketplace approval.
             </p>
             <input
               className="w-full px-3 py-2 rounded-md border border-input bg-background text-sm"

@@ -41,7 +41,7 @@ describe("marketplace publish → browse → install", () => {
     expect(status).toBe(400);
   });
 
-  it("publishes a nest as a priced pack", async () => {
+  it("publishes a nest as a priced pack — pending approval (caller isn't the marketplace operator)", async () => {
     const { status, data } = await jsonRequest(
       app,
       "POST",
@@ -55,9 +55,42 @@ describe("marketplace publish → browse → install", () => {
     );
     expect(status).toBe(200);
     expect(data.pack.price_credits_install).toBe(50);
+    expect(data.pack.status).toBe("pending");
   });
 
-  it("browse lists the pack with pricing + doc count", async () => {
+  it("pending packs are NOT browsable and NOT installable", async () => {
+    const browse = await jsonRequest(app, "GET", "/marketplace/packs");
+    expect(browse.data.packs.find((p: any) => p.id === packNestId)).toBeUndefined();
+    const install = await jsonRequest(
+      app,
+      "POST",
+      `/marketplace/install/${packNestId}`,
+      {},
+    );
+    expect(install.status).toBe(404);
+  });
+
+  it("moderation queue + review are operator-only (403 without the license admin)", async () => {
+    const q = await jsonRequest(app, "GET", "/marketplace/pending");
+    expect(q.status).toBe(403);
+    const r = await jsonRequest(app, "POST", `/marketplace/review/${packNestId}`, {
+      decision: "approved",
+    });
+    expect(r.status).toBe(403);
+  });
+
+  it("browse lists the pack with pricing + doc count once approved", async () => {
+    // No license admin exists in tests — flip the moderation bit directly
+    // (the operator-only review endpoint is asserted above).
+    const { getDb } = await import("../src/db/client");
+    const row = getDb()
+      .prepare("SELECT pack_meta FROM nests WHERE id = ?")
+      .get(packNestId) as { pack_meta: string };
+    const meta = JSON.parse(row.pack_meta);
+    meta.status = "approved";
+    getDb()
+      .prepare("UPDATE nests SET pack_meta = ? WHERE id = ?")
+      .run(JSON.stringify(meta), packNestId);
     const { status, data } = await jsonRequest(app, "GET", "/marketplace/packs");
     expect(status).toBe(200);
     const pack = data.packs.find((p: any) => p.id === packNestId);

@@ -18,6 +18,7 @@ import { resolveCallerEmail } from "../governance/access-guard.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import { trackEvent, trackMeterEvent } from "../telemetry/tracker.js";
+import { isLicenseAdminUserId } from "../auth/license.js";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 
 export const marketplaceRoutes = new Hono<AuthEnv>();
@@ -27,6 +28,11 @@ export interface PackMeta {
   summary: string;
   price_credits_install: number;
   price_credits_per_call: number;
+  /** Moderation gate. Creators (e.g. via `ctx push` + the publish API)
+   *  land as 'pending'; only the license admin — on a PromptOwl-operated
+   *  marketplace server that IS PromptOwl — approves into the public
+   *  listing. Admin self-publishes go straight to 'approved'. */
+  status: "pending" | "approved" | "rejected";
 }
 
 interface PackRow {
@@ -74,7 +80,12 @@ marketplaceRoutes.get("/packs", async (c) => {
         ORDER BY name`,
     )
     .all() as PackRow[];
-  const packs = rows.map((r) => {
+  // Only approved packs list publicly. Legacy metas without a status field
+  // (pre-moderation listings) read as approved.
+  const approved = rows.filter(
+    (r) => (parseMeta(r.pack_meta)?.status ?? "approved") === "approved",
+  );
+  const packs = approved.map((r) => {
     const docCount = (
       db
         .prepare("SELECT COUNT(*) AS c FROM node_versions WHERE nest_id = ? AND version = 1")
@@ -108,11 +119,15 @@ marketplaceRoutes.post("/publish/:nestId", async (c) => {
   if (!body.summary || typeof body.summary !== "string") {
     throw new ValidationError("summary is required");
   }
+  // Moderation: creator publishes land pending; the license admin (on a
+  // PromptOwl-operated server, that IS PromptOwl) is auto-approved.
+  const autoApproved = isLicenseAdminUserId(userId);
   const meta: PackMeta = {
     version: typeof body.version === "string" ? body.version : "0.1.0",
     summary: body.summary,
     price_credits_install: Math.max(0, Number(body.price_credits_install) || 0),
     price_credits_per_call: Math.max(0, Number(body.price_credits_per_call) || 0),
+    status: autoApproved ? "approved" : "pending",
   };
 
   const db = getDb();
@@ -123,7 +138,59 @@ marketplaceRoutes.post("/publish/:nestId", async (c) => {
     "UPDATE nests SET is_pack = 1, pack_meta = ?, visibility = 'public' WHERE id = ?",
   ).run(JSON.stringify(meta), nestId);
 
-  trackEvent("marketplace.publish", { nestId, version: meta.version });
+  trackEvent("marketplace.publish", {
+    nestId,
+    version: meta.version,
+    status: meta.status,
+  });
+  return c.json({ ok: true, pack: { id: nestId, ...meta } });
+});
+
+// GET /marketplace/pending — the moderation queue (license-admin only).
+marketplaceRoutes.get("/pending", async (c) => {
+  const userId = c.get("userId");
+  if (!isLicenseAdminUserId(userId)) {
+    throw new ForbiddenError("Only the marketplace operator can view the approval queue.");
+  }
+  const rows = getDb()
+    .prepare(
+      "SELECT id, name, slug, pack_meta, created_at FROM nests WHERE is_pack = 1 ORDER BY created_at DESC",
+    )
+    .all() as PackRow[];
+  const pending = rows
+    .map((r) => ({ row: r, meta: parseMeta(r.pack_meta) }))
+    .filter((x) => x.meta?.status === "pending")
+    .map((x) => ({ id: x.row.id, name: x.row.name, ...x.meta }));
+  return c.json({ count: pending.length, pending });
+});
+
+// POST /marketplace/review/:nestId — approve or reject a pending pack
+// (license-admin only). Rejection keeps the nest; it just never lists.
+marketplaceRoutes.post("/review/:nestId", async (c) => {
+  const userId = c.get("userId");
+  if (!isLicenseAdminUserId(userId)) {
+    throw new ForbiddenError("Only the marketplace operator can review packs.");
+  }
+  const body = await c.req
+    .json<{ decision?: "approved" | "rejected" }>()
+    .catch(() => ({}) as { decision?: "approved" | "rejected" });
+  if (body.decision !== "approved" && body.decision !== "rejected") {
+    throw new ValidationError("decision must be 'approved' or 'rejected'");
+  }
+  const nestId = c.req.param("nestId");
+  const db = getDb();
+  const row = db
+    .prepare("SELECT pack_meta FROM nests WHERE id = ? AND is_pack = 1")
+    .get(nestId) as { pack_meta: string | null } | undefined;
+  if (!row) throw new NotFoundError(`Pack not found: ${nestId}`);
+  const meta = parseMeta(row.pack_meta);
+  if (!meta) throw new ValidationError("Pack has no manifest to review.");
+  meta.status = body.decision;
+  db.prepare("UPDATE nests SET pack_meta = ? WHERE id = ?").run(
+    JSON.stringify(meta),
+    nestId,
+  );
+  trackEvent("marketplace.review", { nestId, decision: body.decision });
   return c.json({ ok: true, pack: { id: nestId, ...meta } });
 });
 
@@ -154,6 +221,9 @@ marketplaceRoutes.post("/install/:packId", async (c) => {
     .get(packId) as { id: string; name: string; pack_meta: string | null } | undefined;
   if (!row) throw new NotFoundError(`Pack not found: ${packId}`);
   const meta = parseMeta(row.pack_meta);
+  if ((meta?.status ?? "approved") !== "approved") {
+    throw new NotFoundError(`Pack not found: ${packId}`);
+  }
 
   const body = await c.req.json<{ name?: string }>().catch(() => ({}) as { name?: string });
   const name = body.name?.trim() || row.name;
