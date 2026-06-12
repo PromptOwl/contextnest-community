@@ -19,6 +19,11 @@ import { resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import { trackEvent, trackMeterEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
+import { config } from "../config.js";
+import {
+  fetchRegistryPacks,
+  fetchRegistryPackFiles,
+} from "./registry.js";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 
 export const marketplaceRoutes = new Hono<AuthEnv>();
@@ -101,9 +106,47 @@ marketplaceRoutes.get("/packs", async (c) => {
       price_credits_per_call: parseMeta(r.pack_meta)?.price_credits_per_call ?? 0,
       doc_count: docCount,
       published_at: r.created_at,
+      source: "local" as "local" | "registry",
     };
   });
+
+  // Central registry packs (best-effort; a dead registry never breaks the
+  // local store). Local listings win id collisions.
+  const registryUrl = config.MARKETPLACE_REGISTRY_URL;
+  if (registryUrl) {
+    const localIds = new Set(packs.map((p) => p.id));
+    const remote = await fetchRegistryPacks(registryUrl);
+    for (const p of remote) {
+      if (!localIds.has(p.id)) {
+        packs.push({ ...p, source: "registry" as const });
+      }
+    }
+  }
+
   return c.json({ count: packs.length, packs });
+});
+
+// GET /marketplace/packs/:packId/files — a pack's importable files, for
+// CROSS-SERVER installs (another community server pulls these and imports
+// locally). Approved packs only; same rebuilt-file path as local install.
+marketplaceRoutes.get("/packs/:packId/files", async (c) => {
+  const packId = c.req.param("packId");
+  const db = getDb();
+  const row = db
+    .prepare(
+      "SELECT id, name, pack_meta FROM nests WHERE id = ? AND is_pack = 1 AND visibility = 'public'",
+    )
+    .get(packId) as { id: string; name: string; pack_meta: string | null } | undefined;
+  const meta = row ? parseMeta(row.pack_meta) : null;
+  if (!row || (meta?.status ?? "approved") !== "approved") {
+    throw new NotFoundError(`Pack not found: ${packId}`);
+  }
+  const { storage } = engineCache.get(packId);
+  const documents = await storage.discoverDocuments();
+  return c.json({
+    pack: { id: row.id, name: row.name, ...(meta ?? {}) },
+    files: documents.map(docToFile),
+  });
 });
 
 // POST /marketplace/publish/:nestId — owner/admin publishes a nest as a pack.
@@ -234,10 +277,12 @@ marketplaceRoutes.post("/install/:packId", async (c) => {
 
   const nest = await importNest(userId, name, files);
   await registerImportedDocuments(nest.id, resolveCallerEmail(userId));
-  db.prepare("UPDATE nests SET installed_from_pack = ? WHERE id = ?").run(
-    packId,
-    nest.id,
-  );
+  // Provenance + a copy of the pricing meta: the installed copy carries its
+  // own meter rates, so metering keeps working even if the source pack is
+  // delisted (or, for registry installs below, lives on another server).
+  db.prepare(
+    "UPDATE nests SET installed_from_pack = ?, pack_meta = ? WHERE id = ?",
+  ).run(packId, row.pack_meta, nest.id);
 
   trackMeterEvent("meter.pack_install", {
     pack_id: packId,
@@ -245,6 +290,49 @@ marketplaceRoutes.post("/install/:packId", async (c) => {
     nest_id: nest.id,
     price_credits_install: meta?.price_credits_install ?? 0,
     doc_count: files.length,
+  });
+  return c.json({ ok: true, nest: { ...nest, installed_from_pack: packId } }, 201);
+});
+
+// POST /marketplace/install-remote/:packId — install a pack FROM the
+// configured central registry: pull its files over HTTP, import locally,
+// stamp provenance + pricing. The meter event carries the registry origin.
+marketplaceRoutes.post("/install-remote/:packId", async (c) => {
+  const registryUrl = config.MARKETPLACE_REGISTRY_URL;
+  if (!registryUrl) {
+    throw new ValidationError(
+      "No marketplace registry configured (MARKETPLACE_REGISTRY_URL).",
+    );
+  }
+  const packId = c.req.param("packId");
+  const userId = c.get("userId");
+
+  const remote = await fetchRegistryPackFiles(registryUrl, packId);
+  if (!remote) throw new NotFoundError(`Pack not found on registry: ${packId}`);
+
+  const body = await c.req.json<{ name?: string }>().catch(() => ({}) as { name?: string });
+  const name = body.name?.trim() || remote.pack.name;
+
+  const nest = await importNest(userId, name, remote.files);
+  await registerImportedDocuments(nest.id, resolveCallerEmail(userId));
+  const meta = {
+    version: remote.pack.version ?? "0.0.0",
+    summary: remote.pack.summary ?? "",
+    price_credits_install: remote.pack.price_credits_install ?? 0,
+    price_credits_per_call: remote.pack.price_credits_per_call ?? 0,
+    status: "approved" as const,
+  };
+  getDb()
+    .prepare("UPDATE nests SET installed_from_pack = ?, pack_meta = ? WHERE id = ?")
+    .run(packId, JSON.stringify(meta), nest.id);
+
+  trackMeterEvent("meter.pack_install", {
+    pack_id: packId,
+    pack_version: meta.version,
+    nest_id: nest.id,
+    price_credits_install: meta.price_credits_install,
+    doc_count: remote.files.length,
+    registry: registryUrl,
   });
   return c.json({ ok: true, nest: { ...nest, installed_from_pack: packId } }, 201);
 });

@@ -164,6 +164,121 @@ describe("marketplace publish → browse → install", () => {
     expect(mine.price_credits_per_call).toBe(2);
   });
 
+  it("serves an approved pack's files for cross-server install; 404 once unpublished", async () => {
+    const res = await jsonRequest(
+      app,
+      "GET",
+      `/marketplace/packs/${packNestId}/files`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.pack.id).toBe(packNestId);
+    expect(res.data.files.length).toBe(2);
+    expect(res.data.files[0]).toHaveProperty("path");
+    expect(res.data.files[0]).toHaveProperty("content");
+  });
+
+  it("metering reads pricing stamped on the installed copy (survives source delisting)", async () => {
+    const inst = await jsonRequest(
+      app,
+      "POST",
+      `/marketplace/install/${packNestId}`,
+      { name: "Pricing Travels" },
+    );
+    const { getDb } = await import("../src/db/client");
+    const row = getDb()
+      .prepare("SELECT pack_meta, installed_from_pack FROM nests WHERE id = ?")
+      .get(inst.data.nest.id) as { pack_meta: string; installed_from_pack: string };
+    expect(row.installed_from_pack).toBe(packNestId);
+    expect(JSON.parse(row.pack_meta).price_credits_per_call).toBe(2);
+  });
+
+  it("browse merges registry packs and install-remote imports them", async () => {
+    process.env.MARKETPLACE_REGISTRY_URL = "https://registry.test";
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      const u = String(url);
+      if (u === "https://registry.test/marketplace/packs") {
+        return new Response(
+          JSON.stringify({
+            packs: [
+              {
+                id: "remote-pack-1",
+                name: "Remote Pack",
+                slug: "remote-pack",
+                summary: "From the central registry",
+                version: "1.2.0",
+                price_credits_install: 10,
+                price_credits_per_call: 1,
+                doc_count: 1,
+                published_at: "2026-06-11T00:00:00Z",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (u === "https://registry.test/marketplace/packs/remote-pack-1/files") {
+        return new Response(
+          JSON.stringify({
+            pack: {
+              id: "remote-pack-1",
+              name: "Remote Pack",
+              version: "1.2.0",
+              summary: "From the central registry",
+              price_credits_install: 10,
+              price_credits_per_call: 1,
+              status: "approved",
+            },
+            files: [
+              {
+                path: "nodes/remote-doc.md",
+                content:
+                  '---\ntitle: "Remote Doc"\ntags: [remote]\n---\n# Remote\n\nbody',
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      const browse = await jsonRequest(app, "GET", "/marketplace/packs");
+      const remote = browse.data.packs.find((p: any) => p.id === "remote-pack-1");
+      expect(remote).toBeTruthy();
+      expect(remote.source).toBe("registry");
+
+      const inst = await jsonRequest(
+        app,
+        "POST",
+        "/marketplace/install-remote/remote-pack-1",
+        {},
+      );
+      expect(inst.status).toBe(201);
+      expect(inst.data.nest.installed_from_pack).toBe("remote-pack-1");
+      const docs = await jsonRequest(
+        app,
+        "GET",
+        `/nests/${inst.data.nest.id}/nodes`,
+      );
+      expect(docs.data.nodes.map((n: any) => n.title)).toContain("Remote Doc");
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.MARKETPLACE_REGISTRY_URL;
+    }
+  });
+
+  it("install-remote without a configured registry is a 400", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      "/marketplace/install-remote/anything",
+      {},
+    );
+    expect(status).toBe(400);
+  });
+
   it("install 404s for an unpublished nest", async () => {
     await jsonRequest(app, "POST", `/marketplace/unpublish/${packNestId}`, {});
     const { status } = await jsonRequest(

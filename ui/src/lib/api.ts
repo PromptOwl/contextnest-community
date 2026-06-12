@@ -298,6 +298,9 @@ export interface MarketplacePack {
   price_credits_per_call: number;
   doc_count: number;
   published_at: string;
+  /** "local" = published on this server; "registry" = the central
+   *  PromptOwl marketplace (installed via install-remote). */
+  source?: "local" | "registry";
 }
 
 export async function listPacks() {
@@ -328,11 +331,19 @@ export async function unpublishPack(nestId: string) {
   });
 }
 
-export async function installPack(packId: string, name?: string) {
-  return request<{ ok: boolean; nest: any }>(
-    `/marketplace/install/${packId}`,
-    { method: "POST", body: JSON.stringify(name ? { name } : {}) },
-  );
+export async function installPack(
+  packId: string,
+  name?: string,
+  source: "local" | "registry" = "local",
+) {
+  const path =
+    source === "registry"
+      ? `/marketplace/install-remote/${packId}`
+      : `/marketplace/install/${packId}`;
+  return request<{ ok: boolean; nest: any }>(path, {
+    method: "POST",
+    body: JSON.stringify(name ? { name } : {}),
+  });
 }
 
 // ─── Nests ──────────────────────────────────────────────────────────────

@@ -449,6 +449,44 @@ Full review history for a node.
 
 ---
 
+## 7b. Marketplace (license-gated)
+
+Packs ARE nests. The whole `/marketplace/*` surface returns `503 License required` on an unlicensed server.
+
+### GET `/marketplace/packs`
+Public storefront: approved packs with pricing + doc counts. When `MARKETPLACE_REGISTRY_URL` is set, the central registry's approved packs are merged in with `source: "registry"` (local listings win id collisions; registry failures degrade silently to local-only).
+
+### POST `/marketplace/publish/:nestId` (nest owner/admin)
+```json
+{ "summary": "...", "version": "0.1.0", "price_credits_install": 49, "price_credits_per_call": 2 }
+```
+Lists the nest publicly as a pack. Creator publishes land `status: "pending"` (not browsable, not installable) until the **license admin** — on a PromptOwl-operated marketplace server, that IS PromptOwl — approves. Admin self-publishes auto-approve.
+
+### POST `/marketplace/unpublish/:nestId` (nest owner/admin)
+Delists; the nest survives.
+
+### GET `/marketplace/pending` (license admin only)
+The moderation queue.
+
+### POST `/marketplace/review/:nestId` (license admin only)
+```json
+{ "decision": "approved" }
+```
+
+### POST `/marketplace/install/:packId`
+Copies an approved local pack's docs into a fresh caller-owned nest (same import path as Import Folder), stamped `installed_from_pack` + a copy of the pricing meta — so metering resolves locally even if the source is delisted. Emits `meter.pack_install`.
+
+### GET `/marketplace/packs/:packId/files`
+An approved pack's importable files (`{pack, files:[{path,content}]}`) — powers cross-server installs. Public-readable.
+
+### POST `/marketplace/install-remote/:packId`
+Installs a pack FROM the configured central registry: pulls its files over HTTP (timeout-bounded; paths and sizes validated), imports locally with provenance + pricing. `400` without `MARKETPLACE_REGISTRY_URL`; `404` if the registry doesn't list the pack as approved.
+
+### Metering
+Every `/context` call on a pack-installed nest emits `meter.context_call` (pack attribution + `price_credits_per_call`); installs emit `meter.pack_install`. Both ride the telemetry batch to PromptOwl's ingest, regardless of `TELEMETRY_ENABLED` (billing is not opt-out-able).
+
+---
+
 ## 8. Query / Search (read-only consumers)
 
 These power LLM context retrieval. Open-mode friendly.

@@ -68,6 +68,9 @@ function isPublicReadEligiblePath(method: string, path: string): boolean {
   if (method !== "GET") return false;
   // Marketplace browse is a public storefront — listing metadata only.
   if (path === "/marketplace/packs") return true;
+  // Pack files power CROSS-SERVER installs (another server pulls these
+  // anonymously); approved-pack-only enforcement lives in the route.
+  if (/^\/marketplace\/packs\/[^/]+\/files$/.test(path)) return true;
   if (!/^\/nests\/[^/]+(\/.*)?$/.test(path)) return false;
   return !/\/(collaborators|visibility|settings|mcp)/.test(path);
 }

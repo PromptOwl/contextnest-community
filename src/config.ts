@@ -60,6 +60,22 @@ export const config = {
    * Enforced server-side at the device entry points (POST /auth/device,
    * GET /auth/device/poll) and the identity point (POST /auth/promptowl).
    */
+  /**
+   * Central marketplace registry — another community server (typically
+   * PromptOwl-hosted) whose approved packs are browsable and installable
+   * from THIS server. Unset = local marketplace only. Must be http(s).
+   */
+  get MARKETPLACE_REGISTRY_URL(): string | null {
+    const raw = process.env.MARKETPLACE_REGISTRY_URL?.trim();
+    if (!raw) return null;
+    if (!/^https?:\/\//i.test(raw)) {
+      console.warn(
+        `[config] MARKETPLACE_REGISTRY_URL rejected: must start with http(s):// (got "${raw}").`,
+      );
+      return null;
+    }
+    return raw.replace(/\/$/, "");
+  },
   get PROMPTOWL_SIGN_IN_GATE(): "open" | "admin-only" | "disabled" {
     const v = (process.env.PROMPTOWL_SIGN_IN_GATE || "open")
       .trim()

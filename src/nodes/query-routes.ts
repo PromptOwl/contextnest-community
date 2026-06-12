@@ -20,7 +20,10 @@ import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { getDb } from "../db/client.js";
 
-/** Pack attribution + per-call price for a meter.context_call event. */
+/** Pack attribution + per-call price for a meter.context_call event.
+ *  Installs stamp the pack's pricing meta onto the installed nest itself,
+ *  so rates resolve locally even when the source pack lives on another
+ *  server (registry installs) or was later delisted. */
 function meterFields(
   nestId: string,
   tokensReturned: number,
@@ -30,16 +33,13 @@ function meterFields(
   let perCall = 0;
   try {
     const row = getDb()
-      .prepare("SELECT installed_from_pack FROM nests WHERE id = ?")
-      .get(nestId) as { installed_from_pack: string | null } | undefined;
+      .prepare("SELECT installed_from_pack, pack_meta FROM nests WHERE id = ?")
+      .get(nestId) as
+      | { installed_from_pack: string | null; pack_meta: string | null }
+      | undefined;
     packId = row?.installed_from_pack ?? null;
-    if (packId) {
-      const src = getDb()
-        .prepare("SELECT pack_meta FROM nests WHERE id = ?")
-        .get(packId) as { pack_meta: string | null } | undefined;
-      if (src?.pack_meta) {
-        perCall = JSON.parse(src.pack_meta).price_credits_per_call || 0;
-      }
+    if (packId && row?.pack_meta) {
+      perCall = JSON.parse(row.pack_meta).price_credits_per_call || 0;
     }
   } catch {
     /* metering must never break retrieval */

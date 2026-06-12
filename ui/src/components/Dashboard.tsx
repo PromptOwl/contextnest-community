@@ -480,6 +480,11 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                 </CardHeader>
                 <CardContent className="pt-0 space-y-2">
                   <div className="text-xs text-muted-foreground">
+                    {p.source === "registry" && (
+                      <span className="mr-1 rounded-full border border-blue-200 bg-blue-50 px-1.5 text-blue-700">
+                        PromptOwl Marketplace
+                      </span>
+                    )}
                     v{p.version} · {p.doc_count} docs ·{" "}
                     {p.price_credits_install > 0
                       ? `${p.price_credits_install} credits`
@@ -495,7 +500,7 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                       setInstalling(p.id);
                       setInstallNotice(null);
                       try {
-                        await api.installPack(p.id);
+                        await api.installPack(p.id, undefined, p.source ?? "local");
                         setInstallNotice(
                           `Installed "${p.name}" — open it under Nests.`,
                         );
