@@ -6,6 +6,7 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import * as api from "../lib/api";
 import { matchesFilters } from "../lib/node-filter";
 import { linkHealth } from "../lib/link-health";
+import { nestSetupStatus } from "../lib/placeholders";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
   parseSavedFilters, serializeSavedFilters,
@@ -311,6 +312,10 @@ export function NestView({
 
   // Orphans + broken [[links]], client-side from the loaded list.
   const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
+
+  // Starter-pack setup: docs still carrying {{placeholder}} tokens. Drives
+  // the "Finish setup" checklist until the pack is seeded with real facts.
+  const setupTodo = useMemo(() => nestSetupStatus(nodes), [nodes]);
 
   // Distinct authors for the author filter dropdown.
   const authors = useMemo(() => {
@@ -1009,6 +1014,38 @@ export function NestView({
                   >
                     Clear all
                   </Button>
+                </div>
+              )}
+              {/* Finish setup — installed packs carry {{placeholders}} until
+                  seeded with real facts; agents drafting from unfilled
+                  templates produce template answers. */}
+              {setupTodo.length > 0 && (
+                <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs">
+                  <div className="font-medium text-amber-800 mb-1">
+                    Finish setup — {setupTodo.reduce((a, d) => a + d.placeholders.length, 0)}{" "}
+                    placeholder
+                    {setupTodo.reduce((a, d) => a + d.placeholders.length, 0) !== 1 ? "s" : ""}{" "}
+                    to fill in {setupTodo.length} doc
+                    {setupTodo.length !== 1 ? "s" : ""}
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1">
+                    {setupTodo.slice(0, 8).map((d) => (
+                      <button
+                        key={d.id}
+                        type="button"
+                        className="text-amber-900 hover:underline"
+                        onClick={() => onOpenDocument(d.id)}
+                        title={`Fill: ${d.placeholders.slice(0, 6).join(", ")}`}
+                      >
+                        {d.title} ({d.placeholders.length})
+                      </button>
+                    ))}
+                    {setupTodo.length > 8 && (
+                      <span className="text-amber-700">
+                        +{setupTodo.length - 8} more
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
               {/* Tag filter bar — every tag in the nest, clickable; active

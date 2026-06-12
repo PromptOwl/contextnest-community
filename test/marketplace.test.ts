@@ -2,8 +2,33 @@
  * Marketplace primitives — packs ARE nests. publish → browse → install →
  * metered consumption with pack attribution.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { setupTestEnv, createTestApp, jsonRequest } from "./helpers";
+
+// The marketplace is license-gated. Mock a VALID license whose owner email
+// matches nobody in the test DB — the gate opens, but the caller is still
+// not the marketplace operator, so the moderation paths stay exercised.
+// `licenseValid` is mutable so the unlicensed 503 path is testable here too
+// (a separate file would leak this mock through the shared worker).
+let licenseValid = true;
+vi.mock("../src/auth/license", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/auth/license")>();
+  return {
+    ...actual,
+    getCurrentLicense: () =>
+      licenseValid
+        ? {
+            valid: true,
+            tier: "community",
+            org: "Test Org",
+            limits: { maxNests: 100, maxUsers: 100 },
+            suspended: false,
+            suspendedReason: null,
+            ownerEmail: "operator@promptowl.test",
+          }
+        : null,
+  };
+});
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -31,6 +56,24 @@ beforeAll(async () => {
 afterAll(() => env.cleanup());
 
 describe("marketplace publish → browse → install", () => {
+  it("the whole marketplace 503s without a valid license", async () => {
+    licenseValid = false;
+    try {
+      const browse = await jsonRequest(app, "GET", "/marketplace/packs");
+      expect(browse.status).toBe(503);
+      expect(browse.data.error).toBe("License required");
+      const pub = await jsonRequest(
+        app,
+        "POST",
+        `/marketplace/publish/${packNestId}`,
+        { summary: "x" },
+      );
+      expect(pub.status).toBe(503);
+    } finally {
+      licenseValid = true;
+    }
+  });
+
   it("rejects publish without a summary", async () => {
     const { status } = await jsonRequest(
       app,

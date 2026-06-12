@@ -462,6 +462,22 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/nests", nestsApp);
 
   // ─── Marketplace (packs ARE nests; see src/marketplace/routes.ts) ──
+  // LICENSE-GATED: the marketplace is a licensed feature — an unlicensed
+  // community server gets no storefront, no publish, no install. Same
+  // pattern as the /auth/invite and /auth/teammates gates above.
+  app.use("/marketplace/*", async (c, next) => {
+    if (!getCurrentLicense()?.valid) {
+      return c.json(
+        {
+          error: "License required",
+          reason:
+            "Install a valid PromptOwl license key to use the marketplace.",
+        },
+        503,
+      );
+    }
+    return next();
+  });
   // Same flexible auth as /nests: open mode just works; key mode requires
   // a credential for publish/install while browse stays public-readable
   // through the anon path on public packs.
