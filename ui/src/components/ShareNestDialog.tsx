@@ -152,11 +152,13 @@ export function ShareNestDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Users className="h-4 w-4" />
-            Share: {nestName}
+            Share nest: {nestName}
           </DialogTitle>
           <DialogDescription>
-            Control who can see this nest and what they can do. Sharing here
-            grants plain access — it does not make anyone a steward.
+            Sharing applies to the <strong>whole nest</strong> — every
+            document in it. To restrict who can touch an individual document,
+            assign stewards instead. Sharing grants plain access; it does not
+            make anyone a steward.
           </DialogDescription>
         </DialogHeader>
 

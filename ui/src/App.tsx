@@ -7,8 +7,9 @@ import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, type LicenseStatus } from "./lib/api";
+import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -104,8 +105,21 @@ export default function App() {
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
+  // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
+  const [showQuickOpen, setShowQuickOpen] = useState(false);
 
   const requestLogout = useCallback(() => setLogoutConfirm(true), []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setShowQuickOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const confirmLogout = useCallback(async () => {
     setLogoutPending(true);
@@ -148,6 +162,20 @@ export default function App() {
           nestId: nest.id,
           nestName: nest.name,
         });
+        // ?doc=<nodeId> → open that document directly (the doc view's own
+        // load surfaces a not-found error if the id is stale).
+        const docId = params.get("doc");
+        if (docId && docId !== "new") {
+          setView({
+            page: "document",
+            nestId: nest.id,
+            nestName: nest.name,
+            nodeId: docId,
+            isOwner: false,
+            isAnonOwned: false,
+          });
+          return;
+        }
         setView({
           page: "nest",
           nestId: nest.id,
@@ -269,6 +297,25 @@ export default function App() {
         open={showChangePassword}
         onClose={() => setShowChangePassword(false)}
       />
+
+      {showQuickOpen &&
+        (view.page === "nest" || view.page === "document") && (
+          <QuickOpen
+            nestId={view.nestId}
+            onClose={() => setShowQuickOpen(false)}
+            onSelect={(nodeId) => {
+              setShowQuickOpen(false);
+              setView({
+                page: "document",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                nodeId,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              });
+            }}
+          />
+        )}
     </>
   );
 
@@ -551,7 +598,7 @@ function UserMenu({
   const initial = displayName.charAt(0);
 
   return (
-    <DropdownMenu>
+    <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
@@ -626,6 +673,28 @@ function UserMenu({
 // Self-service password change — usable by anyone signed in, including a user
 // who logged in with an admin-issued temporary password. Calls /auth/password,
 // which verifies the current password and invalidates other sessions.
+// Eye toggle pinned inside a password field to reveal/hide the value.
+function PasswordToggle({
+  shown,
+  onToggle,
+}: {
+  shown: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      tabIndex={-1}
+      aria-label={shown ? "Hide password" : "Show password"}
+      title={shown ? "Hide password" : "Show password"}
+      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+    >
+      {shown ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+    </button>
+  );
+}
+
 function ChangePasswordDialog({
   open,
   onClose,
@@ -638,12 +707,19 @@ function ChangePasswordDialog({
   const [confirm, setConfirm] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Reveal toggles per field so a user can verify what they typed.
+  const [showCurrent, setShowCurrent] = useState(false);
+  const [showNext, setShowNext] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
 
   const reset = () => {
     setCurrent("");
     setNext("");
     setConfirm("");
     setError(null);
+    setShowCurrent(false);
+    setShowNext(false);
+    setShowConfirm(false);
   };
 
   const submit = async () => {
@@ -654,6 +730,10 @@ function ChangePasswordDialog({
     }
     if (next !== confirm) {
       setError("New passwords don't match.");
+      return;
+    }
+    if (next === current) {
+      setError("New password must be different from the current password.");
       return;
     }
     setSaving(true);
@@ -691,27 +771,78 @@ function ChangePasswordDialog({
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-1">
-          <Input
-            type="password"
-            placeholder="Current password"
-            value={current}
-            onChange={(e) => setCurrent(e.target.value)}
-            autoComplete="current-password"
-          />
-          <Input
-            type="password"
-            placeholder="New password (min 8 characters)"
-            value={next}
-            onChange={(e) => setNext(e.target.value)}
-            autoComplete="new-password"
-          />
-          <Input
-            type="password"
-            placeholder="Confirm new password"
-            value={confirm}
-            onChange={(e) => setConfirm(e.target.value)}
-            autoComplete="new-password"
-          />
+          <div className="space-y-1">
+            <label
+              htmlFor="cp-current"
+              className="block text-sm font-medium"
+            >
+              Current password
+            </label>
+            <div className="relative">
+              <Input
+                id="cp-current"
+                type={showCurrent ? "text" : "password"}
+                placeholder="Enter your current password"
+                value={current}
+                onChange={(e) => setCurrent(e.target.value)}
+                autoComplete="current-password"
+                className="pr-10"
+              />
+              <PasswordToggle
+                shown={showCurrent}
+                onToggle={() => setShowCurrent((s) => !s)}
+              />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <label htmlFor="cp-next" className="block text-sm font-medium">
+              New password
+            </label>
+            <div className="relative">
+              <Input
+                id="cp-next"
+                type={showNext ? "text" : "password"}
+                placeholder="At least 8 characters"
+                value={next}
+                onChange={(e) => setNext(e.target.value)}
+                autoComplete="new-password"
+                className="pr-10"
+              />
+              <PasswordToggle
+                shown={showNext}
+                onToggle={() => setShowNext((s) => !s)}
+              />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <label
+              htmlFor="cp-confirm"
+              className="block text-sm font-medium"
+            >
+              Confirm new password
+            </label>
+            <div className="relative">
+              <Input
+                id="cp-confirm"
+                type={showConfirm ? "text" : "password"}
+                placeholder="Re-enter your new password"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                autoComplete="new-password"
+                aria-invalid={confirm.length > 0 && confirm !== next}
+                className="pr-10"
+              />
+              <PasswordToggle
+                shown={showConfirm}
+                onToggle={() => setShowConfirm((s) => !s)}
+              />
+            </div>
+            {confirm.length > 0 && confirm !== next && (
+              <p className="text-sm text-destructive">
+                Passwords don't match.
+              </p>
+            )}
+          </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>
         <DialogFooter className="gap-2">
@@ -727,7 +858,7 @@ function ChangePasswordDialog({
           </Button>
           <Button
             onClick={submit}
-            disabled={saving || !current || !next || !confirm}
+            disabled={saving || !current || !next || !confirm || next !== confirm}
           >
             {saving ? "Saving..." : "Change password"}
           </Button>

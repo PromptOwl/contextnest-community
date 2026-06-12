@@ -99,6 +99,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
   type ForwardedRef,
@@ -172,6 +173,9 @@ interface MarkdownEditorProps {
   /** Nest scope used by the wiki-link existence check. Without it
    *  every `[[X]]` styles optimistically as "exists". */
   nestId?: string;
+  /** This document's node id — excluded from the `[[` autocomplete so a
+   *  doc can't wiki-link to itself. */
+  currentNodeId?: string;
   /** Toolbar "Link to document" button calls this. Parent shows the picker. */
   onRequestDocLink?: () => void;
   /** Click on a `[[Title]]` decoration inside the editor. */
@@ -193,6 +197,7 @@ export const MarkdownEditor = forwardRef<
     onSave,
     onBlur,
     nestId,
+    currentNodeId,
     onRequestDocLink,
     onWikiLinkClick,
     onMentionClick,
@@ -248,10 +253,18 @@ export const MarkdownEditor = forwardRef<
   // the handle. Drag on the handle itself reorders the block natively.
   const [blockTarget, setBlockTarget] = useState<{ pos: number } | null>(null);
   const [blockMenuOpen, setBlockMenuOpen] = useState(false);
-  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(
-    null,
-  );
+  // top/left = preferred (below-handle) anchor; anchorTop = the handle's top,
+  // used to flip the menu above when it would overflow the viewport bottom.
+  const [menuPos, setMenuPos] = useState<{
+    top: number;
+    left: number;
+    anchorTop: number;
+  } | null>(null);
+  const blockMenuRef = useRef<HTMLDivElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  // The scrollable content viewport (EditorContent's div). Used as the bubble
+  // menu's flip boundary so a top-of-doc selection flips the menu below.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // Word/char count + document outline. Both recomputed on every doc change
   // (cheap walk); the outline panel is toggled from the toolbar.
@@ -299,9 +312,18 @@ export const MarkdownEditor = forwardRef<
       Typography,
       // Word / character counter (read from editor.storage.characterCount).
       CharacterCount,
-      // Multi-block selection: drag across blocks (or Shift+↑/↓) to select a
-      // range, then move/delete them as a group. Pairs with the drag handle.
-      NodeRange.configure({ key: null }),
+      // Multi-block selection via Mod+drag, to move/delete a range as a group.
+      // `key: "Mod"` keeps a plain mouse drag a normal text selection — so
+      // dragging across lines shows the native ::selection highlight. `key: null`
+      // would turn every drag into a NodeRangeSelection (decoration-rendered, no
+      // native highlight, looked unselected).
+      // We also drop NodeRange's keyboard shortcuts: it binds Mod+A to a
+      // NodeRangeSelection, which has no native highlight — so Ctrl/Cmd+A
+      // "looked unselected". Removing them lets ProseMirror's default Mod+A
+      // selectAll through, which uses the browser's selection highlight.
+      NodeRange.extend({ addKeyboardShortcuts: () => ({}) }).configure({
+        key: "Mod",
+      }),
       // GFM tables (parse via markdown-it, serialize via our Table.ts).
       ...tableExtensions,
       // Rich blocks that persist as markdown container directives (no HTML).
@@ -517,6 +539,8 @@ export const MarkdownEditor = forwardRef<
           : await api.listNodes(nestId);
         if (cancelled) return;
         const list = ((res.nodes as Array<{ id: string; title: string }>) || [])
+          // A doc can't link to itself — drop it from the suggestions.
+          .filter((n) => n.id !== currentNodeId)
           .slice(0, 8);
         setWikiResults(list);
       } catch {
@@ -526,7 +550,7 @@ export const MarkdownEditor = forwardRef<
     return () => {
       cancelled = true;
     };
-  }, [wikiPopup?.query, nestId]);
+  }, [wikiPopup?.query, nestId, currentNodeId]);
 
   // Sync external content only when not focused — avoids selection
   // loss + onUpdate loop on re-render.
@@ -561,19 +585,39 @@ export const MarkdownEditor = forwardRef<
   }, [nestId]);
 
   // Clear the drop indicator (prosemirror-dropcursor) the moment a block is
-  // dropped. The drag-handle's HTML5 drag finishes without delivering a
-  // `dragend` to the dropcursor plugin, so the black drop line lingers until
-  // the next mouse/scroll event. Re-firing `dragend` removes it immediately.
+  // dropped. dropcursor only removes its line on drop/dragend/dragleave fired
+  // on the editor DOM, but the ⠿ drag-handle lives outside the editor DOM, so
+  // its native `dragend` fires on the handle — never on the editor. The last
+  // event the editor sees is a `dragover`, which arms a 5000ms removal timer,
+  // so the black line lingers a few seconds. The handle's drag *does* bubble
+  // `dragend`/`drop` to document (tiptap's drag-handle listens there too).
   useEffect(() => {
     if (!editor) return;
     const dom = editor.view.dom as HTMLElement;
     const clearDropCursor = () => {
-      window.requestAnimationFrame(() =>
-        dom.dispatchEvent(new DragEvent("dragend", { bubbles: true })),
-      );
+      // Proper path: dropcursor removes its line on `dragleave` with no
+      // relatedTarget (not contained in the editor → setCursor(null)).
+      dom.dispatchEvent(new DragEvent("dragleave", { bubbles: false }));
+      // Belt-and-suspenders: if the line is still in the DOM (the synthetic
+      // event doesn't always reach dropcursor's view listeners), collapse it
+      // now. dropcursor's updateOverlay rewrites height/width on the next drag
+      // and its own timer removes the element later, so this can't break a
+      // subsequent drag.
+      document
+        .querySelectorAll<HTMLElement>(
+          ".prosemirror-dropcursor-block, .prosemirror-dropcursor-inline",
+        )
+        .forEach((el) => {
+          el.style.height = "0";
+          el.style.width = "0";
+        });
     };
-    dom.addEventListener("drop", clearDropCursor);
-    return () => dom.removeEventListener("drop", clearDropCursor);
+    document.addEventListener("dragend", clearDropCursor);
+    document.addEventListener("drop", clearDropCursor);
+    return () => {
+      document.removeEventListener("dragend", clearDropCursor);
+      document.removeEventListener("drop", clearDropCursor);
+    };
   }, [editor]);
 
   // Recompute word/char count + heading outline on every doc change.
@@ -713,6 +757,32 @@ export const MarkdownEditor = forwardRef<
     setBlockMenuOpen(false);
     setMenuPos(null);
   };
+
+  // Keep the block-action menu inside the viewport: flip above the handle when
+  // it would overflow the bottom, clamp to the right edge, and cap the height
+  // (scroll) on short screens so the lower items aren't cut off.
+  useLayoutEffect(() => {
+    if (!blockMenuOpen || !menuPos) return;
+    const el = blockMenuRef.current;
+    if (!el) return;
+    const margin = 8;
+    const { offsetHeight: h, offsetWidth: w } = el;
+    const vh = window.innerHeight;
+    const vw = window.innerWidth;
+
+    let top = menuPos.top;
+    if (top + h > vh - margin) {
+      const above = menuPos.anchorTop - h - 4;
+      top = above >= margin ? above : Math.max(margin, vh - h - margin);
+    }
+    let left = menuPos.left;
+    if (left + w > vw - margin) left = Math.max(margin, vw - w - margin);
+
+    el.style.top = `${top}px`;
+    el.style.left = `${left}px`;
+    el.style.maxHeight = `${vh - margin * 2}px`;
+    el.style.overflowY = "auto";
+  }, [blockMenuOpen, menuPos]);
 
   // Read the node fresh at action time (blockTarget.pos tracks the handle's
   // current block, so it's up to date when the menu opens).
@@ -895,7 +965,17 @@ export const MarkdownEditor = forwardRef<
       {editable && !previewing && (
         <BubbleMenu
           editor={editor}
-          className="flex items-center gap-0.5 rounded-md border bg-popover p-1 shadow-md"
+          // The menu is appended inside the overflow-y-auto content viewport, so
+          // a top-of-doc selection would place it above the first line where it
+          // gets clipped by the scroll overflow and hidden behind the sticky
+          // z-20 toolbar. Bounding flip to that viewport (scrollRef) makes a
+          // top-edge selection overflow the boundary and flip to `bottom`, where
+          // it's fully visible; z-50 on the menu keeps it above the toolbar.
+          options={{
+            flip: { boundary: scrollRef.current ?? undefined, padding: 8 },
+            shift: { boundary: scrollRef.current ?? undefined, padding: 8 },
+          }}
+          className="z-50 flex items-center gap-0.5 rounded-md border bg-popover p-1 shadow-md"
         >
           <ToolbarButton
             active={editor.isActive("bold")}
@@ -996,6 +1076,7 @@ export const MarkdownEditor = forwardRef<
       )}
 
       <EditorContent
+        ref={scrollRef}
         editor={editor}
         className={cn(
           "min-h-[60vh] max-h-[60vh] overflow-y-auto",
@@ -1144,7 +1225,7 @@ export const MarkdownEditor = forwardRef<
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-              setMenuPos({ top: r.bottom + 2, left: r.left });
+              setMenuPos({ top: r.bottom + 2, left: r.left, anchorTop: r.top });
               setBlockMenuOpen((o) => !o);
             }}
           >
@@ -1155,6 +1236,7 @@ export const MarkdownEditor = forwardRef<
 
       {effectiveEditable && blockMenuOpen && menuPos && (
         <div
+          ref={blockMenuRef}
           data-block-handle
           className="fixed z-50 min-w-44 select-none overflow-hidden rounded-md border bg-popover py-1 text-popover-foreground shadow-md"
           style={{ top: menuPos.top, left: menuPos.left }}

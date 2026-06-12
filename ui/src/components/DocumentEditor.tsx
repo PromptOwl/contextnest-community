@@ -20,7 +20,10 @@ import {
   X,
   Pencil,
   Users,
+  Link as LinkIcon,
 } from "lucide-react";
+import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
+import { toast } from "sonner";
 import {
   MarkdownEditor,
   slugFromNodeId,
@@ -30,6 +33,11 @@ import { DocumentViewer } from "./DocumentViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { SubmitForReviewModal, ReviewActions, ExternalEditBanner } from "./governance";
 import type { PendingChange } from "../lib/api";
+import { findBacklinks, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
+import { relatedDocs } from "../lib/related";
+import { unlinkedMentions } from "../lib/unlinked-mentions";
+import { extractHeadings } from "../lib/toc";
+import { resolveWikiTarget, previewSnippet } from "../lib/wiki-preview";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
 import type { BreadcrumbEntry } from "../App";
@@ -170,7 +178,82 @@ export function DocumentEditor({
     tags: [],
   });
 
+  // Title as it was last LOADED from the server — only updated by loadNode,
+  // never by (auto)save. The rename warning compares against this so silent
+  // autosave doesn't move the baseline out from under it and dismiss the
+  // warning before the user sees it. (initialSnapshotRef tracks the saved
+  // state and is mutated by every persist, so it's the wrong baseline here.)
+  const loadedTitleRef = useRef<string>("");
+
   const [loading, setLoading] = useState(!isNew);
+  // Cached nest node list (with content) — feeds both the backlinks panel
+  // and wiki-link hover previews from one fetch. Best-effort.
+  const [nestNodes, setNestNodes] = useState<
+    Array<{ id: string; title: string; content?: string; tags?: string[] }>
+  >([]);
+  useEffect(() => {
+    if (isNew || loading) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { nodes } = await api.listNodes(nestId);
+        if (!cancelled) {
+          setNestNodes(
+            nodes as Array<{
+              id: string;
+              title: string;
+              content?: string;
+              tags?: string[];
+            }>,
+          );
+        }
+      } catch {
+        /* best-effort; list failures already surface elsewhere */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isNew, loading, nestId]);
+
+  // Docs in this nest that wiki-link to this one ("what links here").
+  const backlinks = useMemo(
+    () => (isNew ? [] : findBacklinks(nestNodes, { id: nodeId, title })),
+    [isNew, nestNodes, nodeId, title],
+  );
+
+  // Related docs (shared tags + shared links) and link-discovery candidates
+  // (docs that name this one in prose but never [[link]] it).
+  const related = useMemo(
+    () =>
+      isNew
+        ? []
+        : relatedDocs({ id: nodeId, title, tags, content }, nestNodes),
+    [isNew, nestNodes, nodeId, title, tags, content],
+  );
+  const unlinked = useMemo(
+    () => (isNew ? [] : unlinkedMentions({ id: nodeId, title }, nestNodes)),
+    [isNew, nestNodes, nodeId, title],
+  );
+
+  // Outgoing links here whose visible label is stale because the target doc
+  // was renamed (`[[slug|Old Name]]`). Link still resolves; only the label
+  // lags. Surfaced so the linking doc's author can refresh the labels.
+  const staleLinks = useMemo(
+    () => (isNew ? [] : staleAliasLinks(content, nestNodes)),
+    [isNew, content, nestNodes],
+  );
+
+  // Hover-preview lookup for `[[wiki links]]` in the read view — resolves
+  // against the cached list, no per-hover fetch.
+  const previewFor = useCallback(
+    (target: string) => {
+      const node = resolveWikiTarget(nestNodes, target);
+      if (!node) return null;
+      return { title: node.title, snippet: previewSnippet(node.content ?? "") };
+    },
+    [nestNodes],
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
@@ -252,6 +335,7 @@ export function DocumentEditor({
         content: loadedContent,
         tags: loadedTags,
       };
+      loadedTitleRef.current = loadedTitle;
       setTouched(false);
     } catch (err: any) {
       setError(err.message);
@@ -380,7 +464,7 @@ export function DocumentEditor({
   // reassigned every render so the debounce timer always runs the latest
   // closure (current title/content/tags).
   const autosaveTimer = useRef<number | null>(null);
-  const autosaveRef = useRef<() => void>(() => {});
+  const autosaveRef = useRef<() => void>(() => { });
   autosaveRef.current = async () => {
     if (isNew || saving) return;
     if (isLocked || isReviewerOnly || isViewOnly) return;
@@ -607,18 +691,6 @@ export function DocumentEditor({
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {/* Write/review affordances hidden for public reader. */}
-          {canShare && (
-            <Button
-              variant="outline"
-              onClick={() => setShowShare(true)}
-              data-testid="document-editor-share"
-              title="Share this nest — visibility and collaborators"
-            >
-              <Users className="h-4 w-4 mr-2" />
-              Share
-            </Button>
-          )}
           {!isViewOnly && canSubmitForReview && (
             <Button
               variant="outline"
@@ -662,6 +734,38 @@ export function DocumentEditor({
               </Button>
             )
           )}
+          {/* Write/review affordances hidden for public reader.
+              Copy link + Share nest collapsed into an overflow menu to keep
+              the header uncluttered; primary actions (Publish/Save) stay inline. */}
+          {(() => {
+            const moreActions: OverflowAction[] = [];
+            if (!isNew)
+              moreActions.push({
+                label: "Copy link",
+                icon: LinkIcon,
+                testId: "document-editor-copy-link",
+                onSelect: () => {
+                  // Deep link the App's ?nest=&doc= probe understands.
+                  const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
+                  navigator.clipboard.writeText(url);
+                  toast.success("Link copied — recipient needs access to this nest");
+                },
+              });
+            if (canShare)
+              moreActions.push({
+                label: "Share nest",
+                icon: Users,
+                testId: "document-editor-share",
+                onSelect: () => setShowShare(true),
+              });
+            return (
+              <OverflowMenu
+                actions={moreActions}
+                variant="outline"
+                testId="document-editor-more"
+              />
+            );
+          })()}
         </div>
       </div>
 
@@ -726,7 +830,63 @@ export function DocumentEditor({
                 className="border-0 px-0 h-auto py-0 text-3xl font-bold leading-tight shadow-none focus-visible:ring-0 placeholder:text-muted-foreground/40"
               />
             )}
+            {/* Rename safety: links referencing this doc by its old title
+                either break ([[Old Title]]) or go stale ([[slug|Old Title]] —
+                still resolves but keeps showing the old name). Compare against
+                the LAST LOADED title (loadedTitleRef), not the saved snapshot —
+                autosave keeps moving the snapshot, which would dismiss the
+                warning ~1.2s after typing. */}
+            {!isNew &&
+              mode === "edit" &&
+              title.trim() !== loadedTitleRef.current.trim() &&
+              (() => {
+                const affected = renameImpactBacklinks(nestNodes, {
+                  id: nodeId,
+                  title: loadedTitleRef.current,
+                });
+                if (affected.length === 0) return null;
+                return (
+                  <Alert className="mt-2 border-amber-300 bg-amber-50 text-amber-800">
+                    <div className="flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
+                    <AlertDescription className="text-amber-800">
+                      Renaming affects {affected.length} wiki link
+                      {affected.length !== 1 ? "s" : ""} in other documents that
+                      reference this one by its old title (
+                      {affected
+                        .slice(0, 3)
+                        .map((a) => a.title)
+                        .join(", ")}
+                      {affected.length > 3 ? ", …" : ""}
+                      ). Links by slug still resolve, but their visible label
+                      keeps the old name; plain [[title]] links break.
+                    </AlertDescription>
+                    </div>
+                  </Alert>
+                );
+              })()}
           </div>
+
+          {/* Stale outgoing-link labels: a doc this one links to was renamed,
+              so the [[slug|Old Name]] label here lags. Link still resolves. */}
+          {!isNew && staleLinks.length > 0 && (
+            <Alert className="border-amber-300 bg-amber-50 text-amber-800">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
+                <AlertDescription className="text-amber-800">
+                {staleLinks.length} link{staleLinks.length !== 1 ? "s" : ""} in
+                this document show an outdated name — the target document
+                {staleLinks.length !== 1 ? "s were" : " was"} renamed (
+                {staleLinks
+                  .slice(0, 3)
+                  .map((s) => `"${s.shownAs}" → "${s.currentTitle}"`)
+                  .join(", ")}
+                {staleLinks.length > 3 ? ", …" : ""}
+                ). The links still work; only the visible label is out of date.
+                </AlertDescription>
+              </div>
+            </Alert>
+          )}
 
           {/* Tags */}
           <div>
@@ -798,6 +958,39 @@ export function DocumentEditor({
             )}
           </div>
 
+          {/* Outline/TOC — view mode, only when the doc has real structure. */}
+          {mode === "view" &&
+            !looksLikeHtml(content) &&
+            (() => {
+              const headings = extractHeadings(content);
+              if (headings.length < 3) return null;
+              return (
+                <nav className="border rounded-lg bg-muted/20 px-3 py-2">
+                  <div className="text-xs font-medium text-muted-foreground mb-1">
+                    Outline
+                  </div>
+                  <div className="space-y-0.5">
+                    {headings.map((h) => (
+                      <button
+                        key={h.id}
+                        type="button"
+                        className="block w-full text-left text-sm text-primary hover:underline truncate"
+                        style={{ paddingLeft: `${(h.level - 1) * 12}px` }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          document
+                            .getElementById(h.id)
+                            ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                        }}
+                      >
+                        {h.text}
+                      </button>
+                    ))}
+                  </div>
+                </nav>
+              );
+            })()}
+
           {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
           <div
             onClick={() => {
@@ -817,6 +1010,7 @@ export function DocumentEditor({
                   onWikiLinkClick={(title) =>
                     handleWikiLinkClick(title, null)
                   }
+                  previewFor={previewFor}
                 />
               </div>
             ) : (
@@ -832,6 +1026,7 @@ export function DocumentEditor({
                 onSave={handleSave}
                 onBlur={flushAutosave}
                 nestId={nestId}
+                currentNodeId={isNew ? undefined : nodeId}
                 editable={!fieldsDisabled}
                 onRequestDocLink={() => setShowDocPicker(true)}
                 onWikiLinkClick={handleWikiLinkClick}
@@ -839,6 +1034,91 @@ export function DocumentEditor({
               />
             )}
           </div>
+
+          {/* Backlinks — "what links here". View mode only; hidden when empty. */}
+          {mode === "view" && backlinks.length > 0 && (
+            <div className="border rounded-lg bg-muted/20 p-3">
+              <div className="text-xs font-medium text-muted-foreground mb-2">
+                Linked from {backlinks.length} document
+                {backlinks.length !== 1 ? "s" : ""}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {backlinks.map((b) => (
+                  <button
+                    key={b.id}
+                    type="button"
+                    className="text-sm text-primary hover:underline text-left"
+                    onClick={() =>
+                      confirmLeave(
+                        `open "${b.title}"`,
+                        () => onNavigateDocument?.(nestId, b.id, title),
+                      )
+                    }
+                  >
+                    {b.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Related docs — shared tags / links. View mode only. */}
+          {mode === "view" && related.length > 0 && (
+            <div className="border rounded-lg bg-muted/20 p-3">
+              <div className="text-xs font-medium text-muted-foreground mb-2">
+                Related documents
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {related.map((r) => (
+                  <button
+                    key={r.id}
+                    type="button"
+                    className="text-sm text-primary hover:underline text-left"
+                    title={
+                      r.sharedTags.length
+                        ? `Shared tags: ${r.sharedTags.join(", ")}`
+                        : "Shared links"
+                    }
+                    onClick={() =>
+                      confirmLeave(
+                        `open "${r.title}"`,
+                        () => onNavigateDocument?.(nestId, r.id, title),
+                      )
+                    }
+                  >
+                    {r.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Link discovery — docs that mention this one but don't link it. */}
+          {mode === "view" && unlinked.length > 0 && (
+            <div className="border rounded-lg bg-muted/20 p-3">
+              <div className="text-xs font-medium text-muted-foreground mb-2">
+                Mentioned in {unlinked.length} document
+                {unlinked.length !== 1 ? "s" : ""} without a link
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {unlinked.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    className="text-sm text-primary hover:underline text-left"
+                    onClick={() =>
+                      confirmLeave(
+                        `open "${m.title}"`,
+                        () => onNavigateDocument?.(nestId, m.id, title),
+                      )
+                    }
+                  >
+                    {m.title}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

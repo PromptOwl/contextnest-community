@@ -18,6 +18,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { DiffViewer } from "./DiffViewer";
 import { unifiedDiff } from "./diff-util";
+import { DocumentViewer } from "../DocumentViewer";
 
 export interface Version {
   version: number;
@@ -139,7 +140,7 @@ export function VersionHistory({
   // that error — they must resolve the review first.
   const restoreLocked = currentVersionStatus === "pending_review";
   const statusBadgeColor =
-    currentVersionStatus === "approved"
+    currentVersionStatus === "approved" || currentVersionStatus === "published"
       ? "bg-green-100 text-green-800 border-green-200"
       : currentVersionStatus === "rejected"
         ? "bg-red-100 text-red-800 border-red-200"
@@ -156,7 +157,7 @@ export function VersionHistory({
           {currentVersionStatus && (
             <Badge
               variant="outline"
-              className={`text-[10px] ${statusBadgeColor}`}
+              className={`text-[10px] capitalize ${statusBadgeColor}`}
             >
               {currentVersionStatus.replace("_", " ")}
             </Badge>
@@ -240,10 +241,15 @@ export function VersionHistory({
                     className="max-h-none"
                   />
                 </div>
+              ) : previewVersion.content ? (
+                <DocumentViewer
+                  content={previewVersion.content}
+                  className="min-h-0 max-h-none overflow-visible bg-muted/30 rounded px-4 py-3"
+                />
               ) : (
-                <pre className="text-sm whitespace-pre-wrap font-mono p-4 bg-muted/30 rounded">
-                  {previewVersion.content || "(no content)"}
-                </pre>
+                <div className="text-sm text-muted-foreground p-4">
+                  (no content)
+                </div>
               )}
             </ScrollArea>
           </div>
