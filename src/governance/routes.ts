@@ -17,6 +17,7 @@ import * as externalEdits from "./external-edit-service.js";
 import { loadStewardsConfig } from "./stewards-parser.js";
 import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
+import { bodyOnly } from "../nodes/service.js";
 
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
@@ -217,8 +218,23 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   const allVersions = versions.getVersions(nestId, nodeId);
   const approved = versions.getApprovedVersion(nestId, nodeId);
 
+  // getVersions returns content:"" (bodies live on disk, not the table).
+  // Reconstruct each version's body so the history panel can preview it
+  // before restoring. Failures just leave content empty for that row.
+  const { versions: versionManager } = engineCache.get(nestId);
+  const withContent = await Promise.all(
+    allVersions.map(async (v) => {
+      try {
+        const raw = await versionManager.reconstructVersion(nodeId, v.version);
+        return { ...v, content: bodyOnly(nodeId, raw) };
+      } catch {
+        return v;
+      }
+    }),
+  );
+
   return c.json({
-    versions: allVersions,
+    versions: withContent,
     approvedVersion: approved,
     currentVersion: allVersions[0]?.version || 0,
   });

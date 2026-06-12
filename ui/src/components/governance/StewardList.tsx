@@ -169,7 +169,7 @@ export function StewardList({
 
           {(onEditRole || onRemove) &&
             steward.userEmail.toLowerCase() !== self && (
-              <DropdownMenu>
+              <DropdownMenu modal={false}>
                 <DropdownMenuTrigger asChild>
                   <Button
                     variant="ghost"

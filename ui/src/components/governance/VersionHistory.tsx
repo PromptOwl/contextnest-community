@@ -3,7 +3,7 @@
  * Adapted: `versions` and callbacks passed as props (no server-action imports).
  */
 import React, { useState } from "react";
-import { History, RotateCcw, Eye, Loader2, CheckCircle2 } from "lucide-react";
+import { History, RotateCcw, ArrowLeft, ChevronRight, Loader2, CheckCircle2, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -16,6 +16,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { DiffViewer } from "./DiffViewer";
+import { unifiedDiff } from "./diff-util";
+import { DocumentViewer } from "../DocumentViewer";
 
 export interface Version {
   version: number;
@@ -50,6 +53,39 @@ function formatDate(dateStr: string) {
   });
 }
 
+// Long ids (e.g. review-request UUIDs) shortened to head…tail for readability.
+function truncateId(id: string) {
+  return id.length > 20 ? `${id.slice(0, 8)}…${id.slice(-7)}` : id;
+}
+
+interface ParsedNote {
+  action?: { label: string; rejected: boolean };
+  restoredFrom?: number;
+  requestId?: string;
+  note?: string;
+}
+
+// Split a changeNote like "Approved review request <uuid>" into a labelled
+// action + the bare request id so each can render on its own line. A
+// "Restored from version N" note is surfaced as its own labelled marker so
+// the row reads as a restore of version N, not just another edit.
+function parseChangeNote(changeNote?: string): ParsedNote {
+  if (!changeNote) return {};
+  const restore = changeNote.match(/^Restored from version\s+(\d+)/i);
+  if (restore) {
+    return { restoredFrom: Number(restore[1]) };
+  }
+  const m = changeNote.match(/^(Approved|Rejected)\s+review\s+request\s+(\S+)/i);
+  if (m) {
+    const rejected = m[1].toLowerCase() === "rejected";
+    return {
+      action: { label: rejected ? "Review Rejected" : "Review Approved", rejected },
+      requestId: m[2],
+    };
+  }
+  return { note: changeNote };
+}
+
 export function VersionHistory({
   versions,
   currentVersion,
@@ -61,6 +97,8 @@ export function VersionHistory({
   const [previewVersion, setPreviewVersion] = useState<Version | null>(null);
   const [restoreVersion, setRestoreVersion] = useState<number | null>(null);
   const [restoring, setRestoring] = useState(false);
+  // Preview pane: show the full body, or a diff of this version vs current.
+  const [diffMode, setDiffMode] = useState(false);
 
   const handleRestore = async () => {
     if (!restoreVersion || !onRestore) return;
@@ -94,8 +132,15 @@ export function VersionHistory({
   const currentVersionStatus = versions.find(
     (v) => v.version === currentVersion,
   )?.status;
+  const currentContent = versions.find(
+    (v) => v.version === currentVersion,
+  )?.content;
+  // Restore writes a new version, which the server rejects with 423 while a
+  // review is open. Disable the restore affordances so the user never hits
+  // that error — they must resolve the review first.
+  const restoreLocked = currentVersionStatus === "pending_review";
   const statusBadgeColor =
-    currentVersionStatus === "approved"
+    currentVersionStatus === "approved" || currentVersionStatus === "published"
       ? "bg-green-100 text-green-800 border-green-200"
       : currentVersionStatus === "rejected"
         ? "bg-red-100 text-red-800 border-red-200"
@@ -112,7 +157,7 @@ export function VersionHistory({
           {currentVersionStatus && (
             <Badge
               variant="outline"
-              className={`text-[10px] ${statusBadgeColor}`}
+              className={`text-[10px] capitalize ${statusBadgeColor}`}
             >
               {currentVersionStatus.replace("_", " ")}
             </Badge>
@@ -123,7 +168,92 @@ export function VersionHistory({
         </CardTitle>
       </CardHeader>
       <CardContent>
-        {versions.length === 0 ? (
+        {previewVersion ? (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2"
+                onClick={() => {
+                  setPreviewVersion(null);
+                  setDiffMode(false);
+                }}
+              >
+                <ArrowLeft className="h-4 w-4 mr-1" /> Back
+              </Button>
+              <div className="flex items-center gap-1">
+                {previewVersion.content &&
+                  currentContent !== undefined &&
+                  previewVersion.version !== currentVersion && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7"
+                      onClick={() => setDiffMode((d) => !d)}
+                    >
+                      {diffMode ? "Full content" : "Diff vs current"}
+                    </Button>
+                  )}
+                {onRestore && previewVersion.version !== currentVersion && (
+                  <Button
+                    size="sm"
+                    className="h-7"
+                    disabled={restoreLocked}
+                    title={
+                      restoreLocked
+                        ? "Locked while awaiting steward review — resolve the review first"
+                        : undefined
+                    }
+                    onClick={() => {
+                      setRestoreVersion(previewVersion.version);
+                      setPreviewVersion(null);
+                    }}
+                  >
+                    <RotateCcw className="h-4 w-4 mr-1" />
+                    {restoreLocked ? "Locked — review pending" : "Restore"}
+                  </Button>
+                )}
+              </div>
+            </div>
+            <div>
+              <div className="text-sm font-semibold flex items-center gap-2">
+                Version {previewVersion.version}
+                {previewVersion.version === approvedVersion && (
+                  <span className="inline-flex items-center gap-1 text-[10px] text-green-700">
+                    <CheckCircle2 className="h-3 w-3" /> AI-active
+                  </span>
+                )}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {formatDate(previewVersion.editedAt)} · {previewVersion.editedBy}
+                {previewVersion.changeNote && ` · ${previewVersion.changeNote}`}
+              </div>
+            </div>
+            <ScrollArea className="h-[60vh] max-h-[440px] pr-2">
+              {diffMode && currentContent !== undefined ? (
+                <div className="space-y-1">
+                  <div className="text-xs text-muted-foreground px-1">
+                    Diff: current (v{currentVersion}) → v{previewVersion.version}
+                  </div>
+                  <DiffViewer
+                    patch={unifiedDiff(currentContent, previewVersion.content || "")}
+                    className="max-h-none"
+                  />
+                </div>
+              ) : previewVersion.content ? (
+                <DocumentViewer
+                  content={previewVersion.content}
+                  className="min-h-0 max-h-none overflow-visible bg-muted/30 rounded px-4 py-3"
+                />
+              ) : (
+                <div className="text-sm text-muted-foreground p-4">
+                  (no content)
+                </div>
+              )}
+            </ScrollArea>
+          </div>
+        ) : versions.length === 0 ? (
           <div className="text-center py-4 text-sm text-muted-foreground">
             No version history
           </div>
@@ -132,58 +262,100 @@ export function VersionHistory({
             <div className="space-y-1">
               {versions.map((version) => {
                 const isApproved = version.version === approvedVersion;
+                const parsed = parseChangeNote(version.changeNote);
                 return (
                   <div
                     key={version.version}
-                    className={`flex items-center justify-between p-2 rounded hover:bg-muted/50 group ${
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setPreviewVersion(version)}
+                    className={`flex items-center justify-between p-2 rounded hover:bg-muted/50 cursor-pointer group ${
                       isApproved ? "bg-green-50 border border-green-200" : ""
                     }`}
                   >
-                    <div className="flex-1 min-w-0">
+                    <div className="flex-1 min-w-0 space-y-0.5">
                       <div className="text-sm font-medium flex items-center gap-2">
                         Version {version.version}
+                        {parsed.restoredFrom !== undefined && (
+                          <span className="inline-flex items-center gap-1 text-[10px] text-blue-700">
+                            <RotateCcw className="h-3 w-3" /> Restored from v
+                            {parsed.restoredFrom}
+                          </span>
+                        )}
                         {isApproved && (
                           <span className="inline-flex items-center gap-1 text-[10px] text-green-700">
                             <CheckCircle2 className="h-3 w-3" /> AI-active
                           </span>
                         )}
                       </div>
+                      {parsed.action && (
+                        <div
+                          className={`text-xs font-medium flex items-center gap-1 ${
+                            parsed.action.rejected
+                              ? "text-red-700"
+                              : "text-green-700"
+                          }`}
+                        >
+                          {parsed.action.rejected ? (
+                            <XCircle className="h-3 w-3" />
+                          ) : (
+                            <CheckCircle2 className="h-3 w-3" />
+                          )}
+                          {parsed.action.label}
+                        </div>
+                      )}
+                      {parsed.note && (
+                        <div className="text-xs text-foreground/80 break-words">
+                          {parsed.note}
+                        </div>
+                      )}
                       <div className="text-xs text-muted-foreground break-words">
-                        {formatDate(version.editedAt)} · {version.editedBy}
-                        {version.changeNote && ` · ${version.changeNote}`}
+                        By:{" "}
+                        <span className="font-medium text-foreground/80">
+                          {version.editedBy}
+                        </span>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {formatDate(version.editedAt)}
                       </div>
                       {version.resolvedBy && (
                         <div className="text-xs text-muted-foreground break-words">
                           {version.resolutionStatus === "rejected"
                             ? "Rejected by"
-                            : "Approved by"}{" "}
-                          <span className="font-medium">
+                            : "Approved by"}
+                          :{" "}
+                          <span className="font-medium text-foreground/80">
                             {version.resolvedBy}
                           </span>
                         </div>
                       )}
-                    </div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      {version.content && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={() => setPreviewVersion(version)}
-                        >
-                          <Eye className="h-3.5 w-3.5" />
-                        </Button>
+                      {parsed.requestId && (
+                        <div className="text-xs text-muted-foreground font-mono">
+                          Review Request: {truncateId(parsed.requestId)}
+                        </div>
                       )}
+                    </div>
+                    <div className="flex items-center gap-1">
                       {onRestore && version.version !== currentVersion && (
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="h-7 w-7"
-                          onClick={() => setRestoreVersion(version.version)}
+                          className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
+                          disabled={restoreLocked}
+                          title={
+                            restoreLocked
+                              ? "Locked while awaiting steward review — resolve the review first"
+                              : "Restore this version"
+                          }
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRestoreVersion(version.version);
+                          }}
                         >
                           <RotateCcw className="h-3.5 w-3.5" />
                         </Button>
                       )}
+                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
                     </div>
                   </div>
                 );
@@ -192,39 +364,6 @@ export function VersionHistory({
           </ScrollArea>
         )}
       </CardContent>
-
-      <Dialog open={!!previewVersion} onOpenChange={() => setPreviewVersion(null)}>
-        <DialogContent className="max-w-2xl max-h-[80vh]">
-          <DialogHeader>
-            <DialogTitle>Version {previewVersion?.version} Preview</DialogTitle>
-            <DialogDescription>
-              {previewVersion && formatDate(previewVersion.editedAt)}
-              {previewVersion?.changeNote && ` · ${previewVersion.changeNote}`}
-            </DialogDescription>
-          </DialogHeader>
-          <ScrollArea className="max-h-[50vh]">
-            <pre className="text-sm whitespace-pre-wrap font-mono p-4 bg-muted/30 rounded">
-              {previewVersion?.content || "(no content)"}
-            </pre>
-          </ScrollArea>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPreviewVersion(null)}>
-              Close
-            </Button>
-            {onRestore && previewVersion && previewVersion.version !== currentVersion && (
-              <Button
-                onClick={() => {
-                  setRestoreVersion(previewVersion.version);
-                  setPreviewVersion(null);
-                }}
-              >
-                <RotateCcw className="h-4 w-4 mr-2" />
-                Restore This Version
-              </Button>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       <Dialog open={!!restoreVersion} onOpenChange={() => setRestoreVersion(null)}>
         <DialogContent>

@@ -68,6 +68,28 @@ export default {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
       },
+      // Distinguish links in prose (editor + read view). Default prose links
+      // inherit body color, leaving them underline-only. Match wiki-link blue.
+      typography: {
+        DEFAULT: {
+          css: {
+            a: {
+              color: "rgb(37, 99, 235)",
+              fontWeight: "500",
+              textUnderlineOffset: "2px",
+              "&:hover": { color: "rgb(29, 78, 216)" },
+            },
+          },
+        },
+        invert: {
+          css: {
+            a: {
+              color: "rgb(96, 165, 250)",
+              "&:hover": { color: "rgb(147, 197, 253)" },
+            },
+          },
+        },
+      },
     },
   },
   plugins: [tailwindcssAnimate, tailwindcssTypography],
