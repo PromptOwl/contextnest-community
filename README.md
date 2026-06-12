@@ -97,6 +97,10 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 | Per-nest sharing + collaborators | ✅ | ✅ |
 | Public read-only nests | ✅ | ✅ |
 | Custom logo / branding | ✅ | ✅ |
+| Admin password reset + user removal (in-platform) | ✅ | ✅ |
+| Wiki backlinks, outline, hover-preview, link health | ✅ | ✅ |
+| Rich editor — tables, callouts, toggles, code highlight, find/replace | ✅ | ✅ |
+| Steward version revert | ✅ | ✅ |
 | MCP server for AI agents | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
 | SSO / SAML / SCIM | — | ✅ |
@@ -105,6 +109,19 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 | Priority support and SLA | — | ✅ |
 
 For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <https://promptowl.ai/contextnest/>.
+
+## What's new in 1.2.0
+
+- **Admin user management (no email server needed)** — `POST /auth/admin/reset-password/:userId` sets a user's password or returns a one-time temp password; `DELETE /auth/users/:userId` removes a user and revokes their API keys, sessions, and role rows. New self-service **Change password** in the user menu blocks reusing the current password.
+- **`PROMPTOWL_SIGN_IN_GATE`** — `open` / `admin-only` / `disabled` restricts "Sign in with PromptOwl" (admin reaches it via `?admin=1`). See [CONFIGURATION.md](./CONFIGURATION.md).
+- **Plain-text agent view** — `?format=markdown` on a node returns frontmatter + body as `text/markdown` for LLM-friendly consumption.
+- **Steward version revert** — `POST .../revert` restores an earlier version as a new one; pending-review docs are now editable (saving withdraws the review).
+- **Editor — always-editable surface** — Notion-style buttery headline, selection bubble toolbar (format-on-highlight), turn-into block conversion, Cmd+F find & replace, rich blocks (tables, callouts, toggles, syntax-highlighted code, columns), and wiki/code-safety fixes.
+- **Wiki usability** — backlinks panel ("Linked from N documents"), outline/TOC for 3+-heading docs, hover-preview on `[[wiki links]]`, multi-tag AND filtering with clickable chips, per-doc copy link, rename-safety warning for title-form links, link-health report (broken links + orphans), recently-edited strip.
+- **Sharing clarity** — share button reads "Share nest"; dialog clarifies nest-wide scope; deep links open documents directly.
+- **Security** — hardened scanner gate (PolinRider + Shai-Hulud preflight) in `bin/`.
+
+Full history in [CHANGELOG.md](./CHANGELOG.md).
 
 ## What's new in 1.1.0
 
