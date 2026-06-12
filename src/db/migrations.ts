@@ -164,6 +164,21 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE nests ADD COLUMN allow_self_approve INTEGER NOT NULL DEFAULT 0");
   }
 
+  // ─── Marketplace primitives ───
+  // A pack IS a nest published to the marketplace — no parallel registry
+  // service. is_pack flags it; pack_meta holds the listing JSON (version,
+  // summary, price_credits_install, price_credits_per_call); installs stamp
+  // installed_from_pack on the copy so consumption meters with attribution.
+  if (!nestCols.includes("is_pack")) {
+    db.exec("ALTER TABLE nests ADD COLUMN is_pack INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!nestCols.includes("pack_meta")) {
+    db.exec("ALTER TABLE nests ADD COLUMN pack_meta TEXT");
+  }
+  if (!nestCols.includes("installed_from_pack")) {
+    db.exec("ALTER TABLE nests ADD COLUMN installed_from_pack TEXT");
+  }
+
   // Admin flag on users (first PromptOwl-authed user becomes the server admin)
   const userCols = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
   if (!userCols.includes("is_admin")) {

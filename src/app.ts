@@ -15,6 +15,7 @@ import { nodeRoutes } from "./nodes/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
+import { marketplaceRoutes } from "./marketplace/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import {
   resolveNestPermission,
@@ -65,6 +66,8 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 // nest inventory. Admin paths and writes still 401.
 function isPublicReadEligiblePath(method: string, path: string): boolean {
   if (method !== "GET") return false;
+  // Marketplace browse is a public storefront — listing metadata only.
+  if (path === "/marketplace/packs") return true;
   if (!/^\/nests\/[^/]+(\/.*)?$/.test(path)) return false;
   return !/\/(collaborators|visibility|settings|mcp)/.test(path);
 }
@@ -457,6 +460,13 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);
+
+  // ─── Marketplace (packs ARE nests; see src/marketplace/routes.ts) ──
+  // Same flexible auth as /nests: open mode just works; key mode requires
+  // a credential for publish/install while browse stays public-readable
+  // through the anon path on public packs.
+  app.use("/marketplace/*", flexAuthMiddleware);
+  app.route("/marketplace", marketplaceRoutes);
 
   // ─── Dashboard UI (static files served from the bundled dist/web3 dir) ──
   app.use("/assets/*", serveStatic({ root: UI_DIR_REL }));

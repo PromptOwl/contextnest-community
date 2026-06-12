@@ -1,0 +1,121 @@
+/**
+ * Marketplace primitives — packs ARE nests. publish → browse → install →
+ * metered consumption with pack attribution.
+ */
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { setupTestEnv, createTestApp, jsonRequest } from "./helpers";
+
+let env: ReturnType<typeof setupTestEnv>;
+let app: any;
+let packNestId: string;
+
+beforeAll(async () => {
+  env = setupTestEnv();
+  app = await createTestApp("open");
+  const created = await jsonRequest(app, "POST", "/nests", {
+    name: "Author Pack Nest",
+  });
+  packNestId = created.data.nest.id;
+  await jsonRequest(app, "POST", `/nests/${packNestId}/nodes`, {
+    title: "Pack Doc One",
+    content: "# One\n\nfirst body",
+    tags: ["alpha"],
+  });
+  await jsonRequest(app, "POST", `/nests/${packNestId}/nodes`, {
+    title: "Pack Doc Two",
+    content: "# Two\n\nsecond body links [[Pack Doc One]]",
+    tags: ["beta"],
+  });
+});
+
+afterAll(() => env.cleanup());
+
+describe("marketplace publish → browse → install", () => {
+  it("rejects publish without a summary", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/marketplace/publish/${packNestId}`,
+      {},
+    );
+    expect(status).toBe(400);
+  });
+
+  it("publishes a nest as a priced pack", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/marketplace/publish/${packNestId}`,
+      {
+        summary: "Two docs of pure value",
+        version: "1.0.0",
+        price_credits_install: 50,
+        price_credits_per_call: 2,
+      },
+    );
+    expect(status).toBe(200);
+    expect(data.pack.price_credits_install).toBe(50);
+  });
+
+  it("browse lists the pack with pricing + doc count", async () => {
+    const { status, data } = await jsonRequest(app, "GET", "/marketplace/packs");
+    expect(status).toBe(200);
+    const pack = data.packs.find((p: any) => p.id === packNestId);
+    expect(pack).toBeTruthy();
+    expect(pack.summary).toBe("Two docs of pure value");
+    expect(pack.price_credits_per_call).toBe(2);
+    expect(pack.doc_count).toBe(2);
+  });
+
+  it("install copies docs into a fresh nest with pack provenance", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/marketplace/install/${packNestId}`,
+      { name: "My Installed Copy" },
+    );
+    expect(status).toBe(201);
+    expect(data.nest.installed_from_pack).toBe(packNestId);
+    const docs = await jsonRequest(app, "GET", `/nests/${data.nest.id}/nodes`);
+    const titles = docs.data.nodes.map((n: any) => n.title).sort();
+    expect(titles).toEqual(["Pack Doc One", "Pack Doc Two"]);
+  });
+
+  it("consumption on an installed nest emits a meter event with pack attribution", async () => {
+    const inst = await jsonRequest(
+      app,
+      "POST",
+      `/marketplace/install/${packNestId}`,
+      { name: "Metered Copy" },
+    );
+    const nestId = inst.data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${nestId}/context`, {
+      prompt: "pack doc one",
+      max_tokens: 1000,
+    });
+    // Meter rides telemetry_events — assert directly on the local store.
+    const { getDb } = await import("../src/db/client");
+    const rows = getDb()
+      .prepare(
+        "SELECT data_json FROM telemetry_events WHERE event = 'meter.context_call' ORDER BY id DESC LIMIT 5",
+      )
+      .all() as Array<{ data_json: string }>;
+    const mine = rows
+      .map((r) => JSON.parse(r.data_json))
+      .find((d) => d.nest_id === nestId);
+    expect(mine).toBeTruthy();
+    expect(mine.pack_id).toBe(packNestId);
+    expect(mine.price_credits_per_call).toBe(2);
+  });
+
+  it("install 404s for an unpublished nest", async () => {
+    await jsonRequest(app, "POST", `/marketplace/unpublish/${packNestId}`, {});
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/marketplace/install/${packNestId}`,
+      {},
+    );
+    expect(status).toBe(404);
+  });
+});

@@ -4,7 +4,7 @@ import type { ContextNode } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
 import { ValidationError } from "../shared/errors.js";
-import { trackEvent } from "../telemetry/tracker.js";
+import { trackEvent, trackMeterEvent } from "../telemetry/tracker.js";
 import { syncNodeTags } from "../governance/tag-index-service.js";
 import {
   resolveCallerEmail,
@@ -18,6 +18,40 @@ import {
 } from "./markdown-export.js";
 import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { getDb } from "../db/client.js";
+
+/** Pack attribution + per-call price for a meter.context_call event. */
+function meterFields(
+  nestId: string,
+  tokensReturned: number,
+  nodesIncluded: number,
+): Record<string, unknown> {
+  let packId: string | null = null;
+  let perCall = 0;
+  try {
+    const row = getDb()
+      .prepare("SELECT installed_from_pack FROM nests WHERE id = ?")
+      .get(nestId) as { installed_from_pack: string | null } | undefined;
+    packId = row?.installed_from_pack ?? null;
+    if (packId) {
+      const src = getDb()
+        .prepare("SELECT pack_meta FROM nests WHERE id = ?")
+        .get(packId) as { pack_meta: string | null } | undefined;
+      if (src?.pack_meta) {
+        perCall = JSON.parse(src.pack_meta).price_credits_per_call || 0;
+      }
+    }
+  } catch {
+    /* metering must never break retrieval */
+  }
+  return {
+    nest_id: nestId,
+    pack_id: packId,
+    tokens_returned: tokensReturned,
+    nodes_included: nodesIncluded,
+    price_credits_per_call: perCall,
+  };
+}
 
 export const queryRoutes = new Hono<AuthEnv>();
 
@@ -154,6 +188,11 @@ queryRoutes.post("/context", async (c) => {
     permission_filtered: permissionFiltered,
     token_count: tokenCount,
   });
+  // Meter event — the billable unit for marketplace consumption. Rides the
+  // existing telemetry batch to PromptOwl, where the credit ledger debits
+  // per the source pack's pricing. Nests not installed from a pack meter
+  // with pack_id:null (host analytics, not billed).
+  trackMeterEvent("meter.context_call", meterFields(nestId, tokenCount, included.length));
 
   return c.json({
     context: contextMarkdown,

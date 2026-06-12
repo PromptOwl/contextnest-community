@@ -286,6 +286,55 @@ export async function updateNestSettings(
   );
 }
 
+// ─── Marketplace (packs ARE nests) ──────────────────────────────────────
+
+export interface MarketplacePack {
+  id: string;
+  name: string;
+  slug: string;
+  summary: string;
+  version: string;
+  price_credits_install: number;
+  price_credits_per_call: number;
+  doc_count: number;
+  published_at: string;
+}
+
+export async function listPacks() {
+  return request<{ count: number; packs: MarketplacePack[] }>(
+    "/marketplace/packs",
+  );
+}
+
+export async function publishPack(
+  nestId: string,
+  meta: {
+    summary: string;
+    version?: string;
+    price_credits_install?: number;
+    price_credits_per_call?: number;
+  },
+) {
+  return request<{ ok: boolean; pack: any }>(
+    `/marketplace/publish/${nestId}`,
+    { method: "POST", body: JSON.stringify(meta) },
+  );
+}
+
+export async function unpublishPack(nestId: string) {
+  return request<{ ok: boolean }>(`/marketplace/unpublish/${nestId}`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function installPack(packId: string, name?: string) {
+  return request<{ ok: boolean; nest: any }>(
+    `/marketplace/install/${packId}`,
+    { method: "POST", body: JSON.stringify(name ? { name } : {}) },
+  );
+}
+
 // ─── Nests ──────────────────────────────────────────────────────────────
 
 export async function listNests() {
@@ -330,7 +379,15 @@ export async function setNestVisibility(
 
 export async function getNest(nestId: string) {
   return request<{
-    nest: { id: string; name: string; visibility: "private" | "public" };
+    nest: {
+      id: string;
+      name: string;
+      visibility: "private" | "public";
+      // Marketplace columns (SELECT * passthrough).
+      is_pack?: number;
+      pack_meta?: string | null;
+      installed_from_pack?: string | null;
+    };
     permission: string;
     // Caller's merged effective roles (collaborator + steward), nest-wide.
     roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;

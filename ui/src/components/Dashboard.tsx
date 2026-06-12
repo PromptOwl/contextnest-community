@@ -47,6 +47,10 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
   const [deleteTarget, setDeleteTarget] = useState<
     { id: string; name: string; isImported: boolean } | null
   >(null);
+  // Marketplace storefront — packs are nests published on this server.
+  const [packs, setPacks] = useState<api.MarketplacePack[]>([]);
+  const [installing, setInstalling] = useState<string | null>(null);
+  const [installNotice, setInstallNotice] = useState<string | null>(null);
 
   const serverUrl =
     typeof window !== "undefined" ? window.location.origin : "http://localhost:3838";
@@ -65,6 +69,10 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
       ]);
       setNests(nestsData.nests);
       setStats(statsData);
+      api
+        .listPacks()
+        .then((d) => setPacks(d.packs))
+        .catch(() => setPacks([]));
     } catch (e) {
       console.error("[Dashboard] fetchNests failed", e);
     } finally {
@@ -445,6 +453,68 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
         onClose={() => setShowImport(false)}
         onImported={fetchNests}
       />
+
+      {/* Marketplace — packs published on this server. Install copies the
+          pack into a fresh nest you own; consumption meters per the pack's
+          credit pricing. */}
+      {packs.length > 0 && (
+        <div className="space-y-3">
+          <div>
+            <h2 className="text-xl font-semibold">Marketplace</h2>
+            <p className="text-sm text-muted-foreground">
+              Starter packs published on this server — install one to begin
+              with a working structure
+            </p>
+          </div>
+          {installNotice && (
+            <p className="text-sm text-green-700">{installNotice}</p>
+          )}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {packs.map((p) => (
+              <Card key={p.id}>
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base">{p.name}</CardTitle>
+                  <CardDescription className="line-clamp-2">
+                    {p.summary}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="pt-0 space-y-2">
+                  <div className="text-xs text-muted-foreground">
+                    v{p.version} · {p.doc_count} docs ·{" "}
+                    {p.price_credits_install > 0
+                      ? `${p.price_credits_install} credits`
+                      : "free install"}
+                    {p.price_credits_per_call > 0 &&
+                      ` · ${p.price_credits_per_call}/call`}
+                  </div>
+                  <Button
+                    size="sm"
+                    className="w-full"
+                    disabled={installing === p.id}
+                    onClick={async () => {
+                      setInstalling(p.id);
+                      setInstallNotice(null);
+                      try {
+                        await api.installPack(p.id);
+                        setInstallNotice(
+                          `Installed "${p.name}" — open it under Nests.`,
+                        );
+                        await fetchNests();
+                      } catch (e: any) {
+                        setInstallNotice(e?.message || "Install failed");
+                      } finally {
+                        setInstalling(null);
+                      }
+                    }}
+                  >
+                    {installing === p.id ? "Installing…" : "Install"}
+                  </Button>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

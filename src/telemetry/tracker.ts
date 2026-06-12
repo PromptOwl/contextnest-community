@@ -22,6 +22,25 @@ export function trackEvent(
 }
 
 /**
+ * Record a METER event (marketplace billing unit). Deliberately NOT gated
+ * by TELEMETRY_ENABLED — that switch is for optional analytics, and
+ * billing must not be opt-out-able by flipping it. No document content is
+ * recorded; only usage counts and pack attribution.
+ */
+export function trackMeterEvent(
+  event: string,
+  data: Record<string, unknown>,
+): void {
+  try {
+    getDb()
+      .prepare("INSERT INTO telemetry_events (event, data_json) VALUES (?, ?)")
+      .run(event, JSON.stringify(data));
+  } catch {
+    // Metering must never break retrieval; flush retries carry the loss risk.
+  }
+}
+
+/**
  * Flush pending telemetry events to PromptOwl.
  * Called on a timer from the main loop.
  */

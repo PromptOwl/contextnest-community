@@ -52,18 +52,71 @@ export function ShareNestDialog({
   const [isPublic, setIsPublic] = useState(false);
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Marketplace publishing — a pack IS this nest, listed publicly with
+  // credit pricing. Server enforces owner/admin.
+  const [isPack, setIsPack] = useState(false);
+  const [packSummary, setPackSummary] = useState("");
+  const [packInstallPrice, setPackInstallPrice] = useState("0");
+  const [packCallPrice, setPackCallPrice] = useState("0");
+  const [packSaving, setPackSaving] = useState(false);
 
   useEffect(() => {
     // Read current visibility straight from the server so the toggle
     // reflects truth without the parent having to thread it through.
     api
       .getNest(nestId)
-      .then((res) => setIsPublic(res.nest?.visibility === "public"))
+      .then((res) => {
+        setIsPublic(res.nest?.visibility === "public");
+        setIsPack(!!res.nest?.is_pack);
+        if (res.nest?.pack_meta) {
+          try {
+            const m = JSON.parse(res.nest.pack_meta);
+            setPackSummary(m.summary ?? "");
+            setPackInstallPrice(String(m.price_credits_install ?? 0));
+            setPackCallPrice(String(m.price_credits_per_call ?? 0));
+          } catch {
+            /* corrupt meta → fresh form */
+          }
+        }
+      })
       .catch(() => {
         /* leave default; CollaboratorManager surfaces any real error */
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nestId]);
+
+  const handlePublishPack = async () => {
+    setPackSaving(true);
+    setError(null);
+    try {
+      await api.publishPack(nestId, {
+        summary: packSummary.trim(),
+        price_credits_install: parseInt(packInstallPrice, 10) || 0,
+        price_credits_per_call: parseInt(packCallPrice, 10) || 0,
+      });
+      setIsPack(true);
+      setIsPublic(true); // publishing forces public visibility server-side
+      onChanged();
+    } catch (err: any) {
+      setError(err?.message || "Failed to publish pack");
+    } finally {
+      setPackSaving(false);
+    }
+  };
+
+  const handleUnpublishPack = async () => {
+    setPackSaving(true);
+    setError(null);
+    try {
+      await api.unpublishPack(nestId);
+      setIsPack(false);
+      onChanged();
+    } catch (err: any) {
+      setError(err?.message || "Failed to unpublish pack");
+    } finally {
+      setPackSaving(false);
+    }
+  };
 
   const handleVisibilityToggle = async (next: boolean) => {
     // Optimistic flip; revert on failure so the switch never lies about
@@ -151,6 +204,77 @@ export function ShareNestDialog({
             onChanged={onChanged}
             currentUserEmail={currentEmail}
           />
+
+          {/* Marketplace — publish this nest as an installable, credit-priced
+              pack. Publishing makes the nest public (a pack must be browsable). */}
+          <div className="rounded-lg border p-4 space-y-3">
+            <Label className="flex items-center gap-2 text-sm font-medium">
+              <Globe className="h-4 w-4 text-blue-600" />
+              Marketplace
+              {isPack && (
+                <span className="text-[10px] rounded-full border border-green-200 bg-green-50 text-green-700 px-2 py-0.5">
+                  Published
+                </span>
+              )}
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              Publish this nest as a pack others can install. Installs and
+              context calls are metered in PromptOwl credits.
+            </p>
+            <input
+              className="w-full px-3 py-2 rounded-md border border-input bg-background text-sm"
+              placeholder="One-line summary shown in the marketplace"
+              value={packSummary}
+              onChange={(e) => setPackSummary(e.target.value)}
+            />
+            <div className="flex items-center gap-3 text-xs">
+              <label className="flex items-center gap-1.5">
+                Install price
+                <input
+                  type="number"
+                  min="0"
+                  className="w-20 px-2 py-1 rounded-md border border-input bg-background"
+                  value={packInstallPrice}
+                  onChange={(e) => setPackInstallPrice(e.target.value)}
+                />
+                credits
+              </label>
+              <label className="flex items-center gap-1.5">
+                Per call
+                <input
+                  type="number"
+                  min="0"
+                  className="w-20 px-2 py-1 rounded-md border border-input bg-background"
+                  value={packCallPrice}
+                  onChange={(e) => setPackCallPrice(e.target.value)}
+                />
+                credits
+              </label>
+            </div>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                onClick={handlePublishPack}
+                disabled={packSaving || !packSummary.trim()}
+              >
+                {packSaving
+                  ? "Saving…"
+                  : isPack
+                    ? "Update listing"
+                    : "Publish to Marketplace"}
+              </Button>
+              {isPack && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleUnpublishPack}
+                  disabled={packSaving}
+                >
+                  Unpublish
+                </Button>
+              )}
+            </div>
+          </div>
         </div>
 
         <DialogFooter>
