@@ -10,13 +10,13 @@ import { setupTestEnv, createTestApp, jsonRequest } from "./helpers";
 // not the marketplace operator, so the moderation paths stay exercised.
 // `licenseValid` is mutable so the unlicensed 503 path is testable here too
 // (a separate file would leak this mock through the shared worker).
-let licenseValid = true;
+const licenseState = vi.hoisted(() => ({ valid: true }));
 vi.mock("../src/auth/license", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/auth/license")>();
   return {
     ...actual,
     getCurrentLicense: () =>
-      licenseValid
+      licenseState.valid
         ? {
             valid: true,
             tier: "community",
@@ -57,7 +57,7 @@ afterAll(() => env.cleanup());
 
 describe("marketplace publish → browse → install", () => {
   it("the whole marketplace 503s without a valid license", async () => {
-    licenseValid = false;
+    licenseState.valid = false;
     try {
       const browse = await jsonRequest(app, "GET", "/marketplace/packs");
       expect(browse.status).toBe(503);
@@ -70,7 +70,7 @@ describe("marketplace publish → browse → install", () => {
       );
       expect(pub.status).toBe(503);
     } finally {
-      licenseValid = true;
+      licenseState.valid = true;
     }
   });
 
