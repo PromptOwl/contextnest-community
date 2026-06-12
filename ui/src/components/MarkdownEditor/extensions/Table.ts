@@ -17,7 +17,8 @@ function cellToMarkdown(cell: ProseMirrorNode): string {
   const parts: string[] = [];
   cell.descendants((n) => {
     if (n.isText && n.text) {
-      let t = n.text.replace(/\|/g, "\\|");
+      // Escape backslash first so the pipe-escape's added `\` isn't re-escaped.
+      let t = n.text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
       for (const mark of n.marks) {
         switch (mark.type.name) {
           case "bold":

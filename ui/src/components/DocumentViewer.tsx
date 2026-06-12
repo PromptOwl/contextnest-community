@@ -73,7 +73,15 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
 const remarkStripHtml: Plugin<[], Root> = () => (tree) => {
   visit(tree, "html", (node: any) => {
     node.type = "text";
-    node.value = (node.value || "").replace(/<[^>]*>/g, "");
+    // Loop until stable: a single pass of /<[^>]*>/g can leave behind
+    // fragments that reassemble into another tag (e.g. `<scr<script>ipt>`).
+    let value = node.value || "";
+    let prev: string;
+    do {
+      prev = value;
+      value = value.replace(/<[^>]*>/g, "");
+    } while (value !== prev);
+    node.value = value;
   });
 };
 
