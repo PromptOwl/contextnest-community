@@ -318,8 +318,11 @@ marketplaceRoutes.post("/install-remote/:packId", async (c) => {
   const meta = {
     version: remote.pack.version ?? "0.0.0",
     summary: remote.pack.summary ?? "",
-    price_credits_install: remote.pack.price_credits_install ?? 0,
-    price_credits_per_call: remote.pack.price_credits_per_call ?? 0,
+    // Registry pricing is untrusted JSON over HTTP — coerce + floor at 0,
+    // same as the local publish path, so a hostile/buggy registry can't
+    // store negative or non-numeric credit rates into the meter.
+    price_credits_install: Math.max(0, Number(remote.pack.price_credits_install) || 0),
+    price_credits_per_call: Math.max(0, Number(remote.pack.price_credits_per_call) || 0),
     status: "approved" as const,
   };
   getDb()

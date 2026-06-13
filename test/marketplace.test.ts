@@ -269,6 +269,46 @@ describe("marketplace publish → browse → install", () => {
     }
   });
 
+  it("install-remote coerces hostile registry pricing (negative/NaN → 0)", async () => {
+    process.env.MARKETPLACE_REGISTRY_URL = "https://evil.test";
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      const u = String(url);
+      if (u.endsWith("/marketplace/packs/evil-1/files")) {
+        return new Response(
+          JSON.stringify({
+            pack: {
+              id: "evil-1",
+              name: "Evil",
+              version: "1.0.0",
+              summary: "x",
+              price_credits_install: -999,
+              price_credits_per_call: "not-a-number",
+              status: "approved",
+            },
+            files: [{ path: "nodes/x.md", content: "---\ntitle: \"X\"\n---\nbody" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+    try {
+      const inst = await jsonRequest(app, "POST", "/marketplace/install-remote/evil-1", {});
+      expect(inst.status).toBe(201);
+      const { getDb } = await import("../src/db/client");
+      const row = getDb()
+        .prepare("SELECT pack_meta FROM nests WHERE id = ?")
+        .get(inst.data.nest.id) as { pack_meta: string };
+      const meta = JSON.parse(row.pack_meta);
+      expect(meta.price_credits_install).toBe(0);
+      expect(meta.price_credits_per_call).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+      delete process.env.MARKETPLACE_REGISTRY_URL;
+    }
+  });
+
   it("install-remote without a configured registry is a 400", async () => {
     const { status } = await jsonRequest(
       app,
