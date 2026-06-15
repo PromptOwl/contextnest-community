@@ -17,7 +17,11 @@ function getUserEmail(userId: string): string {
   return user?.email || "anonymous@localhost";
 }
 
-function createMcpServerForNest(nestId: string, userEmail: string): McpServer {
+function createMcpServerForNest(
+  nestId: string,
+  userId: string,
+  userEmail: string,
+): McpServer {
   const server = new McpServer(
     { name: `contextnest-${nestId}`, version: "1.0.0" },
     { capabilities: { tools: {} } },
@@ -49,6 +53,7 @@ function createMcpServerForNest(nestId: string, userEmail: string): McpServer {
         queryEngine: engine.query,
         versionManager: engine.versions,
         nestId,
+        userId,
         userEmail,
       });
       return { content: [{ type: "text" as const, text }] };
@@ -64,7 +69,7 @@ mcpRoutes.all("/", async (c) => {
   const userId = c.get("userId");
   const userEmail = getUserEmail(userId);
   // Create a fresh server per request (stateless) with the current user's identity
-  const server = createMcpServerForNest(nestId, userEmail);
+  const server = createMcpServerForNest(nestId, userId, userEmail);
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,

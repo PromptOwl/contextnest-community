@@ -303,6 +303,16 @@ export async function deleteNest(nestId: string) {
   return request("/nests/" + nestId, { method: "DELETE" });
 }
 
+export async function updateNest(
+  nestId: string,
+  patch: { name?: string; description?: string | null },
+) {
+  return request<{ nest: any }>("/nests/" + nestId, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
 /** One file from the browser folder pick, path relative to the chosen folder. */
 export interface ImportedFile {
   path: string;
@@ -315,6 +325,27 @@ export async function importNest(name: string, files: ImportedFile[]) {
   return request<{ nest: any; documents: number }>("/nests/import", {
     method: "POST",
     body: JSON.stringify({ name, files }),
+  });
+}
+
+/** A folder under DATA_ROOT that has not been converted to a nest yet. */
+export interface UnsyncedFolder {
+  /** Path relative to DATA_ROOT (e.g. "nodes/architecture"). */
+  name: string;
+  /** Display label — leaf folder name (e.g. "architecture"). */
+  label: string;
+  mdCount: number;
+  sizeBytes: number;
+}
+
+export async function listUnsyncedFolders() {
+  return request<{ folders: UnsyncedFolder[] }>("/nests/unsynced");
+}
+
+export async function syncUnsyncedFolder(name: string) {
+  return request<{ nest: any; documents: number }>("/nests/unsynced/sync", {
+    method: "POST",
+    body: JSON.stringify({ name }),
   });
 }
 
