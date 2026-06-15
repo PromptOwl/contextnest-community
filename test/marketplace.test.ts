@@ -64,7 +64,7 @@ describe("marketplace publish → browse → install", () => {
     expect(status).toBe(400);
   });
 
-  it("publishes a nest as a priced pack — pending approval (caller isn't the marketplace operator)", async () => {
+  it("publishes a nest as a priced pack — auto-approved (owner/admin trusted)", async () => {
     const { status, data } = await jsonRequest(
       app,
       "POST",
@@ -78,19 +78,7 @@ describe("marketplace publish → browse → install", () => {
     );
     expect(status).toBe(200);
     expect(data.pack.price_credits_install).toBe(50);
-    expect(data.pack.status).toBe("pending");
-  });
-
-  it("pending packs are NOT browsable and NOT installable", async () => {
-    const browse = await jsonRequest(app, "GET", "/marketplace/packs");
-    expect(browse.data.packs.find((p: any) => p.id === packNestId)).toBeUndefined();
-    const install = await jsonRequest(
-      app,
-      "POST",
-      `/marketplace/install/${packNestId}`,
-      {},
-    );
-    expect(install.status).toBe(404);
+    expect(data.pack.status).toBe("approved");
   });
 
   it("moderation queue + review are operator-only (403 without the license admin)", async () => {
@@ -102,18 +90,7 @@ describe("marketplace publish → browse → install", () => {
     expect(r.status).toBe(403);
   });
 
-  it("browse lists the pack with pricing + doc count once approved", async () => {
-    // No license admin exists in tests — flip the moderation bit directly
-    // (the operator-only review endpoint is asserted above).
-    const { getDb } = await import("../src/db/client");
-    const row = getDb()
-      .prepare("SELECT pack_meta FROM nests WHERE id = ?")
-      .get(packNestId) as { pack_meta: string };
-    const meta = JSON.parse(row.pack_meta);
-    meta.status = "approved";
-    getDb()
-      .prepare("UPDATE nests SET pack_meta = ? WHERE id = ?")
-      .run(JSON.stringify(meta), packNestId);
+  it("browse lists the pack with pricing + doc count", async () => {
     const { status, data } = await jsonRequest(app, "GET", "/marketplace/packs");
     expect(status).toBe(200);
     const pack = data.packs.find((p: any) => p.id === packNestId);
@@ -297,12 +274,19 @@ describe("marketplace publish → browse → install", () => {
       const inst = await jsonRequest(app, "POST", "/marketplace/install-remote/evil-1", {});
       expect(inst.status).toBe(201);
       const { getDb } = await import("../src/db/client");
+      // Installed copy stamps only the per-call rate (what the meter reads);
+      // the install-price coercion is asserted on the emitted meter event.
       const row = getDb()
         .prepare("SELECT pack_meta FROM nests WHERE id = ?")
         .get(inst.data.nest.id) as { pack_meta: string };
       const meta = JSON.parse(row.pack_meta);
-      expect(meta.price_credits_install).toBe(0);
       expect(meta.price_credits_per_call).toBe(0);
+      const meterRow = getDb()
+        .prepare(
+          "SELECT data_json FROM telemetry_events WHERE event = 'meter.pack_install' ORDER BY id DESC LIMIT 1",
+        )
+        .get() as { data_json: string };
+      expect(JSON.parse(meterRow.data_json).price_credits_install).toBe(0);
     } finally {
       globalThis.fetch = realFetch;
       delete process.env.MARKETPLACE_REGISTRY_URL;

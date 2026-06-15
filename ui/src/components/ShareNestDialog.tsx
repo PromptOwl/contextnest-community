@@ -69,7 +69,10 @@ export function ShareNestDialog({
       .then((res) => {
         setIsPublic(res.nest?.visibility === "public");
         setIsPack(!!res.nest?.is_pack);
-        if (res.nest?.pack_meta) {
+        // Only hydrate the publish form when this nest IS a pack. Installed
+        // copies carry a slim pack_meta (per-call rate only) for metering;
+        // surfacing it here would falsely pre-fill the publish form.
+        if (res.nest?.is_pack && res.nest?.pack_meta) {
           try {
             const m = JSON.parse(res.nest.pack_meta);
             setPackSummary(m.summary ?? "");

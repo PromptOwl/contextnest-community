@@ -162,15 +162,16 @@ marketplaceRoutes.post("/publish/:nestId", async (c) => {
   if (!body.summary || typeof body.summary !== "string") {
     throw new ValidationError("summary is required");
   }
-  // Moderation: creator publishes land pending; the license admin (on a
-  // PromptOwl-operated server, that IS PromptOwl) is auto-approved.
-  const autoApproved = isLicenseAdminUserId(userId);
+  // Publish auto-approves: the gate above already restricts to nest
+  // owner/admin, and those roles are trusted to control listing +
+  // pricing for their own nest. The operator can still post-hoc reject
+  // a malicious pack via /marketplace/review.
   const meta: PackMeta = {
     version: typeof body.version === "string" ? body.version : "0.1.0",
     summary: body.summary,
     price_credits_install: Math.max(0, Number(body.price_credits_install) || 0),
     price_credits_per_call: Math.max(0, Number(body.price_credits_per_call) || 0),
-    status: autoApproved ? "approved" : "pending",
+    status: "approved",
   };
 
   const db = getDb();
@@ -277,12 +278,16 @@ marketplaceRoutes.post("/install/:packId", async (c) => {
 
   const nest = await importNest(userId, name, files);
   await registerImportedDocuments(nest.id, resolveCallerEmail(userId));
-  // Provenance + a copy of the pricing meta: the installed copy carries its
-  // own meter rates, so metering keeps working even if the source pack is
-  // delisted (or, for registry installs below, lives on another server).
+  // Stamp only the per-call rate the meter actually reads. Listing fields
+  // (summary/status/version/install price) belong to the source pack, not
+  // the installed copy — copying them confuses Share dialog into thinking
+  // an installed nest is itself a pack.
+  const installedMeta = JSON.stringify({
+    price_credits_per_call: meta?.price_credits_per_call ?? 0,
+  });
   db.prepare(
     "UPDATE nests SET installed_from_pack = ?, pack_meta = ? WHERE id = ?",
-  ).run(packId, row.pack_meta, nest.id);
+  ).run(packId, installedMeta, nest.id);
 
   trackMeterEvent("meter.pack_install", {
     pack_id: packId,
@@ -315,25 +320,22 @@ marketplaceRoutes.post("/install-remote/:packId", async (c) => {
 
   const nest = await importNest(userId, name, remote.files);
   await registerImportedDocuments(nest.id, resolveCallerEmail(userId));
-  const meta = {
-    version: remote.pack.version ?? "0.0.0",
-    summary: remote.pack.summary ?? "",
-    // Registry pricing is untrusted JSON over HTTP — coerce + floor at 0,
-    // same as the local publish path, so a hostile/buggy registry can't
-    // store negative or non-numeric credit rates into the meter.
-    price_credits_install: Math.max(0, Number(remote.pack.price_credits_install) || 0),
-    price_credits_per_call: Math.max(0, Number(remote.pack.price_credits_per_call) || 0),
-    status: "approved" as const,
-  };
+  // Untrusted registry JSON — coerce + floor at 0 so a hostile registry
+  // can't seed negative/NaN credit rates into the local meter. Only the
+  // per-call rate sticks on the installed copy; listing fields stay with
+  // the source pack.
+  const perCall = Math.max(0, Number(remote.pack.price_credits_per_call) || 0);
+  const installPrice = Math.max(0, Number(remote.pack.price_credits_install) || 0);
+  const installedMeta = JSON.stringify({ price_credits_per_call: perCall });
   getDb()
     .prepare("UPDATE nests SET installed_from_pack = ?, pack_meta = ? WHERE id = ?")
-    .run(packId, JSON.stringify(meta), nest.id);
+    .run(packId, installedMeta, nest.id);
 
   trackMeterEvent("meter.pack_install", {
     pack_id: packId,
-    pack_version: meta.version,
+    pack_version: remote.pack.version ?? "0.0.0",
     nest_id: nest.id,
-    price_credits_install: meta.price_credits_install,
+    price_credits_install: installPrice,
     doc_count: remote.files.length,
     registry: registryUrl,
   });
