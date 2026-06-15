@@ -277,6 +277,12 @@ export function createApp(): Hono<AuthEnv> {
     const parts = localPath.split("/").filter(Boolean);
     if (parts.length < 2) return next();
 
+    // "unsynced" is a server-admin namespace under /nests, not a nest id.
+    // Without this bypass parts[0]="unsynced" is treated as a nest id and the
+    // permission resolver 404s every call with "Nest not found". Its own
+    // route handlers run the admin-gate check.
+    if (parts[0] === "unsynced") return next();
+
     const nestId = parts[0];
     const userId = c.get("userId");
     const nestScope = c.get("nestScope");

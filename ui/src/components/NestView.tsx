@@ -2,7 +2,7 @@
  * NestView — governance dashboard for a single nest.
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
 import { matchesFilters } from "../lib/node-filter";
 import { linkHealth } from "../lib/link-health";
@@ -82,6 +82,51 @@ export function NestView({
   const canDeleteNest =
     isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
+
+  // Local mirror of the nest name so inline rename feels instant while the
+  // backend autosave lands. Resets if the parent passes a different nest.
+  const [editableName, setEditableName] = useState(nestName);
+  const lastSavedName = useRef(nestName);
+  useEffect(() => {
+    setEditableName(nestName);
+    lastSavedName.current = nestName;
+  }, [nestName, nestId]);
+  const renameTimer = useRef<number | null>(null);
+  const renameRef = useRef<() => void>(() => {});
+  const [renameError, setRenameError] = useState<string | null>(null);
+  renameRef.current = async () => {
+    const trimmed = editableName.trim();
+    if (!trimmed) return;
+    if (trimmed === lastSavedName.current.trim()) return;
+    try {
+      await api.updateNest(nestId, { name: trimmed });
+      lastSavedName.current = trimmed;
+      setRenameError(null);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to rename nest";
+      setRenameError(msg);
+    }
+  };
+  const scheduleRename = useCallback(() => {
+    if (renameTimer.current) window.clearTimeout(renameTimer.current);
+    renameTimer.current = window.setTimeout(() => {
+      renameTimer.current = null;
+      void renameRef.current();
+    }, 1200);
+  }, []);
+  const flushRename = useCallback(() => {
+    if (renameTimer.current) {
+      window.clearTimeout(renameTimer.current);
+      renameTimer.current = null;
+    }
+    void renameRef.current();
+  }, []);
+  useEffect(
+    () => () => {
+      if (renameTimer.current) window.clearTimeout(renameTimer.current);
+    },
+    [],
+  );
   const [nodes, setNodes] = useState<any[]>([]);
   // Full roster — admin-only (listStewards 403s for non-admins → stays []).
   const [stewards, setStewards] = useState<Steward[]>([]);
@@ -629,9 +674,47 @@ export function NestView({
           <Button variant="ghost" size="icon" onClick={onBack} className="shrink-0">
             <ArrowLeft className="h-4 w-4" />
           </Button>
-          <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
-            {nestName}
-          </h3>
+          {canManage ? (
+            <div className="min-w-0 flex-1">
+              <input
+                value={editableName}
+                onChange={(e) => {
+                  setEditableName(e.target.value);
+                  setRenameError(null);
+                  scheduleRename();
+                }}
+                onBlur={flushRename}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    flushRename();
+                    (e.target as HTMLInputElement).blur();
+                  }
+                  if (e.key === "Escape") {
+                    setEditableName(lastSavedName.current);
+                    setRenameError(null);
+                    (e.target as HTMLInputElement).blur();
+                  }
+                }}
+                aria-label="Nest name"
+                title="Click to rename — saved automatically"
+                className="w-full min-w-0 truncate text-xl font-semibold bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary px-1 -ml-1 rounded-sm"
+              />
+              {renameError && (
+                <p
+                  role="alert"
+                  className="mt-1 text-xs text-red-700"
+                  title={renameError}
+                >
+                  {renameError}
+                </p>
+              )}
+            </div>
+          ) : (
+            <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
+              {nestName}
+            </h3>
+          )}
           {visibility === "public" && (
             <Badge
               variant="outline"
