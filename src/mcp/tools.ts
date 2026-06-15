@@ -788,7 +788,6 @@ export async function handleToolCall(
       if (config.AUTH_MODE !== "open" && !isLicenseAdminUserId(userId)) {
         return "You don't have permission to sync folders. Server admin only.";
       }
-      if (!args.name) return "Folder name is required.";
       try {
         const { nest, documents } = await syncUnsyncedFolder(
           userId,
