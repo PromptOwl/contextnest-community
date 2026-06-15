@@ -87,6 +87,32 @@ function toggleCodeBlockMerged(editor: Editor): void {
     .run();
 }
 
+// Normalize a user-typed URL for the Link mark. Bare "google.com" would
+// otherwise be treated as relative by the browser (/google.com on the host
+// origin). Adds https:// when no scheme is present; rejects unparseable
+// input and the javascript: scheme.
+function normalizeLinkUrl(
+  raw: string,
+): { url: string; error: null } | { url: null; error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { url: "", error: null };
+  const tryParse = (candidate: string) => {
+    try {
+      return new URL(candidate);
+    } catch {
+      return null;
+    }
+  };
+  const parsed = tryParse(trimmed) ?? tryParse(`https://${trimmed}`);
+  if (!parsed) {
+    return { url: null, error: "Enter a valid URL (e.g. https://example.com)." };
+  }
+  if (parsed.protocol === "javascript:") {
+    return { url: null, error: "javascript: links are not allowed." };
+  }
+  return { url: parsed.toString(), error: null };
+}
+
 // Obsidian wiki link: `[[nodes/<slug>|Title]]` — full path + alias.
 function formatWikiLink(slug: string, title: string): string {
   const safeSlug = (slug || title).trim();
@@ -138,6 +164,15 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import * as api from "../../lib/api";
 import { WikiLink, clearWikiExistsCache } from "./extensions/WikiLink";
 import { CodeBlock } from "./extensions/CodeBlock";
@@ -857,16 +892,32 @@ export const MarkdownEditor = forwardRef<
   };
   const closeSearch = () => setSearchOpen(false);
 
+  const [linkDialog, setLinkDialog] = useState<{
+    open: boolean;
+    url: string;
+    error: string | null;
+  }>({ open: false, url: "", error: null });
+
   const setLink = () => {
     if (!editor) return;
-    const previous = editor.getAttributes("link").href ?? "";
-    const url = window.prompt("URL", previous);
-    if (url === null) return;
-    if (url === "") {
-      editor.chain().focus().extendMarkRange("link").unsetLink().run();
+    const previous = (editor.getAttributes("link").href as string) ?? "";
+    setLinkDialog({ open: true, url: previous, error: null });
+  };
+
+  const confirmLink = () => {
+    if (!editor) return;
+    const result = normalizeLinkUrl(linkDialog.url);
+    if (result.url === null) {
+      setLinkDialog((s) => ({ ...s, error: result.error }));
       return;
     }
-    editor.chain().focus().extendMarkRange("link").setLink({ href: url }).run();
+    const chain = editor.chain().focus().extendMarkRange("link");
+    if (result.url === "") {
+      chain.unsetLink().run();
+    } else {
+      chain.setLink({ href: result.url }).run();
+    }
+    setLinkDialog({ open: false, url: "", error: null });
   };
 
   if (!editor) {
@@ -1303,6 +1354,55 @@ export const MarkdownEditor = forwardRef<
           </BlockMenuItem>
         </div>
       )}
+
+      <Dialog
+        open={linkDialog.open}
+        onOpenChange={(open) =>
+          setLinkDialog((s) => ({ ...s, open, error: open ? s.error : null }))
+        }
+      >
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle>Insert link</DialogTitle>
+            <DialogDescription>
+              Paste a URL. Bare domains get <code>https://</code> added
+              automatically. Leave blank to remove the link.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-1">
+            <Label htmlFor="link-url" className="text-xs">URL</Label>
+            <Input
+              id="link-url"
+              autoFocus
+              placeholder="https://example.com"
+              value={linkDialog.url}
+              onChange={(e) =>
+                setLinkDialog((s) => ({ ...s, url: e.target.value, error: null }))
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  confirmLink();
+                }
+              }}
+            />
+            {linkDialog.error && (
+              <p className="text-xs text-destructive">{linkDialog.error}</p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() =>
+                setLinkDialog({ open: false, url: "", error: null })
+              }
+            >
+              Cancel
+            </Button>
+            <Button onClick={confirmLink}>Apply</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 });
