@@ -293,8 +293,10 @@ export const MarkdownEditor = forwardRef<
       CodeBlock,
       Placeholder.configure({ placeholder }),
       Link.configure({
-        openOnClick: false,
-        HTMLAttributes: { target: "_blank" },
+        // Plain click opens link in new tab. Edit URL: caret inside link →
+        // toolbar Link button (setLink uses extendMarkRange).
+        openOnClick: true,
+        HTMLAttributes: { target: "_blank", rel: "noopener noreferrer" },
         // Auto-link: typed/pasted URLs become links. Wiki `[[…]]` and
         // `@mentions` aren't URLs, so they're left untouched.
         autolink: true,
