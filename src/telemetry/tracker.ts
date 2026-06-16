@@ -50,35 +50,67 @@ export async function flushTelemetry(): Promise<void> {
     created_at: string;
   }>;
 
-  if (events.length === 0 && userCount === 0) return;
+  if (events.length === 0 && userCount === 0) {
+    console.log("[telemetry] skip flush: no events and no users");
+    return;
+  }
+
+  const emailStmt = db.prepare("SELECT email FROM users WHERE id = ?");
+  const emailCache = new Map<string, string | null>();
+  const resolveEmail = (userId: unknown): string | null => {
+    if (typeof userId !== "string" || !userId) return null;
+    if (emailCache.has(userId)) return emailCache.get(userId) ?? null;
+    const row = emailStmt.get(userId) as { email?: string } | undefined;
+    const email = row?.email ?? null;
+    emailCache.set(userId, email);
+    return email;
+  };
 
   const payload = {
     server_key: config.PROMPTOWL_KEY,
     timestamp: new Date().toISOString(),
     stats: { users: userCount, nests: nestCount },
-    events: events.map((e) => ({
-      event: e.event,
-      data: e.data_json ? JSON.parse(e.data_json) : null,
-      at: e.created_at,
-    })),
+    events: events.map((e) => {
+      const data = e.data_json
+        ? (JSON.parse(e.data_json) as Record<string, unknown>)
+        : null;
+      if (data && data.userId && !data.userEmail) {
+        const email = resolveEmail(data.userId);
+        if (email) data.userEmail = email;
+      }
+      return {
+        event: e.event,
+        data,
+        at: e.created_at,
+      };
+    }),
   };
 
+  const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
+  const url = `${promptowlUrl}/api/telemetry/ingest`;
+  console.log(
+    `[telemetry] POST ${url} events=${events.length} users=${userCount} nests=${nestCount}`,
+  );
+  console.log("[telemetry] payload:", JSON.stringify(payload, null, 2));
+
   try {
-    const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
-    const res = await fetch(`${promptowlUrl}/api/telemetry/ingest`, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+
+    console.log(`[telemetry] response: ${res.status} ${res.statusText}`);
 
     if (res.ok && events.length > 0) {
       const ids = events.map((e) => e.id);
       db.prepare(
         `UPDATE telemetry_events SET sent = 1 WHERE id IN (${ids.map(() => "?").join(",")})`,
       ).run(...ids);
+      console.log(`[telemetry] marked ${ids.length} events as sent`);
     }
-  } catch {
-    // Silently fail — telemetry is best-effort
+  } catch (err) {
+    console.error("[telemetry] flush failed:", err);
   }
 }
 
