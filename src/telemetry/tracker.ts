@@ -1,5 +1,15 @@
+import { createHash } from "crypto";
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
+
+// Deterministic batch_id from sorted event ids — same pending set across
+// retries yields the same id, letting TheOwl dedupe meter rows via its
+// partial unique index on (licenseKeyId, batchId, event, occurredAt).
+// See TheOwl PR #981.
+export function computeBatchId(ids: number[]): string {
+  const key = ids.slice().sort((a, b) => a - b).join(",");
+  return createHash("sha256").update(key).digest("hex").slice(0, 32);
+}
 
 /**
  * Record a telemetry event. Events are stored locally and batched to PromptOwl.
@@ -66,8 +76,11 @@ export async function flushTelemetry(): Promise<void> {
     return email;
   };
 
+  const batchId = computeBatchId(events.map((e) => e.id));
+
   const payload = {
     server_key: config.PROMPTOWL_KEY,
+    batch_id: batchId,
     timestamp: new Date().toISOString(),
     stats: { users: userCount, nests: nestCount },
     events: events.map((e) => {
