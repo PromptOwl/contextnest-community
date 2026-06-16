@@ -76,7 +76,10 @@ export async function flushTelemetry(): Promise<void> {
     return email;
   };
 
-  const batchId = computeBatchId(events.map((e) => e.id));
+  // Stats-only flushes (no events) carry no meter rows, so no batch_id —
+  // otherwise sha256("") would brand every heartbeat with the same constant id.
+  const batchId =
+    events.length > 0 ? computeBatchId(events.map((e) => e.id)) : null;
 
   const payload = {
     server_key: config.PROMPTOWL_KEY,
