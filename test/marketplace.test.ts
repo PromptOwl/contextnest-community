@@ -16,6 +16,10 @@ let packNestId: string;
 
 beforeAll(async () => {
   env = setupTestEnv();
+  // Marketplace is dark by default (a separately-licensed addon). The suite
+  // exercises it as a PromptOwl-hosted edition would: flag on. The dedicated
+  // dark-mode test below flips it off to assert the 404 gate.
+  process.env.MARKETPLACE_ENABLED = "true";
   app = await createTestApp("open");
   const created = await jsonRequest(app, "POST", "/nests", {
     name: "Author Pack Nest",
@@ -51,6 +55,25 @@ describe("marketplace publish → browse → install", () => {
       expect(pub.status).toBe(503);
     } finally {
       (globalThis as any).__TEST_LICENSE_INVALID__ = false;
+    }
+  });
+
+  it("404s entirely when the marketplace addon is disabled (dark by default)", async () => {
+    process.env.MARKETPLACE_ENABLED = "false";
+    try {
+      // 404, not 503: a dormant feature is invisible, and the flag gate runs
+      // ahead of the license gate (valid license here, still 404).
+      const browse = await jsonRequest(app, "GET", "/marketplace/packs");
+      expect(browse.status).toBe(404);
+      const pub = await jsonRequest(
+        app,
+        "POST",
+        `/marketplace/publish/${packNestId}`,
+        { summary: "x" },
+      );
+      expect(pub.status).toBe(404);
+    } finally {
+      process.env.MARKETPLACE_ENABLED = "true";
     }
   });
 

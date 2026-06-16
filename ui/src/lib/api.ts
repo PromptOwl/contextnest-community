@@ -397,7 +397,14 @@ export async function getNest(nestId: string) {
 }
 
 export async function getServerStats() {
-  return request<{ nests: number; documents: number; users: number }>("/stats");
+  return request<{
+    nests: number;
+    documents: number;
+    users: number;
+    // Marketplace addon flag — false (or absent on older servers) means the
+    // storefront and publish controls stay hidden.
+    marketplace?: boolean;
+  }>("/stats");
 }
 
 // ─── Nodes ──────────────────────────────────────────────────────────────

@@ -60,6 +60,16 @@ export function ShareNestDialog({
   const [packInstallPrice, setPackInstallPrice] = useState("0");
   const [packCallPrice, setPackCallPrice] = useState("0");
   const [packSaving, setPackSaving] = useState(false);
+  // Marketplace is a separately-licensed addon, dark by default. Hide the
+  // whole publish section unless the server reports it enabled.
+  const [marketplaceEnabled, setMarketplaceEnabled] = useState(false);
+
+  useEffect(() => {
+    api
+      .getServerStats()
+      .then((s) => setMarketplaceEnabled(!!s.marketplace))
+      .catch(() => setMarketplaceEnabled(false));
+  }, []);
 
   useEffect(() => {
     // Read current visibility straight from the server so the toggle
@@ -211,7 +221,9 @@ export function ShareNestDialog({
           />
 
           {/* Marketplace — publish this nest as an installable, credit-priced
-              pack. Publishing makes the nest public (a pack must be browsable). */}
+              pack. Publishing makes the nest public (a pack must be browsable).
+              Hidden unless the server has the marketplace addon enabled. */}
+          {marketplaceEnabled && (
           <div className="rounded-lg border p-4 space-y-3">
             <Label className="flex items-center gap-2 text-sm font-medium">
               <Globe className="h-4 w-4 text-blue-600" />
@@ -293,6 +305,7 @@ export function ShareNestDialog({
               )}
             </div>
           </div>
+          )}
         </div>
 
         <DialogFooter>

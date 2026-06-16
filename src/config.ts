@@ -83,6 +83,19 @@ export const config = {
     return parseInt(process.env.TELEMETRY_INTERVAL_MS || "3600000", 10);
   },
   /**
+   * Marketplace feature flag — OFF by default. The marketplace (publish /
+   * browse / install / registry) ships dormant in every distribution of the
+   * community edition and is only lit up on PromptOwl-hosted editions, which
+   * set MARKETPLACE_ENABLED=true. It is a separately-licensed addon, not part
+   * of the base community package: the code rides along (this edition is not
+   * open source — see LICENSE.md) but the routes 404 until an operator opts
+   * in. Layered with the existing PROMPTOWL_KEY license gate, not a
+   * replacement for it.
+   */
+  get MARKETPLACE_ENABLED() {
+    return process.env.MARKETPLACE_ENABLED === "true";
+  },
+  /**
    * Optional custom logo URL shown in UI header + login screen.
    * Must be an absolute https://, http://, or data:image/… URL. Other
    * schemes (file://, javascript:, relative paths) are rejected with a
