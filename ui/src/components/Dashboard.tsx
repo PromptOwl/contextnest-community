@@ -69,10 +69,16 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
       ]);
       setNests(nestsData.nests);
       setStats(statsData);
-      api
-        .listPacks()
-        .then((d) => setPacks(d.packs))
-        .catch(() => setPacks([]));
+      // Marketplace is a dark-by-default addon. Only hit the storefront when
+      // the server reports it enabled; otherwise it 404s by design.
+      if (statsData?.marketplace) {
+        api
+          .listPacks()
+          .then((d) => setPacks(d.packs))
+          .catch(() => setPacks([]));
+      } else {
+        setPacks([]);
+      }
     } catch (e) {
       console.error("[Dashboard] fetchNests failed", e);
     } finally {

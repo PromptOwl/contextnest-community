@@ -54,6 +54,7 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `ENV_FILE_PATH` | `$cwd/.env` | Path to the `.env` file the license install flow writes `PROMPTOWL_KEY` into (alongside existing vars). Override when your `.env` lives outside the working directory. |
 | `TELEMETRY_ENABLED` | `"true"` (set to `"false"` to disable) | Batched, anonymized usage events sent to PromptOwl. Off disables the loop entirely. |
 | `TELEMETRY_INTERVAL_MS` | `3600000` (1 hour) | How often buffered telemetry is flushed to PromptOwl. |
+| `MARKETPLACE_ENABLED` | `"false"` (set to `"true"` to enable) | Marketplace addon (publish / browse / install / registry). Dark by default: the routes `404` and the UI hides the storefront and publish controls until set. Layered with `PROMPTOWL_KEY` — enabling it does not bypass the license gate. Lit up on PromptOwl-hosted editions only. |
 | `CORS_ORIGINS` | `*` in open mode; `http://localhost:5173,http://localhost:3838` in key mode | Comma-separated allowlist. Set to `*` to allow any origin (**only** safe in open mode — in key mode with Bearer tokens this enables CSRF). |
 | `MAX_BODY_BYTES` | `10485760` (10 MB) | Reject requests whose `Content-Length` exceeds this. Prevents giant-payload DoS. |
 | `LOGO_URL` | _(unset)_ | Custom logo shown in the UI header + login screen. Must start with `https://`, `http://`, or `data:image/` — other schemes (`file://`, relative, `javascript:`) are rejected with a warning and the bundled icon is used. |

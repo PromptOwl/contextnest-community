@@ -268,6 +268,9 @@ export function createApp(): Hono<AuthEnv> {
       nests: visibleNests.length,
       documents,
       users: usersRow.c,
+      // Surfaces the marketplace addon flag so the UI hides the storefront +
+      // publish controls when the feature is dark (default).
+      marketplace: config.MARKETPLACE_ENABLED,
     });
   });
 
@@ -465,6 +468,18 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/nests", nestsApp);
 
   // ─── Marketplace (packs ARE nests; see src/marketplace/routes.ts) ──
+  // FEATURE-GATED: the marketplace is a separately-licensed addon, dark by
+  // default. It ships in every distribution but stays dormant until an
+  // operator sets MARKETPLACE_ENABLED=true (PromptOwl-hosted editions). When
+  // off it 404s — the feature is invisible, not merely forbidden. This gate
+  // runs BEFORE the license gate so an unlicensed self-host can't even probe
+  // for it.
+  app.use("/marketplace/*", async (c, next) => {
+    if (!config.MARKETPLACE_ENABLED) {
+      return c.json({ error: "Not found" }, 404);
+    }
+    return next();
+  });
   // LICENSE-GATED: the marketplace is a licensed feature — an unlicensed
   // community server gets no storefront, no publish, no install. Same
   // pattern as the /auth/invite and /auth/teammates gates above.
