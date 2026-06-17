@@ -100,7 +100,7 @@ allowed_users:
   - "*.acme.com"                # email wildcard — anyone @acme.com
   - "partner@vendor.com"         # exact match
 super_admins:
-  - "ceo@acme.com"               # always allowed on every nest
+  - "ceo@acme.com"               # admin on every nest: visibility, collaborators, stewards (not owner-only delete/transfer)
 groups:
   engineering:
     default_permission: write

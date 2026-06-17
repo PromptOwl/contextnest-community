@@ -1,5 +1,6 @@
 import { getDb } from "../db/client.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
+import { isSuperAdmin } from "../governance/access-service.js";
 import { ANON_USER_ID } from "./constants.js";
 
 export type NestPermission = "none" | "read" | "write" | "admin" | "owner";
@@ -21,9 +22,13 @@ const PERMISSION_LEVELS: Record<NestPermission, number> = {
  *    (admin keeps full control over the ungoverned commons even after the
  *    nest is flipped to private — otherwise only the anon user could
  *    manage it and there's no login path for anon.)
- * 3. Direct user grant in nest_collaborators -> that permission
- * 4. Nest visibility = 'public' -> 'read'
- * 5. Otherwise -> 'none'
+ * 3. Server super-admin (access.yaml super_admins) -> 'admin' on EVERY nest
+ *    (visibility + collaborators), matching the documented "always allowed on
+ *    every nest". Not 'owner': owner-only actions (delete/transfer) stay with
+ *    the real owner.
+ * 4. Direct user grant in nest_collaborators -> that permission
+ * 5. Nest visibility = 'public' -> 'read'
+ * 6. Otherwise -> 'none'
  */
 export function resolveNestPermission(
   nestId: string,
@@ -40,6 +45,16 @@ export function resolveNestPermission(
 
   if (nest.user_id === ANON_USER_ID && isLicenseAdminUserId(userId)) {
     return "owner";
+  }
+
+  // Server super-admins administer every nest (visibility + collaborators).
+  // Mirrors the governance layer, which already grants super-admins the
+  // 'admin' steward role; here it covers nest-level admin actions too.
+  const caller = db
+    .prepare("SELECT email FROM users WHERE id = ?")
+    .get(userId) as { email?: string } | undefined;
+  if (caller?.email && isSuperAdmin(caller.email)) {
+    return "admin";
   }
 
   const directGrant = db
