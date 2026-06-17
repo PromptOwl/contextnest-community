@@ -81,6 +81,11 @@ export function NestView({
   //   - anon-owned + key mode → license-admin caretaker only
   const canDeleteNest =
     isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
+  // Stewardship is governance of the commons / one's own nests, not a tool
+  // server admins impose on other users' nests. So the steward roster,
+  // assign-steward UI, and Settings modal are hidden when an admin views a
+  // real user's nest.
+  const canManageGovernance = isAdmin && (isOwner || isAnonOwned);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
 
   // Local mirror of the nest name so inline rename feels instant while the
@@ -743,9 +748,12 @@ export function NestView({
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:shrink-0 sm:justify-end">
           {!isReadOnly && (
             <>
-              {/* Settings is stewardship-only and server-admin gated; a
-                  nest-admin/owner would just see an empty modal. */}
-              {isAdmin && (
+              {/* Settings is stewardship-only and server-admin gated. Also
+                  hidden when the admin is viewing a real user's nest —
+                  stewardship is a governance concern over the commons /
+                  the admin's own nests, not something to impose on a user
+                  who owns their own nest. */}
+              {canManageGovernance && (
                 <Button variant="outline" onClick={() => setShowSettings(true)}>
                   <SettingsIcon className="h-4 w-4 mr-2" />
                   Settings
@@ -902,8 +910,9 @@ export function NestView({
               )}
             </TabsTrigger>
           )}
-          {/* Steward roster is admin-only (list + manage). */}
-          {stewardshipEnabled && isAdmin && (
+          {/* Steward roster is admin-only (list + manage), and hidden when
+              the admin is viewing a real user's nest. */}
+          {stewardshipEnabled && canManageGovernance && (
             <TabsTrigger value="stewards">Stewards</TabsTrigger>
           )}
           {/* Collaborators — plain access sharing, independent of
@@ -1542,7 +1551,7 @@ export function NestView({
           </Card>
         </TabsContent>
 
-        {stewardshipEnabled && isAdmin && (
+        {stewardshipEnabled && canManageGovernance && (
           <TabsContent value="stewards" className="space-y-4">
             <Card className="border-blue-200 bg-blue-50/40">
               <CardHeader className="pb-2">
@@ -1631,7 +1640,7 @@ export function NestView({
                       approve. Add an editor/reviewer to delegate approvals
                       for a tag or specific doc.
                     </p>
-                    {isAdmin && (
+                    {canManageGovernance && (
                       <Button
                         variant="outline"
                         size="sm"
@@ -1653,10 +1662,10 @@ export function NestView({
                     )}
                     showScope
                     onAddSteward={
-                      isAdmin ? () => setShowAssignSteward(true) : undefined
+                      canManageGovernance ? () => setShowAssignSteward(true) : undefined
                     }
-                    onRemove={isAdmin ? handleRemoveSteward : undefined}
-                    onEditRole={isAdmin ? setEditingSteward : undefined}
+                    onRemove={canManageGovernance ? handleRemoveSteward : undefined}
+                    onEditRole={canManageGovernance ? setEditingSteward : undefined}
                     currentUserEmail={currentEmail}
                   />
                 )}
@@ -1689,7 +1698,7 @@ export function NestView({
         )}
       </Tabs>
 
-      {!stewardshipEnabled && !isReadOnly && (
+      {!stewardshipEnabled && !isReadOnly && canManageGovernance && (
         <Card className="mt-4">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
@@ -1705,21 +1714,15 @@ export function NestView({
               Enable stewardship to require steward approval before documents become AI-ready.
               Versioning stays on either way.
             </p>
-            {isAdmin ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full"
-                onClick={() => setShowSettings(true)}
-              >
-                <SettingsIcon className="h-3.5 w-3.5 mr-2" />
-                Open Settings
-              </Button>
-            ) : (
-              <p className="text-xs text-muted-foreground italic">
-                Only the server admin can enable stewardship.
-              </p>
-            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={() => setShowSettings(true)}
+            >
+              <SettingsIcon className="h-3.5 w-3.5 mr-2" />
+              Open Settings
+            </Button>
           </CardContent>
         </Card>
       )}
@@ -1749,7 +1752,7 @@ export function NestView({
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
           allowSelfApprove={allowSelfApprove}
-          canManageStewardship={isAdmin}
+          canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
           onChanged={() => { setShowSettings(false); fetchData(); }}
         />

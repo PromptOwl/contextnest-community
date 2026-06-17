@@ -11,6 +11,7 @@ import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
+import { isSuperAdmin } from "../governance/access-service.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError } from "../shared/errors.js";
 import type { Nest } from "../shared/types.js";
@@ -306,6 +307,23 @@ export function isAnonymousNest(nest: Pick<Nest, "user_id">): boolean {
 
 export function listSharedNests(userId: string): Nest[] {
   const db = getDb();
+  // Server admin (license admin or access.yaml super_admin) administers every
+  // nest (resolveNestPermission grants 'admin'), so surface every non-owned
+  // nest in the shared list — otherwise private nests they govern aren't
+  // reachable from the dashboard.
+  const caller = db
+    .prepare("SELECT email FROM users WHERE id = ?")
+    .get(userId) as { email?: string } | undefined;
+  const isServerAdmin =
+    isLicenseAdminUserId(userId) ||
+    (caller?.email ? isSuperAdmin(caller.email) : false);
+  if (isServerAdmin) {
+    return db
+      .prepare(
+        "SELECT * FROM nests WHERE user_id != ? ORDER BY created_at DESC",
+      )
+      .all(userId) as Nest[];
+  }
   // Shared = collaborator grant OR active steward assignment (matched by
   // email, since steward rows may predate the account). Both are
   // independent paths to a nest the user doesn't own.

@@ -59,6 +59,9 @@ export async function createTestApp(
     const actual = await vi.importActual<
       typeof import("../src/auth/license.js")
     >("../src/auth/license.js");
+    // Capture the post-resetModules db/client instance so the userId override
+    // reads the same DB the running app does.
+    const dbClient = await import("../src/db/client.js");
     return {
       ...actual,
       getCurrentLicense: () => ({
@@ -77,6 +80,25 @@ export async function createTestApp(
         !!opts.ownerEmail &&
         !!email &&
         opts.ownerEmail.toLowerCase() === email.toLowerCase(),
+      // isLicenseAdminUserId in production calls the same-module
+      // isLicenseAdminEmail directly, so the mock above doesn't reach it.
+      // Override here too so resolveNestPermission/listSharedNests see the
+      // test user as license admin.
+      isLicenseAdminUserId: (userId?: string | null) => {
+        if (!opts.ownerEmail || !userId) return false;
+        try {
+          const row = dbClient
+            .getDb()
+            .prepare("SELECT email FROM users WHERE id = ?")
+            .get(userId) as { email?: string } | undefined;
+          return (
+            !!row?.email &&
+            row.email.toLowerCase() === opts.ownerEmail.toLowerCase()
+          );
+        } catch {
+          return false;
+        }
+      },
     };
   });
   const { createApp } = await import("../src/app.js");
