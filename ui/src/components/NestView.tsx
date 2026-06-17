@@ -14,7 +14,7 @@ import {
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
-  Pencil, Trash2, FileWarning, Globe, FolderInput, Users,
+  Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
@@ -94,6 +94,7 @@ export function NestView({
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [visibility, setVisibility] = useState<"private" | "public">("private");
+  const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [isImported, setIsImported] = useState(false);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
@@ -621,6 +622,25 @@ export function NestView({
     }
   };
 
+  // Inline visibility toggle from the header (owner/admin only). Optimistic
+  // flip with revert on failure, mirroring ShareNestDialog so the control
+  // never lies about server state. Surfaces the public/private switch outside
+  // the Share dialog, where it was easy to miss. (CU-wdqcpztgwk)
+  const handleVisibilityToggle = async () => {
+    const next = visibility === "public" ? "private" : "public";
+    setVisibility(next);
+    setVisibilitySaving(true);
+    try {
+      const result = await api.setNestVisibility(nestId, next);
+      if (result?.visibility) setVisibility(result.visibility);
+    } catch (err: any) {
+      setVisibility(next === "public" ? "private" : "public"); // revert
+      toast.error(err?.message || "Failed to change visibility");
+    } finally {
+      setVisibilitySaving(false);
+    }
+  };
+
   return (
     <div className="md:py-6">
       {/* Header — PromptOwl ContextDashboard layout */}
@@ -632,15 +652,46 @@ export function NestView({
           <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
             {nestName}
           </h3>
-          {visibility === "public" && (
-            <Badge
+          {/* Visibility — an inline toggle for owner/admin (so the public/
+              private switch isn't buried in the Share dialog), a read-only
+              badge for everyone else. */}
+          {canManage ? (
+            <Button
               variant="outline"
-              className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
-              title="Anyone with the URL can read this nest"
+              size="sm"
+              onClick={handleVisibilityToggle}
+              disabled={visibilitySaving}
+              className={`shrink-0 h-7 gap-1.5 ${
+                visibility === "public"
+                  ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+                  : ""
+              }`}
+              title={
+                visibility === "public"
+                  ? "Public — anyone with the URL can read. Click to make private."
+                  : "Private. Click to make public (anyone with the URL can read)."
+              }
             >
-              <Globe className="h-3 w-3" />
-              Public
-            </Badge>
+              {visibilitySaving ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : visibility === "public" ? (
+                <Globe className="h-3.5 w-3.5" />
+              ) : (
+                <Lock className="h-3.5 w-3.5" />
+              )}
+              {visibility === "public" ? "Public" : "Private"}
+            </Button>
+          ) : (
+            visibility === "public" && (
+              <Badge
+                variant="outline"
+                className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
+                title="Anyone with the URL can read this nest"
+              >
+                <Globe className="h-3 w-3" />
+                Public
+              </Badge>
+            )
           )}
           {isImported && (
             <Badge
