@@ -22,9 +22,25 @@ const isTestRun = !!process.env.VITEST;
 if (envFileLoaded && !isTestRun) {
   dotenv.config({ path: envFileLoaded, override: true });
 }
+// Canonical, app-managed env file — the same path the license install flow
+// writes PROMPTOWL_KEY into (see ENV_FILE_PATH). It lives under DATA_ROOT (the
+// mounted volume) so a key persisted in a container survives restart. Loaded
+// last + override so the persisted key wins; skipped if it's the file already
+// loaded above (dev) to avoid a redundant pass.
+const canonicalEnvFile = process.env.ENV_FILE_PATH || join(dataRoot(), ".env");
+let canonicalEnvLoaded: string | null = null;
+if (
+  !isTestRun &&
+  canonicalEnvFile !== envFileLoaded &&
+  existsSync(canonicalEnvFile)
+) {
+  dotenv.config({ path: canonicalEnvFile, override: true });
+  canonicalEnvLoaded = canonicalEnvFile;
+}
 if (!isTestRun) {
   console.log(
-    `[config] dotenv: ${envFileLoaded ? `loaded ${envFileLoaded}` : "no .env file found"}`,
+    `[config] dotenv: ${envFileLoaded ? `loaded ${envFileLoaded}` : "no .env file found"}` +
+      (canonicalEnvLoaded ? ` + ${canonicalEnvLoaded}` : ""),
   );
 }
 
@@ -69,12 +85,15 @@ export const config = {
       : "open";
   },
   /**
-   * Path to the .env file the server reads its config from. Used by
-   * the license install flow to persist PROMPTOWL_KEY alongside any
-   * existing env vars, instead of a separate sidecar file.
+   * Path to the .env file the server reads its config from and the license
+   * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
+   * $cwd) so it lands on the writable, volume-mounted, restart-surviving path
+   * in containers — $cwd is /app in the official image: root-owned and
+   * discarded on container recreate, which silently lost the key. The boot
+   * dotenv loader reads this same path (see top of file).
    */
   get ENV_FILE_PATH() {
-    return process.env.ENV_FILE_PATH || join(process.cwd(), ".env");
+    return process.env.ENV_FILE_PATH || join(dataRoot(), ".env");
   },
   get TELEMETRY_ENABLED() {
     return process.env.TELEMETRY_ENABLED !== "false";

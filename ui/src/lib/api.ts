@@ -155,6 +155,10 @@ export async function installLicense(key: string) {
     org?: string | null;
     limits?: { maxNests: number; maxUsers: number } | null;
     error?: string;
+    // false when the key validated but couldn't be written to disk (lost on
+    // restart); `warning` carries the operator-facing explanation.
+    persisted?: boolean;
+    warning?: string;
   }>("/license/install", {
     method: "POST",
     body: JSON.stringify({ key }),
