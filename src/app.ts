@@ -221,6 +221,17 @@ export function createApp(): Hono<AuthEnv> {
         tier: info.tier,
         org: info.org,
         limits: info.limits,
+        // The key validated and is live now, but if it couldn't be written to
+        // disk it'll be lost on restart — surface that instead of pretending
+        // the setup is durable (the old behavior silently swallowed this).
+        persisted: info.persisted,
+        ...(info.persisted
+          ? {}
+          : {
+              warning: `License validated, but it could not be saved to disk (${
+                info.persistError || "unknown error"
+              }). It will be LOST on the next restart. Set ENV_FILE_PATH to a writable, persisted path (e.g. under DATA_ROOT) or provide PROMPTOWL_KEY via the container environment.`,
+            }),
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to install key";

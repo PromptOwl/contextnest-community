@@ -6,6 +6,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { join } from "path";
+import { existsSync, readFileSync } from "fs";
 import { setupTestEnv } from "./helpers";
 
 type LicenseModule = typeof import("../src/auth/license.js");
@@ -233,5 +235,61 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
     await license.validateLicense();
     expect(license.isSuspended()).toBe(false);
     expect(license.getSuspensionReason()).toBeNull();
+  });
+});
+
+// Regression for the Docker license-persist bug: the in-app License Setup
+// flow wrote PROMPTOWL_KEY to $cwd/.env (= /app/.env in the image), which is
+// not on the mounted volume and not writable as the node user — so the key
+// was lost on restart, and the write failure was swallowed (UI showed
+// success). Fix: default ENV_FILE_PATH under DATA_ROOT, and surface failures.
+describe("installLicenseKey — durable persistence (Docker)", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+
+  beforeEach(() => {
+    env = setupTestEnv();
+  });
+
+  afterEach(() => {
+    env.cleanup();
+    vi.restoreAllMocks();
+    delete process.env.ENV_FILE_PATH;
+  });
+
+  it("defaults ENV_FILE_PATH to a persisted, writable path under DATA_ROOT", async () => {
+    delete process.env.ENV_FILE_PATH;
+    vi.resetModules();
+    const { config } = await import("../src/config.js");
+    expect(config.ENV_FILE_PATH).toBe(join(env.dataDir, ".env"));
+  });
+
+  it("persists the validated key to ENV_FILE_PATH and reports persisted:true", async () => {
+    const envPath = join(env.dataDir, ".env");
+    process.env.ENV_FILE_PATH = envPath;
+    mockFetch({
+      body: { valid: true, tier: "team", org: "Acme", limits: { maxNests: 100, maxUsers: 25 } },
+    });
+    const { installLicenseKey } = await loadLicense();
+    const result = await installLicenseKey("pk_persist_1");
+    expect(result.valid).toBe(true);
+    expect(result.persisted).toBe(true);
+    expect(existsSync(envPath)).toBe(true);
+    expect(readFileSync(envPath, "utf8")).toContain("PROMPTOWL_KEY=pk_persist_1");
+  });
+
+  it("surfaces a write failure instead of silently keeping the key in memory", async () => {
+    // Parent dir absent → writeFileSync throws regardless of uid (root in CI
+    // would otherwise mask a permission failure).
+    const envPath = join(env.dataDir, "missing-dir", ".env");
+    process.env.ENV_FILE_PATH = envPath;
+    mockFetch({ body: { valid: true, tier: "team", org: "Acme" } });
+    const { installLicenseKey } = await loadLicense();
+    const result = await installLicenseKey("pk_persist_2");
+    // Validated, so it works in-memory for this process...
+    expect(result.valid).toBe(true);
+    // ...but the operator must be told it did NOT persist.
+    expect(result.persisted).toBe(false);
+    expect(result.persistError).toBeTruthy();
+    expect(existsSync(envPath)).toBe(false);
   });
 });
