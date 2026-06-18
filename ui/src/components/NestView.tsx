@@ -97,7 +97,7 @@ export function NestView({
     lastSavedName.current = nestName;
   }, [nestName, nestId]);
   const renameTimer = useRef<number | null>(null);
-  const renameRef = useRef<() => void>(() => {});
+  const renameRef = useRef<() => void>(() => { });
   const [renameError, setRenameError] = useState<string | null>(null);
   renameRef.current = async () => {
     const trimmed = editableName.trim();
@@ -708,12 +708,50 @@ export function NestView({
       {/* Header — PromptOwl ContextDashboard layout */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4 mb-4">
         <div className="flex min-w-0 items-center gap-3">
-        <Button variant="ghost" size="icon" onClick={onBack} className="shrink-0">
+          <Button variant="ghost" size="icon" onClick={onBack} className="shrink-0">
             <ArrowLeft className="h-4 w-4" />
           </Button>
-          <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
-            {nestName}
-          </h3>
+          {canManage ? (
+            <div className="min-w-0 flex-1">
+              <input
+                value={editableName}
+                onChange={(e) => {
+                  setEditableName(e.target.value);
+                  setRenameError(null);
+                  scheduleRename();
+                }}
+                onBlur={flushRename}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    flushRename();
+                    (e.target as HTMLInputElement).blur();
+                  }
+                  if (e.key === "Escape") {
+                    setEditableName(lastSavedName.current);
+                    setRenameError(null);
+                    (e.target as HTMLInputElement).blur();
+                  }
+                }}
+                aria-label="Nest name"
+                title="Click to rename — saved automatically"
+                className="w-full min-w-0 truncate text-xl font-semibold bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary px-1 -ml-1 rounded-sm"
+              />
+              {renameError && (
+                <p
+                  role="alert"
+                  className="mt-1 text-xs text-red-700"
+                  title={renameError}
+                >
+                  {renameError}
+                </p>
+              )}
+            </div>
+          ) : (
+            <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
+              {nestName}
+            </h3>
+          )}
           {/* Visibility — an inline toggle for owner/admin (so the public/
               private switch isn't buried in the Share dialog), a read-only
               badge for everyone else. */}
@@ -723,11 +761,10 @@ export function NestView({
               size="sm"
               onClick={handleVisibilityToggle}
               disabled={visibilitySaving}
-              className={`shrink-0 h-7 gap-1.5 ${
-                visibility === "public"
+              className={`shrink-0 h-7 gap-1.5 ${visibility === "public"
                   ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
                   : ""
-              }`}
+                }`}
               title={
                 visibility === "public"
                   ? "Public — anyone with the URL can read. Click to make private."
@@ -1019,9 +1056,8 @@ export function NestView({
                       type="button"
                       title="List view"
                       aria-pressed={viewMode === "list"}
-                      className={`px-2 h-full rounded-l-md ${
-                        viewMode === "list" ? "bg-muted" : "hover:bg-muted/50"
-                      }`}
+                      className={`px-2 h-full rounded-l-md ${viewMode === "list" ? "bg-muted" : "hover:bg-muted/50"
+                        }`}
                       onClick={() => setViewMode("list")}
                     >
                       <ListIcon className="h-4 w-4" />
@@ -1030,9 +1066,8 @@ export function NestView({
                       type="button"
                       title="Card view"
                       aria-pressed={viewMode === "cards"}
-                      className={`px-2 h-full rounded-r-md ${
-                        viewMode === "cards" ? "bg-muted" : "hover:bg-muted/50"
-                      }`}
+                      className={`px-2 h-full rounded-r-md ${viewMode === "cards" ? "bg-muted" : "hover:bg-muted/50"
+                        }`}
                       onClick={() => setViewMode("cards")}
                     >
                       <LayoutGrid className="h-4 w-4" />
@@ -1139,11 +1174,10 @@ export function NestView({
                       <button
                         key={tag}
                         type="button"
-                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-colors ${
-                          active
+                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-colors ${active
                             ? "bg-primary text-primary-foreground border-primary"
                             : "text-foreground/80 hover:bg-muted"
-                        }`}
+                          }`}
                         onClick={() => toggleTagFilter(tag)}
                         title={
                           active
@@ -1281,118 +1315,116 @@ export function NestView({
                       </div>
                     );
                     return (
-                    <div
-                      key={node.id}
-                      onClick={() => onOpenDocument(node.id)}
-                      className={`${
-                        cards
-                          ? "flex flex-col gap-2"
-                          : "flex items-center gap-3"
-                      } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer`}
-                      data-testid={`document-row-${node.id}`}
-                    >
-                      {!cards && (
-                        <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          {cards && (
-                            <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                          )}
-                          <span
-                            className="font-medium truncate min-w-0"
-                            title={node.title}
-                          >
-                            {node.title}
-                          </span>
-                          <LifecycleStatusBadge
-                            status={(node.status as DocumentLifecycleStatus) || "draft"}
-                            size="sm"
-                            className="shrink-0 whitespace-nowrap"
-                          />
-                          {cards && <div className="ml-auto">{actionMenu}</div>}
-                        </div>
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                          <span>v{node.version || 1}</span>
-                          {node.tags?.length > 0 && (
-                            <>
-                              <span>·</span>
-                              <span className="flex items-center gap-1 truncate">
-                                {node.tags.slice(0, 3).map((t: string) => (
-                                  <button
-                                    key={t}
-                                    type="button"
-                                    title={
-                                      tagFilters.includes(t)
-                                        ? `Remove filter ${t}`
-                                        : `Filter by ${t}`
-                                    }
-                                    className={`rounded-full border px-1.5 py-px transition-colors ${
-                                      tagFilters.includes(t)
-                                        ? "bg-primary text-primary-foreground border-primary"
-                                        : "hover:bg-muted"
-                                    }`}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      toggleTagFilter(t);
-                                    }}
-                                  >
-                                    {t}
-                                  </button>
-                                ))}
-                              </span>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                      {!cards && (
                       <div
-                        className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100"
-                        onClick={(e) => e.stopPropagation()}
+                        key={node.id}
+                        onClick={() => onOpenDocument(node.id)}
+                        className={`${cards
+                            ? "flex flex-col gap-2"
+                            : "flex items-center gap-3"
+                          } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer`}
+                        data-testid={`document-row-${node.id}`}
                       >
-                        {canSubmit && (
-                          <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
-                            <Send className="h-3.5 w-3.5 mr-1" />
-                            Submit
-                          </Button>
+                        {!cards && (
+                          <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
                         )}
-                        {canReview && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => setReviewNode(node)}
-                              className="border-green-200 text-green-700 hover:bg-green-50"
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            {cards && (
+                              <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                            )}
+                            <span
+                              className="font-medium truncate min-w-0"
+                              title={node.title}
                             >
-                              Review
+                              {node.title}
+                            </span>
+                            <LifecycleStatusBadge
+                              status={(node.status as DocumentLifecycleStatus) || "draft"}
+                              size="sm"
+                              className="shrink-0 whitespace-nowrap"
+                            />
+                            {cards && <div className="ml-auto">{actionMenu}</div>}
+                          </div>
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                            <span>v{node.version || 1}</span>
+                            {node.tags?.length > 0 && (
+                              <>
+                                <span>·</span>
+                                <span className="flex items-center gap-1 truncate">
+                                  {node.tags.slice(0, 3).map((t: string) => (
+                                    <button
+                                      key={t}
+                                      type="button"
+                                      title={
+                                        tagFilters.includes(t)
+                                          ? `Remove filter ${t}`
+                                          : `Filter by ${t}`
+                                      }
+                                      className={`rounded-full border px-1.5 py-px transition-colors ${tagFilters.includes(t)
+                                          ? "bg-primary text-primary-foreground border-primary"
+                                          : "hover:bg-muted"
+                                        }`}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleTagFilter(t);
+                                      }}
+                                    >
+                                      {t}
+                                    </button>
+                                  ))}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                        {!cards && (
+                          <div
+                            className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {canSubmit && (
+                              <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
+                                <Send className="h-3.5 w-3.5 mr-1" />
+                                Submit
+                              </Button>
+                            )}
+                            {canReview && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setReviewNode(node)}
+                                className="border-green-200 text-green-700 hover:bg-green-50"
+                              >
+                                Review
+                              </Button>
+                            )}
+                            {canEdit && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => onOpenDocument(node.id)}
+                                title="Edit"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
+                              <History className="h-3.5 w-3.5" />
                             </Button>
-                          )}
-                        {canEdit && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => onOpenDocument(node.id)}
-                            title="Edit"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </Button>
-                        )}
-                        <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
-                          <History className="h-3.5 w-3.5" />
-                        </Button>
-                        {canDelete && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDeleteNode(node)}
-                            title="Delete"
-                            className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
+                            {canDelete && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => handleDeleteNode(node)}
+                                title="Delete"
+                                className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                          </div>
                         )}
                       </div>
-                      )}
-                    </div>
                     );
                   })}
                 </div>
@@ -1403,55 +1435,55 @@ export function NestView({
               {!loading &&
                 (wikiHealth.broken.length > 0 ||
                   wikiHealth.orphans.length > 0) && (
-                <details className="mt-4 text-xs text-muted-foreground">
-                  <summary className="cursor-pointer select-none">
-                    Link health: {wikiHealth.broken.length} broken link
-                    {wikiHealth.broken.length !== 1 ? "s" : ""} ·{" "}
-                    {wikiHealth.orphans.length} orphan doc
-                    {wikiHealth.orphans.length !== 1 ? "s" : ""}
-                  </summary>
-                  <div className="mt-2 space-y-2 pl-1">
-                    {wikiHealth.broken.length > 0 && (
-                      <div>
-                        <div className="font-medium mb-1">
-                          Broken links (target doesn't exist):
-                        </div>
-                        {wikiHealth.broken.slice(0, 10).map((b, i) => (
-                          <div key={i}>
-                            <button
-                              type="button"
-                              className="text-primary hover:underline"
-                              onClick={() => onOpenDocument(b.sourceId)}
-                            >
-                              {b.sourceTitle}
-                            </button>{" "}
-                            → [[{b.target}]]
+                  <details className="mt-4 text-xs text-muted-foreground">
+                    <summary className="cursor-pointer select-none">
+                      Link health: {wikiHealth.broken.length} broken link
+                      {wikiHealth.broken.length !== 1 ? "s" : ""} ·{" "}
+                      {wikiHealth.orphans.length} orphan doc
+                      {wikiHealth.orphans.length !== 1 ? "s" : ""}
+                    </summary>
+                    <div className="mt-2 space-y-2 pl-1">
+                      {wikiHealth.broken.length > 0 && (
+                        <div>
+                          <div className="font-medium mb-1">
+                            Broken links (target doesn't exist):
                           </div>
-                        ))}
-                      </div>
-                    )}
-                    {wikiHealth.orphans.length > 0 && (
-                      <div>
-                        <div className="font-medium mb-1">
-                          Orphans (nothing links to them):
-                        </div>
-                        <div className="flex flex-wrap gap-x-3 gap-y-1">
-                          {wikiHealth.orphans.slice(0, 15).map((o) => (
-                            <button
-                              key={o.id}
-                              type="button"
-                              className="text-primary hover:underline"
-                              onClick={() => onOpenDocument(o.id)}
-                            >
-                              {o.title}
-                            </button>
+                          {wikiHealth.broken.slice(0, 10).map((b, i) => (
+                            <div key={i}>
+                              <button
+                                type="button"
+                                className="text-primary hover:underline"
+                                onClick={() => onOpenDocument(b.sourceId)}
+                              >
+                                {b.sourceTitle}
+                              </button>{" "}
+                              → [[{b.target}]]
+                            </div>
                           ))}
                         </div>
-                      </div>
-                    )}
-                  </div>
-                </details>
-              )}
+                      )}
+                      {wikiHealth.orphans.length > 0 && (
+                        <div>
+                          <div className="font-medium mb-1">
+                            Orphans (nothing links to them):
+                          </div>
+                          <div className="flex flex-wrap gap-x-3 gap-y-1">
+                            {wikiHealth.orphans.slice(0, 15).map((o) => (
+                              <button
+                                key={o.id}
+                                type="button"
+                                className="text-primary hover:underline"
+                                onClick={() => onOpenDocument(o.id)}
+                              >
+                                {o.title}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </details>
+                )}
             </CardContent>
           </Card>
         </TabsContent>
@@ -1570,35 +1602,35 @@ export function NestView({
                       nodes.find((n) => n.id === entry.document_id)?.title ||
                       entry.document_id.split("/").pop();
                     return (
-                    <div
-                      key={entry.suggestion_id}
-                      className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors"
-                      onClick={() => onOpenDocument(entry.document_id)}
-                      data-testid={`external-edit-row-${entry.suggestion_id}`}
-                    >
-                      <FileWarning className="h-5 w-5 text-orange-600 flex-shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium truncate">
-                            {docTitle}
-                          </span>
-                          <Badge
-                            variant="secondary"
-                            className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
-                          >
-                            {entry.source}
-                          </Badge>
-                        </div>
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                          <Clock className="h-3 w-3" />
-                          <span>
-                            {new Date(entry.detected_at).toLocaleString()}
-                          </span>
-                          <span>•</span>
-                          <span>by {entry.actor}</span>
+                      <div
+                        key={entry.suggestion_id}
+                        className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors"
+                        onClick={() => onOpenDocument(entry.document_id)}
+                        data-testid={`external-edit-row-${entry.suggestion_id}`}
+                      >
+                        <FileWarning className="h-5 w-5 text-orange-600 flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium truncate">
+                              {docTitle}
+                            </span>
+                            <Badge
+                              variant="secondary"
+                              className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
+                            >
+                              {entry.source}
+                            </Badge>
+                          </div>
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                            <Clock className="h-3 w-3" />
+                            <span>
+                              {new Date(entry.detected_at).toLocaleString()}
+                            </span>
+                            <span>•</span>
+                            <span>by {entry.actor}</span>
+                          </div>
                         </div>
                       </div>
-                    </div>
                     );
                   })}
                 </div>
