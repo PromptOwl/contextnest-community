@@ -11,6 +11,7 @@ import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
+import { isSuperAdmin } from "../governance/access-service.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError } from "../shared/errors.js";
 import type { Nest } from "../shared/types.js";
@@ -42,6 +43,33 @@ function toSlug(name: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
+}
+
+/**
+ * Append " (N)" to `baseName` until both the resulting display name and the
+ * derived slug are free for this user. The DB enforces UNIQUE(user_id, slug),
+ * so importing a folder whose leaf name collides with an existing nest used
+ * to error out — this helper produces "abc", "abc (1)", "abc (2)", ….
+ */
+export function uniqueNestName(userId: string, baseName: string): string {
+  const db = getDb();
+  const slugTaken = db.prepare(
+    "SELECT 1 FROM nests WHERE user_id = ? AND slug = ? LIMIT 1",
+  );
+  let candidate = baseName;
+  let n = 0;
+  // Bound the loop to keep a buggy DB / accidental rename storm from spinning
+  // forever; 1000 collisions on the same name is already absurd.
+  while (n < 1000) {
+    const slug = toSlug(candidate);
+    const hit = slugTaken.get(userId, slug);
+    if (!hit) return candidate;
+    n++;
+    candidate = `${baseName} (${n})`;
+  }
+  // Fallback: extreme collision count — let the caller still try; the DB
+  // constraint will surface a clearer error than a silent infinite loop.
+  return candidate;
 }
 
 /** Check if stewardship (draft-first + approval workflow) is enabled for a nest. */
@@ -109,6 +137,67 @@ export function disableStewardshipAndWipeGovernance(nestId: string): {
     return { stewards, pendingReviews };
   });
   return wipe(nestId);
+}
+
+/**
+ * Update the human-facing fields of a nest (name + description). The slug is
+ * recomputed from the new name so collaborators see it in the URL-friendly
+ * form too, and we reject the change if it would collide with another nest
+ * the same user already owns (UNIQUE(user_id, slug) would throw anyway —
+ * surfacing a clean error keeps the autosave UX sane).
+ *
+ * On-disk state is untouched. The folder is still at <DATA_ROOT>/nests/<id>;
+ * renaming a nest never relocates its files.
+ */
+export function renameNest(
+  nestId: string,
+  patch: { name?: string; description?: string | null },
+): Nest {
+  const db = getDb();
+  const existing = db
+    .prepare("SELECT * FROM nests WHERE id = ?")
+    .get(nestId) as Nest | undefined;
+  if (!existing) {
+    throw new ValidationError("Nest not found");
+  }
+
+  const updates: string[] = [];
+  const params: any[] = [];
+
+  if (patch.name !== undefined) {
+    const trimmed = patch.name.trim();
+    if (!trimmed) throw new ValidationError("Name cannot be empty");
+    const slug = toSlug(trimmed);
+    if (!slug) throw new ValidationError("Name must contain at least one alphanumeric character");
+    const conflict = db
+      .prepare(
+        "SELECT id FROM nests WHERE user_id = ? AND slug = ? AND id != ? LIMIT 1",
+      )
+      .get(existing.user_id, slug, nestId) as { id: string } | undefined;
+    if (conflict) {
+      throw new ValidationError(
+        `Another nest already uses this name. Pick a different one.`,
+      );
+    }
+    updates.push("name = ?", "slug = ?");
+    params.push(trimmed, slug);
+  }
+
+  if (patch.description !== undefined) {
+    updates.push("description = ?");
+    params.push(patch.description || null);
+  }
+
+  if (updates.length === 0) {
+    return existing;
+  }
+
+  params.push(nestId);
+  db.prepare(`UPDATE nests SET ${updates.join(", ")} WHERE id = ?`).run(
+    ...params,
+  );
+
+  return db.prepare("SELECT * FROM nests WHERE id = ?").get(nestId) as Nest;
 }
 
 export async function createNest(
@@ -218,6 +307,23 @@ export function isAnonymousNest(nest: Pick<Nest, "user_id">): boolean {
 
 export function listSharedNests(userId: string): Nest[] {
   const db = getDb();
+  // Server admin (license admin or access.yaml super_admin) administers every
+  // nest (resolveNestPermission grants 'admin'), so surface every non-owned
+  // nest in the shared list — otherwise private nests they govern aren't
+  // reachable from the dashboard.
+  const caller = db
+    .prepare("SELECT email FROM users WHERE id = ?")
+    .get(userId) as { email?: string } | undefined;
+  const isServerAdmin =
+    isLicenseAdminUserId(userId) ||
+    (caller?.email ? isSuperAdmin(caller.email) : false);
+  if (isServerAdmin) {
+    return db
+      .prepare(
+        "SELECT * FROM nests WHERE user_id != ? ORDER BY created_at DESC",
+      )
+      .all(userId) as Nest[];
+  }
   // Shared = collaborator grant OR active steward assignment (matched by
   // email, since steward rows may predate the account). Both are
   // independent paths to a nest the user doesn't own.

@@ -171,6 +171,56 @@ Owner only.
 { "visibility": "public" }
 ```
 
+### GET `/nests/unsynced` (server-admin only outside open mode)
+Lists folders under `DATA_ROOT` that aren't nests yet — typically dropped in by the starter CLI or copied in manually. Each entry is a sync candidate. Reflects server-side filesystem state, so in non-open mode only the license admin sees it (everyone else gets `403`).
+
+Response (200):
+```json
+{
+  "folders": [
+    {
+      "name": "nodes/architecture",
+      "label": "architecture",
+      "mdCount": 12,
+      "sizeBytes": 48230
+    }
+  ]
+}
+```
+- `name` — path relative to `DATA_ROOT` (slash-separated; pass back verbatim to `/sync`).
+- `label` — leaf folder name (display only).
+- `mdCount` / `sizeBytes` — totals across all `.md` files under the folder, recursive.
+
+When a top-level dir has no markdown directly but holds subfolders that do (e.g. `nodes/architecture/`, `nodes/standards/`), each subfolder surfaces as its own card so users can sync them as separate nests.
+
+### POST `/nests/unsynced/sync` (server-admin only outside open mode)
+Converts a sibling folder under `DATA_ROOT` into a real nest. The folder's markdown is imported (same flat-layout import as `POST /nests`), governance rows are seeded, and the source folder is removed afterwards so the same content can't be synced twice.
+
+Body:
+```json
+{ "name": "nodes/architecture" }
+```
+- `name` — required, as returned by `GET /nests/unsynced`. Travels in the body because leaf paths contain slashes that would split a path-param across route segments.
+
+Response (201):
+```json
+{
+  "nest": { "id": "...", "name": "architecture", "slug": "architecture", "...": "..." },
+  "documents": 12
+}
+```
+- Nest is named after the leaf segment (`nodes/architecture` → `architecture`). If that name (or its slug) collides for the user, a `" (n)"` suffix is appended so repeat syncs Just Work.
+- `documents` — count of governance-registered docs.
+
+Errors:
+- `400 Invalid folder name` — empty, contains `\`, traversal segment, dot-prefixed segment, or `node_modules`.
+- `400 Folder is not eligible for sync` — reserved top-level (e.g. `nests/`).
+- `400 Folder has no markdown to sync` — empty folder.
+- `404 Folder not found` — path doesn't exist under `DATA_ROOT`.
+- `403 Only the server admin can sync folders` — non-admin in non-open mode.
+
+Source-folder cleanup is best-effort. If `rmSync` fails (locked file etc.) the nest is still fully built; the orphan source dir just keeps showing up in `GET /nests/unsynced` until removed manually. Same admin gate exposed as MCP tools `context_unsynced_list` + `context_sync_folder` on any nest's `/mcp` endpoint.
+
 ---
 
 ## 3. Collaborators (direct nest sharing)
@@ -581,6 +631,12 @@ Publishes the nest (snapshots + index).
 
 ### `/nests/:nestId/mcp/*`
 Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually; LLM clients connect here.
+
+Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same as their REST counterparts):
+- `context_unsynced_list` — mirrors `GET /nests/unsynced`.
+- `context_sync_folder` — mirrors `POST /nests/unsynced/sync`. Args: `name` (folder path relative to `DATA_ROOT`).
+
+Both reuse the same `listUnsyncedFolders` / `syncUnsyncedFolder` service functions the REST routes call, so a single fix lands in both surfaces.
 
 ---
 

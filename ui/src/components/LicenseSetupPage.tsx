@@ -13,6 +13,9 @@ export function LicenseSetupPage({ onActivated }: Props) {
   const [key, setKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when the key validated but did NOT persist to disk — the operator must
+  // see this before continuing, or they'll lose the key on the next restart.
+  const [warning, setWarning] = useState<string | null>(null);
 
   const handleInstall = async () => {
     const trimmed = key.trim();
@@ -21,11 +24,18 @@ export function LicenseSetupPage({ onActivated }: Props) {
       return;
     }
     setError(null);
+    setWarning(null);
     setSubmitting(true);
     try {
       const res = await installLicense(trimmed);
       if (!res.valid) {
         setError(res.error || "PromptOwl rejected this key.");
+        return;
+      }
+      if (res.warning) {
+        // Validated but not durable. Don't silently proceed — surface it and
+        // make the operator acknowledge with "Continue anyway".
+        setWarning(res.warning);
         return;
       }
       onActivated();
@@ -76,26 +86,46 @@ export function LicenseSetupPage({ onActivated }: Props) {
                 {error}
               </p>
             )}
+            {warning && (
+              <div
+                className="text-sm rounded-md border border-amber-300 bg-amber-50 text-amber-800 p-3 space-y-1"
+                data-testid="license-setup-warning"
+              >
+                <p className="font-medium">License not saved to disk</p>
+                <p>{warning}</p>
+              </div>
+            )}
           </div>
 
-          <Button
-            className="w-full"
-            onClick={handleInstall}
-            disabled={submitting || !key.trim()}
-            data-testid="license-setup-submit"
-          >
-            {submitting ? (
-              <>
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                Validating...
-              </>
-            ) : (
-              <>
-                <KeyRound className="h-4 w-4 mr-2" />
-                Activate Server
-              </>
-            )}
-          </Button>
+          {warning ? (
+            <Button
+              className="w-full"
+              variant="outline"
+              onClick={onActivated}
+              data-testid="license-setup-continue"
+            >
+              Continue anyway (key lost on restart)
+            </Button>
+          ) : (
+            <Button
+              className="w-full"
+              onClick={handleInstall}
+              disabled={submitting || !key.trim()}
+              data-testid="license-setup-submit"
+            >
+              {submitting ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Validating...
+                </>
+              ) : (
+                <>
+                  <KeyRound className="h-4 w-4 mr-2" />
+                  Activate Server
+                </>
+              )}
+            </Button>
+          )}
         </div>
 
         <div className="text-sm text-muted-foreground space-y-2 border rounded-lg p-4 bg-muted/30">

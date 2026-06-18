@@ -2,7 +2,7 @@
  * NestView — governance dashboard for a single nest.
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
 import { matchesFilters } from "../lib/node-filter";
 import { linkHealth } from "../lib/link-health";
@@ -81,7 +81,57 @@ export function NestView({
   //   - anon-owned + key mode → license-admin caretaker only
   const canDeleteNest =
     isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
+  // Stewardship is governance of the commons / one's own nests, not a tool
+  // server admins impose on other users' nests. So the steward roster,
+  // assign-steward UI, and Settings modal are hidden when an admin views a
+  // real user's nest.
+  const canManageGovernance = isAdmin && (isOwner || isAnonOwned);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
+
+  // Local mirror of the nest name so inline rename feels instant while the
+  // backend autosave lands. Resets if the parent passes a different nest.
+  const [editableName, setEditableName] = useState(nestName);
+  const lastSavedName = useRef(nestName);
+  useEffect(() => {
+    setEditableName(nestName);
+    lastSavedName.current = nestName;
+  }, [nestName, nestId]);
+  const renameTimer = useRef<number | null>(null);
+  const renameRef = useRef<() => void>(() => {});
+  const [renameError, setRenameError] = useState<string | null>(null);
+  renameRef.current = async () => {
+    const trimmed = editableName.trim();
+    if (!trimmed) return;
+    if (trimmed === lastSavedName.current.trim()) return;
+    try {
+      await api.updateNest(nestId, { name: trimmed });
+      lastSavedName.current = trimmed;
+      setRenameError(null);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to rename nest";
+      setRenameError(msg);
+    }
+  };
+  const scheduleRename = useCallback(() => {
+    if (renameTimer.current) window.clearTimeout(renameTimer.current);
+    renameTimer.current = window.setTimeout(() => {
+      renameTimer.current = null;
+      void renameRef.current();
+    }, 1200);
+  }, []);
+  const flushRename = useCallback(() => {
+    if (renameTimer.current) {
+      window.clearTimeout(renameTimer.current);
+      renameTimer.current = null;
+    }
+    void renameRef.current();
+  }, []);
+  useEffect(
+    () => () => {
+      if (renameTimer.current) window.clearTimeout(renameTimer.current);
+    },
+    [],
+  );
   const [nodes, setNodes] = useState<any[]>([]);
   // Full roster — admin-only (listStewards 403s for non-admins → stays []).
   const [stewards, setStewards] = useState<Steward[]>([]);
@@ -498,6 +548,18 @@ export function NestView({
     return true;
   });
 
+  // The caller's own pending submissions. SoD keeps these out of the
+  // actionable queue above (authors can't approve their own work), which made
+  // it look like "submit for review did nothing." Surface them in their own
+  // section so the submitter sees their request IS queued. (CU-wdqcpztgwm)
+  const myPendingSubmissions = reviewQueue.filter(
+    (r) => r.requestedBy.toLowerCase() === currentEmail,
+  );
+  // Show the Review tab whenever stewardship is on OR there are pending
+  // requests at all — otherwise a submitted edit is stranded with no tab
+  // (e.g. stewardship later disabled, or the submitter has no reviewer role).
+  const showReviewTab = stewardshipEnabled || reviewQueue.length > 0;
+
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
   // (raw size, which over-promised before — see CU-86ahn99fv).
@@ -649,13 +711,48 @@ export function NestView({
           <Button variant="ghost" size="icon" onClick={onBack} className="shrink-0">
             <ArrowLeft className="h-4 w-4" />
           </Button>
-          <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
-            {nestName}
-          </h3>
-          {/* Visibility — an inline toggle for owner/admin (so the public/
-              private switch isn't buried in the Share dialog), a read-only
-              badge for everyone else. */}
           {canManage ? (
+            <div className="min-w-0 flex-1">
+              <input
+                value={editableName}
+                onChange={(e) => {
+                  setEditableName(e.target.value);
+                  setRenameError(null);
+                  scheduleRename();
+                }}
+                onBlur={flushRename}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    flushRename();
+                    (e.target as HTMLInputElement).blur();
+                  }
+                  if (e.key === "Escape") {
+                    setEditableName(lastSavedName.current);
+                    setRenameError(null);
+                    (e.target as HTMLInputElement).blur();
+                  }
+                }}
+                aria-label="Nest name"
+                title="Click to rename — saved automatically"
+                className="w-full min-w-0 truncate text-xl font-semibold bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary px-1 -ml-1 rounded-sm"
+              />
+              {renameError && (
+                <p
+                  role="alert"
+                  className="mt-1 text-xs text-red-700"
+                  title={renameError}
+                >
+                  {renameError}
+                </p>
+              )}
+            </div>
+          ) : (
+            <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
+              {nestName}
+            </h3>
+          )}
+          {visibility === "public" && (
             <Button
               variant="outline"
               size="sm"
@@ -681,17 +778,6 @@ export function NestView({
               )}
               {visibility === "public" ? "Public" : "Private"}
             </Button>
-          ) : (
-            visibility === "public" && (
-              <Badge
-                variant="outline"
-                className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
-                title="Anyone with the URL can read this nest"
-              >
-                <Globe className="h-3 w-3" />
-                Public
-              </Badge>
-            )
           )}
           {isImported && (
             <Badge
@@ -711,9 +797,12 @@ export function NestView({
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:shrink-0 sm:justify-end">
           {!isReadOnly && (
             <>
-              {/* Settings is stewardship-only and server-admin gated; a
-                  nest-admin/owner would just see an empty modal. */}
-              {isAdmin && (
+              {/* Settings is stewardship-only and server-admin gated. Also
+                  hidden when the admin is viewing a real user's nest —
+                  stewardship is a governance concern over the commons /
+                  the admin's own nests, not something to impose on a user
+                  who owns their own nest. */}
+              {canManageGovernance && (
                 <Button variant="outline" onClick={() => setShowSettings(true)}>
                   <SettingsIcon className="h-4 w-4 mr-2" />
                   Settings
@@ -847,7 +936,7 @@ export function NestView({
         <TabsList className="mb-4">
           <TabsTrigger value="documents">Documents</TabsTrigger>
           {/* Governance tabs hidden for view-only. */}
-          {stewardshipEnabled && !isReadOnly && (
+          {showReviewTab && !isReadOnly && (
             <TabsTrigger value="review" className="gap-2">
               Review Queue
               {reviewableQueue.length > 0 && (
@@ -870,8 +959,9 @@ export function NestView({
               )}
             </TabsTrigger>
           )}
-          {/* Steward roster is admin-only (list + manage). */}
-          {stewardshipEnabled && isAdmin && (
+          {/* Steward roster is admin-only (list + manage), and hidden when
+              the admin is viewing a real user's nest. */}
+          {stewardshipEnabled && canManageGovernance && (
             <TabsTrigger value="stewards">Stewards</TabsTrigger>
           )}
           {/* Collaborators — plain access sharing, independent of
@@ -1390,8 +1480,39 @@ export function NestView({
           </Card>
         </TabsContent>
 
-        {stewardshipEnabled && (
+        {showReviewTab && (
           <TabsContent value="review" className="space-y-4">
+            {/* The caller's own submissions, kept out of the actionable queue
+                by separation-of-duties. Shown read-only so "submit for review"
+                visibly lands somewhere. */}
+            {myPendingSubmissions.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Send className="h-4 w-4 text-blue-600" />
+                    Submitted by you — awaiting review
+                  </CardTitle>
+                  <CardDescription>
+                    Your edits are queued for a reviewer. You can't approve your
+                    own work (separation of duties), but they are pending.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {myPendingSubmissions.map((r) => (
+                    <button
+                      key={r.id}
+                      onClick={() => onOpenDocument(r.nodeId)}
+                      className="w-full flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm hover:bg-muted/50"
+                    >
+                      <span className="truncate">{r.title || r.nodeId}</span>
+                      <Badge variant="secondary" className="text-[10px] shrink-0">
+                        Awaiting review
+                      </Badge>
+                    </button>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
             <ReviewQueue
               requests={reviewableQueue}
               loading={loading}
@@ -1510,7 +1631,7 @@ export function NestView({
           </Card>
         </TabsContent>
 
-        {stewardshipEnabled && isAdmin && (
+        {stewardshipEnabled && canManageGovernance && (
           <TabsContent value="stewards" className="space-y-4">
             <Card className="border-blue-200 bg-blue-50/40">
               <CardHeader className="pb-2">
@@ -1599,7 +1720,7 @@ export function NestView({
                       approve. Add an editor/reviewer to delegate approvals
                       for a tag or specific doc.
                     </p>
-                    {isAdmin && (
+                    {canManageGovernance && (
                       <Button
                         variant="outline"
                         size="sm"
@@ -1621,10 +1742,10 @@ export function NestView({
                     )}
                     showScope
                     onAddSteward={
-                      isAdmin ? () => setShowAssignSteward(true) : undefined
+                      canManageGovernance ? () => setShowAssignSteward(true) : undefined
                     }
-                    onRemove={isAdmin ? handleRemoveSteward : undefined}
-                    onEditRole={isAdmin ? setEditingSteward : undefined}
+                    onRemove={canManageGovernance ? handleRemoveSteward : undefined}
+                    onEditRole={canManageGovernance ? setEditingSteward : undefined}
                     currentUserEmail={currentEmail}
                   />
                 )}
@@ -1657,7 +1778,7 @@ export function NestView({
         )}
       </Tabs>
 
-      {!stewardshipEnabled && !isReadOnly && (
+      {!stewardshipEnabled && !isReadOnly && canManageGovernance && (
         <Card className="mt-4">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
@@ -1673,21 +1794,15 @@ export function NestView({
               Enable stewardship to require steward approval before documents become AI-ready.
               Versioning stays on either way.
             </p>
-            {isAdmin ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full"
-                onClick={() => setShowSettings(true)}
-              >
-                <SettingsIcon className="h-3.5 w-3.5 mr-2" />
-                Open Settings
-              </Button>
-            ) : (
-              <p className="text-xs text-muted-foreground italic">
-                Only the server admin can enable stewardship.
-              </p>
-            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={() => setShowSettings(true)}
+            >
+              <SettingsIcon className="h-3.5 w-3.5 mr-2" />
+              Open Settings
+            </Button>
           </CardContent>
         </Card>
       )}
@@ -1717,7 +1832,7 @@ export function NestView({
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
           allowSelfApprove={allowSelfApprove}
-          canManageStewardship={isAdmin}
+          canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
           onChanged={() => { setShowSettings(false); fetchData(); }}
         />

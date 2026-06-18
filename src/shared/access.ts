@@ -1,5 +1,6 @@
 import { getDb } from "../db/client.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
+import { isSuperAdmin } from "../governance/access-service.js";
 import { ANON_USER_ID } from "./constants.js";
 
 export type NestPermission = "none" | "read" | "write" | "admin" | "owner";
@@ -21,9 +22,13 @@ const PERMISSION_LEVELS: Record<NestPermission, number> = {
  *    (admin keeps full control over the ungoverned commons even after the
  *    nest is flipped to private — otherwise only the anon user could
  *    manage it and there's no login path for anon.)
- * 3. Direct user grant in nest_collaborators -> that permission
- * 4. Nest visibility = 'public' -> 'read'
- * 5. Otherwise -> 'none'
+ * 3. Server admin (license admin OR access.yaml super_admins) -> 'admin'
+ *    on EVERY nest (visibility + collaborators), matching the documented
+ *    "always allowed on every nest". Not 'owner': owner-only actions
+ *    (delete/transfer) stay with the real owner.
+ * 4. Direct user grant in nest_collaborators -> that permission
+ * 5. Nest visibility = 'public' -> 'read'
+ * 6. Otherwise -> 'none'
  */
 export function resolveNestPermission(
   nestId: string,
@@ -40,6 +45,19 @@ export function resolveNestPermission(
 
   if (nest.user_id === ANON_USER_ID && isLicenseAdminUserId(userId)) {
     return "owner";
+  }
+
+  // Server admins (license admin + access.yaml super_admins) administer every
+  // nest (visibility + collaborators). License admin is the default install's
+  // admin identity; super_admins is the access.yaml extension for multi-admin
+  // setups. Both get the same nest-level 'admin' — owner-only delete/transfer
+  // still stays with the real owner.
+  if (isLicenseAdminUserId(userId)) return "admin";
+  const caller = db
+    .prepare("SELECT email FROM users WHERE id = ?")
+    .get(userId) as { email?: string } | undefined;
+  if (caller?.email && isSuperAdmin(caller.email)) {
+    return "admin";
   }
 
   const directGrant = db
@@ -94,6 +112,14 @@ export function isPublicReader(nestId: string, userId: string): boolean {
     )
     .get(nestId, userId);
   if (directGrant) return false;
+  // Server admin (license admin or access.yaml super_admin) holds 'admin' via
+  // resolveNestPermission; they should see drafts/pending like any admin, not
+  // be downgraded to approved-only.
+  if (isLicenseAdminUserId(userId)) return false;
+  const caller = db
+    .prepare("SELECT email FROM users WHERE id = ?")
+    .get(userId) as { email?: string } | undefined;
+  if (caller?.email && isSuperAdmin(caller.email)) return false;
   // A steward is not a mere public reader — they govern (and may see drafts
   // of) the documents in their scope. Matched by email like resolveNestPermission.
   const stewardGrant = db
