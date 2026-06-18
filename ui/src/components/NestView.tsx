@@ -547,6 +547,18 @@ export function NestView({
     return true;
   });
 
+  // The caller's own pending submissions. SoD keeps these out of the
+  // actionable queue above (authors can't approve their own work), which made
+  // it look like "submit for review did nothing." Surface them in their own
+  // section so the submitter sees their request IS queued. (CU-wdqcpztgwm)
+  const myPendingSubmissions = reviewQueue.filter(
+    (r) => r.requestedBy.toLowerCase() === currentEmail,
+  );
+  // Show the Review tab whenever stewardship is on OR there are pending
+  // requests at all — otherwise a submitted edit is stranded with no tab
+  // (e.g. stewardship later disabled, or the submitter has no reviewer role).
+  const showReviewTab = stewardshipEnabled || reviewQueue.length > 0;
+
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
   // (raw size, which over-promised before — see CU-86ahn99fv).
@@ -887,7 +899,7 @@ export function NestView({
         <TabsList className="mb-4">
           <TabsTrigger value="documents">Documents</TabsTrigger>
           {/* Governance tabs hidden for view-only. */}
-          {stewardshipEnabled && !isReadOnly && (
+          {showReviewTab && !isReadOnly && (
             <TabsTrigger value="review" className="gap-2">
               Review Queue
               {reviewableQueue.length > 0 && (
@@ -1431,8 +1443,39 @@ export function NestView({
           </Card>
         </TabsContent>
 
-        {stewardshipEnabled && (
+        {showReviewTab && (
           <TabsContent value="review" className="space-y-4">
+            {/* The caller's own submissions, kept out of the actionable queue
+                by separation-of-duties. Shown read-only so "submit for review"
+                visibly lands somewhere. */}
+            {myPendingSubmissions.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Send className="h-4 w-4 text-blue-600" />
+                    Submitted by you — awaiting review
+                  </CardTitle>
+                  <CardDescription>
+                    Your edits are queued for a reviewer. You can't approve your
+                    own work (separation of duties), but they are pending.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {myPendingSubmissions.map((r) => (
+                    <button
+                      key={r.id}
+                      onClick={() => onOpenDocument(r.nodeId)}
+                      className="w-full flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm hover:bg-muted/50"
+                    >
+                      <span className="truncate">{r.title || r.nodeId}</span>
+                      <Badge variant="secondary" className="text-[10px] shrink-0">
+                        Awaiting review
+                      </Badge>
+                    </button>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
             <ReviewQueue
               requests={reviewableQueue}
               loading={loading}
