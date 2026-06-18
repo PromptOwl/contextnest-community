@@ -708,51 +708,16 @@ export function NestView({
       {/* Header — PromptOwl ContextDashboard layout */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4 mb-4">
         <div className="flex min-w-0 items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={onBack} className="shrink-0">
+        <Button variant="ghost" size="icon" onClick={onBack} className="shrink-0">
             <ArrowLeft className="h-4 w-4" />
           </Button>
+          <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
+            {nestName}
+          </h3>
+          {/* Visibility — an inline toggle for owner/admin (so the public/
+              private switch isn't buried in the Share dialog), a read-only
+              badge for everyone else. */}
           {canManage ? (
-            <div className="min-w-0 flex-1">
-              <input
-                value={editableName}
-                onChange={(e) => {
-                  setEditableName(e.target.value);
-                  setRenameError(null);
-                  scheduleRename();
-                }}
-                onBlur={flushRename}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    flushRename();
-                    (e.target as HTMLInputElement).blur();
-                  }
-                  if (e.key === "Escape") {
-                    setEditableName(lastSavedName.current);
-                    setRenameError(null);
-                    (e.target as HTMLInputElement).blur();
-                  }
-                }}
-                aria-label="Nest name"
-                title="Click to rename — saved automatically"
-                className="w-full min-w-0 truncate text-xl font-semibold bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary px-1 -ml-1 rounded-sm"
-              />
-              {renameError && (
-                <p
-                  role="alert"
-                  className="mt-1 text-xs text-red-700"
-                  title={renameError}
-                >
-                  {renameError}
-                </p>
-              )}
-            </div>
-          ) : (
-            <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
-              {nestName}
-            </h3>
-          )}
-          {visibility === "public" && (
             <Button
               variant="outline"
               size="sm"
@@ -778,6 +743,17 @@ export function NestView({
               )}
               {visibility === "public" ? "Public" : "Private"}
             </Button>
+          ) : (
+            visibility === "public" && (
+              <Badge
+                variant="outline"
+                className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
+                title="Anyone with the URL can read this nest"
+              >
+                <Globe className="h-3 w-3" />
+                Public
+              </Badge>
+            )
           )}
           {isImported && (
             <Badge
