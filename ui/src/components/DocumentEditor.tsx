@@ -31,7 +31,7 @@ import {
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
-import { SubmitForReviewModal, ReviewActions, ExternalEditBanner } from "./governance";
+import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory } from "./governance";
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { relatedDocs } from "../lib/related";
@@ -125,6 +125,14 @@ export function DocumentEditor({
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState<string[]>([]);
+  // Version history for the detail view (CU-wdqcpztgwn). VersionHistory already
+  // renders highlighted diffs; previously it was only reachable from NestView's
+  // modal, not from the doc detail view.
+  const [versionData, setVersionData] = useState<{
+    versions: any[];
+    approvedVersion: number | null;
+    currentVersion: number;
+  } | null>(null);
   const [tagInput, setTagInput] = useState("");
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
@@ -344,10 +352,23 @@ export function DocumentEditor({
     }
   }, [isNew, nestId, nodeId]);
 
+  const loadVersions = useCallback(async () => {
+    if (isNew) {
+      setVersionData(null);
+      return;
+    }
+    try {
+      setVersionData(await api.getNodeVersions(nestId, nodeId));
+    } catch {
+      setVersionData(null);
+    }
+  }, [isNew, nestId, nodeId]);
+
   useEffect(() => {
     if (isNew) return;
     loadNode();
-  }, [isNew, loadNode]);
+    loadVersions();
+  }, [isNew, loadNode, loadVersions]);
 
   // A pending-review doc is LOCKED: the server rejects edits/deletes with
   // 423 while a review is open (nodes/routes). Plain drafts stay editable —
@@ -1092,6 +1113,34 @@ export function DocumentEditor({
               </div>
             </div>
           )}
+
+          {/* Version history + highlighted diffs, inline in the detail view.
+              VersionHistory already does the diff rendering; shown when the doc
+              has more than one version. View mode only. */}
+          {mode === "view" &&
+            versionData &&
+            versionData.versions.length > 1 && (
+              <div className="border rounded-lg bg-muted/20 p-3">
+                <div className="text-xs font-medium text-muted-foreground mb-2">
+                  Version history
+                </div>
+                <VersionHistory
+                  versions={versionData.versions}
+                  currentVersion={versionData.currentVersion}
+                  approvedVersion={versionData.approvedVersion}
+                  onRestore={async (v) => {
+                    try {
+                      await api.revertToVersion(nestId, nodeId, v);
+                      toast.success(`Reverted to version ${v}`);
+                      await loadNode();
+                      await loadVersions();
+                    } catch (e: any) {
+                      toast.error(e?.message || "Revert failed");
+                    }
+                  }}
+                />
+              </div>
+            )}
 
           {/* Link discovery — docs that mention this one but don't link it. */}
           {mode === "view" && unlinked.length > 0 && (
