@@ -508,6 +508,41 @@ export function NestView({
     reviewable: reviewableQueue.length,
   };
 
+  // Overview/index landing (CU-wdqcpztgwp): a grouped table-of-contents +
+  // recently-edited, so opening a nest presents an index rather than only the
+  // flat node list. Grouped by the node id's top-level folder.
+  // NOTE: the engine also generates a canonical INDEX.md via regenerateIndex()
+  // (excluded from the node list as a meta-file); surfacing that engine-built
+  // index is a deeper follow-up — this is the lightweight UI overview.
+  const tocGroups = (() => {
+    const groups = new Map<string, any[]>();
+    for (const n of nodes) {
+      const id: string = n.id || "";
+      const slash = id.indexOf("/");
+      const folder = slash > 0 ? id.slice(0, slash) : "Root";
+      if (!groups.has(folder)) groups.set(folder, []);
+      groups.get(folder)!.push(n);
+    }
+    return [...groups.entries()]
+      .map(([folder, items]) => ({
+        folder,
+        items: [...items].sort((a, b) =>
+          String(a.title || a.id).localeCompare(String(b.title || b.id)),
+        ),
+      }))
+      .sort((a, b) =>
+        a.folder === "Root"
+          ? -1
+          : b.folder === "Root"
+            ? 1
+            : a.folder.localeCompare(b.folder),
+      );
+  })();
+  const recentlyEdited = [...nodes]
+    .filter((n) => n.updated_at)
+    .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
+    .slice(0, 5);
+
   const openVersions = async (node: any) => {
     setVersionNode(node);
     try {
@@ -792,8 +827,9 @@ export function NestView({
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because
           their data is empty by definition. */}
-      <Tabs defaultValue="documents" className="w-full">
+      <Tabs defaultValue="overview" className="w-full">
         <TabsList className="mb-4">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>
           {/* Governance tabs hidden for view-only. */}
           {stewardshipEnabled && !isReadOnly && (
@@ -829,6 +865,73 @@ export function NestView({
             <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
           )}
         </TabsList>
+
+        {/* Overview — the nest's index/landing: a grouped table-of-contents
+            plus recently-edited, so opening a nest isn't just the flat node
+            list. Default tab. */}
+        <TabsContent value="overview" className="space-y-4">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-lg">Overview</CardTitle>
+              <CardDescription>
+                {stats.total} document{stats.total === 1 ? "" : "s"}
+                {stewardshipEnabled &&
+                  ` · ${stats.pending} pending · ${stats.approved} approved`}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              {recentlyEdited.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-medium text-muted-foreground mb-1.5">
+                    Recently edited
+                  </h4>
+                  <div className="flex flex-wrap gap-2">
+                    {recentlyEdited.map((n) => (
+                      <button
+                        key={n.id}
+                        onClick={() => onOpenDocument(n.id)}
+                        className="rounded-md border px-2.5 py-1 text-sm hover:bg-muted/50 max-w-full truncate"
+                      >
+                        {n.title || n.id}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {tocGroups.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No documents yet. Create one from the Documents tab.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {tocGroups.map((g) => (
+                    <div key={g.folder}>
+                      <h4 className="text-xs font-medium text-muted-foreground mb-1">
+                        {g.folder}{" "}
+                        <span className="text-muted-foreground/60">
+                          ({g.items.length})
+                        </span>
+                      </h4>
+                      <ul className="space-y-0.5">
+                        {g.items.map((n) => (
+                          <li key={n.id}>
+                            <button
+                              onClick={() => onOpenDocument(n.id)}
+                              className="text-sm text-left hover:underline truncate w-full"
+                              title={n.title || n.id}
+                            >
+                              {n.title || n.id}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
 
         <TabsContent value="documents" className="space-y-4">
           <Card>
