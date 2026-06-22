@@ -21,6 +21,7 @@ import {
   Pencil,
   Users,
   Link as LinkIcon,
+  History,
 } from "lucide-react";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { toast } from "sonner";
@@ -125,14 +126,14 @@ export function DocumentEditor({
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState<string[]>([]);
-  // Version history for the detail view (CU-wdqcpztgwn). VersionHistory already
-  // renders highlighted diffs; previously it was only reachable from NestView's
-  // modal, not from the doc detail view.
+  // Version history for the detail view (CU-wdqcpztgwn). Lazily loaded when
+  // the user opens the modal — VersionHistory already renders highlighted diffs.
   const [versionData, setVersionData] = useState<{
     versions: any[];
     approvedVersion: number | null;
     currentVersion: number;
   } | null>(null);
+  const [showVersions, setShowVersions] = useState(false);
   const [tagInput, setTagInput] = useState("");
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
@@ -359,16 +360,22 @@ export function DocumentEditor({
     }
     try {
       setVersionData(await api.getNodeVersions(nestId, nodeId));
-    } catch {
+    } catch (e: any) {
+      console.error("[DocumentEditor] getNodeVersions failed", nestId, nodeId, e);
       setVersionData(null);
+      toast.error(e?.message || "Failed to load version history");
     }
   }, [isNew, nestId, nodeId]);
 
   useEffect(() => {
     if (isNew) return;
     loadNode();
-    loadVersions();
-  }, [isNew, loadNode, loadVersions]);
+  }, [isNew, loadNode]);
+
+  const openVersions = useCallback(async () => {
+    setShowVersions(true);
+    await loadVersions();
+  }, [loadVersions]);
 
   // A pending-review doc is LOCKED: the server rejects edits/deletes with
   // 423 while a review is open (nodes/routes). Plain drafts stay editable —
@@ -755,6 +762,19 @@ export function DocumentEditor({
               </Button>
             )
           )}
+          {/* Version history — opens modal w/ highlighted diffs (CU-wdqcpztgwn).
+              Icon-only; lives next to the overflow menu in the header. */}
+          {!isNew && (
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={openVersions}
+              title="Version history"
+              data-testid="document-editor-history"
+            >
+              <History className="h-4 w-4" />
+            </Button>
+          )}
           {/* Write/review affordances hidden for public reader.
               Copy link + Share nest collapsed into an overflow menu to keep
               the header uncluttered; primary actions (Publish/Save) stay inline. */}
@@ -1114,34 +1134,6 @@ export function DocumentEditor({
             </div>
           )}
 
-          {/* Version history + highlighted diffs, inline in the detail view.
-              VersionHistory already does the diff rendering; shown when the doc
-              has more than one version. View mode only. */}
-          {mode === "view" &&
-            versionData &&
-            versionData.versions.length > 1 && (
-              <div className="border rounded-lg bg-muted/20 p-3">
-                <div className="text-xs font-medium text-muted-foreground mb-2">
-                  Version history
-                </div>
-                <VersionHistory
-                  versions={versionData.versions}
-                  currentVersion={versionData.currentVersion}
-                  approvedVersion={versionData.approvedVersion}
-                  onRestore={async (v) => {
-                    try {
-                      await api.revertToVersion(nestId, nodeId, v);
-                      toast.success(`Reverted to version ${v}`);
-                      await loadNode();
-                      await loadVersions();
-                    } catch (e: any) {
-                      toast.error(e?.message || "Revert failed");
-                    }
-                  }}
-                />
-              </div>
-            )}
-
           {/* Link discovery — docs that mention this one but don't link it. */}
           {mode === "view" && unlinked.length > 0 && (
             <div className="border rounded-lg bg-muted/20 p-3">
@@ -1168,7 +1160,44 @@ export function DocumentEditor({
               </div>
             </div>
           )}
+
         </div>
+      )}
+
+      {showVersions && !isNew && (
+        <Dialog open onOpenChange={(o) => !o && setShowVersions(false)}>
+          <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-hidden flex flex-col">
+            <DialogHeader>
+              <DialogTitle>{title || nodeId}</DialogTitle>
+            </DialogHeader>
+            {versionData ? (
+              <VersionHistory
+                className="flex-1 min-h-0 overflow-hidden"
+                versions={versionData.versions}
+                currentVersion={versionData.currentVersion}
+                approvedVersion={versionData.approvedVersion}
+                onRestore={
+                  isViewOnly
+                    ? undefined
+                    : async (v) => {
+                        try {
+                          await api.revertToVersion(nestId, nodeId, v);
+                          toast.success(`Reverted to version ${v}`);
+                          await Promise.all([loadNode(), loadVersions()]);
+                        } catch (e: any) {
+                          toast.error(e?.message || "Revert failed");
+                        }
+                      }
+                }
+              />
+            ) : (
+              <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Loading versions…
+              </div>
+            )}
+          </DialogContent>
+        </Dialog>
       )}
 
       {!isNew && (
