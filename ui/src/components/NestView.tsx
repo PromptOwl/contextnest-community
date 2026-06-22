@@ -16,6 +16,7 @@ import {
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
   Pencil, Trash2, FileWarning, Globe, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
+  FolderOpen, ChevronRight, FileStack,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
@@ -52,6 +53,24 @@ import { useAuth } from "../auth/AuthContext";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { CollaboratorManager } from "./CollaboratorManager";
 import { toast } from "sonner";
+
+function timeAgo(dateStr: string) {
+  const date = new Date(dateStr);
+  const diff = Date.now() - date.getTime();
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  if (diff < 604_800_000) return `${Math.floor(diff / 86_400_000)}d ago`;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function prettyFolder(name: string) {
+  if (name === "Root") return "Root";
+  return name
+    .split(/[-_]/)
+    .map((s) => (s ? s[0].toUpperCase() + s.slice(1) : s))
+    .join(" ");
+}
 
 interface NestViewProps {
   nestId: string;
@@ -380,13 +399,12 @@ export function NestView({
       .map(([tag, count]) => ({ tag, count }));
   }, [nodes]);
 
-  // Quick-access strip; only useful once the list outgrows a glance.
+  // Quick-access strip; shown on the Overview tab as recently-edited rows.
   const recentlyEdited = useMemo(() => {
-    if (nodes.length < 5) return [];
     return [...nodes]
       .filter((n) => n.updated_at)
       .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
-      .slice(0, 5);
+      .slice(0, 3);
   }, [nodes]);
 
   // myStewards (caller's own scoped rows) comes from GET /nests/:id, so
@@ -538,10 +556,6 @@ export function NestView({
             : a.folder.localeCompare(b.folder),
       );
   })();
-  const recentlyEdited = [...nodes]
-    .filter((n) => n.updated_at)
-    .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
-    .slice(0, 5);
 
   const openVersions = async (node: any) => {
     setVersionNode(node);
@@ -866,65 +880,166 @@ export function NestView({
           )}
         </TabsList>
 
-        {/* Overview — the nest's index/landing: a grouped table-of-contents
-            plus recently-edited, so opening a nest isn't just the flat node
-            list. Default tab. */}
+        {/* Overview — the nest's index/landing: stat tiles, recently-edited
+            rows, and a grouped table-of-contents grid so opening a nest
+            presents an index rather than just the flat node list. */}
         <TabsContent value="overview" className="space-y-4">
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-lg">Overview</CardTitle>
-              <CardDescription>
-                {stats.total} document{stats.total === 1 ? "" : "s"}
-                {stewardshipEnabled &&
-                  ` · ${stats.pending} pending · ${stats.approved} approved`}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-5">
-              {recentlyEdited.length > 0 && (
+          {/* Stat tiles */}
+          <div
+            className={`grid gap-3 ${
+              stewardshipEnabled ? "sm:grid-cols-4" : "sm:grid-cols-3"
+            } grid-cols-2`}
+          >
+            <Card className="border-muted/60">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-md bg-primary/10 text-primary p-2">
+                  <FileStack className="h-4 w-4" />
+                </div>
                 <div>
-                  <h4 className="text-xs font-medium text-muted-foreground mb-1.5">
-                    Recently edited
-                  </h4>
-                  <div className="flex flex-wrap gap-2">
-                    {recentlyEdited.map((n) => (
-                      <button
-                        key={n.id}
-                        onClick={() => onOpenDocument(n.id)}
-                        className="rounded-md border px-2.5 py-1 text-sm hover:bg-muted/50 max-w-full truncate"
-                      >
-                        {n.title || n.id}
-                      </button>
-                    ))}
+                  <div className="text-2xl font-semibold leading-none">
+                    {stats.total}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    Document{stats.total === 1 ? "" : "s"}
                   </div>
                 </div>
-              )}
+              </CardContent>
+            </Card>
+            <Card className="border-muted/60">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-md bg-blue-500/10 text-blue-600 p-2">
+                  <FolderOpen className="h-4 w-4" />
+                </div>
+                <div>
+                  <div className="text-2xl font-semibold leading-none">
+                    {tocGroups.length}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    Folder{tocGroups.length === 1 ? "" : "s"}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-muted/60">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-md bg-amber-500/10 text-amber-600 p-2">
+                  <Clock className="h-4 w-4" />
+                </div>
+                <div>
+                  <div className="text-2xl font-semibold leading-none">
+                    {recentlyEdited.length}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    Recently edited
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            {stewardshipEnabled && (
+              <Card className="border-muted/60">
+                <CardContent className="p-4 flex items-center gap-3">
+                  <div className="rounded-md bg-emerald-500/10 text-emerald-600 p-2">
+                    <CheckCircle2 className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <div className="text-2xl font-semibold leading-none">
+                      {stats.approved}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      Approved
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+
+          {/* Recently edited */}
+          {recentlyEdited.length > 0 && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Clock className="h-4 w-4 text-muted-foreground" />
+                  Recently edited
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="pt-0">
+                <ul className="divide-y">
+                  {recentlyEdited.map((n) => (
+                    <li key={n.id}>
+                      <button
+                        onClick={() => onOpenDocument(n.id)}
+                        className="w-full flex items-center gap-3 py-2 px-1 -mx-1 rounded hover:bg-muted/50 text-left group"
+                      >
+                        <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                        <span className="text-sm truncate flex-1">
+                          {n.title || n.id}
+                        </span>
+                        {n.updated_at && (
+                          <span className="text-xs text-muted-foreground shrink-0">
+                            {timeAgo(n.updated_at)}
+                          </span>
+                        )}
+                        <ChevronRight className="h-4 w-4 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Grouped table of contents */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                Contents
+              </CardTitle>
+              <CardDescription>
+                Browse documents grouped by folder.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="pt-0">
               {tocGroups.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No documents yet. Create one from the Documents tab.
-                </p>
+                <div className="py-8 text-center">
+                  <FileText className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
+                  <p className="text-sm text-muted-foreground">
+                    No documents yet. Create one from the Documents tab.
+                  </p>
+                </div>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-5">
                   {tocGroups.map((g) => (
                     <div key={g.folder}>
-                      <h4 className="text-xs font-medium text-muted-foreground mb-1">
-                        {g.folder}{" "}
-                        <span className="text-muted-foreground/60">
-                          ({g.items.length})
-                        </span>
-                      </h4>
-                      <ul className="space-y-0.5">
+                      <div className="flex items-center gap-2 mb-2">
+                        <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                        <h4 className="text-sm font-medium">
+                          {prettyFolder(g.folder)}
+                        </h4>
+                        <Badge
+                          variant="secondary"
+                          className="text-[10px] px-1.5 py-0 h-5"
+                        >
+                          {g.items.length}
+                        </Badge>
+                      </div>
+                      <div className="grid gap-1 sm:grid-cols-2">
                         {g.items.map((n) => (
-                          <li key={n.id}>
-                            <button
-                              onClick={() => onOpenDocument(n.id)}
-                              className="text-sm text-left hover:underline truncate w-full"
-                              title={n.title || n.id}
-                            >
+                          <button
+                            key={n.id}
+                            onClick={() => onOpenDocument(n.id)}
+                            className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 text-left group min-w-0"
+                            title={n.title || n.id}
+                          >
+                            <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            <span className="text-sm truncate flex-1">
                               {n.title || n.id}
-                            </button>
-                          </li>
+                            </span>
+                            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
+                          </button>
                         ))}
-                      </ul>
+                      </div>
                     </div>
                   ))}
                 </div>
