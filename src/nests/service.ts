@@ -14,6 +14,7 @@ import { isLicenseAdminUserId } from "../auth/license.js";
 import { isSuperAdmin } from "../governance/access-service.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError } from "../shared/errors.js";
+import { toSlug } from "../lib/core/slug.js";
 import type { Nest } from "../shared/types.js";
 
 /**
@@ -36,13 +37,6 @@ export function isImportedNest(nestId: string): boolean {
     .prepare("SELECT is_imported FROM nests WHERE id = ?")
     .get(nestId) as { is_imported: number } | undefined;
   return !!row?.is_imported;
-}
-
-function toSlug(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
 }
 
 /**
