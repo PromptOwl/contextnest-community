@@ -5,7 +5,7 @@ import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import {
@@ -36,6 +36,9 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const [nests, setNests] = useState<any[]>([]);
+  const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
+  const [syncing, setSyncing] = useState<Record<string, boolean>>({});
+  const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
   const [stats, setStats] = useState<ServerStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -54,21 +57,47 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
   const fetchNests = async () => {
     setLoading(true);
     try {
-      // /stats is best-effort. If it 503s (license gate, on older servers)
-      // or 404s (not deployed yet) we fall back to nest count only.
-      const [nestsData, statsData] = await Promise.all([
+      // /stats and /unsynced are best-effort. /stats can 503 on license-gated
+      // servers; /unsynced is admin-gated, so non-admin callers get 403. In
+      // both cases the dashboard still renders with the rest of the data.
+      const [nestsData, statsData, unsyncedData] = await Promise.all([
         api.listNests(),
         api.getServerStats().catch((e) => {
           console.error("[Dashboard] getServerStats failed", e);
           return null;
         }),
+        api.listUnsyncedFolders().catch(() => ({ folders: [] })),
       ]);
       setNests(nestsData.nests);
       setStats(statsData);
+      setUnsynced(unsyncedData.folders);
     } catch (e) {
       console.error("[Dashboard] fetchNests failed", e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSync = async (name: string) => {
+    setSyncing((s) => ({ ...s, [name]: true }));
+    setSyncErrors((s) => {
+      const next = { ...s };
+      delete next[name];
+      return next;
+    });
+    try {
+      await api.syncUnsyncedFolder(name);
+      await fetchNests();
+    } catch (e) {
+      console.error("[Dashboard] syncUnsyncedFolder failed", name, e);
+      const msg = e instanceof Error ? e.message : "Failed to sync folder";
+      setSyncErrors((s) => ({ ...s, [name]: msg }));
+    } finally {
+      setSyncing((s) => {
+        const next = { ...s };
+        delete next[name];
+        return next;
+      });
     }
   };
 
@@ -210,7 +239,7 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
       {/* Nest list */}
       {loading ? (
         <div className="text-center py-12 text-muted-foreground">Loading...</div>
-      ) : nests.length === 0 ? (
+      ) : nests.length === 0 && unsynced.length === 0 ? (
         <Card>
           <CardContent className="text-center py-12">
             <Database className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
@@ -227,6 +256,71 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
       ) : (
         <>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {unsynced.map((folder) => {
+              const isSyncing = !!syncing[folder.name];
+              const errMsg = syncErrors[folder.name];
+              return (
+                <div
+                  key={`unsynced:${folder.name}`}
+                  className="relative text-left p-4 rounded-lg border border-dashed border-blue-300 bg-blue-50/40"
+                >
+                  <div className="flex items-start gap-3 pr-2">
+                    <div className="p-2 rounded-md bg-blue-100">
+                      <Folder className="h-5 w-5 text-blue-700" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="font-medium truncate">{folder.label}</h3>
+                      <p
+                        className="text-xs text-muted-foreground font-mono truncate mt-0.5"
+                        title={folder.name}
+                      >
+                        {folder.name}
+                      </p>
+                      <p className="text-sm text-muted-foreground truncate mt-1">
+                        {folder.mdCount} markdown file
+                        {folder.mdCount === 1 ? "" : "s"} waiting to sync
+                      </p>
+                      <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground flex-wrap">
+                        <span
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200"
+                          title="Folder is on disk but not registered as a nest"
+                        >
+                          <Folder className="h-3 w-3" />
+                          Unsynced
+                        </span>
+                      </div>
+                      <Button
+                        size="sm"
+                        className="mt-3"
+                        onClick={() => handleSync(folder.name)}
+                        disabled={isSyncing}
+                      >
+                        {isSyncing ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+                            Syncing…
+                          </>
+                        ) : (
+                          <>
+                            <FolderSync className="h-3.5 w-3.5 mr-2" />
+                            Sync to Nest
+                          </>
+                        )}
+                      </Button>
+                      {errMsg && (
+                        <p
+                          role="alert"
+                          className="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1 break-words"
+                          title={errMsg}
+                        >
+                          {errMsg}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
             {nests.map((nest) => {
               const isAnonymous = nest.user_id === ANON_USER_ID;
               const openNest = () =>

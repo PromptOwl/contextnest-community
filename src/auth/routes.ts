@@ -21,6 +21,7 @@ import {
   resolveSession,
 } from "./sessions.js";
 import { ValidationError } from "../shared/errors.js";
+import { normalizeEmail } from "../shared/email.js";
 import { config } from "../config.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import {
@@ -127,6 +128,7 @@ authRoutes.post("/register", async (c) => {
   if (!body.email || !body.password) {
     throw new ValidationError("email and password are required");
   }
+  const email = normalizeEmail(body.email);
 
   const ip = clientIp(c);
   if (!tryConsume(`register:ip:${ip}`, REGISTER_LIMIT)) {
@@ -135,8 +137,8 @@ authRoutes.post("/register", async (c) => {
 
   const db = getDb();
   const existing = db
-    .prepare("SELECT id, is_invited FROM users WHERE email = ?")
-    .get(body.email) as { id: string; is_invited: number } | undefined;
+    .prepare("SELECT id, is_invited FROM users WHERE LOWER(email) = ?")
+    .get(email) as { id: string; is_invited: number } | undefined;
 
   let userId: string;
   const passwordHash = await hashPassword(body.password);
@@ -151,15 +153,15 @@ authRoutes.post("/register", async (c) => {
     db.prepare(
       "UPDATE users SET password_hash = ?, name = COALESCE(?, name), is_invited = 0 WHERE id = ?",
     ).run(passwordHash, body.name || null, userId);
-    trackEvent("user.register", { userId, email: body.email, claimed: true });
+    trackEvent("user.register", { userId, email, claimed: true });
   } else if (existing) {
     throw new ValidationError("Email already registered");
   } else {
     userId = uuid();
     db.prepare(
       "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
-    ).run(userId, body.email, body.name || null, passwordHash);
-    trackEvent("user.register", { userId, email: body.email });
+    ).run(userId, email, body.name || null, passwordHash);
+    trackEvent("user.register", { userId, email });
   }
 
   // Web session — browser auth lives in an httpOnly cookie. We do NOT
@@ -172,9 +174,9 @@ authRoutes.post("/register", async (c) => {
     {
       user: {
         id: userId,
-        email: body.email,
+        email,
         name: body.name || null,
-        is_admin: isLicenseAdminEmail(body.email),
+        is_admin: isLicenseAdminEmail(email),
       },
     },
     201,
@@ -214,9 +216,9 @@ authRoutes.post("/login", async (c) => {
   const db = getDb();
   const user = db
     .prepare(
-      "SELECT id, email, name, password_hash, is_admin FROM users WHERE email = ?",
+      "SELECT id, email, name, password_hash, is_admin FROM users WHERE LOWER(email) = ?",
     )
-    .get(body.email) as
+    .get(emailLower) as
     | {
       id: string;
       email: string;
@@ -490,10 +492,11 @@ authRoutes.post("/promptowl", async (c) => {
   }
 
   const db = getDb();
+  const meEmail = normalizeEmail(me.email);
 
   let user = db
-    .prepare("SELECT id, email, name FROM users WHERE email = ?")
-    .get(me.email) as
+    .prepare("SELECT id, email, name FROM users WHERE LOWER(email) = ?")
+    .get(meEmail) as
     | { id: string; email: string; name: string | null }
     | undefined;
 
@@ -502,8 +505,8 @@ authRoutes.post("/promptowl", async (c) => {
     const placeholderHash = await hashPassword(uuid());
     db.prepare(
       "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
-    ).run(userId, me.email, me.name || null, placeholderHash);
-    user = { id: userId, email: me.email, name: me.name || null };
+    ).run(userId, meEmail, me.name || null, placeholderHash);
+    user = { id: userId, email: meEmail, name: me.name || null };
 
     trackEvent("user.register", {
       userId,
@@ -777,6 +780,7 @@ authRoutes.delete("/users/:userId", async (c) => {
 authRoutes.post("/invite", async (c) => {
   const body = await c.req.json<{ email?: string; label?: string }>();
   if (!body.email) throw new ValidationError("email is required");
+  const email = normalizeEmail(body.email);
 
   const callerId = resolveCallerUserId(c);
   if (!callerId) {
@@ -801,16 +805,16 @@ authRoutes.post("/invite", async (c) => {
 
   // Find or create user by email
   let user = db
-    .prepare("SELECT id, email FROM users WHERE email = ?")
-    .get(body.email) as { id: string; email: string } | undefined;
+    .prepare("SELECT id, email FROM users WHERE LOWER(email) = ?")
+    .get(email) as { id: string; email: string } | undefined;
 
   if (!user) {
     const userId = uuid();
     const placeholderHash = await hashPassword(uuid());
     db.prepare(
       "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-    ).run(userId, body.email, null, placeholderHash);
-    user = { id: userId, email: body.email };
+    ).run(userId, email, null, placeholderHash);
+    user = { id: userId, email };
   }
 
   // Single api_key per user — if invitee already has one, we replace it

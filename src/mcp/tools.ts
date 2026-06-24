@@ -12,6 +12,12 @@ import { canManageWith } from "../governance/roles.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import {
+  listUnsyncedFolders,
+  syncUnsyncedFolder,
+} from "../nests/unsynced-service.js";
+import { isLicenseAdminUserId } from "../auth/license.js";
+import { config } from "../config.js";
+import {
   createNode,
   updateNode,
   listNodesForCallerByEmail,
@@ -22,6 +28,7 @@ export interface McpToolContext {
   queryEngine: GraphQueryEngine;
   versionManager: VersionManager;
   nestId: string;
+  userId: string;
   userEmail: string;
 }
 
@@ -270,6 +277,31 @@ export const TOOL_DEFINITIONS = [
       required: ["email"],
     },
   },
+
+  // ─── Unsynced Folder Tools ─────────────────────────────────────────
+
+  {
+    name: "context_unsynced_list",
+    description:
+      "List folders under the data root that are sync candidates — dropped in by the starter CLI or copied in manually, not yet converted into a nest. Server-admin only in non-open mode.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "context_sync_folder",
+    description:
+      "Convert a sibling folder under the data root into a real nest. Imports its markdown, seeds governance, and removes the source folder. Use context_unsynced_list to discover folder names. Server-admin only in non-open mode.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description:
+            "Folder path relative to the data root (e.g. 'nodes/architecture'), as returned by context_unsynced_list.",
+        },
+      },
+      required: ["name"],
+    },
+  },
 ];
 
 // Resolve the LLM-visible body for a node. When the nest enforces
@@ -298,7 +330,7 @@ export async function handleToolCall(
   args: Record<string, any>,
   ctx: McpToolContext,
 ): Promise<string> {
-  const { storage, queryEngine, versionManager, nestId, userEmail } = ctx;
+  const { storage, queryEngine, versionManager, nestId, userId, userEmail } = ctx;
 
   switch (toolName) {
     case "context_init": {
@@ -731,6 +763,40 @@ export async function handleToolCall(
         return `Shared this nest with **${args.email}** as ${label}.`;
       } catch (err: any) {
         return `Failed to share nest: ${err.message}`;
+      }
+    }
+
+    case "context_unsynced_list": {
+      // Same admin gate as REST GET /nests/unsynced — listing reflects
+      // server-side filesystem state, so non-admins shouldn't probe it.
+      if (config.AUTH_MODE !== "open" && !isLicenseAdminUserId(userId)) {
+        return "You don't have permission to list unsynced folders. Server admin only.";
+      }
+      const folders = listUnsyncedFolders();
+      if (!folders.length) return "No unsynced folders found.";
+      const list = folders
+        .map(
+          (f, i) =>
+            `${i + 1}. **${f.label}** \`${f.name}\` — ${f.mdCount} md file(s), ${f.sizeBytes} bytes`,
+        )
+        .join("\n");
+      return `# Unsynced Folders (${folders.length})\n\n${list}`;
+    }
+
+    case "context_sync_folder": {
+      // Same admin gate as REST POST /nests/unsynced/sync.
+      if (config.AUTH_MODE !== "open" && !isLicenseAdminUserId(userId)) {
+        return "You don't have permission to sync folders. Server admin only.";
+      }
+      try {
+        const { nest, documents } = await syncUnsyncedFolder(
+          userId,
+          args.name,
+          userEmail,
+        );
+        return `Synced folder "${args.name}" → nest **${nest.name}** (${nest.id}) with ${documents} document(s).`;
+      } catch (err: any) {
+        return `Failed to sync folder: ${err.message}`;
       }
     }
 

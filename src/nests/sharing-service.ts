@@ -9,6 +9,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { ValidationError, ConflictError } from "../shared/errors.js";
+import { normalizeEmail } from "../shared/email.js";
 import type { NestCollaborator } from "../shared/types.js";
 
 const VALID_PERMISSIONS = ["read", "write", "admin"] as const;
@@ -37,9 +38,10 @@ export async function addCollaborator(params: {
   // (they claim it by registering with the same address — see auth claim flow).
   let userId = params.userId;
   if (!userId && params.email) {
+    const email = normalizeEmail(params.email);
     const existing = db
-      .prepare("SELECT id FROM users WHERE email = ?")
-      .get(params.email) as { id: string } | undefined;
+      .prepare("SELECT id FROM users WHERE LOWER(email) = ?")
+      .get(email) as { id: string } | undefined;
     if (existing) {
       userId = existing.id;
     } else {
@@ -47,7 +49,7 @@ export async function addCollaborator(params: {
       userId = uuid();
       db.prepare(
         "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-      ).run(userId, params.email, null, await hashPassword(uuid()));
+      ).run(userId, email, null, await hashPassword(uuid()));
     }
   }
   if (!userId) {
