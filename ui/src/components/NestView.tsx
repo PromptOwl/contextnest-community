@@ -2,7 +2,7 @@
  * NestView — governance dashboard for a single nest.
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
 import { matchesFilters } from "../lib/node-filter";
 import { linkHealth } from "../lib/link-health";
@@ -14,8 +14,9 @@ import {
 import {
   FileText, Plus, ArrowLeft, History, Shield, Search,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
-  Pencil, Trash2, FileWarning, Globe, FolderInput, Users,
+  Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
+  FolderOpen, ChevronRight, FileStack,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { NestSettingsModal } from "./NestSettingsModal";
@@ -53,6 +54,24 @@ import { MarkdownEditor } from "./MarkdownEditor";
 import { CollaboratorManager } from "./CollaboratorManager";
 import { toast } from "sonner";
 
+function timeAgo(dateStr: string) {
+  const date = new Date(dateStr);
+  const diff = Date.now() - date.getTime();
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  if (diff < 604_800_000) return `${Math.floor(diff / 86_400_000)}d ago`;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function prettyFolder(name: string) {
+  if (name === "Root") return "Root";
+  return name
+    .split(/[-_]/)
+    .map((s) => (s ? s[0].toUpperCase() + s.slice(1) : s))
+    .join(" ");
+}
+
 interface NestViewProps {
   nestId: string;
   nestName: string;
@@ -81,7 +100,57 @@ export function NestView({
   //   - anon-owned + key mode → license-admin caretaker only
   const canDeleteNest =
     isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
+  // Stewardship is governance of the commons / one's own nests, not a tool
+  // server admins impose on other users' nests. So the steward roster,
+  // assign-steward UI, and Settings modal are hidden when an admin views a
+  // real user's nest.
+  const canManageGovernance = isAdmin && (isOwner || isAnonOwned);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
+
+  // Local mirror of the nest name so inline rename feels instant while the
+  // backend autosave lands. Resets if the parent passes a different nest.
+  const [editableName, setEditableName] = useState(nestName);
+  const lastSavedName = useRef(nestName);
+  useEffect(() => {
+    setEditableName(nestName);
+    lastSavedName.current = nestName;
+  }, [nestName, nestId]);
+  const renameTimer = useRef<number | null>(null);
+  const renameRef = useRef<() => void>(() => { });
+  const [renameError, setRenameError] = useState<string | null>(null);
+  renameRef.current = async () => {
+    const trimmed = editableName.trim();
+    if (!trimmed) return;
+    if (trimmed === lastSavedName.current.trim()) return;
+    try {
+      await api.updateNest(nestId, { name: trimmed });
+      lastSavedName.current = trimmed;
+      setRenameError(null);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to rename nest";
+      setRenameError(msg);
+    }
+  };
+  const scheduleRename = useCallback(() => {
+    if (renameTimer.current) window.clearTimeout(renameTimer.current);
+    renameTimer.current = window.setTimeout(() => {
+      renameTimer.current = null;
+      void renameRef.current();
+    }, 1200);
+  }, []);
+  const flushRename = useCallback(() => {
+    if (renameTimer.current) {
+      window.clearTimeout(renameTimer.current);
+      renameTimer.current = null;
+    }
+    void renameRef.current();
+  }, []);
+  useEffect(
+    () => () => {
+      if (renameTimer.current) window.clearTimeout(renameTimer.current);
+    },
+    [],
+  );
   const [nodes, setNodes] = useState<any[]>([]);
   // Full roster — admin-only (listStewards 403s for non-admins → stays []).
   const [stewards, setStewards] = useState<Steward[]>([]);
@@ -94,6 +163,7 @@ export function NestView({
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [visibility, setVisibility] = useState<"private" | "public">("private");
+  const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [isImported, setIsImported] = useState(false);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
@@ -380,13 +450,12 @@ export function NestView({
       .map(([tag, count]) => ({ tag, count }));
   }, [nodes]);
 
-  // Quick-access strip; only useful once the list outgrows a glance.
+  // Quick-access strip; shown on the Overview tab as recently-edited rows.
   const recentlyEdited = useMemo(() => {
-    if (nodes.length < 5) return [];
     return [...nodes]
       .filter((n) => n.updated_at)
       .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
-      .slice(0, 5);
+      .slice(0, 3);
   }, [nodes]);
 
   // myStewards (caller's own scoped rows) comes from GET /nests/:id, so
@@ -497,6 +566,18 @@ export function NestView({
     return true;
   });
 
+  // The caller's own pending submissions. SoD keeps these out of the
+  // actionable queue above (authors can't approve their own work), which made
+  // it look like "submit for review did nothing." Surface them in their own
+  // section so the submitter sees their request IS queued. (CU-wdqcpztgwm)
+  const myPendingSubmissions = reviewQueue.filter(
+    (r) => r.requestedBy.toLowerCase() === currentEmail,
+  );
+  // Show the Review tab whenever stewardship is on OR there are pending
+  // requests at all — otherwise a submitted edit is stranded with no tab
+  // (e.g. stewardship later disabled, or the submitter has no reviewer role).
+  const showReviewTab = stewardshipEnabled || reviewQueue.length > 0;
+
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
   // (raw size, which over-promised before — see CU-86ahn99fv).
@@ -507,6 +588,37 @@ export function NestView({
     reviewQueue: reviewQueue.length,
     reviewable: reviewableQueue.length,
   };
+
+  // Overview/index landing (CU-wdqcpztgwp): a grouped table-of-contents +
+  // recently-edited, so opening a nest presents an index rather than only the
+  // flat node list. Grouped by the node id's top-level folder.
+  // NOTE: the engine also generates a canonical INDEX.md via regenerateIndex()
+  // (excluded from the node list as a meta-file); surfacing that engine-built
+  // index is a deeper follow-up — this is the lightweight UI overview.
+  const tocGroups = (() => {
+    const groups = new Map<string, any[]>();
+    for (const n of nodes) {
+      const id: string = n.id || "";
+      const slash = id.indexOf("/");
+      const folder = slash > 0 ? id.slice(0, slash) : "Root";
+      if (!groups.has(folder)) groups.set(folder, []);
+      groups.get(folder)!.push(n);
+    }
+    return [...groups.entries()]
+      .map(([folder, items]) => ({
+        folder,
+        items: [...items].sort((a, b) =>
+          String(a.title || a.id).localeCompare(String(b.title || b.id)),
+        ),
+      }))
+      .sort((a, b) =>
+        a.folder === "Root"
+          ? -1
+          : b.folder === "Root"
+            ? 1
+            : a.folder.localeCompare(b.folder),
+      );
+  })();
 
   const openVersions = async (node: any) => {
     setVersionNode(node);
@@ -621,6 +733,25 @@ export function NestView({
     }
   };
 
+  // Inline visibility toggle from the header (owner/admin only). Optimistic
+  // flip with revert on failure, mirroring ShareNestDialog so the control
+  // never lies about server state. Surfaces the public/private switch outside
+  // the Share dialog, where it was easy to miss. (CU-wdqcpztgwk)
+  const handleVisibilityToggle = async () => {
+    const next = visibility === "public" ? "private" : "public";
+    setVisibility(next);
+    setVisibilitySaving(true);
+    try {
+      const result = await api.setNestVisibility(nestId, next);
+      if (result?.visibility) setVisibility(result.visibility);
+    } catch (err: any) {
+      setVisibility(next === "public" ? "private" : "public"); // revert
+      toast.error(err?.message || "Failed to change visibility");
+    } finally {
+      setVisibilitySaving(false);
+    }
+  };
+
   return (
     <div className="md:py-6">
       {/* Header — PromptOwl ContextDashboard layout */}
@@ -629,18 +760,86 @@ export function NestView({
           <Button variant="ghost" size="icon" onClick={onBack} className="shrink-0">
             <ArrowLeft className="h-4 w-4" />
           </Button>
-          <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
-            {nestName}
-          </h3>
-          {visibility === "public" && (
-            <Badge
+          {canManage ? (
+            <div className="min-w-0 flex-1">
+              <input
+                value={editableName}
+                onChange={(e) => {
+                  setEditableName(e.target.value);
+                  setRenameError(null);
+                  scheduleRename();
+                }}
+                onBlur={flushRename}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    flushRename();
+                    (e.target as HTMLInputElement).blur();
+                  }
+                  if (e.key === "Escape") {
+                    setEditableName(lastSavedName.current);
+                    setRenameError(null);
+                    (e.target as HTMLInputElement).blur();
+                  }
+                }}
+                aria-label="Nest name"
+                title="Click to rename — saved automatically"
+                className="w-full min-w-0 truncate text-xl font-semibold bg-transparent outline-none border-b border-transparent hover:border-border focus:border-primary px-1 -ml-1 rounded-sm"
+              />
+              {renameError && (
+                <p
+                  role="alert"
+                  className="mt-1 text-xs text-red-700"
+                  title={renameError}
+                >
+                  {renameError}
+                </p>
+              )}
+            </div>
+          ) : (
+            <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
+              {nestName}
+            </h3>
+          )}
+          {/* Visibility — an inline toggle for owner/admin (so the public/
+              private switch isn't buried in the Share dialog), a read-only
+              badge for everyone else. */}
+          {canManage ? (
+            <Button
               variant="outline"
-              className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
-              title="Anyone with the URL can read this nest"
+              size="sm"
+              onClick={handleVisibilityToggle}
+              disabled={visibilitySaving}
+              className={`shrink-0 h-7 gap-1.5 ${visibility === "public"
+                  ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+                  : ""
+                }`}
+              title={
+                visibility === "public"
+                  ? "Public — anyone with the URL can read. Click to make private."
+                  : "Private. Click to make public (anyone with the URL can read)."
+              }
             >
-              <Globe className="h-3 w-3" />
-              Public
-            </Badge>
+              {visibilitySaving ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : visibility === "public" ? (
+                <Globe className="h-3.5 w-3.5" />
+              ) : (
+                <Lock className="h-3.5 w-3.5" />
+              )}
+              {visibility === "public" ? "Public" : "Private"}
+            </Button>
+          ) : (
+            visibility === "public" && (
+              <Badge
+                variant="outline"
+                className="shrink-0 gap-1 border-blue-200 bg-blue-50 text-blue-700"
+                title="Anyone with the URL can read this nest"
+              >
+                <Globe className="h-3 w-3" />
+                Public
+              </Badge>
+            )
           )}
           {isImported && (
             <Badge
@@ -660,9 +859,12 @@ export function NestView({
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:shrink-0 sm:justify-end">
           {!isReadOnly && (
             <>
-              {/* Settings is stewardship-only and server-admin gated; a
-                  nest-admin/owner would just see an empty modal. */}
-              {isAdmin && (
+              {/* Settings is stewardship-only and server-admin gated. Also
+                  hidden when the admin is viewing a real user's nest —
+                  stewardship is a governance concern over the commons /
+                  the admin's own nests, not something to impose on a user
+                  who owns their own nest. */}
+              {canManageGovernance && (
                 <Button variant="outline" onClick={() => setShowSettings(true)}>
                   <SettingsIcon className="h-4 w-4 mr-2" />
                   Settings
@@ -792,11 +994,12 @@ export function NestView({
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because
           their data is empty by definition. */}
-      <Tabs defaultValue="documents" className="w-full">
+      <Tabs defaultValue="overview" className="w-full">
         <TabsList className="mb-4">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>
           {/* Governance tabs hidden for view-only. */}
-          {stewardshipEnabled && !isReadOnly && (
+          {showReviewTab && !isReadOnly && (
             <TabsTrigger value="review" className="gap-2">
               Review Queue
               {reviewableQueue.length > 0 && (
@@ -819,8 +1022,9 @@ export function NestView({
               )}
             </TabsTrigger>
           )}
-          {/* Steward roster is admin-only (list + manage). */}
-          {stewardshipEnabled && isAdmin && (
+          {/* Steward roster is admin-only (list + manage), and hidden when
+              the admin is viewing a real user's nest. */}
+          {stewardshipEnabled && canManageGovernance && (
             <TabsTrigger value="stewards">Stewards</TabsTrigger>
           )}
           {/* Collaborators — plain access sharing, independent of
@@ -829,6 +1033,174 @@ export function NestView({
             <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
           )}
         </TabsList>
+
+        {/* Overview — the nest's index/landing: stat tiles, recently-edited
+            rows, and a grouped table-of-contents grid so opening a nest
+            presents an index rather than just the flat node list. */}
+        <TabsContent value="overview" className="space-y-4">
+          {/* Stat tiles */}
+          <div
+            className={`grid gap-3 ${
+              stewardshipEnabled ? "sm:grid-cols-4" : "sm:grid-cols-3"
+            } grid-cols-2`}
+          >
+            <Card className="border-muted/60">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-md bg-primary/10 text-primary p-2">
+                  <FileStack className="h-4 w-4" />
+                </div>
+                <div>
+                  <div className="text-2xl font-semibold leading-none">
+                    {stats.total}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    Document{stats.total === 1 ? "" : "s"}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-muted/60">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-md bg-blue-500/10 text-blue-600 p-2">
+                  <FolderOpen className="h-4 w-4" />
+                </div>
+                <div>
+                  <div className="text-2xl font-semibold leading-none">
+                    {tocGroups.length}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    Folder{tocGroups.length === 1 ? "" : "s"}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card className="border-muted/60">
+              <CardContent className="p-4 flex items-center gap-3">
+                <div className="rounded-md bg-amber-500/10 text-amber-600 p-2">
+                  <Clock className="h-4 w-4" />
+                </div>
+                <div>
+                  <div className="text-2xl font-semibold leading-none">
+                    {recentlyEdited.length}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-1">
+                    Recently edited
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            {stewardshipEnabled && (
+              <Card className="border-muted/60">
+                <CardContent className="p-4 flex items-center gap-3">
+                  <div className="rounded-md bg-emerald-500/10 text-emerald-600 p-2">
+                    <CheckCircle2 className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <div className="text-2xl font-semibold leading-none">
+                      {stats.approved}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">
+                      Approved
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+
+          {/* Recently edited */}
+          {recentlyEdited.length > 0 && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <Clock className="h-4 w-4 text-muted-foreground" />
+                  Recently edited
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="pt-0">
+                <ul className="divide-y">
+                  {recentlyEdited.map((n) => (
+                    <li key={n.id}>
+                      <button
+                        onClick={() => onOpenDocument(n.id)}
+                        className="w-full flex items-center gap-3 py-2 px-1 -mx-1 rounded hover:bg-muted/50 text-left group"
+                      >
+                        <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                        <span className="text-sm truncate flex-1">
+                          {n.title || n.id}
+                        </span>
+                        {n.updated_at && (
+                          <span className="text-xs text-muted-foreground shrink-0">
+                            {timeAgo(n.updated_at)}
+                          </span>
+                        )}
+                        <ChevronRight className="h-4 w-4 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Grouped table of contents */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                Contents
+              </CardTitle>
+              <CardDescription>
+                Browse documents grouped by folder.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="pt-0">
+              {tocGroups.length === 0 ? (
+                <div className="py-8 text-center">
+                  <FileText className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
+                  <p className="text-sm text-muted-foreground">
+                    No documents yet. Create one from the Documents tab.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-5">
+                  {tocGroups.map((g) => (
+                    <div key={g.folder}>
+                      <div className="flex items-center gap-2 mb-2">
+                        <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                        <h4 className="text-sm font-medium">
+                          {prettyFolder(g.folder)}
+                        </h4>
+                        <Badge
+                          variant="secondary"
+                          className="text-[10px] px-1.5 py-0 h-5"
+                        >
+                          {g.items.length}
+                        </Badge>
+                      </div>
+                      <div className="grid gap-1 sm:grid-cols-2">
+                        {g.items.map((n) => (
+                          <button
+                            key={n.id}
+                            onClick={() => onOpenDocument(n.id)}
+                            className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 text-left group min-w-0"
+                            title={n.title || n.id}
+                          >
+                            <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            <span className="text-sm truncate flex-1">
+                              {n.title || n.id}
+                            </span>
+                            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
 
         <TabsContent value="documents" className="space-y-4">
           <Card>
@@ -902,9 +1274,8 @@ export function NestView({
                       type="button"
                       title="List view"
                       aria-pressed={viewMode === "list"}
-                      className={`px-2 h-full rounded-l-md ${
-                        viewMode === "list" ? "bg-muted" : "hover:bg-muted/50"
-                      }`}
+                      className={`px-2 h-full rounded-l-md ${viewMode === "list" ? "bg-muted" : "hover:bg-muted/50"
+                        }`}
                       onClick={() => setViewMode("list")}
                     >
                       <ListIcon className="h-4 w-4" />
@@ -913,9 +1284,8 @@ export function NestView({
                       type="button"
                       title="Card view"
                       aria-pressed={viewMode === "cards"}
-                      className={`px-2 h-full rounded-r-md ${
-                        viewMode === "cards" ? "bg-muted" : "hover:bg-muted/50"
-                      }`}
+                      className={`px-2 h-full rounded-r-md ${viewMode === "cards" ? "bg-muted" : "hover:bg-muted/50"
+                        }`}
                       onClick={() => setViewMode("cards")}
                     >
                       <LayoutGrid className="h-4 w-4" />
@@ -1022,11 +1392,10 @@ export function NestView({
                       <button
                         key={tag}
                         type="button"
-                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-colors ${
-                          active
+                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-colors ${active
                             ? "bg-primary text-primary-foreground border-primary"
                             : "text-foreground/80 hover:bg-muted"
-                        }`}
+                          }`}
                         onClick={() => toggleTagFilter(tag)}
                         title={
                           active
@@ -1164,118 +1533,116 @@ export function NestView({
                       </div>
                     );
                     return (
-                    <div
-                      key={node.id}
-                      onClick={() => onOpenDocument(node.id)}
-                      className={`${
-                        cards
-                          ? "flex flex-col gap-2"
-                          : "flex items-center gap-3"
-                      } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer`}
-                      data-testid={`document-row-${node.id}`}
-                    >
-                      {!cards && (
-                        <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          {cards && (
-                            <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                          )}
-                          <span
-                            className="font-medium truncate min-w-0"
-                            title={node.title}
-                          >
-                            {node.title}
-                          </span>
-                          <LifecycleStatusBadge
-                            status={(node.status as DocumentLifecycleStatus) || "draft"}
-                            size="sm"
-                            className="shrink-0 whitespace-nowrap"
-                          />
-                          {cards && <div className="ml-auto">{actionMenu}</div>}
-                        </div>
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                          <span>v{node.version || 1}</span>
-                          {node.tags?.length > 0 && (
-                            <>
-                              <span>·</span>
-                              <span className="flex items-center gap-1 truncate">
-                                {node.tags.slice(0, 3).map((t: string) => (
-                                  <button
-                                    key={t}
-                                    type="button"
-                                    title={
-                                      tagFilters.includes(t)
-                                        ? `Remove filter ${t}`
-                                        : `Filter by ${t}`
-                                    }
-                                    className={`rounded-full border px-1.5 py-px transition-colors ${
-                                      tagFilters.includes(t)
-                                        ? "bg-primary text-primary-foreground border-primary"
-                                        : "hover:bg-muted"
-                                    }`}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      toggleTagFilter(t);
-                                    }}
-                                  >
-                                    {t}
-                                  </button>
-                                ))}
-                              </span>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                      {!cards && (
                       <div
-                        className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100"
-                        onClick={(e) => e.stopPropagation()}
+                        key={node.id}
+                        onClick={() => onOpenDocument(node.id)}
+                        className={`${cards
+                            ? "flex flex-col gap-2"
+                            : "flex items-center gap-3"
+                          } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer`}
+                        data-testid={`document-row-${node.id}`}
                       >
-                        {canSubmit && (
-                          <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
-                            <Send className="h-3.5 w-3.5 mr-1" />
-                            Submit
-                          </Button>
+                        {!cards && (
+                          <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
                         )}
-                        {canReview && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => setReviewNode(node)}
-                              className="border-green-200 text-green-700 hover:bg-green-50"
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            {cards && (
+                              <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                            )}
+                            <span
+                              className="font-medium truncate min-w-0"
+                              title={node.title}
                             >
-                              Review
+                              {node.title}
+                            </span>
+                            <LifecycleStatusBadge
+                              status={(node.status as DocumentLifecycleStatus) || "draft"}
+                              size="sm"
+                              className="shrink-0 whitespace-nowrap"
+                            />
+                            {cards && <div className="ml-auto">{actionMenu}</div>}
+                          </div>
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                            <span>v{node.version || 1}</span>
+                            {node.tags?.length > 0 && (
+                              <>
+                                <span>·</span>
+                                <span className="flex items-center gap-1 truncate">
+                                  {node.tags.slice(0, 3).map((t: string) => (
+                                    <button
+                                      key={t}
+                                      type="button"
+                                      title={
+                                        tagFilters.includes(t)
+                                          ? `Remove filter ${t}`
+                                          : `Filter by ${t}`
+                                      }
+                                      className={`rounded-full border px-1.5 py-px transition-colors ${tagFilters.includes(t)
+                                          ? "bg-primary text-primary-foreground border-primary"
+                                          : "hover:bg-muted"
+                                        }`}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleTagFilter(t);
+                                      }}
+                                    >
+                                      {t}
+                                    </button>
+                                  ))}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                        {!cards && (
+                          <div
+                            className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {canSubmit && (
+                              <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
+                                <Send className="h-3.5 w-3.5 mr-1" />
+                                Submit
+                              </Button>
+                            )}
+                            {canReview && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setReviewNode(node)}
+                                className="border-green-200 text-green-700 hover:bg-green-50"
+                              >
+                                Review
+                              </Button>
+                            )}
+                            {canEdit && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => onOpenDocument(node.id)}
+                                title="Edit"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
+                              <History className="h-3.5 w-3.5" />
                             </Button>
-                          )}
-                        {canEdit && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => onOpenDocument(node.id)}
-                            title="Edit"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </Button>
-                        )}
-                        <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
-                          <History className="h-3.5 w-3.5" />
-                        </Button>
-                        {canDelete && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDeleteNode(node)}
-                            title="Delete"
-                            className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
+                            {canDelete && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => handleDeleteNode(node)}
+                                title="Delete"
+                                className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                          </div>
                         )}
                       </div>
-                      )}
-                    </div>
                     );
                   })}
                 </div>
@@ -1286,61 +1653,92 @@ export function NestView({
               {!loading &&
                 (wikiHealth.broken.length > 0 ||
                   wikiHealth.orphans.length > 0) && (
-                <details className="mt-4 text-xs text-muted-foreground">
-                  <summary className="cursor-pointer select-none">
-                    Link health: {wikiHealth.broken.length} broken link
-                    {wikiHealth.broken.length !== 1 ? "s" : ""} ·{" "}
-                    {wikiHealth.orphans.length} orphan doc
-                    {wikiHealth.orphans.length !== 1 ? "s" : ""}
-                  </summary>
-                  <div className="mt-2 space-y-2 pl-1">
-                    {wikiHealth.broken.length > 0 && (
-                      <div>
-                        <div className="font-medium mb-1">
-                          Broken links (target doesn't exist):
-                        </div>
-                        {wikiHealth.broken.slice(0, 10).map((b, i) => (
-                          <div key={i}>
-                            <button
-                              type="button"
-                              className="text-primary hover:underline"
-                              onClick={() => onOpenDocument(b.sourceId)}
-                            >
-                              {b.sourceTitle}
-                            </button>{" "}
-                            → [[{b.target}]]
+                  <details className="mt-4 text-xs text-muted-foreground">
+                    <summary className="cursor-pointer select-none">
+                      Link health: {wikiHealth.broken.length} broken link
+                      {wikiHealth.broken.length !== 1 ? "s" : ""} ·{" "}
+                      {wikiHealth.orphans.length} orphan doc
+                      {wikiHealth.orphans.length !== 1 ? "s" : ""}
+                    </summary>
+                    <div className="mt-2 space-y-2 pl-1">
+                      {wikiHealth.broken.length > 0 && (
+                        <div>
+                          <div className="font-medium mb-1">
+                            Broken links (target doesn't exist):
                           </div>
-                        ))}
-                      </div>
-                    )}
-                    {wikiHealth.orphans.length > 0 && (
-                      <div>
-                        <div className="font-medium mb-1">
-                          Orphans (nothing links to them):
-                        </div>
-                        <div className="flex flex-wrap gap-x-3 gap-y-1">
-                          {wikiHealth.orphans.slice(0, 15).map((o) => (
-                            <button
-                              key={o.id}
-                              type="button"
-                              className="text-primary hover:underline"
-                              onClick={() => onOpenDocument(o.id)}
-                            >
-                              {o.title}
-                            </button>
+                          {wikiHealth.broken.slice(0, 10).map((b, i) => (
+                            <div key={i}>
+                              <button
+                                type="button"
+                                className="text-primary hover:underline"
+                                onClick={() => onOpenDocument(b.sourceId)}
+                              >
+                                {b.sourceTitle}
+                              </button>{" "}
+                              → [[{b.target}]]
+                            </div>
                           ))}
                         </div>
-                      </div>
-                    )}
-                  </div>
-                </details>
-              )}
+                      )}
+                      {wikiHealth.orphans.length > 0 && (
+                        <div>
+                          <div className="font-medium mb-1">
+                            Orphans (nothing links to them):
+                          </div>
+                          <div className="flex flex-wrap gap-x-3 gap-y-1">
+                            {wikiHealth.orphans.slice(0, 15).map((o) => (
+                              <button
+                                key={o.id}
+                                type="button"
+                                className="text-primary hover:underline"
+                                onClick={() => onOpenDocument(o.id)}
+                              >
+                                {o.title}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </details>
+                )}
             </CardContent>
           </Card>
         </TabsContent>
 
-        {stewardshipEnabled && (
+        {showReviewTab && (
           <TabsContent value="review" className="space-y-4">
+            {/* The caller's own submissions, kept out of the actionable queue
+                by separation-of-duties. Shown read-only so "submit for review"
+                visibly lands somewhere. */}
+            {myPendingSubmissions.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Send className="h-4 w-4 text-blue-600" />
+                    Submitted by you — awaiting review
+                  </CardTitle>
+                  <CardDescription>
+                    Your edits are queued for a reviewer. You can't approve your
+                    own work (separation of duties), but they are pending.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {myPendingSubmissions.map((r) => (
+                    <button
+                      key={r.id}
+                      onClick={() => onOpenDocument(r.nodeId)}
+                      className="w-full flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm hover:bg-muted/50"
+                    >
+                      <span className="truncate">{r.title || r.nodeId}</span>
+                      <Badge variant="secondary" className="text-[10px] shrink-0">
+                        Awaiting review
+                      </Badge>
+                    </button>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
             <ReviewQueue
               requests={reviewableQueue}
               loading={loading}
@@ -1422,35 +1820,35 @@ export function NestView({
                       nodes.find((n) => n.id === entry.document_id)?.title ||
                       entry.document_id.split("/").pop();
                     return (
-                    <div
-                      key={entry.suggestion_id}
-                      className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors"
-                      onClick={() => onOpenDocument(entry.document_id)}
-                      data-testid={`external-edit-row-${entry.suggestion_id}`}
-                    >
-                      <FileWarning className="h-5 w-5 text-orange-600 flex-shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium truncate">
-                            {docTitle}
-                          </span>
-                          <Badge
-                            variant="secondary"
-                            className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
-                          >
-                            {entry.source}
-                          </Badge>
-                        </div>
-                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                          <Clock className="h-3 w-3" />
-                          <span>
-                            {new Date(entry.detected_at).toLocaleString()}
-                          </span>
-                          <span>•</span>
-                          <span>by {entry.actor}</span>
+                      <div
+                        key={entry.suggestion_id}
+                        className="flex items-center gap-3 p-3 rounded-lg border hover:bg-muted/50 cursor-pointer transition-colors"
+                        onClick={() => onOpenDocument(entry.document_id)}
+                        data-testid={`external-edit-row-${entry.suggestion_id}`}
+                      >
+                        <FileWarning className="h-5 w-5 text-orange-600 flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium truncate">
+                              {docTitle}
+                            </span>
+                            <Badge
+                              variant="secondary"
+                              className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
+                            >
+                              {entry.source}
+                            </Badge>
+                          </div>
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                            <Clock className="h-3 w-3" />
+                            <span>
+                              {new Date(entry.detected_at).toLocaleString()}
+                            </span>
+                            <span>•</span>
+                            <span>by {entry.actor}</span>
+                          </div>
                         </div>
                       </div>
-                    </div>
                     );
                   })}
                 </div>
@@ -1459,7 +1857,7 @@ export function NestView({
           </Card>
         </TabsContent>
 
-        {stewardshipEnabled && isAdmin && (
+        {stewardshipEnabled && canManageGovernance && (
           <TabsContent value="stewards" className="space-y-4">
             <Card className="border-blue-200 bg-blue-50/40">
               <CardHeader className="pb-2">
@@ -1548,7 +1946,7 @@ export function NestView({
                       approve. Add an editor/reviewer to delegate approvals
                       for a tag or specific doc.
                     </p>
-                    {isAdmin && (
+                    {canManageGovernance && (
                       <Button
                         variant="outline"
                         size="sm"
@@ -1570,10 +1968,10 @@ export function NestView({
                     )}
                     showScope
                     onAddSteward={
-                      isAdmin ? () => setShowAssignSteward(true) : undefined
+                      canManageGovernance ? () => setShowAssignSteward(true) : undefined
                     }
-                    onRemove={isAdmin ? handleRemoveSteward : undefined}
-                    onEditRole={isAdmin ? setEditingSteward : undefined}
+                    onRemove={canManageGovernance ? handleRemoveSteward : undefined}
+                    onEditRole={canManageGovernance ? setEditingSteward : undefined}
                     currentUserEmail={currentEmail}
                   />
                 )}
@@ -1606,7 +2004,7 @@ export function NestView({
         )}
       </Tabs>
 
-      {!stewardshipEnabled && !isReadOnly && (
+      {!stewardshipEnabled && !isReadOnly && canManageGovernance && (
         <Card className="mt-4">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
@@ -1622,21 +2020,15 @@ export function NestView({
               Enable stewardship to require steward approval before documents become AI-ready.
               Versioning stays on either way.
             </p>
-            {isAdmin ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full"
-                onClick={() => setShowSettings(true)}
-              >
-                <SettingsIcon className="h-3.5 w-3.5 mr-2" />
-                Open Settings
-              </Button>
-            ) : (
-              <p className="text-xs text-muted-foreground italic">
-                Only the server admin can enable stewardship.
-              </p>
-            )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={() => setShowSettings(true)}
+            >
+              <SettingsIcon className="h-3.5 w-3.5 mr-2" />
+              Open Settings
+            </Button>
           </CardContent>
         </Card>
       )}
@@ -1666,7 +2058,7 @@ export function NestView({
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
           allowSelfApprove={allowSelfApprove}
-          canManageStewardship={isAdmin}
+          canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
           onChanged={() => { setShowSettings(false); fetchData(); }}
         />

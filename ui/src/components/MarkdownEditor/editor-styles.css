@@ -11,6 +11,12 @@
   user-select: none;
 }
 
+/* ProseMirror puts text caret on all inline content. Override for links so
+   they signal click-to-navigate (matches openOnClick: true behavior). */
+.ProseMirror a {
+  cursor: pointer;
+}
+
 .wiki-link {
   cursor: pointer;
   text-decoration: none;

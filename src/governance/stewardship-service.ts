@@ -7,7 +7,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
-import { getAccessConfig } from "./access-service.js";
+import { isSuperAdmin } from "./access-service.js";
 import { ConflictError, ValidationError } from "../shared/errors.js";
 import { buildTitleMap } from "./title-resolver.js";
 import { resolveNestPermission } from "../shared/access.js";
@@ -598,11 +598,6 @@ export interface PermissionResult {
   allowed: boolean;
   reason: string;
   role?: PermissionRole;
-}
-
-function isSuperAdmin(userEmail: string): boolean {
-  const cfg = getAccessConfig();
-  return !!cfg?.super_admins?.includes(userEmail);
 }
 
 /**

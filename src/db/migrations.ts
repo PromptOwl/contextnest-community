@@ -553,4 +553,57 @@ export function runMigrations(db: Database.Database): void {
       recordMigration("008_drop_steward_folder_scope");
     })();
   }
+
+  // 009: email is case-insensitive. Lowercase existing emails and enforce
+  //   case-insensitive uniqueness so the same person can't become multiple
+  //   user rows in different cases (which broke collaborator access + caused
+  //   login lockouts — CU-wdqcpztrhf). Case-collision rows (two rows whose
+  //   emails differ only in case) are NOT auto-merged — that would mean
+  //   re-pointing api_keys / collaborators / sessions across users, which is
+  //   unsafe to automate — they're logged for manual reconciliation instead.
+  if (!hasMigration("009_lowercase_emails")) {
+    db.transaction(() => {
+      const collisions = db
+        .prepare(
+          `SELECT GROUP_CONCAT(email, ', ') AS emails
+             FROM users GROUP BY LOWER(email) HAVING COUNT(*) > 1`,
+        )
+        .all() as Array<{ emails: string }>;
+      for (const c of collisions) {
+        console.warn(
+          `[migration 009] case-collision user rows NOT auto-merged: ${c.emails} — reconcile manually (pick the row the person logs into; reset its password; ensure collaborator/steward grants point at that user_id).`,
+        );
+      }
+      // Lowercase only the rows that won't collide with an existing row.
+      db.exec(
+        `UPDATE users SET email = LOWER(email)
+           WHERE email <> LOWER(email)
+             AND LOWER(email) NOT IN (
+               SELECT LOWER(email) FROM users GROUP BY LOWER(email) HAVING COUNT(*) > 1
+             )`,
+      );
+      // Enforce case-insensitive uniqueness going forward — but only when the
+      // table is clean (a NOCASE unique index can't be built over remaining
+      // collisions). Otherwise leave it and let the warning drive cleanup.
+      const remaining = (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS c FROM (
+               SELECT 1 FROM users GROUP BY LOWER(email) HAVING COUNT(*) > 1
+             )`,
+          )
+          .get() as { c: number }
+      ).c;
+      if (remaining === 0) {
+        db.exec(
+          "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nocase ON users(email COLLATE NOCASE)",
+        );
+      } else {
+        console.warn(
+          `[migration 009] ${remaining} case-collision group(s) remain — skipping the NOCASE unique index until reconciled.`,
+        );
+      }
+    })();
+    recordMigration("009_lowercase_emails");
+  }
 }

@@ -79,7 +79,16 @@ function upsertEnvVar(
  * other config the operator set) and re-validate. Validation runs BEFORE
  * the file is touched, so a bad key never ends up on disk.
  */
-export async function installLicenseKey(key: string): Promise<LicenseInfo> {
+export interface InstallResult extends LicenseInfo {
+  /** Whether the validated key was durably written to ENV_FILE_PATH. When
+   *  false the key works for this process but is lost on restart — the
+   *  caller MUST surface this (it was previously swallowed). */
+  persisted: boolean;
+  /** Why the write failed, when persisted is false. */
+  persistError?: string;
+}
+
+export async function installLicenseKey(key: string): Promise<InstallResult> {
   const trimmed = key.trim();
   if (!trimmed.startsWith("pk_")) {
     throw new Error("Invalid license key format. Must start with pk_.");
@@ -100,17 +109,22 @@ export async function installLicenseKey(key: string): Promise<LicenseInfo> {
     if (previousKey) {
       await validateLicense({ forceFresh: true });
     }
-    return info;
+    return { ...info, persisted: false };
   }
 
-  // Validated — write the line into .env so a restart picks it up.
+  // Validated — write the line into .env so a restart picks it up. Report
+  // (don't swallow) a write failure: the key is live in-memory now, but if it
+  // didn't reach disk the operator is one restart away from silently losing it.
   try {
     upsertEnvVar(config.ENV_FILE_PATH, "PROMPTOWL_KEY", trimmed);
+    return { ...info, persisted: true };
   } catch (err) {
-    console.warn("[license] failed to write .env:", err);
+    const persistError = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[license] validated but FAILED to persist to ${config.ENV_FILE_PATH}: ${persistError}`,
+    );
+    return { ...info, persisted: false, persistError };
   }
-
-  return info;
 }
 
 // ─── Safety revalidate ────────────────────────────────────────────────
