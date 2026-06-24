@@ -110,6 +110,22 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 
 For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <https://promptowl.ai/contextnest/>.
 
+## What's new in 1.3.0
+
+- **Server super-admins** — emails listed in `access.yaml: super_admins` administer every nest (change visibility, manage collaborators and stewards) without being added per-nest. Owner-only operations (delete, transfer) still require the nest owner. See [STEWARDSHIP.md](./STEWARDSHIP.md).
+- **License persistence under `DATA_ROOT`** — `PROMPTOWL_KEY` now writes to `$DATA_ROOT/.env` (was `$cwd/.env`, which is root-owned `/app` in the official Docker image and silently lost the key on container recreate). The License Setup Page also surfaces write failures instead of failing quietly. Override via `ENV_FILE_PATH`. See [CONFIGURATION.md](./CONFIGURATION.md).
+- **Case-insensitive email** across registration, login, invite, and access checks. Migration dedupes existing accounts that differ only in case; fixes "I can't log in because I capitalized my email" and access-guard / lockout mismatches.
+- **Document version history + inline diff** — every saved version is browsable in the document detail view, and an inline diff highlights what changed between any two versions.
+- **Nest Overview / index landing** — every nest opens on a grouped table-of-contents with a "recently edited" strip instead of a flat list.
+- **Public/private toggle on the nest header** — visibility is set directly from the header, not buried in a dialog.
+- **Review queue surfaces submitted-for-review edits** — reviewers see the pending versions a contributor staged, not just net-new documents.
+- **Internal-folder sync over MCP** — agents can list a nest's unsynced filesystem folders and pull them into the nest on demand. New `unsynced-service.ts` + MCP tools, covered by `test/unsynced-folder.test.ts` and `test/mcp-unsynced.test.ts`.
+- **Telemetry `batch_id` + user email** — usage events carry a stable `batch_id` (de-duped on the receiver) and the authenticated user email alongside the user id, so the PromptOwl ingest bridge can meter credits to the right account.
+- **Hyperlink navigation fix** — hyperlinks in the editor and viewer navigate to their configured target URL correctly.
+- **Repo / DX** — `CLAUDE.md` at the repo root with project-specific guidance for Claude Code; `claude.yml` (PR assistant) and `claude-code-review.yml` (auto review on PRs) GitHub Actions workflows.
+
+Full history in [CHANGELOG.md](./CHANGELOG.md).
+
 ## What's new in 1.2.0
 
 - **Admin user management (no email server needed)** — `POST /auth/admin/reset-password/:userId` sets a user's password or returns a one-time temp password; `DELETE /auth/users/:userId` removes a user and revokes their API keys, sessions, and role rows. New self-service **Change password** in the user menu blocks reusing the current password.
