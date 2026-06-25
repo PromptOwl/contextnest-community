@@ -1,38 +1,30 @@
 /**
- * Governance Types — ported from PromptOwl lib/context-nest/types.ts
+ * Governance Types — community server's governance surface.
  *
- * These are the canonical types shared between PromptOwl and the community server.
- * PromptOwl can subscribe to this layer by implementing the same adapter interfaces.
+ * Shared shapes (role, scope, lifecycle) re-exported from `lib/core/types.js`
+ * which in turn re-exports from `@promptowl/contextnest-engine`. This file
+ * adds community-only shapes (Steward record, ReviewRequest, etc.) and the
+ * SQLite-backed adapter contract.
+ *
+ * Sister apps (TheOwl) consume from `@promptowl/contextnest-community/core`,
+ * not from this file directly.
  */
 
-// Document lifecycle states. `published` is the terminal state for
-// auto-publish (no-stewards) saves — engine has bumped frontmatter on
-// disk and the row points at the live published version. `approved` is
-// kept for legacy data + the stewards approval workflow until that
-// flow is folded into `published` too.
-export type DocumentLifecycleStatus =
-  | "draft"
-  | "pending_review"
-  | "approved"
-  | "published"
-  | "rejected";
+import type {
+  StewardRole,
+  StewardshipScope,
+  DocumentLifecycleStatus,
+  ReviewRequestPriority,
+  ReviewRequestStatus,
+} from "../lib/core/types.js";
 
-// Stewardship scope types (resolution priority: document > tag > nest)
-export type StewardshipScope = "document" | "tag" | "nest";
-
-// Review request priority levels
-export type ReviewRequestPriority = "low" | "normal" | "high" | "urgent";
-
-// Review request status
-export type ReviewRequestStatus =
-  | "pending"
-  | "approved"
-  | "rejected"
-  | "cancelled";
-
-// Steward role (maps to PromptOwl's IStewardUser.role)
-// Semantics: viewer -> access only, editor -> edit, reviewer -> approve+reject+access.
-export type StewardRole = "editor" | "reviewer" | "viewer";
+export type {
+  StewardRole,
+  StewardshipScope,
+  DocumentLifecycleStatus,
+  ReviewRequestPriority,
+  ReviewRequestStatus,
+};
 
 // Document version
 export interface DocumentVersion {
@@ -44,7 +36,21 @@ export interface DocumentVersion {
   status: DocumentLifecycleStatus;
 }
 
-// Steward assignment (ported from PromptOwl ContextSteward)
+/**
+ * Steward assignment — community's SQLite shape.
+ *
+ * Mirrors the engine's `SingleUserSteward` (one row per user grant) but
+ * adds community-only fields used by the REST + UI surface:
+ *   - `nodePattern` (engine uses `documentId`) — kept for back-compat with
+ *     existing SQLite rows and the stewards.yaml import path
+ *   - `nodeTitle` — UI-side enrichment resolved from on-disk frontmatter
+ *     by `enrichWithTitles`, never persisted
+ *
+ * Engine `SingleUserSteward` is the canonical Mongo-backed shape for
+ * consumers using `@promptowl/contextnest-engine` directly. This community
+ * type stays distinct because the SQLite schema, REST DTO, and UI need the
+ * extra fields above.
+ */
 export interface Steward {
   id: string;
   nestId: string;

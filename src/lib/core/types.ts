@@ -1,15 +1,49 @@
 /**
- * Shared governance types — the universally-compatible subset.
+ * Shared governance types — canonical surface for sister apps.
  *
- * These types are byte-identical between contextnest-community and TheOwl
- * today. The intentionally-excluded drift items (StewardshipScope,
- * DocumentLifecycleStatus, Steward/ContextSteward) stay per-repo until a
- * future alignment ADR decides the schema migration.
+ * Source-of-truth chain (per ADR-0001 in the PromptOwl engineering vault):
  *
- * Source of truth: this file. Both repos re-export from here.
+ *   @promptowl/contextnest-engine   ← canonical
+ *     └─ StewardRole, StewardshipScope, Status (re-exported here
+ *        as DocumentLifecycleStatus)
+ *   @promptowl/contextnest-community/core   ← re-exports + community-only
+ *     extras (ReviewRequest enums, StewardEntry, etc.)
+ *   TheOwl + other apps   ← consume from community/core
+ *
+ * Engine is the single canonical home for the role + scope + lifecycle
+ * shapes that any consumer of the Context Nest stack needs. Community
+ * adds review-request and config-file shapes that the engine doesn't
+ * model (community ships a full REST + SQLite governance server; engine
+ * is just the doc/version/integrity library).
  */
 
+// Inlined to match engine's `StewardRole`, `StewardshipScope`, and `Status`
+// shapes exactly. Engine 1.2.0+ is the canonical home; once community's
+// `@promptowl/contextnest-engine` dep is bumped to ^1.2.0, swap these to:
+//   import type { StewardRole, StewardshipScope, Status as DocumentLifecycleStatus }
+//     from "@promptowl/contextnest-engine";
+// Until then, the literal unions stay here so older published engine
+// versions (1.1.x, which has no `StewardshipScope` export) keep building.
+
+/** Editor / reviewer / viewer. Canonical source: engine 1.2.0+. */
 export type StewardRole = "editor" | "reviewer" | "viewer";
+
+/** Document / tag / nest. Canonical source: engine 1.2.0+. */
+export type StewardshipScope = "document" | "tag" | "nest";
+
+/**
+ * 5-state document lifecycle:
+ *   draft | pending_review | approved | published | rejected
+ *
+ * Matches engine's `Status` shape; consumers should import this name from
+ * community/core (not redefine it).
+ */
+export type DocumentLifecycleStatus =
+  | "draft"
+  | "pending_review"
+  | "approved"
+  | "published"
+  | "rejected";
 
 export type ReviewRequestPriority = "low" | "normal" | "high" | "urgent";
 
