@@ -91,9 +91,13 @@ export type CommentStatus = "open" | "resolved";
 
 // Optional highlight anchor — the char span a comment is attached to, so the
 // UI can show it in the margin next to the highlighted text (Word/Docs style).
+// start/end are document character offsets — optional because a client may
+// only have the quoted text (e.g. a plain text selection with no editor offset
+// mapping yet). When offsets are unknown, send just `text` and leave them null;
+// don't fabricate 0/length.
 export interface CommentAnchor {
-  start: number;
-  end: number;
+  start?: number;
+  end?: number;
   text?: string;
 }
 

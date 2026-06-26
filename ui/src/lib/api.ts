@@ -585,8 +585,10 @@ export async function getNodeReviews(nestId: string, nodeId: string) {
 // ─── Comments & activity (collaboration) ─────────────────────────────────
 
 export interface CommentAnchor {
-  start: number;
-  end: number;
+  // Document character offsets — optional. A client that only has the quoted
+  // text (plain selection, no editor offset mapping) sends just `text`.
+  start?: number;
+  end?: number;
   text?: string;
 }
 

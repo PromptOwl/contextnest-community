@@ -25,7 +25,7 @@ export function createComment(params: {
   author: string;
   body: string;
   version?: number;
-  anchor?: { start: number; end: number; text?: string };
+  anchor?: { start?: number; end?: number; text?: string };
   parentId?: string;
 }): Comment {
   const db = getDb();
@@ -107,15 +107,28 @@ export function getComment(id: string): Comment | null {
 
 export function resolveComment(params: {
   nestId: string;
+  nodeId: string;
   commentId: string;
   resolvedBy: string;
 }): Comment {
   const db = getDb();
+  // Scope the lookup to the node in the URL too — otherwise a nest-read user
+  // could resolve a comment on ANY node in the nest (incl. steward-restricted
+  // ones) by guessing a commentId, with the route's nodeId silently ignored.
   const existing = db
-    .prepare("SELECT id FROM comments WHERE id = ? AND nest_id = ?")
-    .get(params.commentId, params.nestId) as { id: string } | undefined;
+    .prepare(
+      "SELECT id, status FROM comments WHERE id = ? AND nest_id = ? AND node_id = ?",
+    )
+    .get(params.commentId, params.nestId, params.nodeId) as
+    | { id: string; status: string }
+    | undefined;
   if (!existing) {
     throw new Error("Comment not found");
+  }
+  // Don't let a re-resolve overwrite the original resolver/timestamp — that
+  // would permanently lose who first resolved it.
+  if (existing.status === "resolved") {
+    throw new Error("Comment is already resolved");
   }
   db.prepare(
     `UPDATE comments
@@ -140,7 +153,12 @@ export async function getActivity(params: {
   limit?: number;
 }): Promise<ActivityEntry[]> {
   const db = getDb();
-  const limit = params.limit ?? 100;
+  // Guard NaN/garbage (a non-numeric ?limit= reaches here as NaN, and
+  // `?? 100` does not catch NaN — slice(0, NaN) would return []).
+  const limit =
+    Number.isFinite(params.limit) && (params.limit as number) > 0
+      ? Math.min(params.limit as number, 1000)
+      : 100;
   const entries: ActivityEntry[] = [];
 
   const nodeFilter = params.nodeId ? " AND node_id = ?" : "";
@@ -148,14 +166,21 @@ export async function getActivity(params: {
     ? [params.nestId, params.nodeId]
     : [params.nestId];
 
+  // Each query is bounded by `ORDER BY <latest event> DESC LIMIT ?` so a busy
+  // nest doesn't load every row to return a page. The global newest `limit`
+  // entries are a subset of each table's newest `limit` rows, so capping per
+  // table is correct (we over-fetch slightly because a row can emit 2 events).
+
   // Comments — both the leaving and the resolving are events.
   const commentRows = db
     .prepare(
       `SELECT id, node_id, author, body, status, created_at, resolved_by, resolved_at
          FROM comments
-        WHERE nest_id = ?${nodeFilter}`,
+        WHERE nest_id = ?${nodeFilter}
+        ORDER BY COALESCE(resolved_at, created_at) DESC
+        LIMIT ?`,
     )
-    .all(...baseArgs) as any[];
+    .all(...baseArgs, limit) as any[];
   for (const r of commentRows) {
     entries.push({
       type: "comment",
@@ -182,9 +207,11 @@ export async function getActivity(params: {
     .prepare(
       `SELECT node_id, version, author, change_note, created_at
          FROM node_versions
-        WHERE nest_id = ?${nodeFilter}`,
+        WHERE nest_id = ?${nodeFilter}
+        ORDER BY created_at DESC
+        LIMIT ?`,
     )
-    .all(...baseArgs) as any[];
+    .all(...baseArgs, limit) as any[];
   for (const r of versionRows) {
     entries.push({
       type: "edit",
@@ -201,9 +228,11 @@ export async function getActivity(params: {
     .prepare(
       `SELECT id, node_id, requested_by, requested_at, status, resolved_by, resolved_at
          FROM review_requests
-        WHERE nest_id = ?${nodeFilter}`,
+        WHERE nest_id = ?${nodeFilter}
+        ORDER BY COALESCE(resolved_at, requested_at) DESC
+        LIMIT ?`,
     )
-    .all(...baseArgs) as any[];
+    .all(...baseArgs, limit) as any[];
   for (const r of reviewRows) {
     entries.push({
       type: "review_requested",
@@ -251,8 +280,23 @@ export async function getActivity(params: {
     );
   }
 
-  // Newest first, capped.
-  entries.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  // Newest first, capped. Parse to epoch millis before comparing — the
+  // timestamps come from two formats: SQLite datetime('now') ("2024-01-15
+  // 10:30:00", space-separated) and engine suggestion detected_at (ISO 8601,
+  // "…T…Z"). A raw string compare would sort EVERY space-form before EVERY
+  // ISO-form (space 0x20 < 'T' 0x54), floating all edit_proposed entries to
+  // the top regardless of real time. `${at} ` → treat SQLite's space form as
+  // UTC so it lines up with the ISO values.
+  const ms = (at: string) => {
+    if (!at) return 0;
+    // SQLite datetime('now') is UTC but lacks the T/Z markers — V8 would parse
+    // it as LOCAL time, skewing it against the ISO (UTC) detected_at values.
+    // Normalise the space form to explicit ISO-UTC so both parse on one clock.
+    const norm = at.includes("T") ? at : at.replace(" ", "T") + "Z";
+    const t = Date.parse(norm);
+    return Number.isNaN(t) ? 0 : t;
+  };
+  entries.sort((a, b) => ms(b.at) - ms(a.at));
   return entries.slice(0, limit);
 }
 
@@ -264,12 +308,19 @@ function excerpt(body: string, max = 80): string {
 }
 
 function rowToComment(row: any): Comment {
+  // Surface an anchor when EITHER the offsets OR the quoted text is present —
+  // a text-only anchor (offsets null) is valid: the client highlighted a span
+  // but couldn't map it to document offsets yet.
+  const hasOffsets =
+    row.anchor_start !== null && row.anchor_end !== null;
+  const hasText = row.anchor_text !== null && row.anchor_text !== undefined;
   const anchor =
-    row.anchor_start !== null && row.anchor_end !== null
+    hasOffsets || hasText
       ? {
-          start: row.anchor_start,
-          end: row.anchor_end,
-          ...(row.anchor_text !== null ? { text: row.anchor_text } : {}),
+          ...(hasOffsets
+            ? { start: row.anchor_start, end: row.anchor_end }
+            : {}),
+          ...(hasText ? { text: row.anchor_text } : {}),
         }
       : undefined;
   return {

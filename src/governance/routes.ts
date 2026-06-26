@@ -24,6 +24,16 @@ import { bodyOnly } from "../nodes/service.js";
 // Nest-level routes (mounted at /:nestId)
 // ═════════════════════════════════════════════════════════════════════════
 
+/** Parse a ?limit= query into a sane bound. A non-numeric value (e.g. "abc")
+ *  is truthy, so `|| "100"` never fires and parseInt yields NaN — which then
+ *  slips through `?? 100` and makes slice(0, NaN) return an empty list. Guard
+ *  NaN / out-of-range explicitly and cap at 1000. */
+function parseLimit(raw: string | undefined, def = 100, max = 1000): number {
+  const n = parseInt(raw ?? "", 10);
+  if (Number.isNaN(n) || n < 1) return def;
+  return Math.min(n, max);
+}
+
 export const governanceRoutes = new Hono<AuthEnv>();
 
 // GET /nests/:nestId/stewards?scope=tag&search=architect
@@ -205,7 +215,7 @@ governanceRoutes.post("/external-edits/scan", async (c) => {
 // Nest-wide activity log — who did what across every node in the nest.
 governanceRoutes.get("/activity", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const limit = parseInt(c.req.query("limit") || "100", 10);
+  const limit = parseLimit(c.req.query("limit"));
   const activity = await comments.getActivity({ nestId, limit });
   return c.json({ activity });
 });
@@ -297,7 +307,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
   const body = await c.req.json<{
     body?: string;
     version?: number;
-    anchor?: { start: number; end: number; text?: string };
+    anchor?: { start?: number; end?: number; text?: string };
     parentId?: string;
   }>();
   const author = getUserEmail(c);
@@ -325,17 +335,25 @@ governanceNodeRoutes.post(
   "/:nodeId{.+?}/comments/:commentId/resolve",
   async (c) => {
     const nestId = c.req.param("nestId")!;
+    const nodeId = c.req.param("nodeId")!;
     const commentId = c.req.param("commentId")!;
     const resolvedBy = getUserEmail(c);
     try {
       const comment = comments.resolveComment({
         nestId,
+        nodeId,
         commentId,
         resolvedBy,
       });
       return c.json({ comment });
     } catch (err: any) {
-      return c.json({ error: err.message }, 404);
+      // Only the known user-errors map to 4xx; anything else (SQLite locked,
+      // I/O) must surface as a 500 via the global handler, not be masked as 404.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "Comment not found") return c.json({ error: msg }, 404);
+      if (msg === "Comment is already resolved")
+        return c.json({ error: msg }, 409);
+      throw err;
     }
   },
 );
@@ -345,7 +363,7 @@ governanceNodeRoutes.post(
 governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const limit = parseInt(c.req.query("limit") || "100", 10);
+  const limit = parseLimit(c.req.query("limit"));
   const activity = await comments.getActivity({ nestId, nodeId, limit });
   return c.json({ activity });
 });

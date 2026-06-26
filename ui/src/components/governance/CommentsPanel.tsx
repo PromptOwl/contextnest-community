@@ -64,6 +64,87 @@ function buildThreads(comments: Comment[]): Thread[] {
   }));
 }
 
+// Module-scope so their component identity is stable across renders. Defining
+// them inside CommentsPanel made React treat each render's copy as a new type,
+// remounting every row on each keystroke (e.g. the reply textarea lost focus).
+function Avatar({ email }: { email: string }) {
+  return (
+    <div className="h-6 w-6 shrink-0 rounded-full bg-muted flex items-center justify-center text-[10px] font-semibold uppercase text-muted-foreground">
+      {email?.[0] || "?"}
+    </div>
+  );
+}
+
+function CommentRow({
+  c,
+  isReply,
+  currentEmail,
+  onReply,
+  onResolve,
+}: {
+  c: Comment;
+  isReply?: boolean;
+  currentEmail: string;
+  onReply?: () => void;
+  onResolve?: () => void;
+}) {
+  const mine = c.author?.toLowerCase() === currentEmail;
+  return (
+    <div className={isReply ? "pl-8" : ""}>
+      <div className="flex items-start gap-2">
+        {isReply && (
+          <CornerDownRight className="h-3.5 w-3.5 mt-1.5 text-muted-foreground shrink-0" />
+        )}
+        <Avatar email={c.author} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-medium truncate">
+              {c.author}
+              {mine && (
+                <span className="text-muted-foreground font-normal"> (you)</span>
+              )}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              {fmt(c.createdAt)}
+            </span>
+            {c.status === "resolved" && (
+              <Badge variant="outline" className="text-emerald-600 border-emerald-200">
+                Resolved
+              </Badge>
+            )}
+          </div>
+          {c.anchor?.text && (
+            <div className="mt-1 border-l-2 border-amber-300 bg-amber-50 px-2 py-1 text-xs italic text-amber-800 rounded-r">
+              “{c.anchor.text}”
+            </div>
+          )}
+          <p className="mt-1 text-sm whitespace-pre-wrap break-words">{c.body}</p>
+          {!isReply && (
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                onClick={onReply}
+              >
+                <CornerDownRight className="h-3 w-3" /> Reply
+              </button>
+              {c.status !== "resolved" && (
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 rounded-md border border-emerald-600 bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700"
+                  onClick={onResolve}
+                >
+                  <Check className="h-3.5 w-3.5" /> Resolve
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const ACTIVITY_META: Record<
   ActivityType,
   { icon: typeof Pencil; verb: string; tone: string }
@@ -137,9 +218,11 @@ export function CommentsPanel({
       await api.createComment(nestId, nodeId, {
         body,
         version,
-        anchor: anchorText
-          ? { start: 0, end: anchorText.length, text: anchorText }
-          : undefined,
+        // Text-only anchor: we have the quoted selection but not its document
+        // character offsets yet (no editor offset mapping). Send just the text
+        // rather than fabricating 0/length offsets. Real offsets are a TipTap
+        // follow-up.
+        anchor: anchorText ? { text: anchorText } : undefined,
       });
       setDraft("");
       setAnchorText("");
@@ -171,75 +254,6 @@ export function CommentsPanel({
     } catch (e: any) {
       toast.error(e?.message || "Failed to resolve");
     }
-  }
-
-  function Avatar({ email }: { email: string }) {
-    return (
-      <div className="h-6 w-6 shrink-0 rounded-full bg-muted flex items-center justify-center text-[10px] font-semibold uppercase text-muted-foreground">
-        {email?.[0] || "?"}
-      </div>
-    );
-  }
-
-  function CommentRow({ c, isReply }: { c: Comment; isReply?: boolean }) {
-    const mine = c.author?.toLowerCase() === currentEmail;
-    return (
-      <div className={isReply ? "pl-8" : ""}>
-        <div className="flex items-start gap-2">
-          {isReply && (
-            <CornerDownRight className="h-3.5 w-3.5 mt-1.5 text-muted-foreground shrink-0" />
-          )}
-          <Avatar email={c.author} />
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-medium truncate">
-                {c.author}
-                {mine && (
-                  <span className="text-muted-foreground font-normal"> (you)</span>
-                )}
-              </span>
-              <span className="text-xs text-muted-foreground">
-                {fmt(c.createdAt)}
-              </span>
-              {c.status === "resolved" && (
-                <Badge variant="outline" className="text-emerald-600 border-emerald-200">
-                  Resolved
-                </Badge>
-              )}
-            </div>
-            {c.anchor?.text && (
-              <div className="mt-1 border-l-2 border-amber-300 bg-amber-50 px-2 py-1 text-xs italic text-amber-800 rounded-r">
-                “{c.anchor.text}”
-              </div>
-            )}
-            <p className="mt-1 text-sm whitespace-pre-wrap break-words">{c.body}</p>
-            {!isReply && (
-              <div className="mt-2 flex items-center gap-2">
-                <button
-                  type="button"
-                  className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-                  onClick={() => {
-                    setReplyTo(replyTo === c.id ? null : c.id);
-                    setReplyDraft("");
-                  }}
-                >
-                  <CornerDownRight className="h-3 w-3" /> Reply
-                </button>
-                {c.status !== "resolved" && (
-                  <button
-                    type="button"
-                    className="inline-flex items-center gap-1 rounded-md border border-emerald-600 bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700"
-                    onClick={() => resolve(c.id)}
-                  >
-                    <Check className="h-3.5 w-3.5" /> Resolve
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
   }
 
   return (
@@ -325,11 +339,24 @@ export function CommentsPanel({
             <div className="space-y-3">
               {threads.map(({ root, replies }) => (
                 <div key={root.id} className="border rounded-lg p-3">
-                  <CommentRow c={root} />
+                  <CommentRow
+                    c={root}
+                    currentEmail={currentEmail}
+                    onReply={() => {
+                      setReplyTo(replyTo === root.id ? null : root.id);
+                      setReplyDraft("");
+                    }}
+                    onResolve={() => resolve(root.id)}
+                  />
                   {replies.length > 0 && (
                     <div className="mt-3 space-y-3">
                       {replies.map((r) => (
-                        <CommentRow key={r.id} c={r} isReply />
+                        <CommentRow
+                          key={r.id}
+                          c={r}
+                          isReply
+                          currentEmail={currentEmail}
+                        />
                       ))}
                     </div>
                   )}
