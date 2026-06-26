@@ -59,6 +59,23 @@ In key mode, when stewardship is enabled on a nest:
 - A non-steward gets an empty list or a 403 on the node they asked for
 - The nest **owner** and any resolved **steward (any role)** can read; **super admins** configured in `access.yaml` bypass the check
 
+## Server super-admins
+
+`access.yaml: super_admins` lists emails who administer **every** nest on the server without being added per-nest. A super-admin can:
+
+- Read every document (bypasses the read gate, even with stewardship enabled)
+- Change a nest's visibility (public / private)
+- Add, remove, and re-role collaborators
+- Add, remove, and re-role stewards
+- Approve and reject pending versions in any nest's review queue
+
+What a super-admin **cannot** do (owner-only operations):
+
+- Delete a nest
+- Transfer ownership
+
+Use this for a small set of platform operators — a CEO, a head of governance, an internal compliance admin — not as a default broad-access mechanism. Day-to-day governance should still flow through per-nest stewards.
+
 ## Picking a scope when you assign a steward
 
 Rules of thumb:

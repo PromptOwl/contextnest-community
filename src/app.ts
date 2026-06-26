@@ -322,6 +322,16 @@ export function createApp(): Hono<AuthEnv> {
     // method.
     {
       const path = c.req.path;
+      // `/comments` and `/activity` must be matched as complete trailing route
+      // segments, NOT substrings — a node id is `nodes/<slug>` and a title like
+      // "Comments Draft" yields slug `comments-draft`, whose path contains the
+      // substring `/comments`. Anchor to the actual comment/activity route
+      // shapes so a node slug can't masquerade as a governance action (see the
+      // matching guard in the permission block below).
+      const isCommentPath =
+        /\/comments$/.test(path) ||
+        /\/comments\/[^/]+\/resolve$/.test(path);
+      const isActivityPath = /\/activity$/.test(path);
       const isGovernance =
         path.includes("/stewards") ||
         path.includes("/review-queue") ||
@@ -333,7 +343,9 @@ export function createApp(): Hono<AuthEnv> {
         path.includes("/reject") ||
         path.includes("/can-access") ||
         path.includes("/can-approve") ||
-        path.includes("/can-edit");
+        path.includes("/can-edit") ||
+        isCommentPath ||
+        isActivityPath;
       const needsLicense = c.req.method !== "GET" || isGovernance;
       if (needsLicense) {
         const lic = getCurrentLicense();
@@ -375,6 +387,19 @@ export function createApp(): Hono<AuthEnv> {
       path.includes("/reject") ||
       path.includes("/submit-review") ||
       path.includes("/cancel-review");
+    // Commenting is a read-tier collaboration action: anyone who can see the
+    // node may leave or resolve a comment. Don't bump these POSTs to "write"
+    // (that would block read-only reviewers — the people most likely to
+    // comment). The handler/service own any finer-grained rules.
+    //
+    // Match `/comments` as a complete trailing route segment, NOT a substring:
+    // a node id is `nodes/<slug>` and a title like "Comments Draft" → slug
+    // `comments-draft` → path `…/nodes/comments-draft` contains `/comments`.
+    // A substring match left `required` at "read", letting a read-only
+    // collaborator PATCH/DELETE any node whose slug starts with "comments".
+    const isCommentAction =
+      /\/comments$/.test(path) ||
+      /\/comments\/[^/]+\/resolve$/.test(path);
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin: not nest owners or collaborators. All methods
     // on /nests/:id/stewards are locked. The node-level resolve route
@@ -393,7 +418,11 @@ export function createApp(): Hono<AuthEnv> {
     }
     if (path.includes("/collaborators") || path.includes("/visibility")) {
       required = "admin";
-    } else if (c.req.method !== "GET" && !isStewardActionPath) {
+    } else if (
+      c.req.method !== "GET" &&
+      !isStewardActionPath &&
+      !isCommentAction
+    ) {
       required = "write";
     }
 

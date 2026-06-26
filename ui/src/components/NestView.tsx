@@ -553,11 +553,15 @@ export function NestView({
     });
   };
 
-  // Review queue: who can act on each request. canReviewNode gates capability;
-  // own submissions are dropped (SoD) unless the caller is the owner and the
-  // nest allows self-approve (the seeding switch). A non-owner reviewer can
-  // never approve their own work.
+  // Review queue: who can act on each request. The server stamps each request
+  // with `canReview` via the authoritative canUserApprove (admin/owner/steward
+  // scope + separation-of-duties), so we trust it rather than re-deriving
+  // steward scope client-side — the client re-derivation diverged for a
+  // reviewer-steward reaching the nest via public visibility, hiding the queue
+  // and the Review button. Fall back to the client check only for an older
+  // server that doesn't send the flag.
   const reviewableQueue = reviewQueue.filter((r) => {
+    if (r.canReview !== undefined) return r.canReview;
     const node = nodes.find((n) => n.id === r.nodeId);
     if (!node) return false;
     if (!canReviewNode(node)) return false;
@@ -566,6 +570,13 @@ export function NestView({
     return true;
   });
 
+  // Node ids the caller can review right now (authoritative, from the queue
+  // annotation). Drives the per-row Review button so it stays in lockstep with
+  // the in-document approve/reject affordance.
+  const reviewableNodeIds = new Set(
+    reviewableQueue.map((r) => r.nodeId),
+  );
+
   // The caller's own pending submissions. SoD keeps these out of the
   // actionable queue above (authors can't approve their own work), which made
   // it look like "submit for review did nothing." Surface them in their own
@@ -573,10 +584,14 @@ export function NestView({
   const myPendingSubmissions = reviewQueue.filter(
     (r) => r.requestedBy.toLowerCase() === currentEmail,
   );
-  // Show the Review tab whenever stewardship is on OR there are pending
-  // requests at all — otherwise a submitted edit is stranded with no tab
-  // (e.g. stewardship later disabled, or the submitter has no reviewer role).
-  const showReviewTab = stewardshipEnabled || reviewQueue.length > 0;
+  // Show the Review tab whenever stewardship is on, the caller can review
+  // (reviewer steward / admin), OR there are pending requests at all —
+  // otherwise a submitted edit is stranded with no tab (e.g. stewardship
+  // later disabled, the submitter has no reviewer role, or a reviewer-steward
+  // reached the nest via public visibility where the settings flag reads
+  // false client-side).
+  const showReviewTab =
+    stewardshipEnabled || caps.canReviewDocs || reviewQueue.length > 0;
 
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
@@ -1469,12 +1484,21 @@ export function NestView({
                       stewardshipEnabled &&
                       node.status === "draft" &&
                       canEditNode(node);
-                    const canReview =
-                      stewardshipEnabled &&
-                      node.status === "pending_review" &&
-                      canReviewNode(node) &&
-                      (submitterByNode.get(node.id) !== currentEmail ||
-                        (isOwner && allowSelfApprove));
+                    // Show Review when the server says this caller can review
+                    // this node (authoritative reviewable set, from the queue's
+                    // canUserApprove annotation — includes admin/owner/steward
+                    // scope + separation-of-duties). This replaced a client-side
+                    // steward-scope re-derivation that diverged for a reviewer-
+                    // steward reaching the nest via public visibility, hiding the
+                    // button even though the in-doc approve/reject showed it.
+                    // Fall back to the client check for an older server that
+                    // doesn't stamp canReview.
+                    const canReview = reviewableNodeIds.has(node.id)
+                      ? true
+                      : node.status === "pending_review" &&
+                        canReviewNode(node) &&
+                        (submitterByNode.get(node.id) !== currentEmail ||
+                          (isOwner && allowSelfApprove));
                     const canEdit =
                       node.status !== "pending_review" && canEditNode(node);
                     const canDelete = canEditNode(node);
