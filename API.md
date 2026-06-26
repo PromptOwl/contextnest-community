@@ -129,6 +129,9 @@ Returns whether the caller is the license admin + license metadata.
 ### POST `/auth/device` / GET `/auth/device/poll`
 Device-flow login. Also gated by `PROMPTOWL_SIGN_IN_GATE`.
 
+### GET `/auth/sso`
+One-click SSO auto-login from PromptOwl (**official deployment only**). PromptOwl redirects a signed-in user here with a short-lived, single-use, audience-bound HS256 JWT ticket (`?ticket=...`). The server verifies the signature with `OFFICIAL_COMMUNITY_SSO_SECRET`, checks `aud` against `PUBLIC_BASE_URL`, enforces one-time-use via the ticket's `jti`, then provisions the user and starts a session (same provisioning + `PROMPTOWL_SIGN_IN_GATE` as `/auth/promptowl`). On success → `302` to `/`; on failure → `302` to `/?sso_error=<code>` (the SPA shows a toast). **When `OFFICIAL_COMMUNITY_SSO_SECRET` is unset** (i.e. every self-hosted server) the feature is disabled and the endpoint bounces to `/?sso_error=not_supported`. That is the domain lock: without the shared secret no ticket can be verified, so the feature stays exclusive to the official community regardless of this redirect. Error codes: `not_supported`, `missing_ticket`, `invalid_ticket`, `bad_audience`, `ticket_used`, `rate_limited`, `sign_in_restricted`.
+
 ---
 
 ## 2. Nests
