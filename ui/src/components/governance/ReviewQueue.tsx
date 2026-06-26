@@ -35,6 +35,10 @@ export interface ReviewRequest {
   requestedAt: string;
   requestNote?: string;
   priority: ReviewRequestPriority;
+  // Server-computed: can THIS caller approve/reject this request? Authoritative
+  // (mirrors approve/reject's canUserApprove). The UI gates affordances off
+  // this instead of re-deriving steward scope client-side.
+  canReview?: boolean;
 }
 
 interface ReviewQueueProps {

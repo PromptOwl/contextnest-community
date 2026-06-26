@@ -129,6 +129,9 @@ Returns whether the caller is the license admin + license metadata.
 ### POST `/auth/device` / GET `/auth/device/poll`
 Device-flow login. Also gated by `PROMPTOWL_SIGN_IN_GATE`.
 
+### GET `/auth/sso`
+One-click SSO auto-login from PromptOwl (**official deployment only**). PromptOwl redirects a signed-in user here with a short-lived, single-use, audience-bound HS256 JWT ticket (`?ticket=...`). The server verifies the signature with `OFFICIAL_COMMUNITY_SSO_SECRET`, checks `aud` against `PUBLIC_BASE_URL`, enforces one-time-use via the ticket's `jti`, then provisions the user and starts a session (same provisioning + `PROMPTOWL_SIGN_IN_GATE` as `/auth/promptowl`). On success → `302` to `/`; on failure → `302` to `/?sso_error=<code>` (the SPA shows a toast). **When `OFFICIAL_COMMUNITY_SSO_SECRET` is unset** (i.e. every self-hosted server) the feature is disabled and the endpoint bounces to `/?sso_error=not_supported`. That is the domain lock: without the shared secret no ticket can be verified, so the feature stays exclusive to the official community regardless of this redirect. Error codes: `not_supported`, `missing_ticket`, `invalid_ticket`, `bad_audience`, `ticket_used`, `rate_limited`, `sign_in_restricted`, `service_error` (DB/internal fault while redeeming the ticket).
+
 ---
 
 ## 2. Nests
@@ -502,7 +505,52 @@ Full review history for a node.
 
 ---
 
-## 8. Query / Search (read-only consumers)
+## 8. Comments & activity
+
+Comments are a standalone collaboration primitive — **not** part of the
+version/hash chain. They thread, carry attribution, anchor to a highlighted
+span, and resolve (Word/Docs-style "Comments", separate from Track Changes).
+Any caller with **read** access to the nest may leave or resolve a comment.
+
+### GET `/nests/:nestId/nodes/:nodeId/comments?status=open`
+List comments on a node. Optional `status` = `open` | `resolved`.
+```json
+{
+  "comments": [
+    {
+      "id": "…",
+      "nestId": "…",
+      "nodeId": "nodes/spec",
+      "version": 1,
+      "anchor": { "start": 8, "end": 19, "text": "first draft" },
+      "parentId": null,
+      "author": "owner@x.com",
+      "body": "This needs a citation.",
+      "status": "open",
+      "createdAt": "…"
+    }
+  ]
+}
+```
+
+### POST `/nests/:nestId/nodes/:nodeId/comments`
+Leave a comment. Body: `{ body, version?, anchor?{start,end,text?}, parentId? }`.
+`parentId` threads a reply. Returns `201 { comment }`. Empty body → `400`.
+
+### POST `/nests/:nestId/nodes/:nodeId/comments/:commentId/resolve`
+Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment }`.
+
+### GET `/nests/:nestId/nodes/:nodeId/activity` · GET `/nests/:nestId/activity`
+Per-node (or nest-wide) activity log — "who did what". A read-only aggregation
+over comments + committed edits (`node_versions`) + pending external-edit
+suggestions ("proposed an edit", read from nest storage) + reviews
+(`review_requests`); newest first, `?limit=` (default 100). Each entry:
+`{ type, nodeId, actor, at, detail?, refId? }` where `type` ∈
+`comment | comment_resolved | edit | edit_proposed | review_requested | review_resolved`.
+
+---
+
+## 9. Query / Search (read-only consumers)
 
 These power LLM context retrieval. Open-mode friendly.
 

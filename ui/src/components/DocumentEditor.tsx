@@ -22,6 +22,7 @@ import {
   Users,
   Link as LinkIcon,
   History,
+  MessageSquare,
 } from "lucide-react";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { toast } from "sonner";
@@ -32,7 +33,7 @@ import {
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
-import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory } from "./governance";
+import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory, CommentsPanel } from "./governance";
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { relatedDocs } from "../lib/related";
@@ -116,6 +117,9 @@ export function DocumentEditor({
   const [showShare, setShowShare] = useState(false);
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
+  // Comments drawer (collaboration comments + activity feed).
+  const [showComments, setShowComments] = useState(false);
+  const [commentQuote, setCommentQuote] = useState("");
   const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
   // Caller's nest-wide scoped steward rows (from GET /nests/:id). Needed for
   // NEW docs, where there's no node yet to resolve a per-node role against.
@@ -775,6 +779,23 @@ export function DocumentEditor({
               <History className="h-4 w-4" />
             </Button>
           )}
+          {/* Comments + activity. Captures the current text selection so the
+              comment is anchored to the highlighted span (Word/Docs style). */}
+          {!isNew && (
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => {
+                const sel = window.getSelection?.()?.toString().trim() || "";
+                setCommentQuote(sel);
+                setShowComments(true);
+              }}
+              title="Comments"
+              data-testid="document-editor-comments"
+            >
+              <MessageSquare className="h-4 w-4" />
+            </Button>
+          )}
           {/* Write/review affordances hidden for public reader.
               Copy link + Share nest collapsed into an overflow menu to keep
               the header uncluttered; primary actions (Publish/Save) stay inline. */}
@@ -1196,6 +1217,25 @@ export function DocumentEditor({
                 Loading versions…
               </div>
             )}
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {showComments && !isNew && (
+        <Dialog open onOpenChange={(o) => !o && setShowComments(false)}>
+          <DialogContent className="sm:max-w-[640px] max-h-[88vh] overflow-hidden flex flex-col gap-3">
+            <DialogHeader className="space-y-0">
+              <DialogTitle className="truncate">
+                Comments · {title || nodeId}
+              </DialogTitle>
+            </DialogHeader>
+            <CommentsPanel
+              nestId={nestId}
+              nodeId={nodeId}
+              currentEmail={currentEmail}
+              quote={commentQuote}
+              version={baseVersion}
+            />
           </DialogContent>
         </Dialog>
       )}
