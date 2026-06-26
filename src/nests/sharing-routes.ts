@@ -50,6 +50,9 @@ sharingRoutes.post("/collaborators", async (c) => {
     userId: body.user_id,
     permission: body.permission ?? "",
     grantedByUserId: c.get("userId"),
+    // Enforce the escalation cap against the caller's own nest permission
+    // (set by the access guard) — a write collaborator can't grant admin.
+    callerPermission: c.get("nestPermission"),
   });
   return c.json({ collaborator: collab }, 201);
 });

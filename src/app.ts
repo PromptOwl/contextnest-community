@@ -391,8 +391,14 @@ export function createApp(): Hono<AuthEnv> {
         403,
       );
     }
-    if (path.includes("/collaborators") || path.includes("/visibility")) {
+    if (path.includes("/visibility")) {
       required = "admin";
+    } else if (path.includes("/collaborators")) {
+      // Inviting (POST) is open to write+ collaborators — you no longer need
+      // to be a nest admin to bring someone in. The escalation cap (you can't
+      // grant access above your own level) is enforced in addCollaborator.
+      // Changing or removing existing collaborators stays admin-only.
+      required = c.req.method === "POST" ? "write" : "admin";
     } else if (c.req.method !== "GET" && !isStewardActionPath) {
       required = "write";
     }
