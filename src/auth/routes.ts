@@ -634,6 +634,14 @@ authRoutes.get("/sso", async (c) => {
     if (aud !== expectedAud) return ssoError("bad_audience");
   }
 
+  // Reject a malformed subject before burning the jti. Tickets are minted by
+  // PromptOwl (trusted), but a whitespace/garbage sub would otherwise create a
+  // degenerate user row with an empty email that can never match a grant.
+  const sub = (claims.sub || "").trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(sub) || sub.length > 254) {
+    return ssoError("invalid_ticket");
+  }
+
   // One-time use — redeem the jti exactly once. Insert-or-conflict is the
   // atomic replay guard.
   if (!claims.jti) return ssoError("invalid_ticket");
@@ -644,11 +652,18 @@ authRoutes.get("/sso", async (c) => {
     db.prepare(
       "INSERT INTO sso_used_jti (jti, expires_at) VALUES (?, ?)",
     ).run(claims.jti, expiresAtIso);
-  } catch {
-    return ssoError("ticket_used"); // PRIMARY KEY conflict → already redeemed
+  } catch (err: any) {
+    // PRIMARY KEY conflict = ticket already redeemed (replay). Any other DB
+    // fault (missing table, disk full, corruption) must NOT masquerade as
+    // "already used" — surface it distinctly so an outage is diagnosable.
+    if (err?.code === "SQLITE_CONSTRAINT_PRIMARYKEY") {
+      return ssoError("ticket_used");
+    }
+    console.error("[sso] failed to record ticket jti:", err);
+    return ssoError("service_error");
   }
 
-  const result = await provisionPromptowlUser(c, claims.sub, claims.name);
+  const result = await provisionPromptowlUser(c, sub, claims.name);
   if (!result.ok) return ssoError("sign_in_restricted");
 
   // Success — session cookie set by the helper; land on the app home.

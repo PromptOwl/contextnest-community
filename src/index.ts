@@ -49,6 +49,18 @@ async function main() {
 `);
   }
 
+  // One-click SSO hardening: the audience check is the cross-server replay
+  // guard, but it can only run when PUBLIC_BASE_URL is set. Warn loudly if the
+  // shared secret is configured without it — otherwise any validly-signed
+  // ticket would be accepted regardless of its intended audience.
+  if (config.OFFICIAL_COMMUNITY_SSO_SECRET && !config.PUBLIC_BASE_URL) {
+    console.warn(`
+      WARNING: OFFICIAL_COMMUNITY_SSO_SECRET is set but PUBLIC_BASE_URL is not.
+      One-click SSO will skip the audience check, weakening cross-server replay
+      protection. Set PUBLIC_BASE_URL to this server's public URL.
+    `);
+  }
+
   const app = createApp();
 
   // Periodic forceFresh revalidate (60s) so PromptOwl-side

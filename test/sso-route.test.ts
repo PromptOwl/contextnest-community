@@ -109,6 +109,18 @@ describe("GET /auth/sso", () => {
     expect(location(res)).toContain("sso_error=bad_audience");
   });
 
+  it("rejects a malformed (non-email) sub → invalid_ticket", async () => {
+    // Distinct x-forwarded-for so these probes use their own rate-limit bucket
+    // and don't drain the shared default-IP budget the other tests rely on.
+    for (const badSub of [" ", "notanemail", "no@domain"]) {
+      const res = await app.request(
+        "/auth/sso?ticket=" + ticket({ sub: badSub }),
+        { method: "GET", headers: { "x-forwarded-for": "203.0.113.7" } },
+      );
+      expect(location(res)).toContain("sso_error=invalid_ticket");
+    }
+  });
+
   it("signs the user in on a valid ticket (302 to /, sets session cookie, provisions user)", async () => {
     const res = await app.request(
       "/auth/sso?ticket=" + ticket({ sub: "fresh@example.com" }),

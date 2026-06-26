@@ -229,6 +229,7 @@ export default function App() {
       ticket_used: "This sign-in link was already used. Start again from PromptOwl.",
       rate_limited: "Too many sign-in attempts. Wait a moment and try again.",
       sign_in_restricted: "Sign-in is restricted on this community. Contact an admin.",
+      service_error: "Something went wrong signing you in. Please try again.",
     };
     const msg = messages[code] ?? "Sign-in failed. Try again from PromptOwl.";
     setTimeout(() => toast.error(msg), 0);
