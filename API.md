@@ -536,10 +536,11 @@ Mark a comment resolved. Records `resolvedBy` + `resolvedAt`. Returns `{ comment
 
 ### GET `/nests/:nestId/nodes/:nodeId/activity` · GET `/nests/:nestId/activity`
 Per-node (or nest-wide) activity log — "who did what". A read-only aggregation
-over comments + edits (`node_versions`) + reviews (`review_requests`); newest
-first, `?limit=` (default 100). Each entry:
+over comments + committed edits (`node_versions`) + pending external-edit
+suggestions ("proposed an edit", read from nest storage) + reviews
+(`review_requests`); newest first, `?limit=` (default 100). Each entry:
 `{ type, nodeId, actor, at, detail?, refId? }` where `type` ∈
-`comment | comment_resolved | edit | review_requested | review_resolved`.
+`comment | comment_resolved | edit | edit_proposed | review_requested | review_resolved`.
 
 ---
 

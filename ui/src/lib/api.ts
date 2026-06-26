@@ -582,6 +582,94 @@ export async function getNodeReviews(nestId: string, nodeId: string) {
   return request<{ reviews: any[] }>(`/nests/${nestId}/nodes/${nodeId}/reviews`);
 }
 
+// ─── Comments & activity (collaboration) ─────────────────────────────────
+
+export interface CommentAnchor {
+  start: number;
+  end: number;
+  text?: string;
+}
+
+export interface Comment {
+  id: string;
+  nestId: string;
+  nodeId: string;
+  version?: number;
+  anchor?: CommentAnchor;
+  parentId?: string;
+  author: string;
+  body: string;
+  status: "open" | "resolved";
+  createdAt: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+}
+
+export type ActivityType =
+  | "comment"
+  | "comment_resolved"
+  | "edit"
+  | "edit_proposed"
+  | "review_requested"
+  | "review_resolved";
+
+export interface ActivityEntry {
+  type: ActivityType;
+  nodeId: string;
+  actor: string;
+  at: string;
+  detail?: string;
+  refId?: string;
+}
+
+export async function getNodeComments(
+  nestId: string,
+  nodeId: string,
+  status?: "open" | "resolved",
+) {
+  const qs = status ? `?status=${status}` : "";
+  return request<{ comments: Comment[] }>(
+    `/nests/${nestId}/nodes/${nodeId}/comments${qs}`,
+  );
+}
+
+export async function createComment(
+  nestId: string,
+  nodeId: string,
+  input: {
+    body: string;
+    version?: number;
+    parentId?: string;
+    anchor?: CommentAnchor;
+  },
+) {
+  return request<{ comment: Comment }>(
+    `/nests/${nestId}/nodes/${nodeId}/comments`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function resolveComment(
+  nestId: string,
+  nodeId: string,
+  commentId: string,
+) {
+  return request<{ comment: Comment }>(
+    `/nests/${nestId}/nodes/${nodeId}/comments/${commentId}/resolve`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export async function getNodeActivity(
+  nestId: string,
+  nodeId: string,
+  limit = 100,
+) {
+  return request<{ activity: ActivityEntry[] }>(
+    `/nests/${nestId}/nodes/${nodeId}/activity?limit=${limit}`,
+  );
+}
+
 // ─── External edits (direct filesystem edits awaiting approval) ──────────
 
 export interface ExternalEditEntry {

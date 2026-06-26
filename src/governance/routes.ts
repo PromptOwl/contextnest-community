@@ -160,7 +160,24 @@ governanceRoutes.get("/review-queue", async (c) => {
     offset,
   });
 
-  return c.json(result);
+  // Annotate each request with the caller's authoritative review capability
+  // (the SAME check approve/reject enforce — handles admin/owner/steward scope
+  // + separation-of-duties). The UI gates the Review button + queue off this
+  // instead of re-deriving steward scope client-side, which diverged for
+  // reviewer-stewards reaching the nest via public visibility (CU-wdqcpzudt3
+  // follow-up). Cached per node across rows.
+  const email = getUserEmail(c);
+  const canReviewCache = new Map<string, boolean>();
+  const requests = result.requests.map((r) => {
+    let canReview = canReviewCache.get(r.nodeId);
+    if (canReview === undefined) {
+      canReview = stewardship.canUserApprove(nestId, r.nodeId, email).allowed;
+      canReviewCache.set(r.nodeId, canReview);
+    }
+    return { ...r, canReview };
+  });
+
+  return c.json({ ...result, requests });
 });
 
 // GET /nests/:nestId/external-edits
@@ -189,7 +206,7 @@ governanceRoutes.post("/external-edits/scan", async (c) => {
 governanceRoutes.get("/activity", async (c) => {
   const nestId = c.req.param("nestId")!;
   const limit = parseInt(c.req.query("limit") || "100", 10);
-  const activity = comments.getActivity({ nestId, limit });
+  const activity = await comments.getActivity({ nestId, limit });
   return c.json({ activity });
 });
 
@@ -329,7 +346,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const limit = parseInt(c.req.query("limit") || "100", 10);
-  const activity = comments.getActivity({ nestId, nodeId, limit });
+  const activity = await comments.getActivity({ nestId, nodeId, limit });
   return c.json({ activity });
 });
 

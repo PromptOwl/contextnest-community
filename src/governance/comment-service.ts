@@ -14,6 +14,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { listNestExternalEdits } from "./external-edit-service.js";
 import type { Comment, CommentStatus, ActivityEntry } from "./types.js";
 
 // ─── Create ─────────────────────────────────────────────────────────────
@@ -126,14 +127,18 @@ export function resolveComment(params: {
 
 // ─── Activity log ───────────────────────────────────────────────────────
 // "Who did what" for a node (or a whole nest) — a read-only aggregation over
-// comments + node_versions + review_requests. No new storage; we just project
-// the actor/timestamp columns each table already records.
+// comments + node_versions + review_requests, plus the pending external-edit
+// suggestions (which live on disk, not SQLite). No new storage; we just project
+// the actor/timestamp fields each source already records.
+//
+// Async because pending suggestions are read from nest storage on disk
+// (external-edit-service), not the database.
 
-export function getActivity(params: {
+export async function getActivity(params: {
   nestId: string;
   nodeId?: string;
   limit?: number;
-}): ActivityEntry[] {
+}): Promise<ActivityEntry[]> {
   const db = getDb();
   const limit = params.limit ?? 100;
   const entries: ActivityEntry[] = [];
@@ -218,6 +223,32 @@ export function getActivity(params: {
         refId: r.id,
       });
     }
+  }
+
+  // Proposed edits — pending external-edit suggestions ("Bob proposed an
+  // edit"). These are NOT in SQLite: the engine stages them on disk inside
+  // the nest, so we read them through the external-edit service. A storage
+  // read failure must not break the rest of the feed, so we degrade to no
+  // suggestions rather than throwing.
+  try {
+    const pending = await listNestExternalEdits(params.nestId);
+    for (const e of pending) {
+      // document_id is the node id; honour the per-node filter.
+      if (params.nodeId && e.document_id !== params.nodeId) continue;
+      entries.push({
+        type: "edit_proposed",
+        nodeId: e.document_id,
+        actor: e.actor,
+        at: e.detected_at,
+        detail: e.note || `proposed an edit (${e.source})`,
+        refId: e.suggestion_id,
+      });
+    }
+  } catch (err) {
+    console.error(
+      `[comments] failed to load pending external edits for activity feed (nest ${params.nestId}):`,
+      err,
+    );
   }
 
   // Newest first, capped.

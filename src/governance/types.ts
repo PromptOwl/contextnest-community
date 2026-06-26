@@ -119,7 +119,8 @@ export interface Comment {
 export type ActivityType =
   | "comment"
   | "comment_resolved"
-  | "edit"
+  | "edit" // a committed node version
+  | "edit_proposed" // a pending external-edit suggestion ("proposed an edit")
   | "review_requested"
   | "review_resolved";
 

@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { readdirSync, readFileSync, writeFileSync } from "fs";
+import { join } from "path";
 import {
   setupTestEnv,
   createTestApp,
@@ -211,5 +213,60 @@ describe("comments: standalone, threaded, attributed, resolvable", () => {
     const actors = new Set(data.activity.map((a: any) => a.actor));
     expect(actors.has("owner@acme.com")).toBe(true);
     expect(actors.has("reader@acme.com")).toBe(true);
+  });
+
+  it("activity feed surfaces a pending external edit as 'edit_proposed'", async () => {
+    // Pending external-edit suggestions live on disk (not SQLite). Stage one
+    // by hand-editing the node's on-disk file out-of-band, then running the
+    // drift scan — this is exactly "Bob proposed an edit" from the ticket.
+    const nestDir = join(process.env.DATA_ROOT!, "nests", nestId);
+    // The node's document body lives under nodes/<slug>.md inside the nest.
+    const docFile = (readdirSync(nestDir, { recursive: true } as any) as string[])
+      .map((f) => String(f))
+      .find((f) => f.endsWith(".md") && f.includes("nodes"));
+    expect(docFile).toBeTruthy();
+    const docPath = join(nestDir, docFile!);
+    writeFileSync(
+      docPath,
+      readFileSync(docPath, "utf-8") + "\n\nAn out-of-band hand edit.\n",
+    );
+
+    const { data: scan } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/external-edits/scan`,
+      {},
+      owner.apiKey,
+    );
+    expect(scan.staged).toBeGreaterThanOrEqual(1);
+
+    // Per-node feed now carries the proposal, attributed + timestamped.
+    const { status, data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${nodeId}/activity`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(status).toBe(200);
+    const proposed = data.activity.filter(
+      (a: any) => a.type === "edit_proposed",
+    );
+    expect(proposed.length).toBeGreaterThanOrEqual(1);
+    expect(proposed[0].actor).toBeTruthy();
+    expect(proposed[0].at).toBeTruthy();
+    expect(proposed[0].nodeId).toBe(nodeId);
+
+    // And the nest-wide feed surfaces it too.
+    const { data: nestFeed } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/activity`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(
+      nestFeed.activity.some((a: any) => a.type === "edit_proposed"),
+    ).toBe(true);
   });
 });
