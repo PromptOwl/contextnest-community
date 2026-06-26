@@ -230,10 +230,11 @@ Source-folder cleanup is best-effort. If `rmSync` fails (locked file etc.) the n
 
 Separate from stewardship — this grants raw nest access. Stewardship layers governance on top.
 
-### GET `/nests/:nestId/collaborators`
+### GET `/nests/:nestId/collaborators` (write+)
 ```json
 { "collaborators": [{ "id": "...", "user_id": "...", "email": "...", "permission": "read" }] }
 ```
+Write-tier (not read) so a public nest's read tier can't enumerate member emails.
 
 ### POST `/nests/:nestId/collaborators` (write+)
 ```json

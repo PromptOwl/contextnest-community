@@ -419,11 +419,16 @@ export function createApp(): Hono<AuthEnv> {
     if (path.includes("/visibility")) {
       required = "admin";
     } else if (path.includes("/collaborators")) {
-      // Inviting (POST) is open to write+ collaborators — you no longer need
-      // to be a nest admin to bring someone in. The escalation cap (you can't
-      // grant access above your own level) is enforced in addCollaborator.
-      // Changing or removing existing collaborators stays admin-only.
-      required = c.req.method === "POST" ? "write" : "admin";
+      // Viewing the roster (GET) and inviting (POST) are open to write+
+      // collaborators: the Collaborators tab loads the roster and lets editors
+      // bring people in — you no longer need to be a nest admin. Kept at write
+      // (not read) so a public nest's read tier can't enumerate member emails.
+      // The escalation cap — you can't grant above your own level — is enforced
+      // in addCollaborator. Changing or removing existing collaborators
+      // (PATCH/DELETE) stays admin-only, per the ticket's governance rule.
+      required = c.req.method === "GET" || c.req.method === "POST"
+        ? "write"
+        : "admin";
     } else if (
       c.req.method !== "GET" &&
       !isStewardActionPath &&

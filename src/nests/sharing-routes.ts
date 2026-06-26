@@ -57,7 +57,8 @@ sharingRoutes.post("/collaborators", async (c) => {
   return c.json({ collaborator: collab }, 201);
 });
 
-// PATCH /nests/:nestId/collaborators/:collabId
+// PATCH /nests/:nestId/collaborators/:collabId — admin-only (access guard).
+// Changing an existing collaborator's level stays an admin-tier action.
 sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   const body = await c.req.json<{ permission?: string }>();
   if (!body.permission || !["read", "write", "admin"].includes(body.permission)) {
@@ -72,7 +73,8 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   return c.json({ updated: true });
 });
 
-// DELETE /nests/:nestId/collaborators/:collabId
+// DELETE /nests/:nestId/collaborators/:collabId — admin-only (access guard).
+// Removing a collaborator stays an admin-tier action.
 sharingRoutes.delete("/collaborators/:collabId", async (c) => {
   const db = getDb();
   db.prepare("DELETE FROM nest_collaborators WHERE id = ?").run(

@@ -74,6 +74,17 @@ describe("share permissions: escalation-capped invites", () => {
 
   afterAll(() => env.cleanup());
 
+  it("a write collaborator can view the roster (GET is write-tier)", async () => {
+    const { status, data } = await collabs(editor);
+    expect(status).toBe(200);
+    expect(Array.isArray(data.collaborators)).toBe(true);
+  });
+
+  it("a read-only collaborator cannot view the roster (no public email leak)", async () => {
+    const { status } = await collabs(viewer);
+    expect(status).toBe(403);
+  });
+
   it("a write collaborator can invite someone at read (≤ own level)", async () => {
     const { status } = await jsonRequest(
       app,
