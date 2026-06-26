@@ -642,4 +642,22 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("010_comments");
   }
+
+  // 010: one-time-use store for PromptOwl SSO ticket IDs (jti). A ticket is
+  // single-use — once its jti lands here it can't be replayed. expires_at
+  // mirrors the ticket's exp so old rows can be pruned.
+  if (!hasMigration("010_sso_used_jti")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sso_used_jti (
+          jti TEXT PRIMARY KEY,
+          used_at TEXT NOT NULL DEFAULT (datetime('now')),
+          expires_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sso_used_jti_expires
+          ON sso_used_jti(expires_at);
+      `);
+    })();
+    recordMigration("010_sso_used_jti");
+  }
 }
