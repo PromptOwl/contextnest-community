@@ -333,7 +333,9 @@ export function createApp(): Hono<AuthEnv> {
         path.includes("/reject") ||
         path.includes("/can-access") ||
         path.includes("/can-approve") ||
-        path.includes("/can-edit");
+        path.includes("/can-edit") ||
+        path.includes("/comments") ||
+        path.includes("/activity");
       const needsLicense = c.req.method !== "GET" || isGovernance;
       if (needsLicense) {
         const lic = getCurrentLicense();
@@ -375,6 +377,11 @@ export function createApp(): Hono<AuthEnv> {
       path.includes("/reject") ||
       path.includes("/submit-review") ||
       path.includes("/cancel-review");
+    // Commenting is a read-tier collaboration action: anyone who can see the
+    // node may leave or resolve a comment. Don't bump these POSTs to "write"
+    // (that would block read-only reviewers — the people most likely to
+    // comment). The handler/service own any finer-grained rules.
+    const isCommentAction = path.includes("/comments");
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin: not nest owners or collaborators. All methods
     // on /nests/:id/stewards are locked. The node-level resolve route
@@ -393,7 +400,11 @@ export function createApp(): Hono<AuthEnv> {
     }
     if (path.includes("/collaborators") || path.includes("/visibility")) {
       required = "admin";
-    } else if (c.req.method !== "GET" && !isStewardActionPath) {
+    } else if (
+      c.req.method !== "GET" &&
+      !isStewardActionPath &&
+      !isCommentAction
+    ) {
       required = "write";
     }
 

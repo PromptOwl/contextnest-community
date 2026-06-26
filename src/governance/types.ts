@@ -86,6 +86,52 @@ export interface ReviewRequest {
   priority: ReviewRequestPriority;
 }
 
+// Comment status — comments are standalone annotations, not version states.
+export type CommentStatus = "open" | "resolved";
+
+// Optional highlight anchor — the char span a comment is attached to, so the
+// UI can show it in the margin next to the highlighted text (Word/Docs style).
+export interface CommentAnchor {
+  start: number;
+  end: number;
+  text?: string;
+}
+
+// Collaboration comment (CU-wdqcpzudt3). DB-only; never part of the hash chain.
+export interface Comment {
+  id: string;
+  nestId: string;
+  nodeId: string;
+  version?: number; // optional: pinned to the version it was left on
+  anchor?: CommentAnchor; // optional: highlighted span
+  parentId?: string; // threading — reply to another comment
+  author: string; // email
+  body: string;
+  status: CommentStatus;
+  createdAt: string;
+  resolvedBy?: string; // email
+  resolvedAt?: string;
+}
+
+// One entry in the per-node / per-nest activity log. Aggregates "who did
+// what" across comments, edits, and reviews — read-only, derived from the
+// existing actor/timestamp fields on each source table.
+export type ActivityType =
+  | "comment"
+  | "comment_resolved"
+  | "edit"
+  | "review_requested"
+  | "review_resolved";
+
+export interface ActivityEntry {
+  type: ActivityType;
+  nodeId: string;
+  actor: string; // email of who did it
+  at: string; // ISO-ish timestamp
+  detail?: string; // e.g. "approved v4", change note, comment excerpt
+  refId?: string; // id of the source row (comment id, review id, version no.)
+}
+
 // User reference
 export interface UserRef {
   id: string;
