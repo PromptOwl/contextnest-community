@@ -698,3 +698,21 @@ export async function removeCollaborator(nestId: string, collabId: string) {
     { method: "DELETE" },
   );
 }
+
+// ─── Ontology graph ───────────────────────────────────────────────────────
+
+export interface NestGraph {
+  nodes: Array<{ id: string; title: string; type: string; tags: string[] }>;
+  links: Array<{ source: string; target: string }>;
+  stewards: Array<{
+    email: string;
+    role: string;
+    scope: "nest" | "tag" | "document";
+    target: string;
+  }>;
+  tags: Array<{ name: string; count: number }>;
+}
+
+export async function getNestGraph(nestId: string) {
+  return request<NestGraph>(`/nests/${nestId}/graph`);
+}
