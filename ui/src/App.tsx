@@ -201,6 +201,34 @@ export default function App() {
     })();
   }, [deepLinkProbe.status]);
 
+  // Keep the URL in sync with the current view so documents (and nests) are
+  // shareable — paste the address bar and the recipient lands on the same doc.
+  // The probe above consumes ?nest / ?doc on load, so we must NOT rewrite the
+  // URL while it's still "loading", or we'd clobber the params before it reads
+  // them. ?doc is omitted for unsaved ("new") documents.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (deepLinkProbe.status === "loading") return;
+    const params = new URLSearchParams(window.location.search);
+    if (view.page === "document") {
+      params.set("nest", view.nestId);
+      if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
+      else params.delete("doc");
+    } else if (view.page === "nest") {
+      params.set("nest", view.nestId);
+      params.delete("doc");
+    } else {
+      params.delete("nest");
+      params.delete("doc");
+    }
+    const qs = params.toString();
+    const next =
+      window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+    const current =
+      window.location.pathname + window.location.search + window.location.hash;
+    if (next !== current) window.history.replaceState({}, "", next);
+  }, [view, deepLinkProbe.status]);
+
   // One-click PromptOwl SSO (GET /auth/sso) bounces back to "/?sso_error=<code>"
   // when a ticket can't be redeemed (bad/expired/replayed ticket, wrong
   // audience, rate limit, sign-in gate) or when this community doesn't support
