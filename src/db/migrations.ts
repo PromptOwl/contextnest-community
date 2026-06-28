@@ -49,6 +49,35 @@ export function runMigrations(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_nest_collab_nest ON nest_collaborators(nest_id);
     CREATE INDEX IF NOT EXISTS idx_nest_collab_user ON nest_collaborators(user_id);
 
+    -- Annotation threads on hosted artifacts. Deliberately kept OUT of the
+    -- versioned/hash-chained node layer: annotations are high-churn human
+    -- feedback, not canonical node content. They reference the node + the
+    -- snapshot (node version) they were anchored against.
+    CREATE TABLE IF NOT EXISTS annotation_threads (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      snapshot_version INTEGER,
+      anchor_json TEXT,                 -- JSON {line?,quote,before,after}; NULL = whole-artifact
+      status TEXT NOT NULL DEFAULT 'open'
+        CHECK(status IN ('open', 'resolved')),
+      created_by TEXT NOT NULL,         -- email
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      resolved_by TEXT,
+      resolved_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS annotation_comments (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL REFERENCES annotation_threads(id) ON DELETE CASCADE,
+      author TEXT NOT NULL,             -- email
+      body TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_annot_threads_node
+      ON annotation_threads(nest_id, node_id);
+    CREATE INDEX IF NOT EXISTS idx_annot_comments_thread
+      ON annotation_comments(thread_id);
+
     -- License validation cache
     CREATE TABLE IF NOT EXISTS license_cache (
       key TEXT PRIMARY KEY,

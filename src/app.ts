@@ -12,6 +12,7 @@ import {
   canManageStewards,
 } from "./governance/stewardship-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
+import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
@@ -387,6 +388,15 @@ export function createApp(): Hono<AuthEnv> {
       path.includes("/reject") ||
       path.includes("/submit-review") ||
       path.includes("/cancel-review");
+    // Hosted-artifact annotations are a read-tier collaboration action:
+    // anyone who can SEE the artifact (notably read-only reviewers — the people
+    // most likely to annotate) may open a thread, reply, resolve or reopen.
+    // Handlers re-check node read-access; don't bump these POSTs to "write".
+    //   POST …/annotations                        → create thread
+    //   POST …/annotations/:id/{comments,resolve,reopen}
+    const isAnnotationAction =
+      /\/annotations$/.test(path) ||
+      /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path);
     // Commenting is a read-tier collaboration action: anyone who can see the
     // node may leave or resolve a comment. Don't bump these POSTs to "write"
     // (that would block read-only reviewers — the people most likely to
@@ -438,7 +448,8 @@ export function createApp(): Hono<AuthEnv> {
     } else if (
       c.req.method !== "GET" &&
       !isStewardActionPath &&
-      !isCommentAction
+      !isCommentAction &&
+      !isAnnotationAction
     ) {
       required = "write";
     }
@@ -514,6 +525,9 @@ export function createApp(): Hono<AuthEnv> {
   // POST routes work fine (Hono matches method+path), but GET routes clash.
   // Solution: mount governance node routes and node CRUD on the same Hono instance.
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
+  // Annotations + sandboxed artifact serving — must precede the greedy
+  // nodeRoutes catch-all so /:nodeId/annotations and /:nodeId/hosted match.
+  nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
