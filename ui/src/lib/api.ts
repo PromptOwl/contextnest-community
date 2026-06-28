@@ -582,6 +582,130 @@ export async function getNodeReviews(nestId: string, nodeId: string) {
   return request<{ reviews: any[] }>(`/nests/${nestId}/nodes/${nodeId}/reviews`);
 }
 
+// ─── Hosted artifacts + annotations ──────────────────────────────────────
+
+export interface AnnotationAnchor {
+  /** 1-based line in the artifact's extracted text. Hint only. */
+  line?: number;
+  /** The highlighted text. */
+  quote: string;
+  /** Up to ~250 chars before the quote. */
+  before: string;
+  /** Up to ~250 chars after the quote. */
+  after: string;
+}
+
+export interface AnnotationComment {
+  id: string;
+  author: string;
+  body: string;
+  createdAt: string;
+}
+
+export interface AnnotationThread {
+  id: string;
+  nestId: string;
+  nodeId: string;
+  snapshotVersion: number | null;
+  anchor: AnnotationAnchor | null;
+  status: "open" | "resolved";
+  createdBy: string;
+  createdAt: string;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+  comments: AnnotationComment[];
+}
+
+/** URL of the sandboxed artifact render (iframe `src`). `v` pins a snapshot. */
+export function hostedArtifactUrl(
+  nestId: string,
+  nodeId: string,
+  version?: number | null,
+): string {
+  const v = version != null ? `?v=${version}` : "";
+  return `${API_BASE}/nests/${nestId}/nodes/${nodeId}/hosted${v}`;
+}
+
+/**
+ * Fetch the artifact's served HTML as text — used to derive the *extracted
+ * text* the annotation layer highlights over (same text the nest indexes).
+ * Same-origin, cookie-authed; not subject to the iframe sandbox.
+ */
+export async function fetchArtifactHtml(
+  nestId: string,
+  nodeId: string,
+  version?: number | null,
+): Promise<{ html: string; snapshot: number | null }> {
+  const res = await fetch(hostedArtifactUrl(nestId, nodeId, version), {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to load artifact (${res.status})`);
+  }
+  const snapHeader = res.headers.get("X-Artifact-Snapshot");
+  const snapshot = snapHeader ? Number(snapHeader) : null;
+  return {
+    html: await res.text(),
+    snapshot: Number.isFinite(snapshot as number) ? snapshot : null,
+  };
+}
+
+export async function listAnnotations(nestId: string, nodeId: string) {
+  return request<{ threads: AnnotationThread[] }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations`,
+  );
+}
+
+export async function createAnnotation(
+  nestId: string,
+  nodeId: string,
+  input: {
+    body: string;
+    anchor?: AnnotationAnchor | null;
+    snapshotVersion?: number | null;
+  },
+) {
+  return request<{ thread: AnnotationThread }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function replyAnnotation(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+  body: string,
+) {
+  return request<{ thread: AnnotationThread }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments`,
+    { method: "POST", body: JSON.stringify({ body }) },
+  );
+}
+
+export async function resolveAnnotation(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+) {
+  return request<{ thread: AnnotationThread }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/resolve`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export async function reopenAnnotation(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+) {
+  return request<{ thread: AnnotationThread }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/reopen`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+
 // ─── Comments & activity (collaboration) ─────────────────────────────────
 
 export interface CommentAnchor {
