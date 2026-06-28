@@ -43,6 +43,14 @@ export const COLLAB_PERMISSIONS: {
   { value: "admin", label: "Admin", hint: "Full access except deleting the nest" },
 ];
 
+// Rank for the escalation cap — mirrors permissionLevel() in
+// src/shared/access.ts. The UI caps what a caller can grant/manage; the
+// server is the real gate (POST /collaborators is write+ and escalation-capped,
+// PATCH/DELETE stay admin).
+const PERM_RANK: Record<string, number> = {
+  read: 1, write: 2, admin: 3, owner: 4,
+};
+
 interface CollaboratorManagerProps {
   nestId: string;
   nestName: string;
@@ -51,6 +59,11 @@ interface CollaboratorManagerProps {
   /** Logged-in user's email — their own row hides the Remove button so they
    *  can't revoke their own access from the UI. */
   currentUserEmail?: string;
+  /** Caller's effective nest permission. Caps the invite dropdown to their own
+   *  level (no escalation) and hides change-role/remove for non-admins, which
+   *  stay admin-only server-side. Defaults to admin for legacy admin-gated
+   *  call sites (e.g. ShareNestDialog) that don't pass it. */
+  callerPermission?: string;
 }
 
 export function CollaboratorManager({
@@ -58,8 +71,17 @@ export function CollaboratorManager({
   nestName,
   onChanged,
   currentUserEmail,
+  callerPermission = "admin",
 }: CollaboratorManagerProps) {
   const self = (currentUserEmail || "").toLowerCase();
+  const callerRank = PERM_RANK[callerPermission] ?? PERM_RANK.read;
+  // Admin/owner manage the roster (change role + remove); per the ticket,
+  // those stay admin-tier. Write collaborators can only invite.
+  const canManageRoster = callerRank >= PERM_RANK.admin;
+  // Escalation cap — can only grant up to your own level.
+  const grantablePermissions = COLLAB_PERMISSIONS.filter(
+    (p) => PERM_RANK[p.value] <= callerRank,
+  );
   const [collaborators, setCollaborators] = useState<Collaborator[]>([]);
   const [loading, setLoading] = useState(true);
   const [inviteEmail, setInviteEmail] = useState("");
@@ -178,7 +200,7 @@ export function CollaboratorManager({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {COLLAB_PERMISSIONS.map((p) => (
+              {grantablePermissions.map((p) => (
                 <SelectItem key={p.value} value={p.value}>
                   {p.label}
                 </SelectItem>
@@ -228,41 +250,52 @@ export function CollaboratorManager({
                     {r}
                   </Badge>
                 ))}
-                <Select
-                  value={c.permission}
-                  disabled={(c.email || "").toLowerCase() === self}
-                  onValueChange={(v) =>
-                    handleRoleChange(c.id, v as Collaborator["permission"])
-                  }
-                >
-                  <SelectTrigger
-                    className="w-[120px] h-8"
-                    title={
-                      (c.email || "").toLowerCase() === self
-                        ? "You can't change your own access level"
-                        : undefined
-                    }
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {COLLAB_PERMISSIONS.map((p) => (
-                      <SelectItem key={p.value} value={p.value}>
-                        {p.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {(c.email || "").toLowerCase() !== self && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => handleRemove(c)}
-                    title="Remove access"
-                    className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
+                {canManageRoster ? (
+                  <>
+                    <Select
+                      value={c.permission}
+                      disabled={(c.email || "").toLowerCase() === self}
+                      onValueChange={(v) =>
+                        handleRoleChange(c.id, v as Collaborator["permission"])
+                      }
+                    >
+                      <SelectTrigger
+                        className="w-[120px] h-8"
+                        title={
+                          (c.email || "").toLowerCase() === self
+                            ? "You can't change your own access level"
+                            : undefined
+                        }
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {COLLAB_PERMISSIONS.map((p) => (
+                          <SelectItem key={p.value} value={p.value}>
+                            {p.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {(c.email || "").toLowerCase() !== self && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleRemove(c)}
+                        title="Remove access"
+                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
+                  </>
+                ) : (
+                  /* Write collaborators can invite but not change or remove
+                     existing people (admin-only) — show their level read-only. */
+                  <Badge variant="secondary" className="text-[11px] capitalize">
+                    {COLLAB_PERMISSIONS.find((p) => p.value === c.permission)
+                      ?.label ?? c.permission}
+                  </Badge>
                 )}
               </div>
             ))}

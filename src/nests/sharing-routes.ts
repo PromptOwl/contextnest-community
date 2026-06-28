@@ -50,11 +50,15 @@ sharingRoutes.post("/collaborators", async (c) => {
     userId: body.user_id,
     permission: body.permission ?? "",
     grantedByUserId: c.get("userId"),
+    // Enforce the escalation cap against the caller's own nest permission
+    // (set by the access guard) — a write collaborator can't grant admin.
+    callerPermission: c.get("nestPermission"),
   });
   return c.json({ collaborator: collab }, 201);
 });
 
-// PATCH /nests/:nestId/collaborators/:collabId
+// PATCH /nests/:nestId/collaborators/:collabId — admin-only (access guard).
+// Changing an existing collaborator's level stays an admin-tier action.
 sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   const body = await c.req.json<{ permission?: string }>();
   if (!body.permission || !["read", "write", "admin"].includes(body.permission)) {
@@ -62,19 +66,24 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   }
 
   const db = getDb();
-  db.prepare("UPDATE nest_collaborators SET permission = ? WHERE id = ?").run(
-    body.permission,
-    c.req.param("collabId")!,
-  );
+  // Scope to the nest in the URL — the guard authorised the caller against
+  // THIS nest, so the row we touch must belong to it (a bare `id =` match
+  // would let an admin of nest A mutate a collaborator row from nest B).
+  db.prepare(
+    "UPDATE nest_collaborators SET permission = ? WHERE id = ? AND nest_id = ?",
+  ).run(body.permission, c.req.param("collabId")!, c.req.param("nestId")!);
   return c.json({ updated: true });
 });
 
-// DELETE /nests/:nestId/collaborators/:collabId
+// DELETE /nests/:nestId/collaborators/:collabId — admin-only (access guard).
+// Removing a collaborator stays an admin-tier action.
 sharingRoutes.delete("/collaborators/:collabId", async (c) => {
   const db = getDb();
-  db.prepare("DELETE FROM nest_collaborators WHERE id = ?").run(
-    c.req.param("collabId")!,
-  );
+  // Scope to the nest in the URL (see PATCH above) — never delete a row that
+  // belongs to a different nest just because the UUID matches.
+  db.prepare(
+    "DELETE FROM nest_collaborators WHERE id = ? AND nest_id = ?",
+  ).run(c.req.param("collabId")!, c.req.param("nestId")!);
   return c.json({ removed: true });
 });
 

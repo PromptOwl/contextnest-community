@@ -77,6 +77,10 @@ type View =
       isAnonOwned: boolean;
     };
 
+// Runs the ?sso_error toast exactly once per page load (survives React
+// StrictMode's dev double-mount). Resets naturally on the next full navigation.
+let ssoErrorHandled = false;
+
 export default function App() {
   const {
     authMode,
@@ -196,6 +200,48 @@ export default function App() {
       }
     })();
   }, [deepLinkProbe.status]);
+
+  // One-click PromptOwl SSO (GET /auth/sso) bounces back to "/?sso_error=<code>"
+  // when a ticket can't be redeemed (bad/expired/replayed ticket, wrong
+  // audience, rate limit, sign-in gate) or when this community doesn't support
+  // SSO at all (no shared secret on a self-hosted deploy → "not_supported").
+  // Surface a human-readable toast and strip the param so a refresh doesn't
+  // re-fire it.
+  //
+  // The module-level guard + deferred toast handle React StrictMode's dev
+  // double-mount: the effect fires twice, and a toast queued synchronously in
+  // the first pass is dropped when sonner's <Toaster> remounts. The guard runs
+  // the body exactly once per page load (each SSO redirect is a full
+  // navigation, so it resets), and the setTimeout lets the toast land after the
+  // mount churn settles so it actually renders.
+  useEffect(() => {
+    if (typeof window === "undefined" || ssoErrorHandled) return;
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("sso_error");
+    if (!code) return;
+    ssoErrorHandled = true;
+
+    params.delete("sso_error");
+    const qs = params.toString();
+    window.history.replaceState(
+      {},
+      "",
+      window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
+    );
+
+    const messages: Record<string, string> = {
+      not_supported: "One-click sign-in isn't available on this community.",
+      missing_ticket: "The sign-in link was incomplete. Try again from PromptOwl.",
+      invalid_ticket: "The sign-in link is invalid or has expired. Try again from PromptOwl.",
+      bad_audience: "This sign-in link was issued for a different community.",
+      ticket_used: "This sign-in link was already used. Start again from PromptOwl.",
+      rate_limited: "Too many sign-in attempts. Wait a moment and try again.",
+      sign_in_restricted: "Sign-in is restricted on this community. Contact an admin.",
+      service_error: "Something went wrong signing you in. Please try again.",
+    };
+    const msg = messages[code] ?? "Sign-in failed. Try again from PromptOwl.";
+    setTimeout(() => toast.error(msg), 0);
+  }, []);
 
   useEffect(() => {
     refreshLicense();
