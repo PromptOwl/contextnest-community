@@ -67,6 +67,32 @@ export const config = {
     return process.env.PROMPTOWL_KEY || "";
   },
   /**
+   * Shared secret for one-click SSO auto-login from PromptOwl (PO).
+   *
+   * THIS IS THE DOMAIN LOCK. Only the ONE official community deployment is
+   * given this secret (it matches OFFICIAL_COMMUNITY_SSO_SECRET on PO). PO
+   * signs a short-lived JWT ticket with it; this server verifies the ticket
+   * with the same secret at GET /auth/sso.
+   *
+   * Self-hosted deployments leave this UNSET — GET /auth/sso then returns 404,
+   * so the auto-login feature is disabled for every domain except ours. Those
+   * users keep using the manual device-code flow (/auth/promptowl).
+   */
+  get OFFICIAL_COMMUNITY_SSO_SECRET(): string {
+    return process.env.OFFICIAL_COMMUNITY_SSO_SECRET || "";
+  },
+  /**
+   * This server's own canonical, externally-reachable base URL (e.g.
+   * "https://community.promptowl.ai"). Used to validate the `aud` claim on
+   * incoming SSO tickets — a ticket minted for a different audience is
+   * rejected, so a ticket can't be replayed against another server. Compared
+   * with the trailing slash stripped. When unset, the `aud` check is skipped
+   * (the shared-secret check is still the primary gate).
+   */
+  get PUBLIC_BASE_URL(): string {
+    return (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+  },
+  /**
    * Restrict "Sign in with PromptOwl":
    *   "open"       — anyone may sign in with PromptOwl (default)
    *   "admin-only" — only the license owner (admin) may; everyone else

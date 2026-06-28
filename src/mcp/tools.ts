@@ -740,11 +740,14 @@ export async function handleToolCall(
     }
 
     case "context_share_nest": {
-      // Same gate as REST/UI: managing collaborators needs nest admin (owner
-      // or admin) — NOT the steward super-admin. A normal nest admin can share.
+      // NOTE: this gate is intentionally stricter than REST/UI for now. REST
+      // POST /collaborators allows write+ collaborators to invite (escalation-
+      // capped in addCollaborator); this MCP tool still requires nest admin.
+      // TODO(CU-wdqcpzudw5 follow-up): bring MCP to parity — accept write+ and
+      // pass callerPermission into addCollaborator so the cap applies here too.
       const roles = stewardship.resolveUserRoles(ctx.nestId, ctx.userEmail);
       if (!canManageWith(roles)) {
-        return "You don't have permission to share this nest. Only the nest owner or an admin can add people.";
+        return "You don't have permission to share this nest via this tool (admin only). You can still invite from the UI with write access, or ask a nest admin.";
       }
       const permission = (args.permission as string) || "read";
       try {

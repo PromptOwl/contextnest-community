@@ -635,4 +635,58 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("009_lowercase_emails");
   }
+
+  // 010: one-time-use store for PromptOwl SSO ticket IDs (jti). A ticket is
+  // single-use — once its jti lands here it can't be replayed. expires_at
+  // mirrors the ticket's exp so old rows can be pruned.
+  if (!hasMigration("010_sso_used_jti")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sso_used_jti (
+          jti TEXT PRIMARY KEY,
+          used_at TEXT NOT NULL DEFAULT (datetime('now')),
+          expires_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sso_used_jti_expires
+          ON sso_used_jti(expires_at);
+      `);
+    })();
+    recordMigration("010_sso_used_jti");
+  }
+
+  // 011: Collaboration comments (CU-wdqcpzudt3). A standalone annotation
+  //   primitive — deliberately NOT part of the engine hash chain or version
+  //   history. Comments are *about* a node, not a version of it: plain rows
+  //   that carry attribution, thread, anchor to a highlighted span, and
+  //   resolve. They feed the per-node activity log alongside reviews + edits.
+  if (!hasMigration("011_comments")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS comments (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          version INTEGER,                 -- optional: comment pinned to a version
+          anchor_start INTEGER,            -- optional: highlight span start (char offset)
+          anchor_end INTEGER,              -- optional: highlight span end
+          anchor_text TEXT,                -- optional: quoted highlighted text
+          parent_id TEXT REFERENCES comments(id) ON DELETE CASCADE,  -- threading
+          author TEXT NOT NULL,            -- email
+          body TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open'
+            CHECK(status IN ('open', 'resolved')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_by TEXT,                -- email
+          resolved_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_comments_node
+          ON comments(nest_id, node_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_comments_open
+          ON comments(nest_id, node_id, status);
+        CREATE INDEX IF NOT EXISTS idx_comments_thread
+          ON comments(parent_id);
+      `);
+    })();
+    recordMigration("011_comments");
+  }
 }
