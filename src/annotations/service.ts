@@ -9,7 +9,7 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
 import { engineCache } from "../nodes/engine.js";
-import { createNode, updateNode } from "../nodes/service.js";
+import { createNode, updateNode, bodyOnly } from "../nodes/service.js";
 import { NotFoundError } from "../shared/errors.js";
 import { clampAnchor, projectThreadsToMarkdown } from "./projection.js";
 import type {
@@ -183,22 +183,66 @@ export function setThreadStatus(
   return rowToThread(getThreadRow(threadId)!);
 }
 
-/** Read a hosted artifact node's stored HTML body + title. */
+/**
+ * Read a hosted artifact's HTML body + title for a *frozen snapshot*.
+ *
+ * Resolution order for which snapshot to serve:
+ *   1. explicit `version` (the snapshot a viewer/annotation is pinned to),
+ *   2. else the node's approved version,
+ *   3. else the live on-disk body (un-versioned / ungoverned fallback).
+ *
+ * A specific version is materialized via the engine's `reconstructVersion`
+ * (the same path public LLM reads use) so the served HTML never drifts from
+ * what annotations were anchored against — this is the frozen-snapshot
+ * guarantee, NOT a live link. Returns the resolved `version` so the caller can
+ * pin newly created threads to it, plus the node `type` for kind enforcement.
+ */
 export async function readArtifact(
   nestId: string,
   nodeId: string,
-): Promise<{ title: string; html: string }> {
-  const { storage } = engineCache.get(nestId);
-  let node;
+  version?: number | null,
+): Promise<{
+  title: string;
+  html: string;
+  version: number | null;
+  type: string | null;
+}> {
+  const { storage, versions: versionManager } = engineCache.get(nestId);
+
+  const target =
+    version ?? versions.getApprovedVersion(nestId, nodeId) ?? null;
+
+  // Title/type + live body from the on-disk doc (cheap, stable label). Missing
+  // doc is only fatal when we also have no snapshot to fall back on.
+  let title = nodeId;
+  let type: string | null = null;
+  let liveHtml = "";
+  let liveExists = true;
   try {
-    node = await storage.readDocument(nodeId);
+    const node = await storage.readDocument(nodeId);
+    title = node.frontmatter?.title || nodeId;
+    type = (node.frontmatter?.type as string) || null;
+    liveHtml = node.body || "";
   } catch {
+    liveExists = false;
+  }
+
+  if (target != null) {
+    try {
+      const raw = await versionManager.reconstructVersion(nodeId, target);
+      return { title, html: bodyOnly(nodeId, raw), version: target, type };
+    } catch (err) {
+      console.warn(
+        `[annotations] reconstruct v${target} failed for ${nestId}/${nodeId}; falling back to live body:`,
+        err,
+      );
+    }
+  }
+
+  if (!liveExists) {
     throw new NotFoundError(`Artifact not found: ${nodeId}`);
   }
-  return {
-    title: node.frontmatter?.title || nodeId,
-    html: node.body || "",
-  };
+  return { title, html: liveHtml, version: target, type };
 }
 
 /** Slug used by node service when deriving an id from a title. Mirror it so the

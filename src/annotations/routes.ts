@@ -10,7 +10,7 @@ import {
   syncAnnotationsNode,
   readArtifact,
 } from "./service.js";
-import type { AnnotationAnchor } from "./types.js";
+import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
 
 /**
  * Routes for hosted-artifact annotations + sandboxed serving.
@@ -142,12 +142,45 @@ annotationRoutes.get("/:nodeId{.+}/hosted", async (c) => {
     return c.json({ error: "Access denied" }, 403);
   }
 
-  const { html } = await readArtifact(nestId, nodeId);
+  // Optional ?v=N pins a frozen snapshot; otherwise the approved version.
+  const vRaw = c.req.query("v");
+  const vNum = vRaw !== undefined ? Number(vRaw) : NaN;
+  const version =
+    Number.isFinite(vNum) && vNum > 0 ? Math.floor(vNum) : undefined;
+
+  const { html, version: served, type } = await readArtifact(
+    nestId,
+    nodeId,
+    version,
+  );
+  // Only genuine artifact nodes render through the HTML host path. A live doc
+  // of another kind (ordinary markdown) is not served as HTML. When the live
+  // doc is gone (type === null) we still serve the reconstructed snapshot.
+  if (type !== null && type !== ARTIFACT_NODE_TYPE) {
+    return c.json({ error: "Not a hosted artifact" }, 404);
+  }
+  // Strict, self-contained CSP. `sandbox` (no allow-same-origin) forces an
+  // opaque origin so the artifact can't touch host cookies/storage; the
+  // resource directives then cap what its inline scripts may load or reach:
+  // `connect-src 'none'` blocks fetch/XHR/beacon exfiltration, `default-src
+  // 'none'` blocks external loads, and only inline script/style + data/blob
+  // images are permitted (self-contained decks/dashboards need no network).
   c.header(
     "Content-Security-Policy",
-    "sandbox allow-scripts allow-popups allow-forms allow-modals",
+    [
+      "sandbox allow-scripts allow-popups allow-forms allow-modals",
+      "default-src 'none'",
+      "script-src 'unsafe-inline'",
+      "style-src 'unsafe-inline'",
+      "img-src data: blob:",
+      "font-src data:",
+      "connect-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+    ].join("; "),
   );
   c.header("X-Content-Type-Options", "nosniff");
   c.header("Referrer-Policy", "no-referrer");
+  if (served != null) c.header("X-Artifact-Snapshot", String(served));
   return c.html(html);
 });

@@ -376,6 +376,15 @@ export function createApp(): Hono<AuthEnv> {
       path.includes("/reject") ||
       path.includes("/submit-review") ||
       path.includes("/cancel-review");
+    // Hosted-artifact annotations are a read-tier collaboration action:
+    // anyone who can SEE the artifact (notably read-only reviewers — the people
+    // most likely to annotate) may open a thread, reply, resolve or reopen.
+    // Handlers re-check node read-access; don't bump these POSTs to "write".
+    //   POST …/annotations                        → create thread
+    //   POST …/annotations/:id/{comments,resolve,reopen}
+    const isAnnotationAction =
+      /\/annotations$/.test(path) ||
+      /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path);
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin: not nest owners or collaborators. All methods
     // on /nests/:id/stewards are locked. The node-level resolve route
@@ -394,7 +403,11 @@ export function createApp(): Hono<AuthEnv> {
     }
     if (path.includes("/collaborators") || path.includes("/visibility")) {
       required = "admin";
-    } else if (c.req.method !== "GET" && !isStewardActionPath) {
+    } else if (
+      c.req.method !== "GET" &&
+      !isStewardActionPath &&
+      !isAnnotationAction
+    ) {
       required = "write";
     }
 

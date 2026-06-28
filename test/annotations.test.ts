@@ -88,6 +88,34 @@ describe("annotations: anchor + markdown projection", () => {
   it("renders an empty state when there are no threads", () => {
     expect(projectThreadsToMarkdown("Empty", [])).toContain("_No annotations yet._");
   });
+
+  it("groups threads by snapshot, newest snapshot first", () => {
+    const mk = (
+      id: string,
+      v: number | null,
+      status: "open" | "resolved",
+    ): AnnotationThread => ({
+      id,
+      nestId: "n",
+      nodeId: "nodes/deck",
+      snapshotVersion: v,
+      anchor: null,
+      status,
+      createdBy: "a@x.com",
+      createdAt: "2026-06-26 14:00:00",
+      resolvedBy: null,
+      resolvedAt: null,
+      comments: [{ id: `c-${id}`, author: "a@x.com", body: `body-${id}`, createdAt: "2026-06-26 14:00:00" }],
+    });
+    const md = projectThreadsToMarkdown("Deck", [
+      mk("old", 1, "resolved"),
+      mk("new", 2, "open"),
+    ]);
+    expect(md).toContain("## Snapshot v2");
+    expect(md).toContain("## Snapshot v1");
+    // Newest snapshot heading precedes the older one.
+    expect(md.indexOf("## Snapshot v2")).toBeLessThan(md.indexOf("## Snapshot v1"));
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -212,5 +240,179 @@ describe("annotations: hosted artifact + threaded comments", () => {
     // context assembly pulls them into the next iteration for free).
     expect(derived.content).toContain("Should be ARR not MRR.");
     expect(derived.content).toContain('quote "MRR of $400K"');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Frozen snapshot + hardening (artifact kind, strict CSP, read-tier perms)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("annotations: frozen snapshot + hardening", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let alice: { apiKey: string; userId: string; email: string };
+  let nestId: string;
+  let artifactId: string;
+
+  const V1 = "<!doctype html><html><body><h1>Slide 3</h1><p>MRR of $400K</p></body></html>";
+  const V2 = "<!doctype html><html><body><h1>Slide 3</h1><p>ARR of $4.8M</p></body></html>";
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    alice = await registerUser(app, "alice@acme.com", "Alice");
+
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Decks" }, alice.apiKey);
+    nestId = nest.data.nest.id;
+
+    const node = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Pitch", content: V1, type: "artifact" },
+      alice.apiKey,
+    );
+    artifactId = node.data.node.id;
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("serves a strict CSP that blocks exfiltration", async () => {
+    const res = await app.request(`/nests/${nestId}/nodes/${artifactId}/hosted`, {
+      headers: { Authorization: `Bearer ${alice.apiKey}` },
+    });
+    expect(res.status).toBe(200);
+    const csp = res.headers.get("content-security-policy") || "";
+    expect(csp).toContain("sandbox");
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("connect-src 'none'");
+  });
+
+  it("404s /hosted for a non-artifact (markdown) node", async () => {
+    const doc = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Just A Doc", content: "# hello", type: "document" },
+      alice.apiKey,
+    );
+    const docId = doc.data.node.id;
+    const res = await app.request(`/nests/${nestId}/nodes/${docId}/hosted`, {
+      headers: { Authorization: `Bearer ${alice.apiKey}` },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("freezes snapshots: ?v= serves the old HTML after a re-gen", async () => {
+    // Capture the first published snapshot version.
+    const before = await app.request(`/nests/${nestId}/nodes/${artifactId}/hosted`, {
+      headers: { Authorization: `Bearer ${alice.apiKey}` },
+    });
+    const v1 = Number(before.headers.get("X-Artifact-Snapshot"));
+    expect(v1).toBeGreaterThan(0);
+    expect(await before.text()).toContain("MRR of $400K");
+
+    // Re-generate the artifact (new version → new snapshot).
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/${artifactId}`,
+      { content: V2 },
+      alice.apiKey,
+    );
+
+    // Default /hosted now serves the new approved snapshot…
+    const latest = await app.request(`/nests/${nestId}/nodes/${artifactId}/hosted`, {
+      headers: { Authorization: `Bearer ${alice.apiKey}` },
+    });
+    const latestHtml = await latest.text();
+    expect(latestHtml).toContain("ARR of $4.8M");
+    expect(latestHtml).not.toContain("MRR of $400K");
+
+    // …but the pinned old snapshot still serves the frozen HTML annotations
+    // were anchored against.
+    const frozen = await app.request(
+      `/nests/${nestId}/nodes/${artifactId}/hosted?v=${v1}`,
+      { headers: { Authorization: `Bearer ${alice.apiKey}` } },
+    );
+    expect(await frozen.text()).toContain("MRR of $400K");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Read-tier permission: a read-only collaborator can annotate
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("annotations: read-only collaborator can annotate", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let alice: { apiKey: string; userId: string; email: string };
+  let bob: { apiKey: string; userId: string; email: string };
+  let nestId: string;
+  let artifactId: string;
+
+  const HTML = "<!doctype html><html><body><p>hello</p></body></html>";
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    alice = await registerUser(app, "owner@acme.com", "Alice");
+    bob = await registerUser(app, "reader@acme.com", "Bob");
+
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Shared" }, alice.apiKey);
+    nestId = nest.data.nest.id;
+
+    const node = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Board", content: HTML, type: "artifact" },
+      alice.apiKey,
+    );
+    artifactId = node.data.node.id;
+
+    // Bob gets read-only access.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: bob.email, permission: "read" },
+      alice.apiKey,
+    );
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("lets a read-only collaborator create + resolve a thread", async () => {
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${artifactId}/annotations`,
+      { body: "Typo in the header." },
+      bob.apiKey,
+    );
+    expect(created.status).toBe(201);
+    const threadId = created.data.thread.id;
+
+    const resolved = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${artifactId}/annotations/${threadId}/resolve`,
+      {},
+      bob.apiKey,
+    );
+    expect(resolved.status).toBe(200);
+    expect(resolved.data.thread.status).toBe("resolved");
+  });
+
+  it("still blocks a read-only collaborator from editing the node", async () => {
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/${artifactId}`,
+      { content: "<p>hacked</p>" },
+      bob.apiKey,
+    );
+    expect(res.status).toBe(403);
   });
 });

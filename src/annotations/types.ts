@@ -8,6 +8,14 @@
  */
 
 /**
+ * The node kind that carries a rich HTML artifact (slide deck / dashboard /
+ * infographic) in its body. Created like any node with `type: "artifact"`; the
+ * `/hosted` endpoint only serves nodes of this kind (a sandboxed HTML render),
+ * so an ordinary markdown document can't be coerced into the HTML host path.
+ */
+export const ARTIFACT_NODE_TYPE = "artifact";
+
+/**
  * Resilient text anchor (W3C TextQuote/TextPosition pattern). The quote is the
  * primary locator; before/after disambiguate when the quote repeats; line is a
  * decaying hint. `null` anchor = a whole-artifact comment.
