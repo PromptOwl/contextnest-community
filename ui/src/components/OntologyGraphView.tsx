@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import {
   forceSimulation,
   forceLink,
@@ -7,7 +14,7 @@ import {
   forceCollide,
   type SimulationNodeDatum,
 } from "d3-force";
-import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2 } from "lucide-react";
+import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2 } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
 import { Button } from "./ui/button";
 
@@ -42,6 +49,17 @@ function linkStroke(kind: GLink["kind"]): string {
   return kind === "steward" ? "#16a34a66" : kind === "tag" ? "#f59e0b66" : "#94a3b8aa";
 }
 
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+const MIN_ZOOM = 0.15;
+const MAX_ZOOM = 5;
+
+/** Pan/zoom transform: screen = world * k + (x, y). */
+interface View {
+  x: number;
+  y: number;
+  k: number;
+}
+
 /**
  * Ontology graph view — nodes + [[wikilink]] edges + tag clusters + stewardship
  * overlay, laid out with a d3-force simulation and rendered as SVG (pure JS, no
@@ -56,8 +74,82 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
   const [selected, setSelected] = useState<GNode | null>(null);
 
   const wrapRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 800, h: 560 });
   const [sim, setSim] = useState<{ nodes: GNode[]; links: GLink[] }>({ nodes: [], links: [] });
+
+  // ── Pan / zoom ──
+  const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
+  const drag = useRef<{ active: boolean; px: number; py: number }>({
+    active: false,
+    px: 0,
+    py: 0,
+  });
+
+  // Fit the laid-out graph into the viewport (centred, padded). Used on first
+  // layout and via the Fit button so a large graph never spills off-screen.
+  const fitView = (nodes: GNode[], w: number, h: number) => {
+    const pts = nodes.filter((n) => n.x != null && n.y != null);
+    if (!pts.length) return setView({ x: w / 2, y: h / 2, k: 1 });
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of pts) {
+      minX = Math.min(minX, n.x!);
+      minY = Math.min(minY, n.y!);
+      maxX = Math.max(maxX, n.x!);
+      maxY = Math.max(maxY, n.y!);
+    }
+    const pad = 48;
+    const gw = maxX - minX || 1;
+    const gh = maxY - minY || 1;
+    const k = clamp(Math.min((w - 2 * pad) / gw, (h - 2 * pad) / gh), MIN_ZOOM, 1.5);
+    setView({
+      x: w / 2 - ((minX + maxX) / 2) * k,
+      y: h / 2 - ((minY + maxY) / 2) * k,
+      k,
+    });
+  };
+
+  // Zoom by a factor about a screen anchor (default: viewport centre), keeping
+  // the world point under the anchor fixed.
+  const zoomBy = (factor: number, ax = size.w / 2, ay = size.h / 2) => {
+    setView((v) => {
+      const k = clamp(v.k * factor, MIN_ZOOM, MAX_ZOOM);
+      const wx = (ax - v.x) / v.k;
+      const wy = (ay - v.y) / v.k;
+      return { k, x: ax - wx * k, y: ay - wy * k };
+    });
+  };
+
+  // Wheel zoom toward the cursor. Attached natively (non-passive) so
+  // preventDefault stops the page from scrolling under the graph.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = svg.getBoundingClientRect();
+      zoomBy(e.deltaY < 0 ? 1.1 : 1 / 1.1, e.clientX - rect.left, e.clientY - rect.top);
+    };
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+    // size feeds the centre fallback inside zoomBy; re-bind on resize.
+  }, [size.w, size.h]);
+
+  const onPanStart = (e: ReactPointerEvent) => {
+    drag.current = { active: true, px: e.clientX, py: e.clientY };
+    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+  };
+  const onPanMove = (e: ReactPointerEvent) => {
+    if (!drag.current.active) return;
+    const dx = e.clientX - drag.current.px;
+    const dy = e.clientY - drag.current.py;
+    drag.current.px = e.clientX;
+    drag.current.py = e.clientY;
+    setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+  };
+  const onPanEnd = () => {
+    drag.current.active = false;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -164,6 +256,8 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
       .stop();
     for (let i = 0; i < 300; i++) simulation.tick();
     setSim({ nodes, links });
+    // Fit the fresh layout into the viewport so a large graph never spills off.
+    fitView(nodes, size.w, size.h);
   }, [data, size.w, size.h]);
 
   const radius = (n: GNode) => 3 + n.val;
@@ -219,46 +313,79 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
             </div>
           )}
           {!loading && !error && (
-            <svg width={size.w} height={size.h} className="block">
-              <g>
-                {sim.links.map((l, i) => {
-                  const s = l.source as GNode;
-                  const t = l.target as GNode;
-                  if (s?.x == null || t?.x == null) return null;
-                  return (
-                    <line
-                      key={i}
-                      x1={s.x}
-                      y1={s.y}
-                      x2={t.x}
-                      y2={t.y}
-                      stroke={linkStroke(l.kind)}
-                      strokeWidth={1}
-                    />
-                  );
-                })}
-              </g>
-              <g>
-                {sim.nodes.map((n) => (
-                  <g
-                    key={n.id}
-                    transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
-                    onClick={() => setSelected(n)}
-                    style={{ cursor: "pointer" }}
-                  >
-                    <circle
-                      r={radius(n)}
-                      fill={n.color}
-                      stroke={selected?.id === n.id ? "#111827" : "#ffffff"}
-                      strokeWidth={selected?.id === n.id ? 2 : 1}
-                    />
-                    <text x={radius(n) + 3} y={3} fontSize={9} fill="#475569">
-                      {n.name.length > 24 ? n.name.slice(0, 24) + "…" : n.name}
-                    </text>
+            <>
+              <svg
+                ref={svgRef}
+                width={size.w}
+                height={size.h}
+                className="block touch-none"
+              >
+                {/* Background pan surface — dragging here pans; node clicks
+                    sit above it and aren't intercepted. */}
+                <rect
+                  width={size.w}
+                  height={size.h}
+                  fill="transparent"
+                  style={{ cursor: drag.current.active ? "grabbing" : "grab" }}
+                  onPointerDown={onPanStart}
+                  onPointerMove={onPanMove}
+                  onPointerUp={onPanEnd}
+                  onPointerLeave={onPanEnd}
+                />
+                <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+                  <g>
+                    {sim.links.map((l, i) => {
+                      const s = l.source as GNode;
+                      const t = l.target as GNode;
+                      if (s?.x == null || t?.x == null) return null;
+                      return (
+                        <line
+                          key={i}
+                          x1={s.x}
+                          y1={s.y}
+                          x2={t.x}
+                          y2={t.y}
+                          stroke={linkStroke(l.kind)}
+                          strokeWidth={1 / view.k}
+                        />
+                      );
+                    })}
                   </g>
-                ))}
-              </g>
-            </svg>
+                  <g>
+                    {sim.nodes.map((n) => (
+                      <g
+                        key={n.id}
+                        transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
+                        onClick={() => setSelected(n)}
+                        style={{ cursor: "pointer" }}
+                      >
+                        <circle
+                          r={radius(n)}
+                          fill={n.color}
+                          stroke={selected?.id === n.id ? "#111827" : "#ffffff"}
+                          strokeWidth={selected?.id === n.id ? 2 : 1}
+                        />
+                        <text x={radius(n) + 3} y={3} fontSize={9} fill="#475569">
+                          {n.name.length > 24 ? n.name.slice(0, 24) + "…" : n.name}
+                        </text>
+                      </g>
+                    ))}
+                  </g>
+                </g>
+              </svg>
+              {/* Zoom controls */}
+              <div className="absolute bottom-2 right-2 z-10 flex flex-col gap-1">
+                <ZoomCtl label="Zoom in" onClick={() => zoomBy(1.25)}>
+                  <ZoomIn className="h-4 w-4" />
+                </ZoomCtl>
+                <ZoomCtl label="Zoom out" onClick={() => zoomBy(1 / 1.25)}>
+                  <ZoomOut className="h-4 w-4" />
+                </ZoomCtl>
+                <ZoomCtl label="Fit to view" onClick={() => fitView(sim.nodes, size.w, size.h)}>
+                  <Maximize2 className="h-4 w-4" />
+                </ZoomCtl>
+              </div>
+            </>
           )}
         </div>
 
@@ -303,6 +430,28 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+function ZoomCtl({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className="flex h-7 w-7 items-center justify-center rounded border border-border bg-card text-foreground shadow-sm hover:bg-accent"
+    >
+      {children}
+    </button>
   );
 }
 
