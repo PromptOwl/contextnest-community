@@ -9,7 +9,8 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, type LicenseStatus } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network } from "lucide-react";
+import { OntologyGraphView } from "./components/OntologyGraphView";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -67,7 +68,14 @@ type View =
       /** Prior wiki-link hops, oldest first. Back pops the last entry. */
       breadcrumb?: BreadcrumbEntry[];
     }
-  | { page: "teammates" };
+  | { page: "teammates" }
+  | {
+      page: "ontology-graph";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    };
 
 // Runs the ?sso_error toast exactly once per page load (survives React
 // StrictMode's dev double-mount). Resets naturally on the next full navigation.
@@ -412,6 +420,25 @@ export default function App() {
               </span>
             )}
 
+            {view.page === "nest" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setView({
+                    page: "ontology-graph",
+                    nestId: view.nestId,
+                    nestName: view.nestName,
+                    isOwner: view.isOwner,
+                    isAnonOwned: view.isAnonOwned,
+                  })
+                }
+              >
+                <Network className="h-3.5 w-3.5 mr-1" />
+                Graph
+              </Button>
+            )}
+
             {adminStatus?.me ? (
               <UserMenu
                 me={adminStatus.me}
@@ -611,6 +638,21 @@ export default function App() {
         })()}
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
+        )}
+        {view.page === "ontology-graph" && (
+          <OntologyGraphView
+            nestId={view.nestId}
+            nestName={view.nestName}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
         )}
       </main>
 
