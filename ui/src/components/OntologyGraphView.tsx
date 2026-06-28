@@ -132,8 +132,10 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
     };
     svg.addEventListener("wheel", onWheel, { passive: false });
     return () => svg.removeEventListener("wheel", onWheel);
-    // size feeds the centre fallback inside zoomBy; re-bind on resize.
-  }, [size.w, size.h]);
+    // Re-bind once the svg actually mounts (it renders only after loading
+    // clears) and on resize — otherwise the listener never attaches and the
+    // browser's default ctrl+wheel zooms the whole page instead of the graph.
+  }, [size.w, size.h, loading, error]);
 
   const onPanStart = (e: ReactPointerEvent) => {
     drag.current = { active: true, px: e.clientX, py: e.clientY };
