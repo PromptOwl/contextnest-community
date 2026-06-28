@@ -230,24 +230,28 @@ Source-folder cleanup is best-effort. If `rmSync` fails (locked file etc.) the n
 
 Separate from stewardship — this grants raw nest access. Stewardship layers governance on top.
 
-### GET `/nests/:nestId/collaborators`
+### GET `/nests/:nestId/collaborators` (write+)
 ```json
 { "collaborators": [{ "id": "...", "user_id": "...", "email": "...", "permission": "read" }] }
 ```
+Write-tier (not read) so a public nest's read tier can't enumerate member emails.
 
-### POST `/nests/:nestId/collaborators`
+### POST `/nests/:nestId/collaborators` (write+)
 ```json
 { "email": "c@x.com", "permission": "read" }
 ```
 - `permission` ∈ `read` / `write` / `admin`.
+- **Inviting no longer requires admin** — any **write+** collaborator can add people, but only **up to their own level** (escalation cap). A `write` collaborator can grant `read`/`write`; only an `admin`/owner can grant `admin`. Exceeding your level → `403`. Read-only collaborators can't invite.
 - Auto-creates placeholder user (`is_invited = 1`) if email unknown.
 
-### PATCH `/nests/:nestId/collaborators/:collabId`
+### PATCH `/nests/:nestId/collaborators/:collabId` (admin)
 ```json
 { "permission": "write" }
 ```
+Changing an existing collaborator's level stays admin-only.
 
-### DELETE `/nests/:nestId/collaborators/:collabId`
+### DELETE `/nests/:nestId/collaborators/:collabId` (admin)
+Removing a collaborator stays admin-only.
 
 ---
 

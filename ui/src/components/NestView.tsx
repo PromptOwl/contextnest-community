@@ -1043,8 +1043,11 @@ export function NestView({
             <TabsTrigger value="stewards">Stewards</TabsTrigger>
           )}
           {/* Collaborators — plain access sharing, independent of
-              stewardship. Managing it is owner/admin only (server gate). */}
-          {canManage && (
+              stewardship. Owner/admin manage the full roster; write
+              collaborators can invite (escalation-capped server-side), so
+              they see the tab too. The roster controls cap themselves by the
+              caller's permission (see CollaboratorManager). */}
+          {(canManage || collabCanWrite) && (
             <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
           )}
         </TabsList>
@@ -2004,7 +2007,7 @@ export function NestView({
           </TabsContent>
         )}
 
-        {canManage && (
+        {(canManage || collabCanWrite) && (
           <TabsContent value="collaborators" className="space-y-4">
             <Card>
               <CardHeader className="pb-3">
@@ -2021,6 +2024,7 @@ export function NestView({
                   nestName={nestName}
                   onChanged={fetchData}
                   currentUserEmail={currentEmail}
+                  callerPermission={permission ?? undefined}
                 />
               </CardContent>
             </Card>
