@@ -12,6 +12,7 @@ import { ValidationError, ConflictError } from "../shared/errors.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
+import * as comments from "./comment-service.js";
 import * as versions from "./version-service.js";
 import * as externalEdits from "./external-edit-service.js";
 import { loadStewardsConfig } from "./stewards-parser.js";
@@ -22,6 +23,16 @@ import { bodyOnly } from "../nodes/service.js";
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
 // ═════════════════════════════════════════════════════════════════════════
+
+/** Parse a ?limit= query into a sane bound. A non-numeric value (e.g. "abc")
+ *  is truthy, so `|| "100"` never fires and parseInt yields NaN — which then
+ *  slips through `?? 100` and makes slice(0, NaN) return an empty list. Guard
+ *  NaN / out-of-range explicitly and cap at 1000. */
+function parseLimit(raw: string | undefined, def = 100, max = 1000): number {
+  const n = parseInt(raw ?? "", 10);
+  if (Number.isNaN(n) || n < 1) return def;
+  return Math.min(n, max);
+}
 
 export const governanceRoutes = new Hono<AuthEnv>();
 
@@ -159,7 +170,24 @@ governanceRoutes.get("/review-queue", async (c) => {
     offset,
   });
 
-  return c.json(result);
+  // Annotate each request with the caller's authoritative review capability
+  // (the SAME check approve/reject enforce — handles admin/owner/steward scope
+  // + separation-of-duties). The UI gates the Review button + queue off this
+  // instead of re-deriving steward scope client-side, which diverged for
+  // reviewer-stewards reaching the nest via public visibility (CU-wdqcpzudt3
+  // follow-up). Cached per node across rows.
+  const email = getUserEmail(c);
+  const canReviewCache = new Map<string, boolean>();
+  const requests = result.requests.map((r) => {
+    let canReview = canReviewCache.get(r.nodeId);
+    if (canReview === undefined) {
+      canReview = stewardship.canUserApprove(nestId, r.nodeId, email).allowed;
+      canReviewCache.set(r.nodeId, canReview);
+    }
+    return { ...r, canReview };
+  });
+
+  return c.json({ ...result, requests });
 });
 
 // GET /nests/:nestId/external-edits
@@ -181,6 +209,15 @@ governanceRoutes.post("/external-edits/scan", async (c) => {
   const actor = getUserEmail(c);
   const result = await externalEdits.scanNestForDrift(nestId, actor);
   return c.json(result);
+});
+
+// GET /nests/:nestId/activity
+// Nest-wide activity log — who did what across every node in the nest.
+governanceRoutes.get("/activity", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const limit = parseLimit(c.req.query("limit"));
+  const activity = await comments.getActivity({ nestId, limit });
+  return c.json({ activity });
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -247,6 +284,88 @@ governanceNodeRoutes.get("/:nodeId{.+}/reviews", async (c) => {
 
   const history = reviews.getReviewHistory(nestId, nodeId);
   return c.json({ reviews: history });
+});
+
+// GET /nests/:nestId/nodes/:nodeId/comments?status=open
+// List comments on a node. Open to anyone with nest-read access (a reviewer
+// must be able to read + leave comments without write permission).
+governanceNodeRoutes.get("/:nodeId{.+}/comments", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const status = c.req.query("status") as "open" | "resolved" | undefined;
+  const list = comments.listComments(nestId, nodeId, {
+    status: status === "open" || status === "resolved" ? status : undefined,
+  });
+  return c.json({ comments: list });
+});
+
+// POST /nests/:nestId/nodes/:nodeId/comments
+// Leave a comment. Body: { body, version?, anchor?{start,end,text?}, parentId? }
+governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const body = await c.req.json<{
+    body?: string;
+    version?: number;
+    anchor?: { start?: number; end?: number; text?: string };
+    parentId?: string;
+  }>();
+  const author = getUserEmail(c);
+  try {
+    const comment = comments.createComment({
+      nestId,
+      nodeId,
+      author,
+      body: body.body ?? "",
+      version: body.version,
+      anchor: body.anchor,
+      parentId: body.parentId,
+    });
+    return c.json({ comment }, 201);
+  } catch (err) {
+    // Empty body / dangling parent are user errors, not 500s.
+    throw new ValidationError(
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+});
+
+// POST /nests/:nestId/nodes/:nodeId/comments/:commentId/resolve
+governanceNodeRoutes.post(
+  "/:nodeId{.+?}/comments/:commentId/resolve",
+  async (c) => {
+    const nestId = c.req.param("nestId")!;
+    const nodeId = c.req.param("nodeId")!;
+    const commentId = c.req.param("commentId")!;
+    const resolvedBy = getUserEmail(c);
+    try {
+      const comment = comments.resolveComment({
+        nestId,
+        nodeId,
+        commentId,
+        resolvedBy,
+      });
+      return c.json({ comment });
+    } catch (err: any) {
+      // Only the known user-errors map to 4xx; anything else (SQLite locked,
+      // I/O) must surface as a 500 via the global handler, not be masked as 404.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "Comment not found") return c.json({ error: msg }, 404);
+      if (msg === "Comment is already resolved")
+        return c.json({ error: msg }, 409);
+      throw err;
+    }
+  },
+);
+
+// GET /nests/:nestId/nodes/:nodeId/activity
+// Per-node activity log — who did what (comments + edits + reviews).
+governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const limit = parseLimit(c.req.query("limit"));
+  const activity = await comments.getActivity({ nestId, nodeId, limit });
+  return c.json({ activity });
 });
 
 // POST /nests/:nestId/nodes/:nodeId/submit-review

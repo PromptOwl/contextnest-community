@@ -12,6 +12,7 @@ import {
   canManageStewards,
 } from "./governance/stewardship-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
+import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
@@ -322,6 +323,16 @@ export function createApp(): Hono<AuthEnv> {
     // method.
     {
       const path = c.req.path;
+      // `/comments` and `/activity` must be matched as complete trailing route
+      // segments, NOT substrings — a node id is `nodes/<slug>` and a title like
+      // "Comments Draft" yields slug `comments-draft`, whose path contains the
+      // substring `/comments`. Anchor to the actual comment/activity route
+      // shapes so a node slug can't masquerade as a governance action (see the
+      // matching guard in the permission block below).
+      const isCommentPath =
+        /\/comments$/.test(path) ||
+        /\/comments\/[^/]+\/resolve$/.test(path);
+      const isActivityPath = /\/activity$/.test(path);
       const isGovernance =
         path.includes("/stewards") ||
         path.includes("/review-queue") ||
@@ -333,7 +344,9 @@ export function createApp(): Hono<AuthEnv> {
         path.includes("/reject") ||
         path.includes("/can-access") ||
         path.includes("/can-approve") ||
-        path.includes("/can-edit");
+        path.includes("/can-edit") ||
+        isCommentPath ||
+        isActivityPath;
       const needsLicense = c.req.method !== "GET" || isGovernance;
       if (needsLicense) {
         const lic = getCurrentLicense();
@@ -375,6 +388,28 @@ export function createApp(): Hono<AuthEnv> {
       path.includes("/reject") ||
       path.includes("/submit-review") ||
       path.includes("/cancel-review");
+    // Hosted-artifact annotations are a read-tier collaboration action:
+    // anyone who can SEE the artifact (notably read-only reviewers — the people
+    // most likely to annotate) may open a thread, reply, resolve or reopen.
+    // Handlers re-check node read-access; don't bump these POSTs to "write".
+    //   POST …/annotations                        → create thread
+    //   POST …/annotations/:id/{comments,resolve,reopen}
+    const isAnnotationAction =
+      /\/annotations$/.test(path) ||
+      /\/annotations\/[^/]+\/(comments|resolve|reopen)$/.test(path);
+    // Commenting is a read-tier collaboration action: anyone who can see the
+    // node may leave or resolve a comment. Don't bump these POSTs to "write"
+    // (that would block read-only reviewers — the people most likely to
+    // comment). The handler/service own any finer-grained rules.
+    //
+    // Match `/comments` as a complete trailing route segment, NOT a substring:
+    // a node id is `nodes/<slug>` and a title like "Comments Draft" → slug
+    // `comments-draft` → path `…/nodes/comments-draft` contains `/comments`.
+    // A substring match left `required` at "read", letting a read-only
+    // collaborator PATCH/DELETE any node whose slug starts with "comments".
+    const isCommentAction =
+      /\/comments$/.test(path) ||
+      /\/comments\/[^/]+\/resolve$/.test(path);
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin: not nest owners or collaborators. All methods
     // on /nests/:id/stewards are locked. The node-level resolve route
@@ -391,9 +426,31 @@ export function createApp(): Hono<AuthEnv> {
         403,
       );
     }
-    if (path.includes("/collaborators") || path.includes("/visibility")) {
+    // Match the resource as an exact path segment, NOT a substring: a node id
+    // is derived from the doc title (e.g. "Collaborators Guide" → slug
+    // `collaborators-guide`), so a substring `path.includes("/collaborators")`
+    // would wrongly gate `…/nodes/collaborators-guide` as a collaborators route
+    // and 403 a write user editing that doc. parts[1] is the resource segment.
+    const resource = parts[1];
+    if (resource === "visibility") {
       required = "admin";
-    } else if (c.req.method !== "GET" && !isStewardActionPath) {
+    } else if (resource === "collaborators") {
+      // Viewing the roster (GET) and inviting (POST) are open to write+
+      // collaborators: the Collaborators tab loads the roster and lets editors
+      // bring people in — you no longer need to be a nest admin. Kept at write
+      // (not read) so a public nest's read tier can't enumerate member emails.
+      // The escalation cap — you can't grant above your own level — is enforced
+      // in addCollaborator. Changing or removing existing collaborators
+      // (PATCH/DELETE) stays admin-only, per the ticket's governance rule.
+      required = c.req.method === "GET" || c.req.method === "POST"
+        ? "write"
+        : "admin";
+    } else if (
+      c.req.method !== "GET" &&
+      !isStewardActionPath &&
+      !isCommentAction &&
+      !isAnnotationAction
+    ) {
       required = "write";
     }
 
@@ -468,6 +525,9 @@ export function createApp(): Hono<AuthEnv> {
   // POST routes work fine (Hono matches method+path), but GET routes clash.
   // Solution: mount governance node routes and node CRUD on the same Hono instance.
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
+  // Annotations + sandboxed artifact serving — must precede the greedy
+  // nodeRoutes catch-all so /:nodeId/annotations and /:nodeId/hosted match.
+  nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
