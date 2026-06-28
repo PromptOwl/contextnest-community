@@ -168,11 +168,24 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
   useEffect(() => {
     if (!wrapRef.current) return;
     const el = wrapRef.current;
-    const ro = new ResizeObserver(() =>
-      setSize({ w: el.clientWidth, h: Math.max(420, el.clientHeight) }),
-    );
+    const apply = () =>
+      setSize({ w: el.clientWidth, h: Math.max(420, el.clientHeight) });
+    // Set the real size synchronously at mount — the observer fires async, so
+    // without this the first simulation runs at the 800px default and clips
+    // the layout on narrower viewports until a resize nudges it.
+    apply();
+    // Debounce resizes: each size change restarts the 300-tick layout, so an
+    // unthrottled observer would thrash the main thread during a drag-resize.
+    let t: ReturnType<typeof setTimeout>;
+    const ro = new ResizeObserver(() => {
+      clearTimeout(t);
+      t = setTimeout(apply, 150);
+    });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      clearTimeout(t);
+      ro.disconnect();
+    };
   }, []);
 
   // Governance signals are now computed server-side over the FULL set (so they
@@ -479,7 +492,9 @@ function NodeDetail({ node, graph }: { node: GNode; graph: NestGraph | null }) {
             </div>
           )}
           <div className="text-muted-foreground">
-            {linkCount === 0 ? "No links (orphan)" : `${linkCount} link${linkCount === 1 ? "" : "s"}`}
+            {linkCount === 0
+              ? "No wikilinks"
+              : `${linkCount} wikilink${linkCount === 1 ? "" : "s"}`}
           </div>
         </div>
       )}

@@ -8,6 +8,7 @@ import {
 } from "./helpers.js";
 import { extractWikiTargets } from "../src/nodes/graph-service.js";
 import { createStewardRecord } from "../src/governance/stewardship-service.js";
+import { setStewardshipEnabled } from "../src/nests/service.js";
 
 describe("graph: wikilink extraction", () => {
   it("extracts [[targets]] and ignores |display aliases", () => {
@@ -213,5 +214,84 @@ describe("graph: steward identity masking for sub-write callers", () => {
     );
     const steward = data.stewards.find((s: any) => s.scope === "tag");
     expect(steward.label).toBe("jane@acme.com");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Steward gating + node dedup (review follow-ups)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("graph: steward gating and node dedup", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Gated" }, owner.apiKey);
+    nestId = nest.data.nest.id;
+
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Alpha", content: "See [[Beta]].", tags: ["market-x"] },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Beta", content: "Body.", tags: ["market-x"] },
+      owner.apiKey,
+    );
+
+    // Same person holds BOTH a tag-scope and a document-scope row.
+    await createStewardRecord({
+      nestId,
+      scope: "tag",
+      tagName: "market-x",
+      users: [{ email: "jane@acme.com", role: "reviewer" }],
+      assignedBy: "owner@acme.com",
+    });
+    await createStewardRecord({
+      nestId,
+      scope: "document",
+      documentId: "nodes/alpha",
+      users: [{ email: "jane@acme.com", role: "editor" }],
+      assignedBy: "owner@acme.com",
+    });
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("emits one steward NODE per identity but one EDGE per row", async () => {
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/graph`,
+      undefined,
+      owner.apiKey,
+    );
+    // Two rows for jane → one node, two edges.
+    expect(data.stewards.filter((s: any) => s.id === "jane@acme.com")).toHaveLength(1);
+    expect(data.stewardEdges.filter((e: any) => e.steward === "jane@acme.com")).toHaveLength(2);
+  });
+
+  it("returns no stewards once stewardship is disabled", async () => {
+    setStewardshipEnabled(nestId, false);
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/graph`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(data.stewards).toHaveLength(0);
+    expect(data.stewardEdges).toHaveLength(0);
   });
 });

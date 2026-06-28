@@ -674,6 +674,40 @@ Nest-level summary stats.
 ### GET `/nests/:nestId/context`
 Returns CONTEXT.md content.
 
+### GET `/nests/:nestId/graph` (read+)
+Ontology graph — a read-only assembly over data the nest already holds, for the
+graph view (links / stewardship overlay / coverage gaps). Gated to what the
+caller can read (same `filterAccessible` pass as the other query routes).
+
+Response `NestGraph`:
+```json
+{
+  "nodes":   [{ "id": "nodes/alpha", "title": "Alpha", "type": "document", "tags": ["market-x"] }],
+  "links":   [{ "source": "nodes/alpha", "target": "nodes/beta" }],
+  "stewards":[{ "id": "jane@acme.com", "label": "jane@acme.com", "role": "reviewer", "scope": "tag", "target": "market-x" }],
+  "stewardEdges":[{ "steward": "jane@acme.com", "target": "tag:market-x", "scope": "tag" }],
+  "tags":    [{ "name": "market-x", "count": 2 }],
+  "signals": {
+    "orphans": [{ "id": "nodes/loose", "title": "Loose" }],
+    "unstewardedTags": [{ "name": "market-y", "count": 1 }],
+    "bottlenecks": [{ "steward": "jane@acme.com", "label": "jane@acme.com", "share": 67 }]
+  },
+  "truncated": false,
+  "totalNodes": 3
+}
+```
+
+Notes:
+- **Identity masking** — steward `id`/`label` are the real email only for **write+**
+  callers (same rule as the collaborators roster, so a public/read tier can't
+  enumerate member emails). Sub-write callers get an opaque `"s1"` id and a
+  `"Steward 1"` label; `bottlenecks[].label` follows suit.
+- **Roster gating** — `stewards`/`stewardEdges` are empty for public/anonymous
+  readers and when the nest has stewardship disabled.
+- **Draw cap** — `nodes`/`links` are capped at 150 (highest-degree kept) with
+  `truncated: true` and `totalNodes` set; `signals` are still computed over the
+  full set so the gap numbers stay accurate.
+
 ### POST `/nests/:nestId/publish`
 Publishes the nest (snapshots + index).
 

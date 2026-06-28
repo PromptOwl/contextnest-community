@@ -10,6 +10,8 @@ import { engineCache } from "./engine.js";
 import { filterAccessible } from "../governance/access-guard.js";
 import { listStewards } from "../governance/stewardship-service.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
+import { isStewardshipEnabled } from "../nests/service.js";
+import { isPublicReader } from "../shared/access.js";
 
 export interface GraphNode {
   id: string;
@@ -118,7 +120,10 @@ export async function buildNestGraph(
   const titleToId = new Map<string, string>();
   for (const d of accessible) {
     const t = (d.frontmatter?.title || "").toLowerCase().trim();
-    if (t) titleToId.set(t, d.id);
+    // First occurrence wins — duplicate case-folded titles are ambiguous, so
+    // don't let a later doc silently steal title-based incoming links (which
+    // would make the earlier doc look like a false orphan).
+    if (t && !titleToId.has(t)) titleToId.set(t, d.id);
   }
 
   const allNodes: GraphNode[] = accessible.map((d) => ({
@@ -159,9 +164,18 @@ export async function buildNestGraph(
     .sort((a, b) => b.count - a.count);
 
   // ── Stewards (identity-masked for sub-write callers) ──
-  const stewardRows = (await listStewards({ nestId }))
-    // Drop document-scoped rows whose node the caller can't see.
-    .filter((s) => s.scope !== "document" || idSet.has(s.nodePattern || ""));
+  // Skip the roster entirely for public/anon readers (even masked, the roster
+  // is member-only — same rule as the collaborators list) and when the nest
+  // isn't governed (every other endpoint treats disabled stewardship as no
+  // rows; returning stale rows here would contradict them).
+  const exposeStewards =
+    isStewardshipEnabled(nestId) && !isPublicReader(nestId, userId);
+  const stewardRows = exposeStewards
+    ? (await listStewards({ nestId })).filter(
+        // Drop document-scoped rows whose node the caller can't see.
+        (s) => s.scope !== "document" || idSet.has(s.nodePattern || ""),
+      )
+    : [];
 
   // Assign stable opaque ids when masking: sort emails so the same email maps
   // to the same "sN" token across requests (stable node identity) without
@@ -177,7 +191,10 @@ export async function buildNestGraph(
     return { id, label: `Steward ${id.slice(1)}` };
   };
 
-  const stewards: GraphSteward[] = stewardRows.map((s) => {
+  // One entry per row — a person may hold several scope rows (e.g. a tag row
+  // and a doc row). Edges and signals are computed over rows; the steward NODE
+  // list is deduped below so d3-force doesn't get two nodes with the same id.
+  const stewardRowsMapped: GraphSteward[] = stewardRows.map((s) => {
     const { id, label } = identity(s.userEmail);
     return {
       id,
@@ -193,12 +210,19 @@ export async function buildNestGraph(
     };
   });
 
-  const stewardEdges: GraphStewardEdge[] = stewards.map((s) => ({
+  const stewardEdges: GraphStewardEdge[] = stewardRowsMapped.map((s) => ({
     steward: s.id,
     target:
       s.scope === "tag" ? `tag:${s.target}` : s.scope === "document" ? s.target : "*",
     scope: s.scope,
   }));
+
+  // Deduped node list — first row per identity. Edges (above) stay 1:1 with
+  // rows so every governed target keeps its edge.
+  const seenSteward = new Set<string>();
+  const stewards: GraphSteward[] = stewardRowsMapped.filter((s) =>
+    seenSteward.has(s.id) ? false : (seenSteward.add(s.id), true),
+  );
 
   // ── Governance signals over the FULL set (accuracy survives truncation) ──
   const linkedIds = new Set<string>();
@@ -218,7 +242,9 @@ export async function buildNestGraph(
   // tag rows sharing docs) can't double-count and push share past 100%.
   const coveredBySteward = new Map<string, Set<string>>();
   const labelById = new Map<string, string>();
-  for (const s of stewards) {
+  // Iterate ALL rows (not the deduped node list) so a person's coverage unions
+  // across every scope row they hold.
+  for (const s of stewardRowsMapped) {
     labelById.set(s.id, s.label);
     let cov = coveredBySteward.get(s.id);
     if (!cov) coveredBySteward.set(s.id, (cov = new Set()));
