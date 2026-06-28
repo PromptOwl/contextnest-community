@@ -66,10 +66,12 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   }
 
   const db = getDb();
-  db.prepare("UPDATE nest_collaborators SET permission = ? WHERE id = ?").run(
-    body.permission,
-    c.req.param("collabId")!,
-  );
+  // Scope to the nest in the URL — the guard authorised the caller against
+  // THIS nest, so the row we touch must belong to it (a bare `id =` match
+  // would let an admin of nest A mutate a collaborator row from nest B).
+  db.prepare(
+    "UPDATE nest_collaborators SET permission = ? WHERE id = ? AND nest_id = ?",
+  ).run(body.permission, c.req.param("collabId")!, c.req.param("nestId")!);
   return c.json({ updated: true });
 });
 
@@ -77,9 +79,11 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
 // Removing a collaborator stays an admin-tier action.
 sharingRoutes.delete("/collaborators/:collabId", async (c) => {
   const db = getDb();
-  db.prepare("DELETE FROM nest_collaborators WHERE id = ?").run(
-    c.req.param("collabId")!,
-  );
+  // Scope to the nest in the URL (see PATCH above) — never delete a row that
+  // belongs to a different nest just because the UUID matches.
+  db.prepare(
+    "DELETE FROM nest_collaborators WHERE id = ? AND nest_id = ?",
+  ).run(c.req.param("collabId")!, c.req.param("nestId")!);
   return c.json({ removed: true });
 });
 

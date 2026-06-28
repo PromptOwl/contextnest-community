@@ -66,9 +66,12 @@ describe("share permissions: escalation-capped invites", () => {
         owner.apiKey,
       );
     }
+    // Resolve a DIFFERENT user's row (the viewer) so the "can't change another
+    // collaborator" tests exercise cross-collaborator modification, not the
+    // caller editing their own row.
     const { data: list } = await collabs(owner);
     seedCollabId = list.collaborators.find(
-      (x: any) => x.email === "editor@acme.com",
+      (x: any) => x.email === "viewer@acme.com",
     ).id;
   }, 30000);
 
@@ -171,5 +174,57 @@ describe("share permissions: escalation-capped invites", () => {
       editor.apiKey,
     );
     expect(status).toBe(403);
+  });
+
+  it("PATCH is scoped to the nest in the URL — can't mutate another nest's row", async () => {
+    // Owner spins up a second nest and adds the viewer there at read.
+    const { data: other } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Other Vault" },
+      owner.apiKey,
+    );
+    const otherNestId = other.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${otherNestId}/collaborators`,
+      { email: "viewer@acme.com", permission: "read" },
+      owner.apiKey,
+    );
+    const { data: otherList } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${otherNestId}/collaborators`,
+      undefined,
+      owner.apiKey,
+    );
+    const otherCollabId = otherList.collaborators.find(
+      (x: any) => x.email === "viewer@acme.com",
+    ).id;
+
+    // Owner is admin of the FIRST nest; aim a PATCH at the first nest's URL but
+    // with the second nest's collaborator id. The nest_id scope must no-op it.
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/collaborators/${otherCollabId}`,
+      { permission: "admin" },
+      owner.apiKey,
+    );
+
+    // The other nest's row is untouched — still read.
+    const { data: after } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${otherNestId}/collaborators`,
+      undefined,
+      owner.apiKey,
+    );
+    const row = after.collaborators.find(
+      (x: any) => x.email === "viewer@acme.com",
+    );
+    expect(row.permission).toBe("read");
   });
 });

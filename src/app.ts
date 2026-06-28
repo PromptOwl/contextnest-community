@@ -416,9 +416,15 @@ export function createApp(): Hono<AuthEnv> {
         403,
       );
     }
-    if (path.includes("/visibility")) {
+    // Match the resource as an exact path segment, NOT a substring: a node id
+    // is derived from the doc title (e.g. "Collaborators Guide" → slug
+    // `collaborators-guide`), so a substring `path.includes("/collaborators")`
+    // would wrongly gate `…/nodes/collaborators-guide` as a collaborators route
+    // and 403 a write user editing that doc. parts[1] is the resource segment.
+    const resource = parts[1];
+    if (resource === "visibility") {
       required = "admin";
-    } else if (path.includes("/collaborators")) {
+    } else if (resource === "collaborators") {
       // Viewing the roster (GET) and inviting (POST) are open to write+
       // collaborators: the Collaborators tab loads the roster and lets editors
       // bring people in — you no longer need to be a nest admin. Kept at write
