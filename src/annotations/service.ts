@@ -138,7 +138,28 @@ export function createThread(
   return rowToThread(getThreadRow(id)!);
 }
 
+/**
+ * Load a thread and assert it belongs to the URL's nest+node. The route only
+ * authorizes the URL node via `canReadNode`; without this check a caller with
+ * read access to one node could mutate a thread in another nest/node just by
+ * knowing its UUID (IDOR). Treat a scope mismatch as not-found so we don't leak
+ * the existence of threads the caller can't see.
+ */
+function getScopedThreadRow(
+  threadId: string,
+  nestId: string,
+  nodeId: string,
+): ThreadRow {
+  const row = getThreadRow(threadId);
+  if (!row || row.nest_id !== nestId || row.node_id !== nodeId) {
+    throw new NotFoundError(`Thread not found: ${threadId}`);
+  }
+  return row;
+}
+
 export function addComment(
+  nestId: string,
+  nodeId: string,
   threadId: string,
   authorEmail: string,
   body: string,
@@ -147,8 +168,7 @@ export function addComment(
   if (!trimmed) {
     throw new Error("comment body is required");
   }
-  const row = getThreadRow(threadId);
-  if (!row) throw new NotFoundError(`Thread not found: ${threadId}`);
+  getScopedThreadRow(threadId, nestId, nodeId);
 
   getDb()
     .prepare(
@@ -160,12 +180,13 @@ export function addComment(
 }
 
 export function setThreadStatus(
+  nestId: string,
+  nodeId: string,
   threadId: string,
   status: ThreadStatus,
   byEmail: string,
 ): AnnotationThread {
-  const row = getThreadRow(threadId);
-  if (!row) throw new NotFoundError(`Thread not found: ${threadId}`);
+  getScopedThreadRow(threadId, nestId, nodeId);
 
   if (status === "resolved") {
     getDb()
@@ -245,14 +266,17 @@ export async function readArtifact(
   return { title, html: liveHtml, version: target, type };
 }
 
-/** Slug used by node service when deriving an id from a title. Mirror it so the
- * derived annotations node has a deterministic, upsert-able id. */
-function slugId(title: string): string {
-  const slug = title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-  return `nodes/${slug}`;
+/**
+ * Deterministic id for an artifact's derived annotations node, keyed off the
+ * SOURCE node id (unique within the nest) — NOT its human-readable title. This
+ * avoids two failure modes: (a) collisions when two artifacts have titles that
+ * slug to the same value, and (b) silent duplicate nodes if the node-service
+ * title→slug algorithm ever changes. Passed as an explicit id to createNode so
+ * create and update agree on the same id forever.
+ */
+function derivedAnnotationsId(sourceNodeId: string): string {
+  const base = sourceNodeId.replace(/^nodes\//, "");
+  return `nodes/${base}--annotations`;
 }
 
 /**
@@ -280,7 +304,7 @@ export async function syncAnnotationsNode(
     const threads = listThreads(nestId, nodeId);
     const derivedTitle = `${title} — Annotations`;
     const markdown = projectThreadsToMarkdown(title, threads);
-    const derivedId = slugId(derivedTitle);
+    const derivedId = derivedAnnotationsId(nodeId);
 
     try {
       await updateNode(nestId, derivedId, { content: markdown }, userEmail);
@@ -289,6 +313,7 @@ export async function syncAnnotationsNode(
         await createNode(
           nestId,
           {
+            id: derivedId,
             title: derivedTitle,
             content: markdown,
             type: "document",

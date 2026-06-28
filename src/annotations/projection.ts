@@ -10,6 +10,10 @@
 import type { AnnotationAnchor, AnnotationThread } from "./types.js";
 
 export const MAX_CONTEXT_CHARS = 250;
+/** Hard ceiling on the stored quote — a highlight, not a document. Prevents a
+ *  client from stuffing megabytes into anchor_json (re-serialised on every
+ *  re-projection of the derived node). */
+export const MAX_QUOTE_CHARS = 1000;
 
 /**
  * Normalize a raw anchor from the client. Returns null when there is no usable
@@ -20,7 +24,7 @@ export function clampAnchor(
   raw: Partial<AnnotationAnchor> | null | undefined,
 ): AnnotationAnchor | null {
   if (!raw) return null;
-  const quote = (raw.quote ?? "").trim();
+  const quote = (raw.quote ?? "").trim().slice(0, MAX_QUOTE_CHARS);
   if (!quote) return null;
 
   const before = (raw.before ?? "").slice(-MAX_CONTEXT_CHARS);
@@ -33,9 +37,12 @@ export function clampAnchor(
   return { quote, before, after, ...(line !== undefined ? { line } : {}) };
 }
 
-/** Collapse internal whitespace so a context window renders on one md line. */
+/** Collapse internal whitespace so a context window renders on one md line.
+ *  Also neutralise `-->` so user text can't prematurely close the surrounding
+ *  HTML comment in the derived node (which would corrupt the markdown / leak
+ *  raw text into the rendered output). */
 function oneLine(s: string): string {
-  return s.replace(/\s+/g, " ").trim();
+  return s.replace(/\s+/g, " ").replace(/--+>/g, "-→").trim();
 }
 
 /** Render the hidden, machine-readable anchor comment for one thread. */

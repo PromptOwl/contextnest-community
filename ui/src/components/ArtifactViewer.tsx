@@ -269,7 +269,7 @@ export function ArtifactViewer({
               title={title || nodeId}
               // Defense-in-depth alongside the server's CSP `sandbox` header.
               // No `allow-same-origin` → opaque origin, no host cookie/storage.
-              sandbox="allow-scripts allow-popups allow-forms allow-modals"
+              sandbox="allow-scripts allow-popups allow-modals"
               className="w-full flex-1 min-h-[70vh] bg-white"
             />
           ) : (

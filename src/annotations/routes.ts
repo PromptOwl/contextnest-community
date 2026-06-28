@@ -92,7 +92,7 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/comments", async (c) =
     throw new ValidationError("body is required");
   }
 
-  const thread = addComment(threadId, userEmail, input.body);
+  const thread = addComment(nestId, nodeId, threadId, userEmail, input.body);
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 });
@@ -108,7 +108,7 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/resolve", async (c) =>
     return c.json({ error: "Access denied" }, 403);
   }
 
-  const thread = setThreadStatus(threadId, "resolved", userEmail);
+  const thread = setThreadStatus(nestId, nodeId, threadId, "resolved", userEmail);
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 });
@@ -124,7 +124,7 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/reopen", async (c) => 
     return c.json({ error: "Access denied" }, 403);
   }
 
-  const thread = setThreadStatus(threadId, "open", userEmail);
+  const thread = setThreadStatus(nestId, nodeId, threadId, "open", userEmail);
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 });
@@ -168,7 +168,7 @@ annotationRoutes.get("/:nodeId{.+}/hosted", async (c) => {
   c.header(
     "Content-Security-Policy",
     [
-      "sandbox allow-scripts allow-popups allow-forms allow-modals",
+      "sandbox allow-scripts allow-popups allow-modals",
       "default-src 'none'",
       "script-src 'unsafe-inline'",
       "style-src 'unsafe-inline'",

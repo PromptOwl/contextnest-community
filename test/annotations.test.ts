@@ -9,6 +9,7 @@ import {
   clampAnchor,
   projectThreadsToMarkdown,
   MAX_CONTEXT_CHARS,
+  MAX_QUOTE_CHARS,
 } from "../src/annotations/projection.js";
 import type { AnnotationThread } from "../src/annotations/types.js";
 
@@ -87,6 +88,35 @@ describe("annotations: anchor + markdown projection", () => {
 
   it("renders an empty state when there are no threads", () => {
     expect(projectThreadsToMarkdown("Empty", [])).toContain("_No annotations yet._");
+  });
+
+  it("clampAnchor caps the quote length", () => {
+    const huge = "z".repeat(MAX_QUOTE_CHARS + 5000);
+    const a = clampAnchor({ quote: huge, before: "", after: "" });
+    expect(a!.quote.length).toBe(MAX_QUOTE_CHARS);
+  });
+
+  it("neutralizes --> so a quote can't break out of the anchor comment", () => {
+    const md = projectThreadsToMarkdown("Deck", [
+      {
+        id: "t1",
+        nestId: "n",
+        nodeId: "nodes/deck",
+        snapshotVersion: 1,
+        anchor: { quote: "evil --> out", before: "", after: "" },
+        status: "open",
+        createdBy: "a@x.com",
+        createdAt: "2026-06-26 14:00:00",
+        resolvedBy: null,
+        resolvedAt: null,
+        comments: [{ id: "c1", author: "a@x.com", body: "hi", createdAt: "2026-06-26 14:00:00" }],
+      },
+    ]);
+    // The raw comment-closing sequence must not survive inside the anchor line.
+    const anchorLine = md.split("\n").find((l) => l.includes("<!-- anchor:"))!;
+    expect(anchorLine).not.toContain("--></");
+    expect(anchorLine).not.toContain("evil --> out");
+    expect(anchorLine).toContain("evil -→ out");
   });
 
   it("groups threads by snapshot, newest snapshot first", () => {
@@ -414,5 +444,67 @@ describe("annotations: read-only collaborator can annotate", () => {
       bob.apiKey,
     );
     expect(res.status).toBe(403);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// IDOR: a thread can only be mutated through its own nest/node URL
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("annotations: thread scope is enforced (no cross-node hijack)", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let alice: { apiKey: string; userId: string; email: string };
+  let nestId: string;
+  let artA: string;
+  let artB: string;
+  let threadInB: string;
+
+  const HTML = "<!doctype html><html><body><p>x</p></body></html>";
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    alice = await registerUser(app, "alice@acme.com", "Alice");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Decks" }, alice.apiKey);
+    nestId = nest.data.nest.id;
+
+    const a = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`,
+      { title: "Deck A", content: HTML, type: "artifact" }, alice.apiKey);
+    artA = a.data.node.id;
+    const b = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`,
+      { title: "Deck B", content: HTML, type: "artifact" }, alice.apiKey);
+    artB = b.data.node.id;
+
+    const t = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${artB}/annotations`,
+      { body: "thread on B" }, alice.apiKey);
+    threadInB = t.data.thread.id;
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("404s when commenting on B's thread via A's URL", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${artA}/annotations/${threadInB}/comments`,
+      { body: "hijack" },
+      alice.apiKey,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("404s when resolving B's thread via A's URL", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${artA}/annotations/${threadInB}/resolve`,
+      {},
+      alice.apiKey,
+    );
+    expect(res.status).toBe(404);
+    // And B's thread is untouched.
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${artB}/annotations`, undefined, alice.apiKey);
+    expect(list.data.threads[0].status).toBe("open");
   });
 });
