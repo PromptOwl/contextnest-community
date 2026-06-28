@@ -81,39 +81,9 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
     return () => ro.disconnect();
   }, []);
 
-  // ── Governance signals (the value, not the pretty web) ──
-  const signals = useMemo(() => {
-    if (!graph) return null;
-    const docIds = new Set(graph.nodes.map((n) => n.id));
-    const linked = new Set<string>();
-    for (const l of graph.links) {
-      linked.add(l.source);
-      linked.add(l.target);
-    }
-    const orphans = graph.nodes.filter((n) => !linked.has(n.id));
-
-    const hasNestSteward = graph.stewards.some((s) => s.scope === "nest");
-    const stewardedTags = new Set(
-      graph.stewards.filter((s) => s.scope === "tag").map((s) => s.target),
-    );
-    const unstewardedTags = hasNestSteward
-      ? []
-      : graph.tags.filter((t) => !stewardedTags.has(t.name));
-
-    const tagDocCount = new Map(graph.tags.map((t) => [t.name, t.count]));
-    const bySteward = new Map<string, number>();
-    for (const s of graph.stewards) {
-      const covered =
-        s.scope === "nest" ? docIds.size : s.scope === "tag" ? tagDocCount.get(s.target) || 0 : 1;
-      bySteward.set(s.email, (bySteward.get(s.email) || 0) + covered);
-    }
-    const bottlenecks = [...bySteward.entries()]
-      .filter(([, c]) => docIds.size > 0 && c / docIds.size >= 0.5)
-      .map(([email, c]) => ({ email, share: Math.round((c / docIds.size) * 100) }))
-      .sort((a, b) => b.share - a.share);
-
-    return { orphans, unstewardedTags, bottlenecks };
-  }, [graph]);
+  // Governance signals are now computed server-side over the FULL set (so they
+  // stay accurate even when the drawn graph is truncated for the hairball cap).
+  const signals = graph?.signals ?? null;
 
   // ── Build renderable graph from active layers ──
   const data = useMemo<{ nodes: GNode[]; links: GLink[] }>(() => {
@@ -141,15 +111,26 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
     }
 
     if (layers.stewardship) {
-      for (const email of new Set(graph.stewards.map((s) => s.email)))
-        nodes.push({ id: `steward:${email}`, name: email, kind: "steward", color: COLORS.steward, val: 3 });
+      const labelById = new Map(graph.stewards.map((s) => [s.id, s.label]));
+      for (const s of graph.stewards)
+        nodes.push({ id: `steward:${s.id}`, name: s.label, kind: "steward", color: COLORS.steward, val: 3 });
       let needRoot = false;
-      for (const s of graph.stewards) {
-        const from = `steward:${s.email}`;
-        if (s.scope === "tag") {
-          if (layers.categories) links.push({ source: from, target: `tag:${s.target}`, kind: "steward" });
-        } else if (s.scope === "document") {
-          links.push({ source: from, target: s.target, kind: "steward" });
+      for (const e of graph.stewardEdges) {
+        const from = `steward:${e.steward}`;
+        if (!labelById.has(e.steward)) continue;
+        if (e.scope === "tag") {
+          // Tag-scope steward edge: hop through the tag node when the Categories
+          // layer is on, otherwise pin straight to the doc(s) the tag covers so
+          // the steward never floats orphaned with Categories off.
+          if (layers.categories) {
+            links.push({ source: from, target: e.target, kind: "steward" });
+          } else {
+            const tag = e.target.replace(/^tag:/, "");
+            for (const n of graph.nodes)
+              if (n.tags.includes(tag)) links.push({ source: from, target: n.id, kind: "steward" });
+          }
+        } else if (e.scope === "document") {
+          links.push({ source: from, target: e.target, kind: "steward" });
         } else {
           needRoot = true;
           links.push({ source: from, target: "root:nest", kind: "steward" });
@@ -232,6 +213,11 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
               {error}
             </div>
           )}
+          {!loading && !error && graph?.truncated && (
+            <div className="absolute top-2 left-2 z-10 rounded bg-amber-100 text-amber-800 text-xs px-2 py-1 border border-amber-300">
+              Showing {graph.nodes.length} of {graph.totalNodes} nodes (highest-connected). Gaps below cover all {graph.totalNodes}.
+            </div>
+          )}
           {!loading && !error && (
             <svg width={size.w} height={size.h} className="block">
               <g>
@@ -292,7 +278,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
                 />
                 <GapRow
                   label="Bottleneck stewards (≥50% of nodes)"
-                  items={signals.bottlenecks.map((b) => `${b.email} — ${b.share}%`)}
+                  items={signals.bottlenecks.map((b) => `${b.label} — ${b.share}%`)}
                   empty="No single-owner concentration."
                 />
                 <GapRow
@@ -305,10 +291,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           </div>
 
           {selected && (
-            <div className="border border-border rounded-lg bg-card p-3 text-sm">
-              <div className="font-medium mb-1 break-all">{selected.name}</div>
-              <div className="text-xs text-muted-foreground capitalize">{selected.kind}</div>
-            </div>
+            <NodeDetail node={selected} graph={graph} />
           )}
 
           <div className="text-xs text-muted-foreground space-y-1">
@@ -319,6 +302,36 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function NodeDetail({ node, graph }: { node: GNode; graph: NestGraph | null }) {
+  const doc = node.kind === "doc" ? graph?.nodes.find((n) => n.id === node.id) : null;
+  const linkCount =
+    doc && graph
+      ? graph.links.filter((l) => l.source === doc.id || l.target === doc.id).length
+      : 0;
+  return (
+    <div className="border border-border rounded-lg bg-card p-3 text-sm">
+      <div className="font-medium mb-1 break-all">{node.name}</div>
+      <div className="text-xs text-muted-foreground capitalize">{node.kind}</div>
+      {doc && (
+        <div className="mt-2 space-y-1 text-xs">
+          {doc.tags.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {doc.tags.map((t) => (
+                <span key={t} className="rounded bg-amber-50 text-amber-700 px-1.5 py-0.5">
+                  #{t}
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="text-muted-foreground">
+            {linkCount === 0 ? "No links (orphan)" : `${linkCount} link${linkCount === 1 ? "" : "s"}`}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

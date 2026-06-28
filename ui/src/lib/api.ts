@@ -915,16 +915,41 @@ export async function removeCollaborator(nestId: string, collabId: string) {
 
 // ─── Ontology graph ───────────────────────────────────────────────────────
 
+export interface GraphNode {
+  id: string;
+  title: string;
+  type: string;
+  tags: string[];
+}
+
 export interface NestGraph {
-  nodes: Array<{ id: string; title: string; type: string; tags: string[] }>;
+  nodes: GraphNode[];
   links: Array<{ source: string; target: string }>;
   stewards: Array<{
-    email: string;
+    /** Stable identity key — email for write+ callers, opaque "sN" otherwise. */
+    id: string;
+    /** Display name — email for write+ callers, "Steward N" otherwise. */
+    label: string;
     role: string;
     scope: "nest" | "tag" | "document";
     target: string;
   }>;
+  /** Steward → tag/doc/nest-root edges, pre-assembled server-side. */
+  stewardEdges: Array<{
+    steward: string;
+    target: string;
+    scope: "nest" | "tag" | "document";
+  }>;
   tags: Array<{ name: string; count: number }>;
+  /** Governance gaps, computed server-side over the full set. */
+  signals: {
+    orphans: GraphNode[];
+    unstewardedTags: Array<{ name: string; count: number }>;
+    bottlenecks: Array<{ steward: string; label: string; share: number }>;
+  };
+  /** True when the drawn node set was capped; signals stay full-set accurate. */
+  truncated: boolean;
+  totalNodes: number;
 }
 
 export async function getNestGraph(nestId: string) {

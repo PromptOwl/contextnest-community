@@ -18,6 +18,7 @@ import {
 } from "./markdown-export.js";
 import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { permissionLevel } from "../shared/access.js";
 import { buildNestGraph } from "./graph-service.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
@@ -30,7 +31,11 @@ queryRoutes.get("/graph", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
   const userEmail = resolveCallerEmail(userId);
-  const graph = await buildNestGraph(nestId, userId, userEmail);
+  // Steward emails are write+ only — same rule as the collaborators roster, so
+  // a public/read tier can't enumerate member emails via the graph overlay.
+  const canSeeIdentities =
+    permissionLevel(c.get("nestPermission")) >= permissionLevel("write");
+  const graph = await buildNestGraph(nestId, userId, userEmail, canSeeIdentities);
   return c.json(graph);
 });
 
