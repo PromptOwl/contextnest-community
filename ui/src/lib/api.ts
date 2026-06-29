@@ -134,12 +134,25 @@ export async function getHealth() {
 
 export type SignInGate = "open" | "admin-only" | "disabled";
 
-/** Admin: set the PromptOwl sign-in gate. Live + persisted server-side. */
-export async function setSignInGate(value: SignInGate) {
-  return request<{ promptowl_sign_in_gate: SignInGate; persisted: boolean }>(
-    "/admin/sign-in-gate",
-    { method: "PATCH", body: JSON.stringify({ value }) },
-  );
+/** Server-wide settings editable from the admin Settings page. */
+export interface AdminSettings {
+  promptowl_sign_in_gate: SignInGate;
+  logo_url: string | null;
+  telemetry_enabled: boolean;
+  public_base_url: string;
+  max_body_bytes: number;
+}
+
+export async function getAdminSettings() {
+  return request<AdminSettings>("/admin/settings");
+}
+
+/** Admin: patch one or more server settings. Live + persisted server-side. */
+export async function updateAdminSettings(patch: Partial<AdminSettings>) {
+  return request<{ settings: AdminSettings }>("/admin/settings", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
 }
 
 // ─── License ───────────────────────────────────────────────────────────
