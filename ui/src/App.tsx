@@ -5,6 +5,7 @@ import { NestView } from "./components/NestView";
 import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
+import { SettingsPage } from "./components/SettingsPage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getHealth, setSignInGate as apiSetSignInGate, type LicenseStatus, type SignInGate } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
@@ -21,12 +22,6 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-  DropdownMenuLabel,
-  DropdownMenuSub,
-  DropdownMenuSubTrigger,
-  DropdownMenuSubContent,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
 } from "@/components/ui/dropdown-menu";
 import {
   Dialog,
@@ -75,6 +70,7 @@ type View =
       breadcrumb?: BreadcrumbEntry[];
     }
   | { page: "teammates" }
+  | { page: "settings" }
   | {
       page: "ontology-graph";
       nestId: string;
@@ -503,9 +499,8 @@ export default function App() {
               <UserMenu
                 me={adminStatus.me}
                 isAdmin={isAdmin}
-                signInGate={signInGate}
-                onSetSignInGate={handleSetSignInGate}
                 onTeammates={() => setView({ page: "teammates" })}
+                onSettings={() => setView({ page: "settings" })}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
               />
@@ -701,6 +696,14 @@ export default function App() {
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}
+
+        {view.page === "settings" && (
+          <SettingsPage
+            onBack={() => setView({ page: "dashboard" })}
+            signInGate={signInGate}
+            onSetSignInGate={handleSetSignInGate}
+          />
+        )}
         {view.page === "ontology-graph" && (
           <OntologyGraphView
             nestId={view.nestId}
@@ -732,9 +735,8 @@ export default function App() {
 interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
-  signInGate: SignInGate;
-  onSetSignInGate: (value: SignInGate) => void;
   onTeammates: () => void;
+  onSettings: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
 }
@@ -742,9 +744,8 @@ interface UserMenuProps {
 function UserMenu({
   me,
   isAdmin,
-  signInGate,
-  onSetSignInGate,
   onTeammates,
+  onSettings,
   onChangePassword,
   onLogout,
 }: UserMenuProps) {
@@ -799,31 +800,10 @@ function UserMenu({
               <Users className="h-3.5 w-3.5 mr-2" />
               Teammates
             </DropdownMenuItem>
-            <DropdownMenuLabel className="text-[11px] font-normal text-muted-foreground pt-1">
+            <DropdownMenuItem onSelect={onSettings} className="cursor-pointer">
+              <Shield className="h-3.5 w-3.5 mr-2" />
               Server settings
-            </DropdownMenuLabel>
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger className="cursor-pointer">
-                <Shield className="h-3.5 w-3.5 mr-2" />
-                PromptOwl sign-in
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                <DropdownMenuRadioGroup
-                  value={signInGate}
-                  onValueChange={(v) => onSetSignInGate(v as SignInGate)}
-                >
-                  <DropdownMenuRadioItem value="open" className="cursor-pointer">
-                    Everyone
-                  </DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="admin-only" className="cursor-pointer">
-                    Admins only
-                  </DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="disabled" className="cursor-pointer">
-                    Off
-                  </DropdownMenuRadioItem>
-                </DropdownMenuRadioGroup>
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
+            </DropdownMenuItem>
           </>
         )}
         <DropdownMenuSeparator />
