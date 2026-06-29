@@ -103,9 +103,20 @@ sharingRoutes.patch("/visibility", async (c) => {
   }
 
   const db = getDb();
-  db.prepare("UPDATE nests SET visibility = ? WHERE id = ?").run(
-    body.visibility,
-    c.req.param("nestId")!,
-  );
-  return c.json({ visibility: body.visibility });
+  const nestId = c.req.param("nestId")!;
+  const result = db
+    .prepare("UPDATE nests SET visibility = ? WHERE id = ?")
+    .run(body.visibility, nestId);
+  // A zero-row update means the nest id didn't resolve — report it instead of
+  // echoing success, which previously let the UI flip to a state the DB never
+  // took (the "made it private but it still shows public" symptom).
+  if (result.changes === 0) {
+    throw new NotFoundError("Nest not found");
+  }
+  // Re-read the persisted value so the client reconciles against the DB truth,
+  // not the value it sent.
+  const row = db
+    .prepare("SELECT visibility FROM nests WHERE id = ?")
+    .get(nestId) as { visibility: string };
+  return c.json({ visibility: row.visibility });
 });

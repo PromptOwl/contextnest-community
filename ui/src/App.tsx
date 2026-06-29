@@ -226,7 +226,9 @@ export default function App() {
       window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
-    if (next !== current) window.history.replaceState({}, "", next);
+    if (next !== current) {
+      window.history.replaceState({}, "", next);
+    }
   }, [view, deepLinkProbe.status]);
 
   // One-click PromptOwl SSO (GET /auth/sso) bounces back to "/?sso_error=<code>"

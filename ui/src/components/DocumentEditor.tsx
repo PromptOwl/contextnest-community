@@ -1,5 +1,6 @@
 /** DocumentEditor — create/edit view; `nodeId === "new"` → POST, else PATCH. Server enforces 403. */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,6 +26,11 @@ import {
   Users,
   Link as LinkIcon,
   History,
+  Code2,
+  GitCompare,
+  ChevronDown,
+  Check,
+  MessageSquarePlus,
   MessageSquare,
 } from "lucide-react";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -37,7 +43,24 @@ import {
 import { DocumentViewer } from "./DocumentViewer";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
-import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory, CommentsPanel } from "./governance";
+import { AnnotationsPanel } from "./AnnotationsPanel";
+import {
+  buildTextIndex,
+  rangeForAnchor,
+  setHighlight,
+  clearHighlight,
+  caretAt,
+} from "../lib/anchor-highlight";
+import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory, CommentsPanel, DiffViewer } from "./governance";
+import { unifiedDiff } from "./governance/diff-util";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { relatedDocs } from "../lib/related";
@@ -145,6 +168,25 @@ export function DocumentEditor({
     currentVersion: number;
   } | null>(null);
   const [showVersions, setShowVersions] = useState(false);
+  // Ever-present inline diff: pick a past version from the "Compare" dropdown
+  // and the doc area renders current → vN side-by-side, no modal.
+  const [compareVersion, setCompareVersion] = useState<number | null>(null);
+  // Inline-diff display: "source" = unified line diff; "rendered" = both
+  // versions rendered as markdown, side by side.
+  const [diffRendered, setDiffRendered] = useState(false);
+  // Anchored comments: text highlighted in the rendered doc stages an anchor
+  // (quote + 250c context + line hint); a floating button pins a comment to it.
+  const [pendingAnchor, setPendingAnchor] = useState<api.AnnotationAnchor | null>(null);
+  const [selPopover, setSelPopover] = useState<{ x: number; y: number } | null>(null);
+  const docViewRef = useRef<HTMLDivElement | null>(null);
+  // Anchored threads mirrored up from the panel, the DOM ranges we paint for
+  // them, and which thread is currently emphasized (doc ⇄ rail sync).
+  const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const anchorRangesRef = useRef<{ id: string; range: Range }[]>([]);
+  // Thread to scroll/emphasize once highlights (re)build — set when a comment
+  // is clicked from edit mode and we have to flip into comment mode first.
+  const pendingFocusRef = useRef<string | null>(null);
   const [tagInput, setTagInput] = useState("");
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
@@ -188,6 +230,14 @@ export function DocumentEditor({
   // "document" = the normal markdown editor. Only meaningful while isNew.
   const [newType, setNewType] = useState<"document" | "artifact">("document");
   const isArtifactDraft = isNew && newType === "artifact";
+  // Comment mode: force the rendered (read) view + annotation overlay even for
+  // users who can edit, so highlighting-to-comment and the painted highlights
+  // are reachable without the buttery editor stealing focus into TipTap.
+  const [commentMode, setCommentMode] = useState(false);
+  // Raw markdown source view — `content` is already markdown (the editor
+  // serializes via tiptap-markdown), so this is just a textarea over the same
+  // state. Editable in edit mode, read-only in view mode.
+  const [rawMode, setRawMode] = useState(false);
 
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
 
@@ -392,6 +442,196 @@ export function DocumentEditor({
     setShowVersions(true);
     await loadVersions();
   }, [loadVersions]);
+
+  // Load versions on demand when the Compare dropdown opens, so the list is
+  // populated without forcing the user through the history modal first.
+  const ensureVersions = useCallback(async () => {
+    if (!versionData) await loadVersions();
+  }, [versionData, loadVersions]);
+
+  // Selecting a past version from Compare shows it; clearing returns to edit.
+  const compareWith = useCallback((v: number | null) => {
+    setCompareVersion(v);
+  }, []);
+
+  // Read the current selection inside the rendered doc and, if non-empty,
+  // surface a floating "Comment" button at the selection. Building the anchor
+  // is deferred to the click so we don't compute on every mouseup.
+  const onDocMouseUp = useCallback(() => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      setSelPopover(null);
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    const container = docViewRef.current;
+    if (!container || !container.contains(range.commonAncestorContainer)) {
+      setSelPopover(null);
+      return;
+    }
+    if (!sel.toString().trim()) {
+      setSelPopover(null);
+      return;
+    }
+    const rect = range.getBoundingClientRect();
+    // Anchor the button just above the selection (viewport/fixed coords).
+    setSelPopover({ x: rect.left + rect.width / 2, y: rect.top });
+  }, []);
+
+  // Turn the live selection into a resilient anchor: quote + up to 250c of
+  // surrounding rendered text + a best-effort source line hint.
+  const stageAnchorFromSelection = useCallback(() => {
+    const sel = window.getSelection();
+    const container = docViewRef.current;
+    if (!sel || sel.isCollapsed || !container) return;
+    const quote = sel.toString().trim();
+    if (!quote) return;
+    const full = container.innerText || container.textContent || "";
+    const idx = full.indexOf(quote);
+    const before = idx >= 0 ? full.slice(Math.max(0, idx - 250), idx) : "";
+    const after = idx >= 0 ? full.slice(idx + quote.length, idx + quote.length + 250) : "";
+    const srcIdx = content.indexOf(quote);
+    const line = srcIdx >= 0 ? content.slice(0, srcIdx).split("\n").length : undefined;
+    setPendingAnchor({ quote, before, after, line });
+    setSelPopover(null);
+    sel.removeAllRanges();
+  }, [content]);
+
+  // Rebuild the painted comment highlights whenever the doc text or the set
+  // of anchored threads changes (and only in the rendered, non-diff view).
+  useEffect(() => {
+    const container = docViewRef.current;
+    const inRenderedView =
+      !isNew &&
+      (commentMode || mode === "view") &&
+      !rawMode &&
+      compareVersion == null &&
+      !looksLikeHtml(content);
+    if (!container || !inRenderedView) {
+      anchorRangesRef.current = [];
+      clearHighlight("comment-anchor");
+      clearHighlight("comment-anchor-active");
+      return;
+    }
+    // Defer one frame so react-markdown has committed its DOM.
+    const id = requestAnimationFrame(() => {
+      const idx = buildTextIndex(container);
+      const ranges: { id: string; range: Range }[] = [];
+      for (const t of anchoredThreads) {
+        if (!t.anchor?.quote) continue;
+        const r = rangeForAnchor(container, idx, t.anchor);
+        if (r) ranges.push({ id: t.id, range: r });
+      }
+      anchorRangesRef.current = ranges;
+      setHighlight("comment-anchor", ranges.map((r) => r.range));
+      // Deferred focus: a comment was clicked from edit mode; now that the
+      // rendered view exists and ranges are built, scroll to + emphasize it.
+      if (pendingFocusRef.current) {
+        const hit = ranges.find((r) => r.id === pendingFocusRef.current);
+        if (hit) {
+          hit.range.startContainer.parentElement?.scrollIntoView({
+            behavior: "smooth",
+            block: "center",
+          });
+          setActiveThreadId(hit.id);
+        }
+        pendingFocusRef.current = null;
+      }
+    });
+    return () => cancelAnimationFrame(id);
+  }, [anchoredThreads, content, mode, rawMode, compareVersion, isNew, commentMode]);
+
+  // Paint the active thread's range brighter (doc ⇄ rail emphasis).
+  useEffect(() => {
+    const hit = anchorRangesRef.current.find((r) => r.id === activeThreadId);
+    setHighlight("comment-anchor-active", hit ? [hit.range] : []);
+  }, [activeThreadId]);
+
+  // Jump to (and emphasize) an anchored quote when its thread is clicked.
+  const focusAnchor = useCallback(
+    (anchor: api.AnnotationAnchor) => {
+      const hit = anchoredThreads.find(
+        (t) => t.anchor?.quote === anchor.quote && t.anchor?.before === anchor.before,
+      );
+      if (hit) setActiveThreadId(hit.id);
+      const range = anchorRangesRef.current.find((r) => r.id === hit?.id)?.range;
+      if (range) {
+        range.startContainer.parentElement?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+        return;
+      }
+      // Not rendered yet (we're in the editor) — drop into comment mode and let
+      // the highlight effect scroll to it once ranges build.
+      const inRenderedView = commentMode || mode === "view";
+      if (!inRenderedView && !looksLikeHtml(content)) {
+        pendingFocusRef.current = hit?.id ?? null;
+        setCommentMode(true);
+        setMode("view");
+        return;
+      }
+      toast.message("That highlighted text isn't in the current version.");
+    },
+    [anchoredThreads, commentMode, mode, content],
+  );
+
+  // Map a click inside the rendered doc onto an anchored thread (if the click
+  // landed on a highlighted span) and emphasize it in the rail.
+  const onDocClick = useCallback((e: ReactMouseEvent) => {
+    if (!anchorRangesRef.current.length) return;
+    const caret = caretAt(e.clientX, e.clientY);
+    if (!caret) return;
+    for (const { id, range } of anchorRangesRef.current) {
+      try {
+        if (range.isPointInRange(caret.node, caret.offset)) {
+          setActiveThreadId(id);
+          return;
+        }
+      } catch {
+        /* range detached after a re-render; ignore */
+      }
+    }
+  }, []);
+
+  // Pointer feedback: cursor becomes a pointer when hovering a commented span.
+  const onDocMouseMove = useCallback((e: ReactMouseEvent) => {
+    const container = docViewRef.current;
+    if (!container) return;
+    if (!anchorRangesRef.current.length) {
+      container.style.cursor = "";
+      return;
+    }
+    const caret = caretAt(e.clientX, e.clientY);
+    let over = false;
+    if (caret) {
+      for (const { range } of anchorRangesRef.current) {
+        try {
+          if (range.isPointInRange(caret.node, caret.offset)) {
+            over = true;
+            break;
+          }
+        } catch {
+          /* ignore detached range */
+        }
+      }
+    }
+    container.style.cursor = over ? "pointer" : "";
+  }, []);
+
+  // Dismiss the floating Comment button when the user clicks away from both
+  // the selection and the button itself.
+  useEffect(() => {
+    if (!selPopover) return;
+    const onDown = (e: MouseEvent) => {
+      const el = e.target as HTMLElement;
+      if (el.closest('[data-testid="selection-comment-button"]')) return;
+      if (docViewRef.current?.contains(el)) return;
+      setSelPopover(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [selPopover]);
 
   // A pending-review doc is LOCKED: the server rejects edits/deletes with
   // 423 while a review is open (nodes/routes). Plain drafts stay editable —
@@ -617,9 +857,9 @@ export function DocumentEditor({
   // remounts DocumentViewer→MarkdownEditor and loses the caret/reflows.
   // Read-only sessions (view-only / locked / reviewer) keep the rendered view.
   useEffect(() => {
-    if (loading || mode === "edit") return;
+    if (loading || mode === "edit" || commentMode) return;
     if (!isViewOnly && !isLocked && !isReviewerOnly) setMode("edit");
-  }, [loading, isViewOnly, isLocked, isReviewerOnly, mode]);
+  }, [loading, isViewOnly, isLocked, isReviewerOnly, mode, commentMode]);
 
   // A doc can become locked while already in edit mode (e.g. the user just
   // submitted it for review). Kick back to read-only view so the editor
@@ -824,23 +1064,81 @@ export function DocumentEditor({
               <MessageSquare className="h-4 w-4" />
             </Button>
           )}
-          {/* Write/review affordances hidden for public reader.
-              Copy link + Share nest collapsed into an overflow menu to keep
-              the header uncluttered; primary actions (Publish/Save) stay inline. */}
+          {/* Compare ▾ — pick a past version; the doc area renders an
+              ever-present current→vN diff inline (no modal). */}
+          {!isNew && (
+            <DropdownMenu
+              onOpenChange={(o) => {
+                if (o) ensureVersions();
+              }}
+            >
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant={compareVersion != null ? "secondary" : "outline"}
+                  size="sm"
+                  title="Compare with a past version"
+                  data-testid="document-editor-compare"
+                >
+                  <GitCompare className="h-4 w-4 mr-1" />
+                  {compareVersion != null ? `Comparing v${compareVersion}` : "Compare"}
+                  <ChevronDown className="h-4 w-4 ml-1" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56 max-h-80 overflow-y-auto">
+                <DropdownMenuLabel>Diff current against…</DropdownMenuLabel>
+                {compareVersion != null && (
+                  <>
+                    <DropdownMenuItem onClick={() => compareWith(null)}>
+                      <X className="h-4 w-4 mr-2" /> Exit compare
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                  </>
+                )}
+                {!versionData ? (
+                  <DropdownMenuItem disabled>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" /> Loading…
+                  </DropdownMenuItem>
+                ) : versionData.versions.filter(
+                    (v) => v.version !== versionData.currentVersion,
+                  ).length === 0 ? (
+                  <DropdownMenuItem disabled>No earlier versions</DropdownMenuItem>
+                ) : (
+                  versionData.versions
+                    .filter((v) => v.version !== versionData.currentVersion)
+                    .map((v) => (
+                      <DropdownMenuItem
+                        key={v.version}
+                        onClick={() => compareWith(v.version)}
+                      >
+                        {compareVersion === v.version ? (
+                          <Check className="h-4 w-4 mr-2" />
+                        ) : (
+                          <span className="w-4 mr-2" />
+                        )}
+                        v{v.version}
+                        <span className="ml-auto text-xs text-muted-foreground">
+                          {v.editedBy?.split("@")[0] || ""}
+                        </span>
+                      </DropdownMenuItem>
+                    ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+          {/* Raw markdown source toggle — view/edit the underlying .md. */}
+          <Button
+            variant={rawMode ? "secondary" : "outline"}
+            size="icon"
+            onClick={() => setRawMode((v) => !v)}
+            title={rawMode ? "Rich editor" : "Markdown source"}
+            aria-pressed={rawMode}
+            data-testid="document-editor-markdown-toggle"
+          >
+            <Code2 className="h-4 w-4" />
+          </Button>
+          {/* Share-nest (collaborators / visibility) stays in the overflow. */}
           {(() => {
             const moreActions: OverflowAction[] = [];
-            if (!isNew)
-              moreActions.push({
-                label: "Copy link",
-                icon: LinkIcon,
-                testId: "document-editor-copy-link",
-                onSelect: () => {
-                  // Deep link the App's ?nest=&doc= probe understands.
-                  const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
-                  navigator.clipboard.writeText(url);
-                  toast.success("Link copied — recipient needs access to this nest");
-                },
-              });
             if (canShare)
               moreActions.push({
                 label: "Share nest",
@@ -848,13 +1146,13 @@ export function DocumentEditor({
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
               });
-            return (
+            return moreActions.length ? (
               <OverflowMenu
                 actions={moreActions}
                 variant="outline"
                 testId="document-editor-more"
               />
-            );
+            ) : null;
           })()}
         </div>
       </div>
@@ -1102,10 +1400,101 @@ export function DocumentEditor({
             </div>
           )}
 
-          {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
+          {/* Document + ever-present comments rail (Notion/Docs-style):
+              editor left, comments a sticky panel on the right. */}
+          <div className="flex flex-col lg:flex-row gap-6 items-start">
+          <div className="flex-1 min-w-0">
+          {commentMode && compareVersion == null && (
+            <div className="mb-2 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50/70 dark:bg-amber-950/20 px-3 py-1.5 text-xs text-amber-900 dark:text-amber-200">
+              <MessageSquare className="h-3.5 w-3.5 shrink-0" />
+              Comment mode — select any text to pin a comment, or click a
+              highlighted phrase to open its thread. Editing is paused.
+            </div>
+          )}
+          {compareVersion != null ? (
+            /* Ever-present inline diff: current vs a chosen past version. */
+            <div data-testid="document-editor-inline-diff">
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-sm font-medium flex items-center gap-2">
+                  <GitCompare className="h-4 w-4" />
+                  Diff: v{compareVersion} → current (v
+                  {versionData?.currentVersion ?? baseVersion ?? "?"})
+                </label>
+                <div className="flex items-center gap-1">
+                  {/* Source = exact line changes; Rendered = formatted markdown. */}
+                  <div className="flex rounded-md border overflow-hidden text-xs">
+                    <button
+                      type="button"
+                      className={`px-2 py-1 ${!diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+                      onClick={() => setDiffRendered(false)}
+                    >
+                      Source
+                    </button>
+                    <button
+                      type="button"
+                      className={`px-2 py-1 ${diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+                      onClick={() => setDiffRendered(true)}
+                    >
+                      Rendered
+                    </button>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7"
+                    onClick={() => setCompareVersion(null)}
+                  >
+                    <X className="h-4 w-4 mr-1" /> Exit diff
+                  </Button>
+                </div>
+              </div>
+              {(() => {
+                const past = versionData?.versions.find(
+                  (v) => v.version === compareVersion,
+                );
+                if (!past) {
+                  return (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 border rounded-lg">
+                      <Loader2 className="h-4 w-4 animate-spin" /> Loading version{" "}
+                      {compareVersion}…
+                    </div>
+                  );
+                }
+                if (diffRendered) {
+                  // Side-by-side rendered markdown: past vs current.
+                  return (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="border rounded-lg overflow-hidden">
+                        <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                          v{compareVersion}
+                        </div>
+                        <DocumentViewer
+                          content={past.content || ""}
+                          className="px-4 py-3"
+                        />
+                      </div>
+                      <div className="border rounded-lg overflow-hidden">
+                        <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                          current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
+                        </div>
+                        <DocumentViewer content={content} className="px-4 py-3" />
+                      </div>
+                    </div>
+                  );
+                }
+                return (
+                  <DiffViewer
+                    patch={unifiedDiff(past.content || "", content)}
+                    className="max-h-none border rounded-lg"
+                  />
+                );
+              })()}
+            </div>
+          ) : (
+          /* Dblclick → edit unless locked/reviewer/public-viewer. */
           <div
             onClick={() => {
-              if (isViewOnly || isLocked || isArtifactDraft) return;
+              if (commentMode || isViewOnly || isLocked || isArtifactDraft) return;
               if (mode === "view" && !isReviewerOnly) {
                 setMode("edit");
               }
@@ -1126,8 +1515,30 @@ export function DocumentEditor({
                 spellCheck={false}
                 className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
               />
-            ) : mode === "view" && !looksLikeHtml(content) ? (
-              <div className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text">
+            ) : rawMode ? (
+              <textarea
+                value={content}
+                onChange={(e) => {
+                  if (fieldsDisabled) return;
+                  setContent(e.target.value);
+                  setTouched(true);
+                  scheduleAutosave();
+                }}
+                onBlur={flushAutosave}
+                readOnly={fieldsDisabled}
+                spellCheck={false}
+                placeholder="# Raw markdown"
+                className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                data-testid="document-editor-raw-markdown"
+              />
+            ) : (commentMode || mode === "view") && !looksLikeHtml(content) ? (
+              <div
+                ref={docViewRef}
+                onMouseUp={isNew ? undefined : onDocMouseUp}
+                onClick={isNew ? undefined : onDocClick}
+                onMouseMove={isNew ? undefined : onDocMouseMove}
+                className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text"
+              >
                 <DocumentViewer
                   content={content}
                   onWikiLinkClick={(title) =>
@@ -1157,6 +1568,53 @@ export function DocumentEditor({
               />
             )}
           </div>
+          )}
+          </div>
+
+          {/* Ever-present comments rail — beside the doc, not stacked below. */}
+          {!isNew && (
+            <aside className="w-full lg:w-80 shrink-0 lg:sticky lg:top-4 self-start max-h-[calc(100vh-2rem)] overflow-y-auto">
+              <AnnotationsPanel
+                nestId={nestId}
+                nodeId={nodeId}
+                readOnly={isViewOnly}
+                pendingAnchor={pendingAnchor}
+                onClearAnchor={() => setPendingAnchor(null)}
+                onFocusAnchor={focusAnchor}
+                onThreadsChange={setAnchoredThreads}
+                activeThreadId={activeThreadId}
+                commentMode={commentMode}
+                onSetCommentMode={(on) => {
+                  setCommentMode(on);
+                  if (on) setMode("view");
+                  setSelPopover(null);
+                  if (!on) setActiveThreadId(null);
+                }}
+              />
+            </aside>
+          )}
+          </div>
+
+          {/* Floating "Comment" button on text selection — pins a comment to
+              the highlighted quote (Notion/Docs-style). */}
+          {selPopover && !isViewOnly && (
+            <button
+              type="button"
+              data-testid="selection-comment-button"
+              onMouseDown={(e) => e.preventDefault() /* keep the selection */}
+              onClick={stageAnchorFromSelection}
+              style={{
+                position: "fixed",
+                left: selPopover.x,
+                top: selPopover.y - 40,
+                transform: "translateX(-50%)",
+                zIndex: 50,
+              }}
+              className="flex items-center gap-1 rounded-md bg-foreground text-background px-2.5 py-1.5 text-xs font-medium shadow-lg hover:opacity-90"
+            >
+              <MessageSquarePlus className="h-3.5 w-3.5" /> Comment
+            </button>
+          )}
 
           {/* Backlinks — "what links here". View mode only; hidden when empty. */}
           {mode === "view" && backlinks.length > 0 && (
