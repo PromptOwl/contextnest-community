@@ -426,9 +426,21 @@ export interface AnnotationComment {
   body: string;
   createdAt: string;
 }
+/** Resilient text anchor (W3C TextQuote). null = whole-document comment. */
+export interface AnnotationAnchor {
+  /** 1-based line hint in the source markdown. */
+  line?: number;
+  /** The highlighted text. */
+  quote: string;
+  /** Up to ~250 chars before the quote. */
+  before: string;
+  /** Up to ~250 chars after the quote. */
+  after: string;
+}
 export interface AnnotationThread {
   id: string;
   status: "open" | "resolved";
+  anchor: AnnotationAnchor | null;
   createdBy: string;
   createdAt: string;
   resolvedBy: string | null;
@@ -442,10 +454,15 @@ export async function listAnnotations(nestId: string, nodeId: string) {
   );
 }
 
-export async function createAnnotation(nestId: string, nodeId: string, body: string) {
+export async function createAnnotation(
+  nestId: string,
+  nodeId: string,
+  body: string,
+  anchor?: AnnotationAnchor | null,
+) {
   return request<{ thread: AnnotationThread }>(
     `/nests/${nestId}/nodes/${nodeId}/annotations`,
-    { method: "POST", body: JSON.stringify({ body }) },
+    { method: "POST", body: JSON.stringify({ body, anchor: anchor ?? null }) },
   );
 }
 
