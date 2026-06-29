@@ -1,5 +1,35 @@
 # @promptowl/contextnest-community
 
+## 1.4.0
+
+### Minor Changes
+
+- v1.4.0 — collaboration, hosted artifacts, ontology graph, and one-click SSO.
+
+  ### Collaboration & sharing
+
+  - **Standalone collaboration comments + activity log** — contributors can comment on documents independent of the review workflow, and a per-nest activity log records governance events (`src/governance/comment-service.ts`, `CommentsPanel.tsx`).
+  - **Granular share permissions** — collaborator invites are now escalation-capped instead of admin-only, so an editor can invite another collaborator without exceeding their own permission tier (`src/nests/sharing-service.ts`).
+  - **Shareable document URLs** — documents now have stable deep-link URLs that open the target document directly.
+
+  ### Hosted artifacts & annotations
+
+  - **Hosted artifacts + threaded annotations** — non-markdown artifacts can be hosted and viewed in-app, with threaded annotations anchored to artifact text (`src/annotations/*`, `ArtifactViewer.tsx`, `ui/src/lib/artifact-text.ts`).
+
+  ### Ontology graph
+
+  - **Ontology graph view** — an interactive canvas of nodes, `[[wikilinks]]`, and stewardship overlay that surfaces coverage gaps. Supports pan, zoom, and fit-to-view; steward emails are masked for the read tier and the drawn-node count is capped for large graphs (`src/nodes/graph-service.ts`, `OntologyGraphView.tsx`).
+
+  ### Auth
+
+  - **One-click SSO auto-login** — users can sign into ContextNest Community directly from PromptOwl via a short-lived SSO token (`src/auth/sso-token.ts`, `test/sso-route.test.ts`, `test/sso-token.test.ts`).
+
+  ### Fixes
+
+  - Hyperlink / wiki-link navigation now resolves to the configured target.
+  - Comment and annotation projection conflict resolved.
+  - Editors can add new collaborators in the UI.
+
 ## 1.3.0
 
 ### Minor Changes
