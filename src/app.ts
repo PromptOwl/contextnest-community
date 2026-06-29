@@ -242,45 +242,75 @@ export function createApp(): Hono<AuthEnv> {
     }
   });
 
-  // PATCH /admin/sign-in-gate — admin toggles the PromptOwl sign-in gate
-  // (open | admin-only | disabled). Takes effect live (process.env, which the
-  // config getter reads) and is persisted to ENV_FILE_PATH so it survives a
-  // restart. In open mode the anonymous admin may set it; in key mode it's
-  // restricted to the license admin.
-  app.use("/admin/sign-in-gate", flexAuthMiddleware);
-  app.patch("/admin/sign-in-gate", async (c) => {
-    const userId = c.get("userId");
-    const isOpen = config.AUTH_MODE === "open";
-    if (!isOpen && !isLicenseAdminUserId(userId)) {
+  // /admin/settings — server-wide settings the admin edits from the Settings
+  // page. Each setting takes effect live (config getters read process.env) and
+  // persists to ENV_FILE_PATH so it survives a restart. In open mode the
+  // anonymous admin may edit; in key mode it's the license admin only.
+  app.use("/admin/settings", flexAuthMiddleware);
+  const adminSettingsAllowed = (c: any) =>
+    config.AUTH_MODE === "open" || isLicenseAdminUserId(c.get("userId"));
+  const currentServerSettings = () => ({
+    promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+    logo_url: config.LOGO_URL,
+    telemetry_enabled: config.TELEMETRY_ENABLED,
+    public_base_url: config.PUBLIC_BASE_URL,
+    max_body_bytes: config.MAX_BODY_BYTES,
+  });
+
+  app.get("/admin/settings", (c) => {
+    if (!adminSettingsAllowed(c))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    return c.json(currentServerSettings());
+  });
+
+  app.patch("/admin/settings", async (c) => {
+    if (!adminSettingsAllowed(c))
       return c.json({ error: "Only the server admin can change this." }, 403);
-    }
-    let body: { value?: string };
+    let body: Record<string, unknown>;
     try {
       body = await c.req.json();
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
-    const value = (body?.value || "").trim().toLowerCase();
-    if (!["open", "admin-only", "disabled"].includes(value)) {
-      return c.json(
-        { error: "value must be one of: open, admin-only, disabled" },
-        400,
-      );
+    const errors: string[] = [];
+    // Set live (process.env) + persist; null deletes the line (falls to default).
+    const apply = (name: string, value: string | null) => {
+      if (value === null) delete process.env[name];
+      else process.env[name] = value;
+      try {
+        upsertEnvVar(config.ENV_FILE_PATH, name, value);
+      } catch (e) {
+        errors.push(`persist ${name}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+
+    if ("promptowl_sign_in_gate" in body) {
+      const v = String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase();
+      if (!["open", "admin-only", "disabled"].includes(v))
+        errors.push("promptowl_sign_in_gate must be open | admin-only | disabled");
+      else apply("PROMPTOWL_SIGN_IN_GATE", v);
     }
-    process.env.PROMPTOWL_SIGN_IN_GATE = value;
-    let persisted = true;
-    let persistError: string | null = null;
-    try {
-      upsertEnvVar(config.ENV_FILE_PATH, "PROMPTOWL_SIGN_IN_GATE", value);
-    } catch (e) {
-      persisted = false;
-      persistError = e instanceof Error ? e.message : String(e);
+    if ("logo_url" in body) {
+      const v = String(body.logo_url ?? "").trim();
+      apply("LOGO_URL", v || null);
     }
-    return c.json({
-      promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
-      persisted,
-      persistError,
-    });
+    if ("public_base_url" in body) {
+      const v = String(body.public_base_url ?? "").trim().replace(/\/$/, "");
+      apply("PUBLIC_BASE_URL", v || null);
+    }
+    if ("telemetry_enabled" in body) {
+      apply("TELEMETRY_ENABLED", body.telemetry_enabled ? "true" : "false");
+    }
+    if ("max_body_bytes" in body) {
+      const n = Number(body.max_body_bytes);
+      if (!Number.isFinite(n) || n < 1024 * 1024 || n > 500 * 1024 * 1024)
+        errors.push("max_body_bytes must be between 1MB and 500MB");
+      else apply("MAX_BODY_BYTES", String(Math.floor(n)));
+    }
+
+    if (errors.length)
+      return c.json({ error: errors.join("; "), settings: currentServerSettings() }, 400);
+    return c.json({ settings: currentServerSettings() });
   });
 
   // GET /stats — dashboard summary counts: nests visible to caller,

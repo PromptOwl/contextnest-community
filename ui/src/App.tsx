@@ -7,7 +7,7 @@ import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, getNest, changePassword, getHealth, setSignInGate as apiSetSignInGate, type LicenseStatus, type SignInGate } from "./lib/api";
+import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network } from "lucide-react";
@@ -119,32 +119,25 @@ export default function App() {
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
-  // PromptOwl sign-in gate (admin-controllable from the user menu). Loaded from
-  // /health; the Login screen reads the same value to show/hide the button.
-  const [signInGate, setSignInGate] = useState<SignInGate>("open");
+  // Server-wide settings for the admin Settings page. Loaded once for admins.
+  const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
   useEffect(() => {
-    getHealth()
-      .then((h) => setSignInGate(h.promptowl_sign_in_gate ?? "open"))
+    if (!isAdmin) return;
+    getAdminSettings()
+      .then(setServerSettings)
       .catch(() => {});
-  }, []);
-  const handleSetSignInGate = useCallback(async (value: SignInGate) => {
-    const prev = signInGate;
-    setSignInGate(value); // optimistic
+  }, [isAdmin]);
+  const updateServerSettings = useCallback(async (patch: Partial<AdminSettings>) => {
     try {
-      const res = await apiSetSignInGate(value);
-      setSignInGate(res.promptowl_sign_in_gate);
-      toast.success(
-        value === "disabled"
-          ? "PromptOwl sign-in turned off"
-          : value === "admin-only"
-            ? "PromptOwl sign-in limited to admins"
-            : "PromptOwl sign-in enabled for everyone",
-      );
+      const res = await updateAdminSettings(patch);
+      setServerSettings(res.settings);
+      toast.success("Settings saved");
     } catch (e: any) {
-      setSignInGate(prev); // revert
-      toast.error(e?.message || "Failed to update sign-in setting");
+      toast.error(e?.message || "Failed to save settings");
+      // Re-sync from server so the UI reflects the true state.
+      getAdminSettings().then(setServerSettings).catch(() => {});
     }
-  }, [signInGate]);
+  }, []);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
   const [showQuickOpen, setShowQuickOpen] = useState(false);
 
@@ -702,8 +695,8 @@ export default function App() {
         {view.page === "settings" && (
           <SettingsPage
             onBack={() => setView({ page: "dashboard" })}
-            signInGate={signInGate}
-            onSetSignInGate={handleSetSignInGate}
+            settings={serverSettings}
+            onUpdate={updateServerSettings}
           />
         )}
         {view.page === "ontology-graph" && (
