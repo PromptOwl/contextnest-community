@@ -174,6 +174,10 @@ export interface CreateNodeInput {
   tags?: string[];
   scope?: string;
   status?: string;
+  /** Explicit node id (e.g. "nodes/foo"). When omitted the id is derived from
+   *  the title slug. Used by derived/system nodes that need a deterministic,
+   *  collision-free id independent of the human-readable title. */
+  id?: string;
 }
 
 export interface UpdateNodePatch {
@@ -201,7 +205,7 @@ export async function createNode(
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
-  const id = `nodes/${slug}`;
+  const id = input.id ?? `nodes/${slug}`;
   const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
 

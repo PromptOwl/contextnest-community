@@ -9,7 +9,8 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, type LicenseStatus } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network } from "lucide-react";
+import { OntologyGraphView } from "./components/OntologyGraphView";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -67,7 +68,18 @@ type View =
       /** Prior wiki-link hops, oldest first. Back pops the last entry. */
       breadcrumb?: BreadcrumbEntry[];
     }
-  | { page: "teammates" };
+  | { page: "teammates" }
+  | {
+      page: "ontology-graph";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    };
+
+// Runs the ?sso_error toast exactly once per page load (survives React
+// StrictMode's dev double-mount). Resets naturally on the next full navigation.
+let ssoErrorHandled = false;
 
 export default function App() {
   const {
@@ -188,6 +200,76 @@ export default function App() {
       }
     })();
   }, [deepLinkProbe.status]);
+
+  // Keep the URL in sync with the current view so documents (and nests) are
+  // shareable — paste the address bar and the recipient lands on the same doc.
+  // The probe above consumes ?nest / ?doc on load, so we must NOT rewrite the
+  // URL while it's still "loading", or we'd clobber the params before it reads
+  // them. ?doc is omitted for unsaved ("new") documents.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (deepLinkProbe.status === "loading") return;
+    const params = new URLSearchParams(window.location.search);
+    if (view.page === "document") {
+      params.set("nest", view.nestId);
+      if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
+      else params.delete("doc");
+    } else if (view.page === "nest") {
+      params.set("nest", view.nestId);
+      params.delete("doc");
+    } else {
+      params.delete("nest");
+      params.delete("doc");
+    }
+    const qs = params.toString();
+    const next =
+      window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
+    const current =
+      window.location.pathname + window.location.search + window.location.hash;
+    if (next !== current) window.history.replaceState({}, "", next);
+  }, [view, deepLinkProbe.status]);
+
+  // One-click PromptOwl SSO (GET /auth/sso) bounces back to "/?sso_error=<code>"
+  // when a ticket can't be redeemed (bad/expired/replayed ticket, wrong
+  // audience, rate limit, sign-in gate) or when this community doesn't support
+  // SSO at all (no shared secret on a self-hosted deploy → "not_supported").
+  // Surface a human-readable toast and strip the param so a refresh doesn't
+  // re-fire it.
+  //
+  // The module-level guard + deferred toast handle React StrictMode's dev
+  // double-mount: the effect fires twice, and a toast queued synchronously in
+  // the first pass is dropped when sonner's <Toaster> remounts. The guard runs
+  // the body exactly once per page load (each SSO redirect is a full
+  // navigation, so it resets), and the setTimeout lets the toast land after the
+  // mount churn settles so it actually renders.
+  useEffect(() => {
+    if (typeof window === "undefined" || ssoErrorHandled) return;
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("sso_error");
+    if (!code) return;
+    ssoErrorHandled = true;
+
+    params.delete("sso_error");
+    const qs = params.toString();
+    window.history.replaceState(
+      {},
+      "",
+      window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
+    );
+
+    const messages: Record<string, string> = {
+      not_supported: "One-click sign-in isn't available on this community.",
+      missing_ticket: "The sign-in link was incomplete. Try again from PromptOwl.",
+      invalid_ticket: "The sign-in link is invalid or has expired. Try again from PromptOwl.",
+      bad_audience: "This sign-in link was issued for a different community.",
+      ticket_used: "This sign-in link was already used. Start again from PromptOwl.",
+      rate_limited: "Too many sign-in attempts. Wait a moment and try again.",
+      sign_in_restricted: "Sign-in is restricted on this community. Contact an admin.",
+      service_error: "Something went wrong signing you in. Please try again.",
+    };
+    const msg = messages[code] ?? "Sign-in failed. Try again from PromptOwl.";
+    setTimeout(() => toast.error(msg), 0);
+  }, []);
 
   useEffect(() => {
     refreshLicense();
@@ -364,6 +446,25 @@ export default function App() {
                 <Info className="h-3 w-3" />
                 Public read-only
               </span>
+            )}
+
+            {view.page === "nest" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setView({
+                    page: "ontology-graph",
+                    nestId: view.nestId,
+                    nestName: view.nestName,
+                    isOwner: view.isOwner,
+                    isAnonOwned: view.isAnonOwned,
+                  })
+                }
+              >
+                <Network className="h-3.5 w-3.5 mr-1" />
+                Graph
+              </Button>
             )}
 
             {adminStatus?.me ? (
@@ -565,6 +666,21 @@ export default function App() {
         })()}
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
+        )}
+        {view.page === "ontology-graph" && (
+          <OntologyGraphView
+            nestId={view.nestId}
+            nestName={view.nestName}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
         )}
       </main>
 

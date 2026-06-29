@@ -12,3 +12,4 @@ export { LifecycleStatusBadge, AIEligibilityBadge } from "./LifecycleStatusBadge
 export type { DocumentLifecycleStatus } from "./LifecycleStatusBadge";
 export { ExternalEditBanner } from "./ExternalEditBanner";
 export { DiffViewer } from "./DiffViewer";
+export { CommentsPanel } from "./CommentsPanel";

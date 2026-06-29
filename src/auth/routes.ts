@@ -30,6 +30,7 @@ import {
   isLicenseAdminUserId,
 } from "./license.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
+import { verifySsoTicket } from "./sso-token.js";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { ANON_USER_ID } from "../shared/constants.js";
 
@@ -38,6 +39,9 @@ import { ANON_USER_ID } from "../shared/constants.js";
 const LOGIN_LIMIT = { max: 5, windowMs: 15 * 60_000 };       // 5 / 15 min
 const REGISTER_LIMIT = { max: 3, windowMs: 60 * 60_000 };    // 3 / hr
 const DEVICE_LIMIT = { max: 10, windowMs: 15 * 60_000 };     // 10 / 15 min
+
+// Warn once (not per request) when SSO runs without audience binding.
+let warnedMissingSsoAudience = false;
 
 function clientIp(c: any): string {
   // Respect reverse-proxy headers; fall back to the raw socket address if
@@ -113,6 +117,106 @@ function clearSessionCookie(c: any) {
     "Set-Cookie",
     buildClearSessionCookie({ secure: isSecureRequest(c) }),
   );
+}
+
+type ClaimBlocked =
+  | { reason: "license_required" }
+  | { reason: "email_mismatch"; license_owner_email: string | null };
+
+type ProvisionResult =
+  | { ok: false; status: 403; error: string; gate: string }
+  | {
+    ok: true;
+    user: { id: string; email: string; name: string | null };
+    isAdmin: boolean;
+    claimBlocked: ClaimBlocked | null;
+  };
+
+/**
+ * Provision (or look up) a user from a PromptOwl identity and start a browser
+ * session for them. Shared by BOTH PromptOwl sign-in paths:
+ *   - POST /auth/promptowl — manual device-code flow (any self-hosted server)
+ *   - GET  /auth/sso       — one-click SSO ticket (official server only)
+ *
+ * Enforces PROMPTOWL_SIGN_IN_GATE, auto-provisions an unknown email, derives
+ * admin status live from the installed license, and (on success) sets the
+ * httpOnly session cookie. The caller owns the response shape — JSON for the
+ * device flow, a redirect for SSO.
+ */
+async function provisionPromptowlUser(
+  c: any,
+  rawEmail: string,
+  rawName: string | null | undefined,
+): Promise<ProvisionResult> {
+  // PROMPTOWL_SIGN_IN_GATE — optionally restrict PromptOwl sign-in. When not
+  // "open", only the license owner (admin) may complete it; everyone else
+  // uses email/password. Enforced HERE (the identity point) so a non-admin
+  // can't even auto-provision a user via PromptOwl.
+  const gate = config.PROMPTOWL_SIGN_IN_GATE;
+  if (gate !== "open") {
+    if (gate === "disabled" || !isLicenseAdminEmail(rawEmail)) {
+      return {
+        ok: false,
+        status: 403,
+        error:
+          "PromptOwl sign-in is restricted on this server. Use email and password, or contact your admin.",
+        gate,
+      };
+    }
+  }
+
+  const db = getDb();
+  const meEmail = normalizeEmail(rawEmail);
+
+  let user = db
+    .prepare("SELECT id, email, name FROM users WHERE LOWER(email) = ?")
+    .get(meEmail) as
+    | { id: string; email: string; name: string | null }
+    | undefined;
+
+  if (!user) {
+    const userId = uuid();
+    const placeholderHash = await hashPassword(uuid());
+    db.prepare(
+      "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+    ).run(userId, meEmail, rawName || null, placeholderHash);
+    user = { id: userId, email: meEmail, name: rawName || null };
+
+    trackEvent("user.register", {
+      userId,
+      email: rawEmail,
+      method: "promptowl",
+    });
+  } else {
+    trackEvent("user.login", { userId: user.id, method: "promptowl" });
+  }
+
+  // ─── Admin derivation ───
+  // Admin is whoever owns the currently-installed license, not a sticky DB
+  // flag. Transferring the license to a new PromptOwl account immediately
+  // demotes the old admin and promotes the new owner — no manual cleanup.
+  let claimBlocked: ClaimBlocked | null = null;
+  const lic = getCurrentLicense();
+  let isAdmin = false;
+  if (!lic?.valid) {
+    claimBlocked = { reason: "license_required" };
+  } else if (
+    lic.ownerEmail &&
+    lic.ownerEmail.toLowerCase() === rawEmail.toLowerCase()
+  ) {
+    isAdmin = true;
+    trackEvent("admin.claim", { userId: user.id, email: user.email });
+  } else {
+    claimBlocked = {
+      reason: "email_mismatch",
+      license_owner_email: lic.ownerEmail,
+    };
+  }
+
+  const sessionId = createSession(user.id, c.req.header("User-Agent"));
+  setSessionCookie(c, sessionId);
+
+  return { ok: true, user, isAdmin, claimBlocked };
 }
 
 export const authRoutes = new Hono<AuthEnv>();
@@ -473,89 +577,123 @@ authRoutes.post("/promptowl", async (c) => {
     );
   }
 
-  // PROMPTOWL_SIGN_IN_GATE — optionally restrict PromptOwl sign-in. When
-  // not "open", only the license owner (admin) may complete it; everyone
-  // else uses email/password. Enforced HERE (the identity point) so a
-  // non-admin can't even auto-provision a user via PromptOwl.
-  const gate = config.PROMPTOWL_SIGN_IN_GATE;
-  if (gate !== "open") {
-    if (gate === "disabled" || !isLicenseAdminEmail(me.email)) {
-      return c.json(
-        {
-          error:
-            "PromptOwl sign-in is restricted on this server. Use email and password, or contact your admin.",
-          gate,
-        },
-        403,
-      );
-    }
+  const result = await provisionPromptowlUser(c, me.email, me.name);
+  if (!result.ok) {
+    return c.json({ error: result.error, gate: result.gate }, result.status);
   }
-
-  const db = getDb();
-  const meEmail = normalizeEmail(me.email);
-
-  let user = db
-    .prepare("SELECT id, email, name FROM users WHERE LOWER(email) = ?")
-    .get(meEmail) as
-    | { id: string; email: string; name: string | null }
-    | undefined;
-
-  if (!user) {
-    const userId = uuid();
-    const placeholderHash = await hashPassword(uuid());
-    db.prepare(
-      "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
-    ).run(userId, meEmail, me.name || null, placeholderHash);
-    user = { id: userId, email: meEmail, name: me.name || null };
-
-    trackEvent("user.register", {
-      userId,
-      email: me.email,
-      method: "promptowl",
-    });
-  } else {
-    trackEvent("user.login", { userId: user.id, method: "promptowl" });
-  }
-
-  // ─── Admin derivation ───
-  // Admin is whoever owns the currently-installed license, not a
-  // sticky DB flag. This means transferring the license to a new
-  // PromptOwl account immediately demotes the old admin and promotes
-  // the new owner — no manual DB cleanup required.
-  let claimBlocked:
-    | { reason: "license_required" }
-    | { reason: "email_mismatch"; license_owner_email: string | null }
-    | null = null;
-
-  const lic = getCurrentLicense();
-  let isAdmin = false;
-  if (!lic?.valid) {
-    claimBlocked = { reason: "license_required" };
-  } else if (
-    lic.ownerEmail &&
-    lic.ownerEmail.toLowerCase() === me.email.toLowerCase()
-  ) {
-    isAdmin = true;
-    trackEvent("admin.claim", { userId: user.id, email: user.email });
-  } else {
-    claimBlocked = {
-      reason: "email_mismatch",
-      license_owner_email: lic.ownerEmail,
-    };
-  }
-
-  const sessionId = createSession(user.id, c.req.header("User-Agent"));
-  setSessionCookie(c, sessionId);
 
   return c.json({
     user: {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      is_admin: isAdmin,
+      id: result.user.id,
+      email: result.user.email,
+      name: result.user.name,
+      is_admin: result.isAdmin,
     },
-    ...(claimBlocked ? { claim_blocked: claimBlocked } : {}),
+    ...(result.claimBlocked ? { claim_blocked: result.claimBlocked } : {}),
   });
+});
+
+// GET /auth/sso — one-click SSO auto-login from PromptOwl.
+//
+// THE DOMAIN LOCK. PromptOwl redirects a logged-in user here with a short-lived
+// JWT ticket signed with the shared OFFICIAL_COMMUNITY_SSO_SECRET. Only the ONE
+// official deployment holds that secret, so:
+//   - secret unset  → feature disabled (every self-hosted server); bounce to the
+//                     SPA with ?sso_error=not_supported so the user sees a clear
+//                     message instead of a bare 404. This does NOT weaken the
+//                     lock: without the secret no ticket can be verified, so
+//                     other domains still cannot auto-login.
+//   - secret set    → verify signature + audience + expiry + one-time jti, then
+//                     provision the user and start a session, exactly like the
+//                     manual /auth/promptowl flow.
+// On any failure the user is bounced to the app with ?sso_error=<code> so the
+// SPA can show a message and fall back to manual sign-in.
+authRoutes.get("/sso", async (c) => {
+  const ssoError = (code: string) => c.redirect(`/?sso_error=${code}`, 302);
+
+  const secret = config.OFFICIAL_COMMUNITY_SSO_SECRET;
+  // Self-hosted servers (no shared secret) don't support one-click SSO.
+  if (!secret) return ssoError("not_supported");
+
+  if (!tryConsume(`sso:ip:${clientIp(c)}`, DEVICE_LIMIT)) {
+    return ssoError("rate_limited");
+  }
+
+  const ticket = c.req.query("ticket");
+  if (!ticket) return ssoError("missing_ticket");
+
+  let claims;
+  try {
+    claims = verifySsoTicket(ticket, secret);
+  } catch {
+    return ssoError("invalid_ticket");
+  }
+
+  // Audience binding — a ticket minted for a different server is rejected, so
+  // it can't be replayed elsewhere even if the secret were shared. When
+  // PUBLIC_BASE_URL is unset this binding is DISABLED (the secret is the only
+  // control left), so warn loudly — that's a misconfiguration on an official
+  // deployment, not an intended mode.
+  const expectedAud = config.PUBLIC_BASE_URL;
+  if (!expectedAud && !warnedMissingSsoAudience) {
+    warnedMissingSsoAudience = true;
+    console.warn(
+      "[sso] OFFICIAL_COMMUNITY_SSO_SECRET is set but PUBLIC_BASE_URL is empty — " +
+        "ticket audience binding is DISABLED. Set PUBLIC_BASE_URL so a ticket minted " +
+        "for another server cannot be replayed against this one.",
+    );
+  }
+  if (expectedAud) {
+    const aud = (claims.aud || "").replace(/\/$/, "");
+    if (aud !== expectedAud) return ssoError("bad_audience");
+  }
+
+  // Reject a malformed subject before burning the jti. Tickets are minted by
+  // PromptOwl (trusted), but a whitespace/garbage sub would otherwise create a
+  // degenerate user row with an empty email that can never match a grant.
+  const sub = (claims.sub || "").trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(sub) || sub.length > 254) {
+    return ssoError("invalid_ticket");
+  }
+
+  // One-time use — redeem the jti exactly once. Insert-or-conflict is the
+  // atomic replay guard.
+  if (!claims.jti) return ssoError("invalid_ticket");
+  const db = getDb();
+  db.prepare("DELETE FROM sso_used_jti WHERE expires_at < datetime('now')").run();
+  const expiresAtIso = new Date((claims.exp ?? 0) * 1000).toISOString();
+  try {
+    db.prepare(
+      "INSERT INTO sso_used_jti (jti, expires_at) VALUES (?, ?)",
+    ).run(claims.jti, expiresAtIso);
+  } catch (err: any) {
+    // PRIMARY KEY conflict = ticket already redeemed (replay). Any other DB
+    // fault (missing table, disk full, corruption) must NOT masquerade as
+    // "already used" — surface it distinctly so an outage is diagnosable.
+    if (err?.code === "SQLITE_CONSTRAINT_PRIMARYKEY") {
+      return ssoError("ticket_used");
+    }
+    console.error("[sso] failed to record ticket jti:", err);
+    return ssoError("service_error");
+  }
+
+  // jti is already burned above. If provisioning throws (transient: bcrypt
+  // fault, duplicate-email race between the SELECT and INSERT), release the jti
+  // so the still-valid ticket can be retried instead of being permanently dead.
+  // A deterministic !ok (gate restriction) is NOT released — retrying can't help
+  // and keeping the jti burned preserves the one-time replay guard.
+  let result;
+  try {
+    result = await provisionPromptowlUser(c, sub, claims.name);
+  } catch (err) {
+    db.prepare("DELETE FROM sso_used_jti WHERE jti = ?").run(claims.jti);
+    console.error("[sso] provisioning failed; released jti for retry:", err);
+    return ssoError("service_error");
+  }
+  if (!result.ok) return ssoError("sign_in_restricted");
+
+  // Success — session cookie set by the helper; land on the app home.
+  return c.redirect("/", 302);
 });
 
 // GET /auth/admin-status — does this server have an admin? Who am I?
