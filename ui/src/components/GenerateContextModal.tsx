@@ -66,26 +66,44 @@ export function GenerateContextModal({ isOpen, onClose, nestId, nestName, openMo
     ? ""
     : '  -H "Authorization: Bearer $CNST_KEY" \\\n';
 
-  const prompt = `You can write to my ContextNest knowledge base ("nest") over HTTP.
-Generate well-structured context on the topic below, then create ONE node per
-document by POSTing to the nest API. Keep each node tight (100–300 words).
+  const prompt = `You are helping me build a ContextNest knowledge base — a "nest":
+a graph of small, linked context documents that AI agents read later. You can
+write to it over HTTP. Nest: "${nestName}".
 
-Base URL: ${serverUrl}
-Nest ID:  ${nestId}
+STEP 1 — Interview me first. Do NOT create anything yet. Ask me:
+  • What body of knowledge should go in here? (sources, docs, transcripts, URLs, topics)
+  • Who/what will use this nest, and for what? (purpose drives how granular to go)
+  • What's authoritative vs. rough, and is there anything to leave out?
+  • How do I want it organized — by topic, project, client/entity, or timeline?
+Ask follow-ups until you actually understand the material and my intent.
 
-Create a node:
+STEP 2 — Propose an organization and wait for my OK. Give me a short plan:
+the main topic areas, a consistent tagging scheme, a node-naming convention, and
+roughly how many nodes. Adjust based on my feedback before writing anything.
+
+STEP 3 — Create the nodes, organized for retrieval (not prose):
+  • One idea per node; keep each tight (~100–300 words). Prefer many small linked
+    nodes over one big dump.
+  • Clear, specific titles; 3–6 consistent lower-case tags per node.
+  • Connect related nodes with [[Wiki Links]] (use the other node's title) so the
+    graph is traversable.
+  • type "document" for markdown; type "artifact" with raw HTML for self-contained
+    pages (decks, dashboards, infographics).
+
+API — create one node per POST:
   POST ${serverUrl}/nests/${nestId}/nodes
   Content-Type: application/json${openMode ? "" : "\n  Authorization: Bearer <MY_API_KEY>   # mint one via Connect; omit if the server is in open mode"}
   Body: {
-    "title":   "<short title>",
-    "content": "<markdown body>",   // or raw HTML for an artifact
-    "type":    "document",          // use "artifact" for self-contained HTML (decks, dashboards)
+    "title":   "<short, specific title>",
+    "content": "<markdown body, with [[Wiki Links]] to related nodes>",
+    "type":    "document",
     "tags":    ["<tag>", "<tag>"]
   }
 
-After creating each node, report its id from the response.
+After each create, report the node id. At the end, give me a short map of what
+you created and how it's organized.
 
-Topic to generate / add: <DESCRIBE WHAT YOU WANT HERE>`;
+Begin at STEP 1 by interviewing me about what to put in this nest.`;
 
   const curl = `curl -X POST ${serverUrl}/nests/${nestId}/nodes \\
 ${authLine}  -H "Content-Type: application/json" \\
@@ -112,8 +130,9 @@ ${authLine}  -H "Content-Type: application/json" \\
               1. Paste this into Claude / Codex
             </div>
             <p className="text-xs text-muted-foreground mb-2">
-              Replace the last line with what you want, then let the agent
-              generate and POST each node.
+              It interviews you about what to ingest, proposes an organization
+              (topics, tags, links), then creates well-structured nodes — it
+              won't just dump one big doc.
             </p>
             <CopyBlock label="Prompt for your agent" text={prompt} />
           </div>
