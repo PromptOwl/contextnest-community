@@ -12,7 +12,7 @@ import {
   type DatePreset, type SavedFilter,
 } from "../lib/saved-filters";
 import {
-  FileText, Plus, ArrowLeft, History, Shield, Search,
+  FileText, Plus, ArrowLeft, History, Shield, Search, Upload,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
@@ -767,8 +767,100 @@ export function NestView({
     }
   };
 
+  // ── Drag-and-drop ingestion ────────────────────────────────────────────
+  // Drop .md/.markdown/.txt → a markdown document; .html/.htm → a hosted HTML
+  // artifact (commentable in the ArtifactViewer's Annotate pane). Title comes
+  // from the filename. A single dropped file opens straight into its editor.
+  const [dragOver, setDragOver] = useState(false);
+  const [importing, setImporting] = useState(false);
+
+  const kindForFile = (name: string): "document" | "artifact" | null => {
+    const ext = name.toLowerCase().split(".").pop() || "";
+    if (ext === "html" || ext === "htm") return "artifact";
+    if (ext === "md" || ext === "markdown" || ext === "txt") return "document";
+    return null;
+  };
+
+  const importFiles = useCallback(
+    async (fileList: FileList) => {
+      const files = Array.from(fileList).filter((f) => kindForFile(f.name));
+      const skipped = fileList.length - files.length;
+      if (!files.length) {
+        toast.error("Drop .md or .html files to add them to this vault.");
+        return;
+      }
+      setImporting(true);
+      const createdIds: string[] = [];
+      try {
+        for (const file of files) {
+          const type = kindForFile(file.name)!;
+          const title = file.name.replace(/\.(md|markdown|txt|html|htm)$/i, "");
+          try {
+            const text = await file.text();
+            const res = await api.createNode(nestId, { title, content: text, type });
+            const id = (res as any)?.node?.id;
+            if (id) createdIds.push(id);
+          } catch (e: any) {
+            toast.error(`${file.name}: ${e?.message || "failed to import"}`);
+          }
+        }
+        if (createdIds.length) {
+          toast.success(
+            `Added ${createdIds.length} ${createdIds.length === 1 ? "item" : "items"}` +
+              (skipped ? ` (skipped ${skipped} unsupported)` : ""),
+          );
+          await fetchData();
+          if (createdIds.length === 1) onOpenDocument(createdIds[0]);
+        }
+      } finally {
+        setImporting(false);
+      }
+    },
+    [nestId, fetchData, onOpenDocument],
+  );
+
   return (
-    <div className="md:py-6">
+    <div
+      className="md:py-6 relative"
+      onDragOver={(e) => {
+        if (!canEditDocs) return;
+        if (Array.from(e.dataTransfer.types).includes("Files")) {
+          e.preventDefault();
+          setDragOver(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        // Only clear when leaving the whole region, not on child enter/leave.
+        if (e.currentTarget === e.target) setDragOver(false);
+      }}
+      onDrop={(e) => {
+        if (!canEditDocs) return;
+        e.preventDefault();
+        setDragOver(false);
+        if (e.dataTransfer.files?.length) void importFiles(e.dataTransfer.files);
+      }}
+    >
+      {/* Drop overlay — appears while dragging files over the vault. */}
+      {dragOver && canEditDocs && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/5 backdrop-blur-[1px]">
+          <div className="flex flex-col items-center gap-2 text-primary">
+            <Upload className="h-8 w-8" />
+            <div className="text-sm font-medium">
+              Drop to add to this vault
+            </div>
+            <div className="text-xs text-muted-foreground">
+              .md → document · .html → hosted artifact
+            </div>
+          </div>
+        </div>
+      )}
+      {importing && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-background/60">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Importing…
+          </div>
+        </div>
+      )}
       {/* Header — PromptOwl ContextDashboard layout */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4 mb-4">
         <div className="flex min-w-0 items-center gap-3">
