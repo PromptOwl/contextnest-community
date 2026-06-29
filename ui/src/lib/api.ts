@@ -419,6 +419,60 @@ export async function deleteNode(nestId: string, nodeId: string) {
   return request(`/nests/${nestId}/nodes/${nodeId}`, { method: "DELETE" });
 }
 
+// ─── Annotations / comment threads ──────────────────────────────────────
+export interface AnnotationComment {
+  id: string;
+  author: string;
+  body: string;
+  createdAt: string;
+}
+export interface AnnotationThread {
+  id: string;
+  status: "open" | "resolved";
+  createdBy: string;
+  createdAt: string;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+  comments: AnnotationComment[];
+}
+
+export async function listAnnotations(nestId: string, nodeId: string) {
+  return request<{ threads: AnnotationThread[] }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations`,
+  );
+}
+
+export async function createAnnotation(nestId: string, nodeId: string, body: string) {
+  return request<{ thread: AnnotationThread }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations`,
+    { method: "POST", body: JSON.stringify({ body }) },
+  );
+}
+
+export async function addAnnotationComment(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+  body: string,
+) {
+  return request<{ thread: AnnotationThread }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments`,
+    { method: "POST", body: JSON.stringify({ body }) },
+  );
+}
+
+export async function setAnnotationStatus(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+  action: "resolve" | "reopen",
+) {
+  return request<{ thread: AnnotationThread }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/${action}`,
+    { method: "POST" },
+  );
+}
+
 // ─── Search & Query ─────────────────────────────────────────────────────
 
 export async function searchNodes(nestId: string, query: string) {

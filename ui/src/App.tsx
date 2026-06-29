@@ -204,6 +204,13 @@ export default function App() {
   // them. ?doc is omitted for unsaved ("new") documents.
   useEffect(() => {
     if (typeof window === "undefined") return;
+    // eslint-disable-next-line no-console
+    console.log("[doclink] sync fired", {
+      page: view.page,
+      nodeId: (view as { nodeId?: string }).nodeId,
+      probe: deepLinkProbe.status,
+      search: window.location.search,
+    });
     if (deepLinkProbe.status === "loading") return;
     const params = new URLSearchParams(window.location.search);
     if (view.page === "document") {
@@ -222,7 +229,11 @@ export default function App() {
       window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
-    if (next !== current) window.history.replaceState({}, "", next);
+    if (next !== current) {
+      window.history.replaceState({}, "", next);
+      // eslint-disable-next-line no-console
+      console.log("[doclink] URL updated ->", next);
+    }
   }, [view, deepLinkProbe.status]);
 
   useEffect(() => {

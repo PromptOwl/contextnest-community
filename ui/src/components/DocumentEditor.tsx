@@ -775,23 +775,27 @@ export function DocumentEditor({
               <History className="h-4 w-4" />
             </Button>
           )}
-          {/* Write/review affordances hidden for public reader.
-              Copy link + Share nest collapsed into an overflow menu to keep
-              the header uncluttered; primary actions (Publish/Save) stay inline. */}
+          {/* Visible document-share action — copies the deep link the App's
+              ?nest=&doc= probe understands. Promoted out of the overflow menu
+              so sharing a single document is discoverable. */}
+          {!isNew && (
+            <Button
+              variant="outline"
+              size="sm"
+              title="Copy a shareable link to this document"
+              data-testid="document-editor-copy-link"
+              onClick={() => {
+                const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
+                navigator.clipboard.writeText(url);
+                toast.success("Link copied — recipient needs access to this nest");
+              }}
+            >
+              <LinkIcon className="h-4 w-4 mr-1" /> Share
+            </Button>
+          )}
+          {/* Share-nest (collaborators / visibility) stays in the overflow. */}
           {(() => {
             const moreActions: OverflowAction[] = [];
-            if (!isNew)
-              moreActions.push({
-                label: "Copy link",
-                icon: LinkIcon,
-                testId: "document-editor-copy-link",
-                onSelect: () => {
-                  // Deep link the App's ?nest=&doc= probe understands.
-                  const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
-                  navigator.clipboard.writeText(url);
-                  toast.success("Link copied — recipient needs access to this nest");
-                },
-              });
             if (canShare)
               moreActions.push({
                 label: "Share nest",
@@ -799,13 +803,13 @@ export function DocumentEditor({
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
               });
-            return (
+            return moreActions.length ? (
               <OverflowMenu
                 actions={moreActions}
                 variant="outline"
                 testId="document-editor-more"
               />
-            );
+            ) : null;
           })()}
         </div>
       </div>
