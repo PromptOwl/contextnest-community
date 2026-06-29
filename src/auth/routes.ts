@@ -40,6 +40,9 @@ const LOGIN_LIMIT = { max: 5, windowMs: 15 * 60_000 };       // 5 / 15 min
 const REGISTER_LIMIT = { max: 3, windowMs: 60 * 60_000 };    // 3 / hr
 const DEVICE_LIMIT = { max: 10, windowMs: 15 * 60_000 };     // 10 / 15 min
 
+// Warn once (not per request) when SSO runs without audience binding.
+let warnedMissingSsoAudience = false;
+
 function clientIp(c: any): string {
   // Respect reverse-proxy headers; fall back to the raw socket address if
   // none. Intentionally trusts the first forwarded IP — deploy behind a
@@ -627,8 +630,19 @@ authRoutes.get("/sso", async (c) => {
   }
 
   // Audience binding — a ticket minted for a different server is rejected, so
-  // it can't be replayed elsewhere even if the secret were shared.
+  // it can't be replayed elsewhere even if the secret were shared. When
+  // PUBLIC_BASE_URL is unset this binding is DISABLED (the secret is the only
+  // control left), so warn loudly — that's a misconfiguration on an official
+  // deployment, not an intended mode.
   const expectedAud = config.PUBLIC_BASE_URL;
+  if (!expectedAud && !warnedMissingSsoAudience) {
+    warnedMissingSsoAudience = true;
+    console.warn(
+      "[sso] OFFICIAL_COMMUNITY_SSO_SECRET is set but PUBLIC_BASE_URL is empty — " +
+        "ticket audience binding is DISABLED. Set PUBLIC_BASE_URL so a ticket minted " +
+        "for another server cannot be replayed against this one.",
+    );
+  }
   if (expectedAud) {
     const aud = (claims.aud || "").replace(/\/$/, "");
     if (aud !== expectedAud) return ssoError("bad_audience");
@@ -663,7 +677,19 @@ authRoutes.get("/sso", async (c) => {
     return ssoError("service_error");
   }
 
-  const result = await provisionPromptowlUser(c, sub, claims.name);
+  // jti is already burned above. If provisioning throws (transient: bcrypt
+  // fault, duplicate-email race between the SELECT and INSERT), release the jti
+  // so the still-valid ticket can be retried instead of being permanently dead.
+  // A deterministic !ok (gate restriction) is NOT released — retrying can't help
+  // and keeping the jti burned preserves the one-time replay guard.
+  let result;
+  try {
+    result = await provisionPromptowlUser(c, sub, claims.name);
+  } catch (err) {
+    db.prepare("DELETE FROM sso_used_jti WHERE jti = ?").run(claims.jti);
+    console.error("[sso] provisioning failed; released jti for retry:", err);
+    return ssoError("service_error");
+  }
   if (!result.ok) return ssoError("sign_in_restricted");
 
   // Success — session cookie set by the helper; land on the app home.

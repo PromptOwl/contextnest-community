@@ -24,9 +24,14 @@ export function extractText(html: string): string {
   if (!html) return "";
   if (typeof DOMParser === "undefined") {
     // Non-DOM env (tests/SSR): strip tags, collapse runs of whitespace.
+    // Final [<>] pass is belt-and-suspenders: even if the tag regexes leave a
+    // partial "<script" from nested/malformed input, no angle bracket survives
+    // (clears CodeQL js/incomplete-multi-character-sanitization). The result is
+    // only ever rendered as escaped text, never as HTML.
     return html
-      .replace(/<(script|style)[\s\S]*?<\/\1>/gi, "")
-      .replace(/<[^>]+>/g, " ")
+      .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, " ")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/[<>]/g, " ")
       .replace(/[ \t]+/g, " ")
       .replace(/\n{3,}/g, "\n\n")
       .trim();

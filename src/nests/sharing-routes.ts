@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/client.js";
 import type { AuthEnv } from "../auth/middleware.js";
-import { ValidationError } from "../shared/errors.js";
+import { NotFoundError, ValidationError } from "../shared/errors.js";
 import {
   resolveUserRoles,
   getStewardRolesForUser,
@@ -69,9 +69,14 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   // Scope to the nest in the URL — the guard authorised the caller against
   // THIS nest, so the row we touch must belong to it (a bare `id =` match
   // would let an admin of nest A mutate a collaborator row from nest B).
-  db.prepare(
+  const info = db.prepare(
     "UPDATE nest_collaborators SET permission = ? WHERE id = ? AND nest_id = ?",
   ).run(body.permission, c.req.param("collabId")!, c.req.param("nestId")!);
+  // No row matched → the collabId is unknown or belongs to another nest. Don't
+  // claim success for a no-op.
+  if (info.changes === 0) {
+    throw new NotFoundError("Collaborator not found");
+  }
   return c.json({ updated: true });
 });
 
@@ -81,9 +86,12 @@ sharingRoutes.delete("/collaborators/:collabId", async (c) => {
   const db = getDb();
   // Scope to the nest in the URL (see PATCH above) — never delete a row that
   // belongs to a different nest just because the UUID matches.
-  db.prepare(
+  const info = db.prepare(
     "DELETE FROM nest_collaborators WHERE id = ? AND nest_id = ?",
   ).run(c.req.param("collabId")!, c.req.param("nestId")!);
+  if (info.changes === 0) {
+    throw new NotFoundError("Collaborator not found");
+  }
   return c.json({ removed: true });
 });
 
