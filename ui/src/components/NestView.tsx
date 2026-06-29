@@ -1259,10 +1259,22 @@ export function NestView({
                         onClick={() => onOpenDocument(n.id)}
                         className="w-full flex items-center gap-3 py-2 px-1 -mx-1 rounded hover:bg-muted/50 text-left group"
                       >
-                        <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                        {n.type === "artifact" ? (
+                          <FileCode2 className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                        ) : (
+                          <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                        )}
                         <span className="text-sm truncate flex-1">
                           {n.title || n.id}
                         </span>
+                        {n.type === "artifact" && (
+                          <span
+                            className="shrink-0 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide"
+                            title="Hosted HTML artifact"
+                          >
+                            HTML
+                          </span>
+                        )}
                         {n.updated_at && (
                           <span className="text-xs text-muted-foreground shrink-0">
                             {timeAgo(n.updated_at)}
@@ -1573,10 +1585,17 @@ export function NestView({
                     <button
                       key={n.id}
                       type="button"
-                      className="rounded-full border px-2 py-0.5 text-primary hover:bg-muted truncate max-w-[180px]"
+                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 hover:bg-muted truncate max-w-[180px] ${
+                        n.type === "artifact"
+                          ? "border-amber-300 text-amber-700 dark:text-amber-300"
+                          : "text-primary"
+                      }`}
                       onClick={() => onOpenDocument(n.id)}
                     >
-                      {n.title}
+                      {n.type === "artifact" && (
+                        <FileCode2 className="h-3 w-3 shrink-0" />
+                      )}
+                      <span className="truncate">{n.title}</span>
                     </button>
                   ))}
                 </div>
