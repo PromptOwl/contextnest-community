@@ -234,10 +234,10 @@ export function VersionHistory({
               {diffMode && currentContent !== undefined ? (
                 <div className="space-y-1">
                   <div className="text-xs text-muted-foreground px-1">
-                    Diff: current (v{currentVersion}) → v{previewVersion.version}
+                    Diff: v{previewVersion.version} → current (v{currentVersion})
                   </div>
                   <DiffViewer
-                    patch={unifiedDiff(currentContent, previewVersion.content || "")}
+                    patch={unifiedDiff(previewVersion.content || "", currentContent)}
                     className="max-h-none"
                   />
                 </div>

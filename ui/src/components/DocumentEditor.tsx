@@ -418,6 +418,8 @@ export function DocumentEditor({
 
   const compareWith = useCallback((v: number | null) => {
     setCompareVersion(v);
+    // Always reopen compare in the default Source view, and reset on exit.
+    setDiffRendered(false);
   }, []);
 
   // A pending-review doc is LOCKED: the server rejects edits/deletes with
@@ -1211,6 +1213,11 @@ export function DocumentEditor({
                     <GitCompare className="h-4 w-4" />
                     Diff: v{compareVersion} → current (v
                     {versionData?.currentVersion ?? baseVersion ?? "?"})
+                    {isDirty && (
+                      <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase">
+                        incl. unsaved edits
+                      </span>
+                    )}
                   </label>
                   <div className="flex items-center gap-1">
                     {/* Source = exact line changes; Rendered = formatted markdown. */}
@@ -1234,7 +1241,7 @@ export function DocumentEditor({
                       variant="ghost"
                       size="sm"
                       className="h-7"
-                      onClick={() => setCompareVersion(null)}
+                      onClick={() => compareWith(null)}
                     >
                       <X className="h-4 w-4 mr-1" /> Exit diff
                     </Button>
