@@ -773,6 +773,7 @@ export function NestView({
   // from the filename. A single dropped file opens straight into its editor.
   const [dragOver, setDragOver] = useState(false);
   const [importing, setImporting] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const kindForFile = (name: string): "document" | "artifact" | null => {
     const ext = name.toLowerCase().split(".").pop() || "";
@@ -978,10 +979,33 @@ export function NestView({
                 </Button>
               )}
               {canEditDocs && (
-                <Button onClick={() => onOpenDocument("new")}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  New Document
-                </Button>
+                <>
+                  {/* Visible import affordance — same path as drag-and-drop. */}
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    multiple
+                    accept=".md,.markdown,.txt,.html,.htm"
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files?.length) void importFiles(e.target.files);
+                      e.target.value = "";
+                    }}
+                  />
+                  <Button
+                    variant="outline"
+                    onClick={() => importInputRef.current?.click()}
+                    title="Import .md or .html files (or just drag them onto the page)"
+                    data-testid="nest-import-files"
+                  >
+                    <Upload className="h-4 w-4 mr-2" />
+                    Import
+                  </Button>
+                  <Button onClick={() => onOpenDocument("new")}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    New Document
+                  </Button>
+                </>
               )}
             </>
           )}
@@ -1562,9 +1586,25 @@ export function NestView({
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
               ) : filtered.length === 0 ? (
-                <div className="text-center py-8 text-sm text-muted-foreground">
-                  {hasActiveFilters ? "No matching documents" : "No documents yet"}
-                </div>
+                hasActiveFilters || !canEditDocs ? (
+                  <div className="text-center py-8 text-sm text-muted-foreground">
+                    {hasActiveFilters ? "No matching documents" : "No documents yet"}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => importInputRef.current?.click()}
+                    className="w-full flex flex-col items-center gap-2 rounded-lg border-2 border-dashed border-border py-10 text-muted-foreground hover:border-primary hover:text-primary transition-colors"
+                  >
+                    <Upload className="h-7 w-7" />
+                    <div className="text-sm font-medium">
+                      Drag files here, or click to import
+                    </div>
+                    <div className="text-xs">
+                      .md → document · .html → hosted artifact
+                    </div>
+                  </button>
+                )
               ) : (
                 <div
                   className={
