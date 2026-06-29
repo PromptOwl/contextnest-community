@@ -31,6 +31,8 @@ import {
   getSuspensionReason,
   getCurrentLicense,
   installLicenseKey,
+  isLicenseAdminUserId,
+  upsertEnvVar,
 } from "./auth/license.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
@@ -238,6 +240,47 @@ export function createApp(): Hono<AuthEnv> {
       const msg = err instanceof Error ? err.message : "Failed to install key";
       return c.json({ error: msg }, 500);
     }
+  });
+
+  // PATCH /admin/sign-in-gate — admin toggles the PromptOwl sign-in gate
+  // (open | admin-only | disabled). Takes effect live (process.env, which the
+  // config getter reads) and is persisted to ENV_FILE_PATH so it survives a
+  // restart. In open mode the anonymous admin may set it; in key mode it's
+  // restricted to the license admin.
+  app.use("/admin/sign-in-gate", flexAuthMiddleware);
+  app.patch("/admin/sign-in-gate", async (c) => {
+    const userId = c.get("userId");
+    const isOpen = config.AUTH_MODE === "open";
+    if (!isOpen && !isLicenseAdminUserId(userId)) {
+      return c.json({ error: "Only the server admin can change this." }, 403);
+    }
+    let body: { value?: string };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const value = (body?.value || "").trim().toLowerCase();
+    if (!["open", "admin-only", "disabled"].includes(value)) {
+      return c.json(
+        { error: "value must be one of: open, admin-only, disabled" },
+        400,
+      );
+    }
+    process.env.PROMPTOWL_SIGN_IN_GATE = value;
+    let persisted = true;
+    let persistError: string | null = null;
+    try {
+      upsertEnvVar(config.ENV_FILE_PATH, "PROMPTOWL_SIGN_IN_GATE", value);
+    } catch (e) {
+      persisted = false;
+      persistError = e instanceof Error ? e.message : String(e);
+    }
+    return c.json({
+      promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+      persisted,
+      persistError,
+    });
   });
 
   // GET /stats — dashboard summary counts: nests visible to caller,

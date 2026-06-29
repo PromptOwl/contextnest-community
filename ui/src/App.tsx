@@ -6,7 +6,7 @@ import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, getNest, changePassword, type LicenseStatus } from "./lib/api";
+import { getLicenseStatus, getNest, changePassword, getHealth, setSignInGate as apiSetSignInGate, type LicenseStatus, type SignInGate } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network } from "lucide-react";
@@ -21,6 +21,12 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  DropdownMenuLabel,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
 } from "@/components/ui/dropdown-menu";
 import {
   Dialog,
@@ -117,6 +123,32 @@ export default function App() {
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
+  // PromptOwl sign-in gate (admin-controllable from the user menu). Loaded from
+  // /health; the Login screen reads the same value to show/hide the button.
+  const [signInGate, setSignInGate] = useState<SignInGate>("open");
+  useEffect(() => {
+    getHealth()
+      .then((h) => setSignInGate(h.promptowl_sign_in_gate ?? "open"))
+      .catch(() => {});
+  }, []);
+  const handleSetSignInGate = useCallback(async (value: SignInGate) => {
+    const prev = signInGate;
+    setSignInGate(value); // optimistic
+    try {
+      const res = await apiSetSignInGate(value);
+      setSignInGate(res.promptowl_sign_in_gate);
+      toast.success(
+        value === "disabled"
+          ? "PromptOwl sign-in turned off"
+          : value === "admin-only"
+            ? "PromptOwl sign-in limited to admins"
+            : "PromptOwl sign-in enabled for everyone",
+      );
+    } catch (e: any) {
+      setSignInGate(prev); // revert
+      toast.error(e?.message || "Failed to update sign-in setting");
+    }
+  }, [signInGate]);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
   const [showQuickOpen, setShowQuickOpen] = useState(false);
 
@@ -473,6 +505,8 @@ export default function App() {
               <UserMenu
                 me={adminStatus.me}
                 isAdmin={isAdmin}
+                signInGate={signInGate}
+                onSetSignInGate={handleSetSignInGate}
                 onTeammates={() => setView({ page: "teammates" })}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
@@ -700,6 +734,8 @@ export default function App() {
 interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
+  signInGate: SignInGate;
+  onSetSignInGate: (value: SignInGate) => void;
   onTeammates: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
@@ -708,6 +744,8 @@ interface UserMenuProps {
 function UserMenu({
   me,
   isAdmin,
+  signInGate,
+  onSetSignInGate,
   onTeammates,
   onChangePassword,
   onLogout,
@@ -763,6 +801,31 @@ function UserMenu({
               <Users className="h-3.5 w-3.5 mr-2" />
               Teammates
             </DropdownMenuItem>
+            <DropdownMenuLabel className="text-[11px] font-normal text-muted-foreground pt-1">
+              Server settings
+            </DropdownMenuLabel>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger className="cursor-pointer">
+                <Shield className="h-3.5 w-3.5 mr-2" />
+                PromptOwl sign-in
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuRadioGroup
+                  value={signInGate}
+                  onValueChange={(v) => onSetSignInGate(v as SignInGate)}
+                >
+                  <DropdownMenuRadioItem value="open" className="cursor-pointer">
+                    Everyone
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="admin-only" className="cursor-pointer">
+                    Admins only
+                  </DropdownMenuRadioItem>
+                  <DropdownMenuRadioItem value="disabled" className="cursor-pointer">
+                    Off
+                  </DropdownMenuRadioItem>
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
           </>
         )}
         <DropdownMenuSeparator />
