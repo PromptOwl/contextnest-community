@@ -22,6 +22,7 @@ import {
   Users,
   Link as LinkIcon,
   History,
+  Code2,
 } from "lucide-react";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { toast } from "sonner";
@@ -32,6 +33,7 @@ import {
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { AnnotationsPanel } from "./AnnotationsPanel";
 import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory } from "./governance";
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
@@ -173,6 +175,10 @@ export function DocumentEditor({
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
   const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : "view");
+  // Raw markdown source view — `content` is already markdown (the editor
+  // serializes via tiptap-markdown), so this is just a textarea over the same
+  // state. Editable in edit mode, read-only in view mode.
+  const [rawMode, setRawMode] = useState(false);
 
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
 
@@ -775,25 +781,20 @@ export function DocumentEditor({
               <History className="h-4 w-4" />
             </Button>
           )}
-          {/* Visible document-share action — copies the deep link the App's
-              ?nest=&doc= probe understands. Promoted out of the overflow menu
-              so sharing a single document is discoverable. */}
-          {!isNew && (
-            <Button
-              variant="outline"
-              size="sm"
-              title="Copy a shareable link to this document"
-              data-testid="document-editor-copy-link"
-              onClick={() => {
-                const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
-                navigator.clipboard.writeText(url);
-                toast.success("Link copied — recipient needs access to this nest");
-              }}
-            >
-              <LinkIcon className="h-4 w-4 mr-1" /> Share
-            </Button>
-          )}
-          {/* Share-nest (collaborators / visibility) stays in the overflow. */}
+          {/* Raw markdown source toggle — view/edit the underlying .md. */}
+          <Button
+            variant={rawMode ? "secondary" : "outline"}
+            size="icon"
+            onClick={() => setRawMode((v) => !v)}
+            title={rawMode ? "Rich editor" : "Markdown source"}
+            aria-pressed={rawMode}
+            data-testid="document-editor-markdown-toggle"
+          >
+            <Code2 className="h-4 w-4" />
+          </Button>
+          {/* Write/review affordances hidden for public reader.
+              Copy link + Share nest collapsed into an overflow menu to keep
+              the header uncluttered; primary actions (Publish/Save) stay inline. */}
           {(() => {
             const moreActions: OverflowAction[] = [];
             if (canShare)
@@ -1048,7 +1049,23 @@ export function DocumentEditor({
             <label className="block text-sm font-medium mb-1">
               Content <span className="text-destructive">*</span>
             </label>
-            {mode === "view" && !looksLikeHtml(content) ? (
+            {rawMode ? (
+              <textarea
+                value={content}
+                onChange={(e) => {
+                  if (fieldsDisabled) return;
+                  setContent(e.target.value);
+                  setTouched(true);
+                  scheduleAutosave();
+                }}
+                onBlur={flushAutosave}
+                readOnly={fieldsDisabled}
+                spellCheck={false}
+                placeholder="# Raw markdown"
+                className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                data-testid="document-editor-raw-markdown"
+              />
+            ) : mode === "view" && !looksLikeHtml(content) ? (
               <div className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text">
                 <DocumentViewer
                   content={content}
@@ -1079,6 +1096,15 @@ export function DocumentEditor({
               />
             )}
           </div>
+
+          {/* Threaded comments on this document (saved docs only). */}
+          {!isNew && (
+            <AnnotationsPanel
+              nestId={nestId}
+              nodeId={nodeId}
+              readOnly={isViewOnly}
+            />
+          )}
 
           {/* Backlinks — "what links here". View mode only; hidden when empty. */}
           {mode === "view" && backlinks.length > 0 && (
