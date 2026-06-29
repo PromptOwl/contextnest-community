@@ -132,6 +132,16 @@ export async function getHealth() {
   }>("/health");
 }
 
+export type SignInGate = "open" | "admin-only" | "disabled";
+
+/** Admin: set the PromptOwl sign-in gate. Live + persisted server-side. */
+export async function setSignInGate(value: SignInGate) {
+  return request<{ promptowl_sign_in_gate: SignInGate; persisted: boolean }>(
+    "/admin/sign-in-gate",
+    { method: "PATCH", body: JSON.stringify({ value }) },
+  );
+}
+
 // ─── License ───────────────────────────────────────────────────────────
 
 export interface LicenseStatus {

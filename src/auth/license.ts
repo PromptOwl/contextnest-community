@@ -54,7 +54,7 @@ export function isLicenseAdminUserId(userId: string): boolean {
  *
  * Pass value=null to delete the line.
  */
-function upsertEnvVar(
+export function upsertEnvVar(
   filePath: string,
   varName: string,
   value: string | null,
