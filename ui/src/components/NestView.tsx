@@ -12,13 +12,14 @@ import {
   type DatePreset, type SavedFilter,
 } from "../lib/saved-filters";
 import {
-  FileText, FileCode2, Plus, ArrowLeft, History, Shield, Search, Upload,
+  FileText, FileCode2, Plus, ArrowLeft, History, Shield, Search, Upload, Sparkles,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
+import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { DeleteNestDialog } from "./DeleteNestDialog";
@@ -258,6 +259,7 @@ export function NestView({
   }>({ versions: [], approvedVersion: null, currentVersion: 0 });
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
+  const [showGenerate, setShowGenerate] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
 
@@ -1000,6 +1002,15 @@ export function NestView({
                   >
                     <Upload className="h-4 w-4 mr-2" />
                     Import
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setShowGenerate(true)}
+                    title="Generate context with an AI agent and push it into this nest"
+                    data-testid="nest-generate-context"
+                  >
+                    <Sparkles className="h-4 w-4 mr-2" />
+                    Add with AI
                   </Button>
                   <Button onClick={() => onOpenDocument("new")}>
                     <Plus className="h-4 w-4 mr-2" />
@@ -2236,6 +2247,16 @@ export function NestView({
           onClose={() => setShowConnect(false)}
           nestId={nestId}
           nestName={nestName}
+        />
+      )}
+
+      {showGenerate && (
+        <GenerateContextModal
+          isOpen={showGenerate}
+          onClose={() => setShowGenerate(false)}
+          nestId={nestId}
+          nestName={nestName}
+          openMode={authMode === "open"}
         />
       )}
 
