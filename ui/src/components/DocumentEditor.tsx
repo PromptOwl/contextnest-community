@@ -22,6 +22,7 @@ import {
   Users,
   Link as LinkIcon,
   History,
+  Code2,
 } from "lucide-react";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { toast } from "sonner";
@@ -173,6 +174,10 @@ export function DocumentEditor({
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
   const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : "view");
+  // Raw markdown source view — `content` is already markdown (the editor
+  // serializes via tiptap-markdown), so this is just a textarea over the same
+  // state. Editable in edit mode, read-only in view mode.
+  const [rawMode, setRawMode] = useState(false);
 
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
 
@@ -775,6 +780,17 @@ export function DocumentEditor({
               <History className="h-4 w-4" />
             </Button>
           )}
+          {/* Raw markdown source toggle — view/edit the underlying .md. */}
+          <Button
+            variant={rawMode ? "secondary" : "outline"}
+            size="icon"
+            onClick={() => setRawMode((v) => !v)}
+            title={rawMode ? "Rich editor" : "Markdown source"}
+            aria-pressed={rawMode}
+            data-testid="document-editor-markdown-toggle"
+          >
+            <Code2 className="h-4 w-4" />
+          </Button>
           {/* Write/review affordances hidden for public reader.
               Copy link + Share nest collapsed into an overflow menu to keep
               the header uncluttered; primary actions (Publish/Save) stay inline. */}
@@ -1044,7 +1060,23 @@ export function DocumentEditor({
             <label className="block text-sm font-medium mb-1">
               Content <span className="text-destructive">*</span>
             </label>
-            {mode === "view" && !looksLikeHtml(content) ? (
+            {rawMode ? (
+              <textarea
+                value={content}
+                onChange={(e) => {
+                  if (fieldsDisabled) return;
+                  setContent(e.target.value);
+                  setTouched(true);
+                  scheduleAutosave();
+                }}
+                onBlur={flushAutosave}
+                readOnly={fieldsDisabled}
+                spellCheck={false}
+                placeholder="# Raw markdown"
+                className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                data-testid="document-editor-raw-markdown"
+              />
+            ) : mode === "view" && !looksLikeHtml(content) ? (
               <div className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text">
                 <DocumentViewer
                   content={content}
