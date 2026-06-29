@@ -12,7 +12,7 @@ import {
   type DatePreset, type SavedFilter,
 } from "../lib/saved-filters";
 import {
-  FileText, Plus, ArrowLeft, History, Shield, Search, Upload,
+  FileText, FileCode2, Plus, ArrowLeft, History, Shield, Search, Upload,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
@@ -1615,6 +1615,9 @@ export function NestView({
                 >
                   {filtered.map((node) => {
                     const cards = viewMode === "cards";
+                    // Hosted HTML artifacts get a distinct icon + badge so they
+                    // read differently from markdown documents in the list.
+                    const isArtifact = node.type === "artifact";
                     const canSubmit =
                       stewardshipEnabled &&
                       node.status === "draft" &&
@@ -1701,20 +1704,34 @@ export function NestView({
                           } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer`}
                         data-testid={`document-row-${node.id}`}
                       >
-                        {!cards && (
-                          <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                        )}
+                        {!cards &&
+                          (isArtifact ? (
+                            <FileCode2 className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                          ) : (
+                            <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                          ))}
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
-                            {cards && (
-                              <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                            )}
+                            {cards &&
+                              (isArtifact ? (
+                                <FileCode2 className="h-4 w-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                              ) : (
+                                <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                              ))}
                             <span
                               className="font-medium truncate min-w-0"
                               title={node.title}
                             >
                               {node.title}
                             </span>
+                            {isArtifact && (
+                              <span
+                                className="shrink-0 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide"
+                                title="Hosted HTML artifact"
+                              >
+                                HTML
+                              </span>
+                            )}
                             <LifecycleStatusBadge
                               status={(node.status as DocumentLifecycleStatus) || "draft"}
                               size="sm"
