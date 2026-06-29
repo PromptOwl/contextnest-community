@@ -840,6 +840,10 @@ function ChangePasswordDialog({
 
   const submit = async () => {
     setError(null);
+    if (next.trim().length === 0) {
+      setError("New password cannot be empty or only whitespace.");
+      return;
+    }
     if (next.length < 8) {
       setError("New password must be at least 8 characters.");
       return;

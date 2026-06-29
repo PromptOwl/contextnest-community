@@ -43,6 +43,22 @@ const DEVICE_LIMIT = { max: 10, windowMs: 15 * 60_000 };     // 10 / 15 min
 // Warn once (not per request) when SSO runs without audience binding.
 let warnedMissingSsoAudience = false;
 
+const MIN_PASSWORD_LENGTH = 8;
+
+// Single source of truth for password rules so register / change / admin-reset
+// stay consistent. Rejects whitespace-only secrets (e.g. 8 spaces) which would
+// otherwise satisfy a naive `length` check while being effectively empty.
+function assertValidPassword(password: string, label = "password"): void {
+  if (password.trim().length === 0) {
+    throw new ValidationError(`${label} cannot be empty or only whitespace`);
+  }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    throw new ValidationError(
+      `${label} must be at least ${MIN_PASSWORD_LENGTH} characters`,
+    );
+  }
+}
+
 function clientIp(c: any): string {
   // Respect reverse-proxy headers; fall back to the raw socket address if
   // none. Intentionally trusts the first forwarded IP — deploy behind a
@@ -232,6 +248,7 @@ authRoutes.post("/register", async (c) => {
   if (!body.email || !body.password) {
     throw new ValidationError("email and password are required");
   }
+  assertValidPassword(body.password);
   const email = normalizeEmail(body.email);
 
   const ip = clientIp(c);
@@ -748,9 +765,7 @@ authRoutes.post("/password", authMiddleware, async (c) => {
   if (!body.current || !body.next) {
     throw new ValidationError("current and next are required");
   }
-  if (body.next.length < 8) {
-    throw new ValidationError("new password must be at least 8 characters");
-  }
+  assertValidPassword(body.next, "new password");
 
   const db = getDb();
   const userId = c.get("userId");
@@ -822,8 +837,8 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   } catch {
     supplied = undefined;
   }
-  if (supplied && supplied.length < 8) {
-    throw new ValidationError("password must be at least 8 characters");
+  if (supplied !== undefined) {
+    assertValidPassword(supplied);
   }
   // Readable 16-char temp secret when the admin doesn't supply one.
   const generated = supplied ? null : uuid().replace(/-/g, "").slice(0, 16);
