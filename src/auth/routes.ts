@@ -326,7 +326,10 @@ authRoutes.post("/login", async (c) => {
   // rely on the per-email key. Deploy behind a proxy that sets
   // x-forwarded-for to get real per-IP protection.
   const ip = clientIp(c);
-  const emailLower = body.email.toLowerCase();
+  // Normalize like every other path (register/invite/sso) — trim + lowercase.
+  // Login previously only lowercased, so a leading/trailing space from mobile
+  // autofill missed the LOWER(email) lookup → spurious "invalid credentials".
+  const emailLower = normalizeEmail(body.email);
   const hasIp = ip !== "unknown";
   const ipKey = `login:ip:${ip}`;
   const emailKey = `login:email:${emailLower}`;
@@ -845,17 +848,15 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   const newPassword = supplied ?? generated!;
 
   const newHash = await hashPassword(newPassword);
-  // Atomically set the new hash and REVOKE the user's API keys — a reset
-  // covers the compromised-account case, so a stolen key must stop working
-  // too (the user re-issues a key after signing in). Sessions are cleared
-  // separately below.
-  db.transaction(() => {
-    db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
-      newHash,
-      target.id,
-    );
-    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(target.id);
-  })();
+  // Set the new hash. We deliberately do NOT revoke the user's API keys: an
+  // admin resetting a teammate's login password shouldn't silently break the
+  // CLI/MCP/Hootie clients that teammate already configured. Password login
+  // and API keys are independent credentials. Sessions ARE cleared below so a
+  // stale browser cookie stops working and the user must sign in fresh.
+  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
+    newHash,
+    target.id,
+  );
   deleteAllSessionsForUser(target.id);
 
   trackEvent("admin.reset_password", { adminId: callerId, userId: target.id });
@@ -863,7 +864,7 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   return c.json({
     ok: true,
     email: target.email,
-    keys_revoked: true,
+    keys_revoked: false,
     // Plaintext returned ONCE, only when the server generated it.
     temporary_password: generated ?? undefined,
   });
@@ -956,45 +957,56 @@ authRoutes.post("/invite", async (c) => {
     );
   }
 
-  // Find or create user by email
-  let user = db
-    .prepare("SELECT id, email FROM users WHERE LOWER(email) = ?")
-    .get(email) as { id: string; email: string } | undefined;
+  // Find user by email (case-insensitive).
+  const existing = db
+    .prepare("SELECT id, email, is_invited FROM users WHERE LOWER(email) = ?")
+    .get(email) as
+    | { id: string; email: string; is_invited: number }
+    | undefined;
 
-  if (!user) {
-    const userId = uuid();
-    const placeholderHash = await hashPassword(uuid());
-    db.prepare(
-      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-    ).run(userId, email, null, placeholderHash);
-    user = { id: userId, email };
+  // A fully-established user (one who claimed their own password) already has a
+  // working login — don't silently clobber it from the invite flow. Point the
+  // admin at Reset password instead.
+  if (existing && existing.is_invited === 0) {
+    return c.json(
+      {
+        error:
+          "A user with this email already exists. Use Reset password to issue them a new password.",
+      },
+      409,
+    );
   }
 
-  // Single api_key per user — if invitee already has one, we replace it
-  // so the admin can hand a fresh plaintext to the teammate. The prior
-  // key is invalidated atomically.
-  const apiKey = generateApiKey();
-  const keyId = uuid();
-  db.transaction(() => {
-    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(user!.id);
-    db.prepare(
-      "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, label) VALUES (?, ?, ?, ?, ?)",
-    ).run(
-      keyId,
-      user!.id,
-      hashApiKey(apiKey),
-      getKeyPrefix(apiKey),
-      body.label || "teammate",
-    );
-  })();
+  // Issue a PASSWORD, not an API key. The admin adds teammates so they can log
+  // in; teammates mint their own API keys (for CLI/MCP/Hootie) after signing in.
+  // Readable 16-char temporary password, returned ONCE for the admin to hand
+  // over. Re-inviting a not-yet-claimed user refreshes it (so "delete + re-add"
+  // / re-invite now produces a working credential).
+  const tempPassword = uuid().replace(/-/g, "").slice(0, 16);
+  const passwordHash = await hashPassword(tempPassword);
 
-  trackEvent("admin.invite", { adminId: callerId, email: body.email });
+  let userId: string;
+  if (existing) {
+    userId = existing.id;
+    db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
+      passwordHash,
+      userId,
+    );
+  } else {
+    userId = uuid();
+    db.prepare(
+      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
+    ).run(userId, email, null, passwordHash);
+  }
+
+  trackEvent("admin.invite", { adminId: callerId, email });
 
   return c.json(
     {
-      api_key: apiKey,
-      user: { id: user.id, email: user.email },
-      message: "Copy this key and share it securely — it won't be shown again.",
+      temporary_password: tempPassword,
+      user: { id: userId, email },
+      message:
+        "Share this temporary password securely. Your teammate signs in with their email + this password, then can change it and create their own API key.",
     },
     201,
   );
