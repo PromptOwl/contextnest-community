@@ -25,6 +25,7 @@ import {
   Users,
   Link as LinkIcon,
   History,
+  Code2,
   MessageSquare,
 } from "lucide-react";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -184,6 +185,10 @@ export function DocumentEditor({
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
   const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : "view");
+  // Raw markdown source view — `content` is already markdown (the editor
+  // serializes via tiptap-markdown), so this is just a textarea over the same
+  // state. Editable in edit mode, read-only in view mode.
+  const [rawMode, setRawMode] = useState(false);
   // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
   // "document" = the normal markdown editor. Only meaningful while isNew.
   const [newType, setNewType] = useState<"document" | "artifact">("document");
@@ -807,6 +812,17 @@ export function DocumentEditor({
               <History className="h-4 w-4" />
             </Button>
           )}
+          {/* Raw markdown source toggle — view/edit the underlying .md. */}
+          <Button
+            variant={rawMode ? "secondary" : "outline"}
+            size="icon"
+            onClick={() => setRawMode((v) => !v)}
+            title={rawMode ? "Rich editor" : "Markdown source"}
+            aria-pressed={rawMode}
+            data-testid="document-editor-markdown-toggle"
+          >
+            <Code2 className="h-4 w-4" />
+          </Button>
           {/* Comments + activity. Captures the current text selection so the
               comment is anchored to the highlighted span (Word/Docs style). */}
           {!isNew && (
@@ -938,19 +954,19 @@ export function DocumentEditor({
                 return (
                   <Alert className="mt-2 border-amber-300 bg-amber-50 text-amber-800">
                     <div className="flex items-center gap-2">
-                    <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
-                    <AlertDescription className="text-amber-800">
-                      Renaming affects {affected.length} wiki link
-                      {affected.length !== 1 ? "s" : ""} in other documents that
-                      reference this one by its old title (
-                      {affected
-                        .slice(0, 3)
-                        .map((a) => a.title)
-                        .join(", ")}
-                      {affected.length > 3 ? ", …" : ""}
-                      ). Links by slug still resolve, but their visible label
-                      keeps the old name; plain [[title]] links break.
-                    </AlertDescription>
+                      <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
+                      <AlertDescription className="text-amber-800">
+                        Renaming affects {affected.length} wiki link
+                        {affected.length !== 1 ? "s" : ""} in other documents that
+                        reference this one by its old title (
+                        {affected
+                          .slice(0, 3)
+                          .map((a) => a.title)
+                          .join(", ")}
+                        {affected.length > 3 ? ", …" : ""}
+                        ). Links by slug still resolve, but their visible label
+                        keeps the old name; plain [[title]] links break.
+                      </AlertDescription>
                     </div>
                   </Alert>
                 );
@@ -964,15 +980,15 @@ export function DocumentEditor({
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
                 <AlertDescription className="text-amber-800">
-                {staleLinks.length} link{staleLinks.length !== 1 ? "s" : ""} in
-                this document show an outdated name — the target document
-                {staleLinks.length !== 1 ? "s were" : " was"} renamed (
-                {staleLinks
-                  .slice(0, 3)
-                  .map((s) => `"${s.shownAs}" → "${s.currentTitle}"`)
-                  .join(", ")}
-                {staleLinks.length > 3 ? ", …" : ""}
-                ). The links still work; only the visible label is out of date.
+                  {staleLinks.length} link{staleLinks.length !== 1 ? "s" : ""} in
+                  this document show an outdated name — the target document
+                  {staleLinks.length !== 1 ? "s were" : " was"} renamed (
+                  {staleLinks
+                    .slice(0, 3)
+                    .map((s) => `"${s.shownAs}" → "${s.currentTitle}"`)
+                    .join(", ")}
+                  {staleLinks.length > 3 ? ", …" : ""}
+                  ). The links still work; only the visible label is out of date.
                 </AlertDescription>
               </div>
             </Alert>
@@ -1115,7 +1131,23 @@ export function DocumentEditor({
               {isArtifactDraft ? "Artifact HTML" : "Content"}{" "}
               <span className="text-destructive">*</span>
             </label>
-            {isArtifactDraft ? (
+            {rawMode ? (
+              <textarea
+                value={content}
+                onChange={(e) => {
+                  if (fieldsDisabled) return;
+                  setContent(e.target.value);
+                  setTouched(true);
+                  scheduleAutosave();
+                }}
+                onBlur={flushAutosave}
+                readOnly={fieldsDisabled}
+                spellCheck={false}
+                placeholder="# Raw markdown"
+                className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                data-testid="document-editor-raw-markdown"
+              />
+            ) : isArtifactDraft ? (
               <textarea
                 value={content}
                 onChange={(e) => {
@@ -1262,14 +1294,14 @@ export function DocumentEditor({
                   isViewOnly
                     ? undefined
                     : async (v) => {
-                        try {
-                          await api.revertToVersion(nestId, nodeId, v);
-                          toast.success(`Reverted to version ${v}`);
-                          await Promise.all([loadNode(), loadVersions()]);
-                        } catch (e: any) {
-                          toast.error(e?.message || "Revert failed");
-                        }
+                      try {
+                        await api.revertToVersion(nestId, nodeId, v);
+                        toast.success(`Reverted to version ${v}`);
+                        await Promise.all([loadNode(), loadVersions()]);
+                      } catch (e: any) {
+                        toast.error(e?.message || "Revert failed");
                       }
+                    }
                 }
               />
             ) : (
