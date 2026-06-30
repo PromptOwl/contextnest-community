@@ -1,5 +1,6 @@
 import { createMiddleware } from "hono/factory";
 import { getDb } from "../db/client.js";
+import { nowExpr } from "../db/sql.js";
 import { hashApiKey, parseBearerToken } from "./keys.js";
 import { getSessionIdFromRequest, resolveSession } from "./sessions.js";
 
@@ -32,7 +33,7 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   // 1. Cookie session
   const sessionId = getSessionIdFromRequest(c);
   if (sessionId) {
-    const userId = resolveSession(sessionId);
+    const userId = await resolveSession(sessionId);
     if (userId) {
       c.set("userId", userId);
       c.set("nestScope", null);
@@ -44,14 +45,16 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   const key = parseBearerToken(c.req.header("Authorization"));
   if (key) {
     const keyHash = hashApiKey(key);
-    const record = db
-      .prepare("SELECT user_id, nest_id FROM api_keys WHERE key_hash = ?")
-      .get(keyHash) as { user_id: string; nest_id: string | null } | undefined;
+    const record = await db.get(
+      "SELECT user_id, nest_id FROM api_keys WHERE key_hash = ?",
+      [keyHash],
+    ) as { user_id: string; nest_id: string | null } | undefined;
 
     if (record) {
-      db.prepare(
-        "UPDATE api_keys SET last_used_at = datetime('now') WHERE key_hash = ?",
-      ).run(keyHash);
+      await db.run(
+        `UPDATE api_keys SET last_used_at = ${nowExpr(db)} WHERE key_hash = ?`,
+        [keyHash],
+      );
       c.set("userId", record.user_id);
       c.set("nestScope", record.nest_id);
       return next();

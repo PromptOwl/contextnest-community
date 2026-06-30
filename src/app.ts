@@ -54,7 +54,7 @@ const UI_DIR_REL = relative(process.cwd(), UI_DIR_ABS) || ".";
 // In open mode, assign the anonymous admin user to every request.
 // This gives full access without requiring auth headers.
 const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
-  const anonId = ensureAnonymousUser();
+  const anonId = await ensureAnonymousUser();
   c.set("userId", anonId);
   c.set("nestScope", null);
   await next();
@@ -78,14 +78,14 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   }
 
   if (config.AUTH_MODE === "open") {
-    const anonId = ensureAnonymousUser();
+    const anonId = await ensureAnonymousUser();
     c.set("userId", anonId);
     c.set("nestScope", null);
     return next();
   }
 
   if (isPublicReadEligiblePath(c.req.method, c.req.path)) {
-    const anonId = ensureAnonymousUser();
+    const anonId = await ensureAnonymousUser();
     c.set("userId", anonId);
     c.set("nestScope", null);
     return next();
@@ -248,9 +248,11 @@ export function createApp(): Hono<AuthEnv> {
   app.get("/stats", async (c) => {
     const db = getDb();
     const userId = c.get("userId");
-    const userEmail = resolveCallerEmail(userId);
+    const userEmail = await resolveCallerEmail(userId);
 
-    const visibleNests = [...listNests(userId), ...listSharedNests(userId)];
+    const owned = await listNests(userId);
+    const sharedNests = await listSharedNests(userId);
+    const visibleNests = [...owned, ...sharedNests];
 
     // Count accessible documents across every nest the caller can see.
     // Mirrors the per-nest filterAccessible logic used by GET /nests/:id/nodes
@@ -258,17 +260,17 @@ export function createApp(): Hono<AuthEnv> {
     let documents = 0;
     for (const nest of visibleNests) {
       try {
-        const { storage } = engineCache.get(nest.id);
+        const { storage } = await engineCache.get(nest.id);
         const docs = await storage.discoverDocuments();
-        documents += filterAccessible(nest.id, userId, userEmail, docs).length;
+        documents += (await filterAccessible(nest.id, userId, userEmail, docs)).length;
       } catch {
         // Nest with filesystem issue — skip; don't break the whole count.
       }
     }
 
-    const usersRow = db
-      .prepare("SELECT COUNT(*) as c FROM users")
-      .get() as { c: number };
+    const usersRow = (await db.get(
+      "SELECT COUNT(*) as c FROM users",
+    )) as { c: number };
 
     return c.json({
       nests: visibleNests.length,
@@ -370,7 +372,7 @@ export function createApp(): Hono<AuthEnv> {
       return next();
     }
 
-    const permission = resolveNestPermission(nestId, userId);
+    const permission = await resolveNestPermission(nestId, userId);
     if (permission === "none") {
       return c.json({ error: "Nest not found" }, 404);
     }
@@ -417,7 +419,7 @@ export function createApp(): Hono<AuthEnv> {
     // caller's per-node role.
     const isStewardRoster =
       path.includes("/stewards") && !path.includes("/nodes/");
-    if (isStewardRoster && !canManageStewards(resolveCallerEmail(userId))) {
+    if (isStewardRoster && !canManageStewards(await resolveCallerEmail(userId))) {
       return c.json(
         {
           error:
@@ -463,7 +465,7 @@ export function createApp(): Hono<AuthEnv> {
       parts[parts.length - 1] === "revert";
     let stewardEditorBypass = false;
     if (required === "write" && permission === "read" && parts[1] === "nodes") {
-      const userEmail = resolveCallerEmail(userId);
+      const userEmail = await resolveCallerEmail(userId);
       if (
         parts.length >= 3 &&
         (c.req.method === "PATCH" || c.req.method === "DELETE" || isNodeRevert)
@@ -478,7 +480,7 @@ export function createApp(): Hono<AuthEnv> {
         } catch {
           /* malformed escape */
         }
-        const resolved = resolveStewardsForNode(nestId, nodeId);
+        const resolved = await resolveStewardsForNode(nestId, nodeId);
         stewardEditorBypass = resolved.some(
           (r) =>
             r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
@@ -486,7 +488,7 @@ export function createApp(): Hono<AuthEnv> {
         );
       } else if (parts.length === 2 && c.req.method === "POST") {
         // Empty nodeId: doc/tag branches won't match; nest branch returns all.
-        const resolved = resolveStewardsForNode(nestId, "");
+        const resolved = await resolveStewardsForNode(nestId, "");
         stewardEditorBypass = resolved.some(
           (r) =>
             r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
