@@ -31,6 +31,8 @@ import {
   getSuspensionReason,
   getCurrentLicense,
   installLicenseKey,
+  isLicenseAdminUserId,
+  upsertEnvVar,
 } from "./auth/license.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
@@ -238,6 +240,93 @@ export function createApp(): Hono<AuthEnv> {
       const msg = err instanceof Error ? err.message : "Failed to install key";
       return c.json({ error: msg }, 500);
     }
+  });
+
+  // /admin/settings — server-wide settings the admin edits from the Settings
+  // page. Each setting takes effect live (config getters read process.env) and
+  // persists to ENV_FILE_PATH so it survives a restart. In open mode the
+  // anonymous admin may edit; in key mode it's the license admin only.
+  app.use("/admin/settings", flexAuthMiddleware);
+  const adminSettingsAllowed = (c: any) =>
+    config.AUTH_MODE === "open" || isLicenseAdminUserId(c.get("userId"));
+  const currentServerSettings = () => ({
+    promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+    logo_url: config.LOGO_URL,
+    telemetry_enabled: config.TELEMETRY_ENABLED,
+    public_base_url: config.PUBLIC_BASE_URL,
+    max_body_bytes: config.MAX_BODY_BYTES,
+  });
+
+  app.get("/admin/settings", (c) => {
+    if (!adminSettingsAllowed(c))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    return c.json(currentServerSettings());
+  });
+
+  app.patch("/admin/settings", async (c) => {
+    if (!adminSettingsAllowed(c))
+      return c.json({ error: "Only the server admin can change this." }, 403);
+    let body: Record<string, unknown>;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    // Validate every supplied field FIRST and stage the changes. Nothing is
+    // applied (live env or disk) until all fields pass, so a single bad field
+    // can't leave the server in a half-updated state that disagrees with the
+    // 400 response. null value deletes the line (setting falls to its default).
+    const errors: string[] = [];
+    const pending: Array<{ name: string; value: string | null }> = [];
+
+    if ("promptowl_sign_in_gate" in body) {
+      const v = String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase();
+      if (!["open", "admin-only", "disabled"].includes(v))
+        errors.push("promptowl_sign_in_gate must be open | admin-only | disabled");
+      else pending.push({ name: "PROMPTOWL_SIGN_IN_GATE", value: v });
+    }
+    if ("logo_url" in body) {
+      const v = String(body.logo_url ?? "").trim();
+      pending.push({ name: "LOGO_URL", value: v || null });
+    }
+    if ("public_base_url" in body) {
+      const v = String(body.public_base_url ?? "").trim().replace(/\/$/, "");
+      pending.push({ name: "PUBLIC_BASE_URL", value: v || null });
+    }
+    if ("telemetry_enabled" in body) {
+      pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
+    }
+    if ("max_body_bytes" in body) {
+      const n = Number(body.max_body_bytes);
+      if (!Number.isFinite(n) || n < 1024 * 1024 || n > 500 * 1024 * 1024)
+        errors.push("max_body_bytes must be between 1MB and 500MB");
+      else pending.push({ name: "MAX_BODY_BYTES", value: String(Math.floor(n)) });
+    }
+
+    // Reject the whole request if any field failed validation — apply nothing.
+    if (errors.length)
+      return c.json({ error: errors.join("; "), settings: currentServerSettings() }, 400);
+
+    // All valid: persist first, then mutate live env. Ordering persist-before-
+    // live means a disk failure aborts before the running server changes, so a
+    // 500 never leaves a live setting that was never written to disk.
+    for (const { name, value } of pending) {
+      try {
+        upsertEnvVar(config.ENV_FILE_PATH, name, value);
+      } catch (e) {
+        return c.json(
+          {
+            error: `Could not persist ${name}: ${e instanceof Error ? e.message : String(e)}`,
+            settings: currentServerSettings(),
+          },
+          500
+        );
+      }
+      if (value === null) delete process.env[name];
+      else process.env[name] = value;
+    }
+
+    return c.json({ settings: currentServerSettings() });
   });
 
   // GET /stats — dashboard summary counts: nests visible to caller,
