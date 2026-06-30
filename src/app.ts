@@ -272,44 +272,60 @@ export function createApp(): Hono<AuthEnv> {
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
+    // Validate every supplied field FIRST and stage the changes. Nothing is
+    // applied (live env or disk) until all fields pass, so a single bad field
+    // can't leave the server in a half-updated state that disagrees with the
+    // 400 response. null value deletes the line (setting falls to its default).
     const errors: string[] = [];
-    // Set live (process.env) + persist; null deletes the line (falls to default).
-    const apply = (name: string, value: string | null) => {
-      if (value === null) delete process.env[name];
-      else process.env[name] = value;
-      try {
-        upsertEnvVar(config.ENV_FILE_PATH, name, value);
-      } catch (e) {
-        errors.push(`persist ${name}: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    };
+    const pending: Array<{ name: string; value: string | null }> = [];
 
     if ("promptowl_sign_in_gate" in body) {
       const v = String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase();
       if (!["open", "admin-only", "disabled"].includes(v))
         errors.push("promptowl_sign_in_gate must be open | admin-only | disabled");
-      else apply("PROMPTOWL_SIGN_IN_GATE", v);
+      else pending.push({ name: "PROMPTOWL_SIGN_IN_GATE", value: v });
     }
     if ("logo_url" in body) {
       const v = String(body.logo_url ?? "").trim();
-      apply("LOGO_URL", v || null);
+      pending.push({ name: "LOGO_URL", value: v || null });
     }
     if ("public_base_url" in body) {
       const v = String(body.public_base_url ?? "").trim().replace(/\/$/, "");
-      apply("PUBLIC_BASE_URL", v || null);
+      pending.push({ name: "PUBLIC_BASE_URL", value: v || null });
     }
     if ("telemetry_enabled" in body) {
-      apply("TELEMETRY_ENABLED", body.telemetry_enabled ? "true" : "false");
+      pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
     }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);
       if (!Number.isFinite(n) || n < 1024 * 1024 || n > 500 * 1024 * 1024)
         errors.push("max_body_bytes must be between 1MB and 500MB");
-      else apply("MAX_BODY_BYTES", String(Math.floor(n)));
+      else pending.push({ name: "MAX_BODY_BYTES", value: String(Math.floor(n)) });
     }
 
+    // Reject the whole request if any field failed validation — apply nothing.
     if (errors.length)
       return c.json({ error: errors.join("; "), settings: currentServerSettings() }, 400);
+
+    // All valid: persist first, then mutate live env. Ordering persist-before-
+    // live means a disk failure aborts before the running server changes, so a
+    // 500 never leaves a live setting that was never written to disk.
+    for (const { name, value } of pending) {
+      try {
+        upsertEnvVar(config.ENV_FILE_PATH, name, value);
+      } catch (e) {
+        return c.json(
+          {
+            error: `Could not persist ${name}: ${e instanceof Error ? e.message : String(e)}`,
+            settings: currentServerSettings(),
+          },
+          500
+        );
+      }
+      if (value === null) delete process.env[name];
+      else process.env[name] = value;
+    }
+
     return c.json({ settings: currentServerSettings() });
   });
 
