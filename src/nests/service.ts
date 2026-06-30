@@ -1,4 +1,3 @@
-import { join } from "path";
 import { rmSync, mkdirSync } from "fs";
 import { v4 as uuid } from "uuid";
 import { NestStorage } from "@promptowl/contextnest-engine";
@@ -9,6 +8,7 @@ import {
 } from "../fs/vault-import.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import { resolveNestPath } from "../shared/paths.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { isSuperAdmin } from "../governance/access-service.js";
@@ -17,14 +17,11 @@ import { ValidationError } from "../shared/errors.js";
 import type { Nest } from "../shared/types.js";
 
 /**
- * On-disk storage root for a nest — always <DATA_ROOT>/nests/<id>. Imported
- * nests copy their files here on import (rather than linking an external host
- * path), so every nest lives under DATA_ROOT. Single source of truth for every
- * disk read/write (engineCache + create/delete).
+ * On-disk storage root for a nest. Resolution lives in `shared/paths.ts`
+ * (honours NEST_STORAGE_ROOT, default `<DATA_ROOT>/nests`); re-exported here
+ * for backward compatibility with existing importers (e.g. `nodes/engine.ts`).
  */
-export function resolveNestPath(nestId: string): string {
-  return join(config.DATA_ROOT, "nests", nestId);
-}
+export { resolveNestPath };
 
 /**
  * True when the nest was imported from a folder. Imported nests use flat

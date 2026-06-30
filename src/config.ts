@@ -60,6 +60,14 @@ export const config = {
       process.env.DATABASE_PATH || join(dataRoot(), "community.db")
     );
   },
+  /**
+   * Root directory for nest vault files. Defaults to `<DATA_ROOT>/nests`.
+   * Override (e.g. a GCS volume mount on Cloud Run) to store nest files
+   * separately from the SQLite DB. See `src/shared/paths.ts`.
+   */
+  get NEST_STORAGE_ROOT() {
+    return process.env.NEST_STORAGE_ROOT || join(dataRoot(), "nests");
+  },
   get PROMPTOWL_API_URL() {
     return process.env.PROMPTOWL_API_URL || "https://app.promptowl.ai";
   },

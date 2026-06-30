@@ -14,8 +14,7 @@
 
 import { NestStorage } from "@promptowl/contextnest-engine";
 import type Database from "better-sqlite3";
-import { join } from "path";
-import { config } from "../config.js";
+import { resolveNestPath } from "../shared/paths.js";
 
 const MIGRATION_ID = "005_backfill_node_versions_from_history";
 
@@ -67,7 +66,7 @@ export async function backfillNodeVersionsFromHistory(
   let totalDocs = 0;
 
   for (const { id: nestId } of nests) {
-    const nestPath = join(config.DATA_ROOT, "nests", nestId);
+    const nestPath = resolveNestPath(nestId);
     const storage = new NestStorage(nestPath);
 
     let docs;
