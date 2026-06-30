@@ -1,5 +1,6 @@
 /** DocumentEditor — create/edit view; `nodeId === "new"` → POST, else PATCH. Server enforces 403. */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,6 +28,7 @@ import {
   History,
   Code2,
   MessageSquare,
+  MessageSquarePlus,
   GitCompare,
   ChevronDown,
   Check,
@@ -41,7 +43,15 @@ import {
 import { DocumentViewer } from "./DocumentViewer";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
-import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory, CommentsPanel, DiffViewer } from "./governance";
+import { AnnotationsPanel } from "./AnnotationsPanel";
+import {
+  buildTextIndex,
+  rangeForAnchor,
+  setHighlight,
+  clearHighlight,
+  caretAt,
+} from "../lib/anchor-highlight";
+import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory, DiffViewer } from "./governance";
 import { unifiedDiff } from "./governance/diff-util";
 import {
   DropdownMenu,
@@ -134,9 +144,6 @@ export function DocumentEditor({
   const [showShare, setShowShare] = useState(false);
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
-  // Comments drawer (collaboration comments + activity feed).
-  const [showComments, setShowComments] = useState(false);
-  const [commentQuote, setCommentQuote] = useState("");
   const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
   // Caller's nest-wide scoped steward rows (from GET /nests/:id). Needed for
   // NEW docs, where there's no node yet to resolve a per-node role against.
@@ -210,6 +217,197 @@ export function DocumentEditor({
   // "document" = the normal markdown editor. Only meaningful while isNew.
   const [newType, setNewType] = useState<"document" | "artifact">("document");
   const isArtifactDraft = isNew && newType === "artifact";
+  // Inline anchored comments (annotations) parked beside the doc. commentMode
+  // forces the rendered read view + highlight overlay even for editors, so
+  // select-to-comment and painted highlights are reachable without TipTap
+  // stealing focus. Backed by the same /annotations API the ArtifactViewer uses.
+  const [commentMode, setCommentMode] = useState(false);
+  const [pendingAnchor, setPendingAnchor] = useState<api.AnnotationAnchor | null>(null);
+  const [selPopover, setSelPopover] = useState<{ x: number; y: number } | null>(null);
+  const docViewRef = useRef<HTMLDivElement | null>(null);
+  const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const anchorRangesRef = useRef<{ id: string; range: Range }[]>([]);
+  const pendingFocusRef = useRef<string | null>(null);
+
+  // Read the current selection inside the rendered doc and, if non-empty,
+  // surface a floating "Comment" button at the selection. Building the anchor
+  // is deferred to the click so we don't compute on every mouseup.
+  const onDocMouseUp = useCallback(() => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      setSelPopover(null);
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    const container = docViewRef.current;
+    if (!container || !container.contains(range.commonAncestorContainer)) {
+      setSelPopover(null);
+      return;
+    }
+    if (!sel.toString().trim()) {
+      setSelPopover(null);
+      return;
+    }
+    const rect = range.getBoundingClientRect();
+    // Anchor the button just above the selection (viewport/fixed coords).
+    setSelPopover({ x: rect.left + rect.width / 2, y: rect.top });
+  }, []);
+
+  // Turn the live selection into a resilient anchor: quote + up to 250c of
+  // surrounding rendered text + a best-effort source line hint.
+  const stageAnchorFromSelection = useCallback(() => {
+    const sel = window.getSelection();
+    const container = docViewRef.current;
+    if (!sel || sel.isCollapsed || !container) return;
+    const quote = sel.toString().trim();
+    if (!quote) return;
+    const full = container.innerText || container.textContent || "";
+    const idx = full.indexOf(quote);
+    const before = idx >= 0 ? full.slice(Math.max(0, idx - 250), idx) : "";
+    const after = idx >= 0 ? full.slice(idx + quote.length, idx + quote.length + 250) : "";
+    const srcIdx = content.indexOf(quote);
+    const line = srcIdx >= 0 ? content.slice(0, srcIdx).split("\n").length : undefined;
+    setPendingAnchor({ quote, before, after, line });
+    setSelPopover(null);
+    sel.removeAllRanges();
+  }, [content]);
+
+  // Rebuild the painted comment highlights whenever the doc text or the set
+  // of anchored threads changes (and only in the rendered, non-diff view).
+  useEffect(() => {
+    const container = docViewRef.current;
+    const inRenderedView =
+      !isNew &&
+      (commentMode || mode === "view") &&
+      !rawMode &&
+      compareVersion == null &&
+      !looksLikeHtml(content);
+    if (!container || !inRenderedView) {
+      anchorRangesRef.current = [];
+      clearHighlight("comment-anchor");
+      clearHighlight("comment-anchor-active");
+      return;
+    }
+    // Defer one frame so react-markdown has committed its DOM.
+    const id = requestAnimationFrame(() => {
+      const idx = buildTextIndex(container);
+      const ranges: { id: string; range: Range }[] = [];
+      for (const t of anchoredThreads) {
+        if (!t.anchor?.quote) continue;
+        const r = rangeForAnchor(container, idx, t.anchor);
+        if (r) ranges.push({ id: t.id, range: r });
+      }
+      anchorRangesRef.current = ranges;
+      setHighlight("comment-anchor", ranges.map((r) => r.range));
+      // Deferred focus: a comment was clicked from edit mode; now that the
+      // rendered view exists and ranges are built, scroll to + emphasize it.
+      if (pendingFocusRef.current) {
+        const hit = ranges.find((r) => r.id === pendingFocusRef.current);
+        if (hit) {
+          hit.range.startContainer.parentElement?.scrollIntoView({
+            behavior: "smooth",
+            block: "center",
+          });
+          setActiveThreadId(hit.id);
+        }
+        pendingFocusRef.current = null;
+      }
+    });
+    return () => cancelAnimationFrame(id);
+  }, [anchoredThreads, content, mode, rawMode, compareVersion, isNew, commentMode]);
+
+  // Paint the active thread's range brighter (doc ⇄ rail emphasis).
+  useEffect(() => {
+    const hit = anchorRangesRef.current.find((r) => r.id === activeThreadId);
+    setHighlight("comment-anchor-active", hit ? [hit.range] : []);
+  }, [activeThreadId]);
+
+  // Jump to (and emphasize) an anchored quote when its thread is clicked.
+  const focusAnchor = useCallback(
+    (anchor: api.AnnotationAnchor) => {
+      const hit = anchoredThreads.find(
+        (t) => t.anchor?.quote === anchor.quote && t.anchor?.before === anchor.before,
+      );
+      if (hit) setActiveThreadId(hit.id);
+      const range = anchorRangesRef.current.find((r) => r.id === hit?.id)?.range;
+      if (range) {
+        range.startContainer.parentElement?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+        return;
+      }
+      // Not rendered yet (we're in the editor) — drop into comment mode and let
+      // the highlight effect scroll to it once ranges build.
+      const inRenderedView = commentMode || mode === "view";
+      if (!inRenderedView && !looksLikeHtml(content)) {
+        pendingFocusRef.current = hit?.id ?? null;
+        setCommentMode(true);
+        setMode("view");
+        return;
+      }
+      toast.message("That highlighted text isn't in the current version.");
+    },
+    [anchoredThreads, commentMode, mode, content],
+  );
+
+  // Map a click inside the rendered doc onto an anchored thread (if the click
+  // landed on a highlighted span) and emphasize it in the rail.
+  const onDocClick = useCallback((e: ReactMouseEvent) => {
+    if (!anchorRangesRef.current.length) return;
+    const caret = caretAt(e.clientX, e.clientY);
+    if (!caret) return;
+    for (const { id, range } of anchorRangesRef.current) {
+      try {
+        if (range.isPointInRange(caret.node, caret.offset)) {
+          setActiveThreadId(id);
+          return;
+        }
+      } catch {
+        /* range detached after a re-render; ignore */
+      }
+    }
+  }, []);
+
+  // Pointer feedback: cursor becomes a pointer when hovering a commented span.
+  const onDocMouseMove = useCallback((e: ReactMouseEvent) => {
+    const container = docViewRef.current;
+    if (!container) return;
+    if (!anchorRangesRef.current.length) {
+      container.style.cursor = "";
+      return;
+    }
+    const caret = caretAt(e.clientX, e.clientY);
+    let over = false;
+    if (caret) {
+      for (const { range } of anchorRangesRef.current) {
+        try {
+          if (range.isPointInRange(caret.node, caret.offset)) {
+            over = true;
+            break;
+          }
+        } catch {
+          /* ignore detached range */
+        }
+      }
+    }
+    container.style.cursor = over ? "pointer" : "";
+  }, []);
+
+  // Dismiss the floating Comment button when the user clicks away from both
+  // the selection and the button itself.
+  useEffect(() => {
+    if (!selPopover) return;
+    const onDown = (e: MouseEvent) => {
+      const el = e.target as HTMLElement;
+      if (el.closest('[data-testid="selection-comment-button"]')) return;
+      if (docViewRef.current?.contains(el)) return;
+      setSelPopover(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [selPopover]);
 
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
 
@@ -913,23 +1111,6 @@ export function DocumentEditor({
           >
             <Code2 className="h-4 w-4" />
           </Button>
-          {/* Comments + activity. Captures the current text selection so the
-              comment is anchored to the highlighted span (Word/Docs style). */}
-          {!isNew && (
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() => {
-                const sel = window.getSelection?.()?.toString().trim() || "";
-                setCommentQuote(sel);
-                setShowComments(true);
-              }}
-              title="Comments"
-              data-testid="document-editor-comments"
-            >
-              <MessageSquare className="h-4 w-4" />
-            </Button>
-          )}
           {/* Write/review affordances hidden for public reader.
               Copy link + Share nest collapsed into an overflow menu to keep
               the header uncluttered; primary actions (Publish/Save) stay inline. */}
@@ -1208,10 +1389,21 @@ export function DocumentEditor({
             </div>
           )}
 
-          {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
+          {/* Document + ever-present comments rail (Notion/Docs-style):
+              editor left, comments a sticky panel on the right. */}
+          <div className="flex flex-col lg:flex-row gap-6 items-start">
+          <div className="flex-1 min-w-0">
+          {commentMode && compareVersion == null && (
+            <div className="mb-2 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50/70 dark:bg-amber-950/20 px-3 py-1.5 text-xs text-amber-900 dark:text-amber-200">
+              <MessageSquare className="h-3.5 w-3.5 shrink-0" />
+              Comment mode — select any text to pin a comment, or click a
+              highlighted phrase to open its thread. Editing is paused.
+            </div>
+          )}
+          {/* Dblclick → edit unless commenting/locked/reviewer/public-viewer. */}
           <div
             onClick={() => {
-              if (isViewOnly || isLocked || isArtifactDraft) return;
+              if (commentMode || isViewOnly || isLocked || isArtifactDraft) return;
               if (mode === "view" && !isReviewerOnly) {
                 setMode("edit");
               }
@@ -1331,8 +1523,14 @@ export function DocumentEditor({
                 spellCheck={false}
                 className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
               />
-            ) : mode === "view" && !looksLikeHtml(content) ? (
-              <div className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text">
+            ) : (commentMode || mode === "view") && !looksLikeHtml(content) ? (
+              <div
+                ref={docViewRef}
+                onMouseUp={isNew ? undefined : onDocMouseUp}
+                onClick={isNew ? undefined : onDocClick}
+                onMouseMove={isNew ? undefined : onDocMouseMove}
+                className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text"
+              >
                 <DocumentViewer
                   content={content}
                   onWikiLinkClick={(title) =>
@@ -1362,6 +1560,52 @@ export function DocumentEditor({
               />
             )}
           </div>
+          </div>
+
+          {/* Ever-present comments rail — beside the doc, not stacked below. */}
+          {!isNew && (
+            <aside className="w-full lg:w-80 shrink-0 lg:sticky lg:top-4 self-start max-h-[calc(100vh-2rem)] overflow-y-auto">
+              <AnnotationsPanel
+                nestId={nestId}
+                nodeId={nodeId}
+                readOnly={isViewOnly}
+                pendingAnchor={pendingAnchor}
+                onClearAnchor={() => setPendingAnchor(null)}
+                onFocusAnchor={focusAnchor}
+                onThreadsChange={setAnchoredThreads}
+                activeThreadId={activeThreadId}
+                commentMode={commentMode}
+                onSetCommentMode={(on) => {
+                  setCommentMode(on);
+                  if (on) setMode("view");
+                  setSelPopover(null);
+                  if (!on) setActiveThreadId(null);
+                }}
+              />
+            </aside>
+          )}
+          </div>
+
+          {/* Floating "Comment" button on text selection — pins a comment to
+              the highlighted quote (Notion/Docs-style). */}
+          {selPopover && !isViewOnly && (
+            <button
+              type="button"
+              data-testid="selection-comment-button"
+              onMouseDown={(e) => e.preventDefault() /* keep the selection */}
+              onClick={stageAnchorFromSelection}
+              style={{
+                position: "fixed",
+                left: selPopover.x,
+                top: selPopover.y - 40,
+                transform: "translateX(-50%)",
+                zIndex: 50,
+              }}
+              className="flex items-center gap-1 rounded-md bg-foreground text-background px-2.5 py-1.5 text-xs font-medium shadow-lg hover:opacity-90"
+            >
+              <MessageSquarePlus className="h-3.5 w-3.5" /> Comment
+            </button>
+          )}
 
           {/* Backlinks — "what links here". View mode only; hidden when empty. */}
           {mode === "view" && backlinks.length > 0 && (
@@ -1483,25 +1727,6 @@ export function DocumentEditor({
                 Loading versions…
               </div>
             )}
-          </DialogContent>
-        </Dialog>
-      )}
-
-      {showComments && !isNew && (
-        <Dialog open onOpenChange={(o) => !o && setShowComments(false)}>
-          <DialogContent className="sm:max-w-[640px] max-h-[88vh] overflow-hidden flex flex-col gap-3">
-            <DialogHeader className="space-y-0">
-              <DialogTitle className="truncate">
-                Comments · {title || nodeId}
-              </DialogTitle>
-            </DialogHeader>
-            <CommentsPanel
-              nestId={nestId}
-              nodeId={nodeId}
-              currentEmail={currentEmail}
-              quote={commentQuote}
-              version={baseVersion}
-            />
           </DialogContent>
         </Dialog>
       )}
