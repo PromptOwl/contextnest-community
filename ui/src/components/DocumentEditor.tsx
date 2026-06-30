@@ -27,6 +27,9 @@ import {
   History,
   Code2,
   MessageSquare,
+  GitCompare,
+  ChevronDown,
+  Check,
 } from "lucide-react";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { toast } from "sonner";
@@ -38,7 +41,16 @@ import {
 import { DocumentViewer } from "./DocumentViewer";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
-import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory, CommentsPanel } from "./governance";
+import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory, CommentsPanel, DiffViewer } from "./governance";
+import { unifiedDiff } from "./governance/diff-util";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { relatedDocs } from "../lib/related";
@@ -146,6 +158,11 @@ export function DocumentEditor({
     currentVersion: number;
   } | null>(null);
   const [showVersions, setShowVersions] = useState(false);
+  // Ever-present inline diff: pick a past version from the "Compare" dropdown
+  // and the doc area renders current↔vN inline (no modal). diffRendered swaps
+  // the unified line-diff for a side-by-side rendered-markdown comparison.
+  const [compareVersion, setCompareVersion] = useState<number | null>(null);
+  const [diffRendered, setDiffRendered] = useState(false);
   const [tagInput, setTagInput] = useState("");
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
@@ -397,6 +414,18 @@ export function DocumentEditor({
     setShowVersions(true);
     await loadVersions();
   }, [loadVersions]);
+
+  // Load versions on demand when the Compare dropdown opens, so the list is
+  // populated without forcing the user through the history modal first.
+  const ensureVersions = useCallback(async () => {
+    if (!versionData) await loadVersions();
+  }, [versionData, loadVersions]);
+
+  const compareWith = useCallback((v: number | null) => {
+    setCompareVersion(v);
+    // Always reopen compare in the default Source view, and reset on exit.
+    setDiffRendered(false);
+  }, []);
 
   // A pending-review doc is LOCKED: the server rejects edits/deletes with
   // 423 while a review is open (nodes/routes). Plain drafts stay editable —
@@ -812,6 +841,67 @@ export function DocumentEditor({
               <History className="h-4 w-4" />
             </Button>
           )}
+          {/* Compare ▾ — pick a past version; the doc area renders an
+              ever-present current↔vN diff inline (no modal). */}
+          {!isNew && (
+            <DropdownMenu
+              onOpenChange={(o) => {
+                if (o) ensureVersions();
+              }}
+            >
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant={compareVersion != null ? "secondary" : "outline"}
+                  size="sm"
+                  title="Compare with a past version"
+                  data-testid="document-editor-compare"
+                >
+                  <GitCompare className="h-4 w-4 mr-1" />
+                  {compareVersion != null ? `Comparing v${compareVersion}` : "Compare"}
+                  <ChevronDown className="h-4 w-4 ml-1" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56 max-h-80 overflow-y-auto">
+                <DropdownMenuLabel>Diff current against…</DropdownMenuLabel>
+                {compareVersion != null && (
+                  <>
+                    <DropdownMenuItem onClick={() => compareWith(null)}>
+                      <X className="h-4 w-4 mr-2" /> Exit compare
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                  </>
+                )}
+                {!versionData ? (
+                  <DropdownMenuItem disabled>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" /> Loading…
+                  </DropdownMenuItem>
+                ) : versionData.versions.filter(
+                  (v) => v.version !== versionData.currentVersion,
+                ).length === 0 ? (
+                  <DropdownMenuItem disabled>No earlier versions</DropdownMenuItem>
+                ) : (
+                  versionData.versions
+                    .filter((v) => v.version !== versionData.currentVersion)
+                    .map((v) => (
+                      <DropdownMenuItem
+                        key={v.version}
+                        onClick={() => compareWith(v.version)}
+                      >
+                        {compareVersion === v.version ? (
+                          <Check className="h-4 w-4 mr-2" />
+                        ) : (
+                          <span className="w-4 mr-2" />
+                        )}
+                        v{v.version}
+                        <span className="ml-auto text-xs text-muted-foreground">
+                          {v.editedBy?.split("@")[0] || ""}
+                        </span>
+                      </DropdownMenuItem>
+                    ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
           {/* Raw markdown source toggle — view/edit the underlying .md. */}
           <Button
             variant={rawMode ? "secondary" : "outline"}
@@ -1131,7 +1221,90 @@ export function DocumentEditor({
               {isArtifactDraft ? "Artifact HTML" : "Content"}{" "}
               <span className="text-destructive">*</span>
             </label>
-            {rawMode ? (
+            {compareVersion != null ? (
+              /* Ever-present inline diff: current vs a chosen past version. */
+              <div data-testid="document-editor-inline-diff">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-sm font-medium flex items-center gap-2">
+                    <GitCompare className="h-4 w-4" />
+                    Diff: v{compareVersion} → current (v
+                    {versionData?.currentVersion ?? baseVersion ?? "?"})
+                    {isDirty && (
+                      <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase">
+                        incl. unsaved edits
+                      </span>
+                    )}
+                  </label>
+                  <div className="flex items-center gap-1">
+                    {/* Source = exact line changes; Rendered = formatted markdown. */}
+                    <div className="flex rounded-md border overflow-hidden text-xs">
+                      <button
+                        type="button"
+                        className={`px-2 py-1 ${!diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+                        onClick={() => setDiffRendered(false)}
+                      >
+                        Source
+                      </button>
+                      <button
+                        type="button"
+                        className={`px-2 py-1 ${diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+                        onClick={() => setDiffRendered(true)}
+                      >
+                        Rendered
+                      </button>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7"
+                      onClick={() => compareWith(null)}
+                    >
+                      <X className="h-4 w-4 mr-1" /> Exit diff
+                    </Button>
+                  </div>
+                </div>
+                {(() => {
+                  const past = versionData?.versions.find(
+                    (v) => v.version === compareVersion,
+                  );
+                  if (!past) {
+                    return (
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 border rounded-lg">
+                        <Loader2 className="h-4 w-4 animate-spin" /> Loading version{" "}
+                        {compareVersion}…
+                      </div>
+                    );
+                  }
+                  if (diffRendered) {
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="border rounded-lg overflow-hidden">
+                          <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                            v{compareVersion}
+                          </div>
+                          <DocumentViewer
+                            content={past.content || ""}
+                            className="px-4 py-3"
+                          />
+                        </div>
+                        <div className="border rounded-lg overflow-hidden">
+                          <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                            current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
+                          </div>
+                          <DocumentViewer content={content} className="px-4 py-3" />
+                        </div>
+                      </div>
+                    );
+                  }
+                  return (
+                    <DiffViewer
+                      patch={unifiedDiff(past.content || "", content)}
+                      className="max-h-none border rounded-lg"
+                    />
+                  );
+                })()}
+              </div>
+            ) : rawMode ? (
               <textarea
                 value={content}
                 onChange={(e) => {
