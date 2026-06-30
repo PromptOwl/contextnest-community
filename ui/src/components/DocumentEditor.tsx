@@ -3,6 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
@@ -23,6 +26,7 @@ import {
   Link as LinkIcon,
   History,
   Code2,
+  MessageSquare,
 } from "lucide-react";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { toast } from "sonner";
@@ -32,8 +36,9 @@ import {
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
+import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
-import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory } from "./governance";
+import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory, CommentsPanel } from "./governance";
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { relatedDocs } from "../lib/related";
@@ -117,6 +122,9 @@ export function DocumentEditor({
   const [showShare, setShowShare] = useState(false);
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
+  // Comments drawer (collaboration comments + activity feed).
+  const [showComments, setShowComments] = useState(false);
+  const [commentQuote, setCommentQuote] = useState("");
   const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
   // Caller's nest-wide scoped steward rows (from GET /nests/:id). Needed for
   // NEW docs, where there's no node yet to resolve a per-node role against.
@@ -127,6 +135,9 @@ export function DocumentEditor({
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState<string[]>([]);
+  // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
+  // as markdown — once loaded we hand off to ArtifactViewer (see below).
+  const [nodeType, setNodeType] = useState<string | null>(null);
   // Version history for the detail view (CU-wdqcpztgwn). Lazily loaded when
   // the user opens the modal — VersionHistory already renders highlighted diffs.
   const [versionData, setVersionData] = useState<{
@@ -178,6 +189,10 @@ export function DocumentEditor({
   // serializes via tiptap-markdown), so this is just a textarea over the same
   // state. Editable in edit mode, read-only in view mode.
   const [rawMode, setRawMode] = useState(false);
+  // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
+  // "document" = the normal markdown editor. Only meaningful while isNew.
+  const [newType, setNewType] = useState<"document" | "artifact">("document");
+  const isArtifactDraft = isNew && newType === "artifact";
 
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
 
@@ -338,6 +353,7 @@ export function DocumentEditor({
       setTitle(loadedTitle);
       setContent(loadedContent);
       setTags(loadedTags);
+      setNodeType(node?.type ?? null);
       setBaseVersion(node?.version);
       setStatus(node?.status ?? null);
       setPendingChange((node as any)?.pendingChange ?? null);
@@ -441,7 +457,7 @@ export function DocumentEditor({
     const payload = { title: title.trim(), content, tags };
     let savedId: string | undefined;
     if (isNew) {
-      const res = await api.createNode(nestId, payload);
+      const res = await api.createNode(nestId, { ...payload, type: newType });
       savedId = (res as any)?.node?.id;
     } else {
       const res = await api.updateNode(nestId, nodeId, payload, baseVersion);
@@ -669,6 +685,22 @@ export function DocumentEditor({
     }
   };
 
+  // Artifact nodes are hosted HTML, not markdown — render the sandboxed
+  // viewer + annotation surface instead of the editor. Gated on a loaded node
+  // so all hooks above still run unconditionally (rules-of-hooks).
+  if (!isNew && !loading && nodeType === ARTIFACT_NODE_TYPE) {
+    return (
+      <ArtifactViewer
+        nestId={nestId}
+        nodeId={nodeId}
+        title={title}
+        snapshotVersion={null}
+        currentEmail={currentEmail}
+        onBack={onBack}
+      />
+    );
+  }
+
   return (
     <div className="md:py-6">
       {/* Header */}
@@ -791,6 +823,23 @@ export function DocumentEditor({
           >
             <Code2 className="h-4 w-4" />
           </Button>
+          {/* Comments + activity. Captures the current text selection so the
+              comment is anchored to the highlighted span (Word/Docs style). */}
+          {!isNew && (
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => {
+                const sel = window.getSelection?.()?.toString().trim() || "";
+                setCommentQuote(sel);
+                setShowComments(true);
+              }}
+              title="Comments"
+              data-testid="document-editor-comments"
+            >
+              <MessageSquare className="h-4 w-4" />
+            </Button>
+          )}
           {/* Write/review affordances hidden for public reader.
               Copy link + Share nest collapsed into an overflow menu to keep
               the header uncluttered; primary actions (Publish/Save) stay inline. */}
@@ -905,19 +954,19 @@ export function DocumentEditor({
                 return (
                   <Alert className="mt-2 border-amber-300 bg-amber-50 text-amber-800">
                     <div className="flex items-center gap-2">
-                    <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
-                    <AlertDescription className="text-amber-800">
-                      Renaming affects {affected.length} wiki link
-                      {affected.length !== 1 ? "s" : ""} in other documents that
-                      reference this one by its old title (
-                      {affected
-                        .slice(0, 3)
-                        .map((a) => a.title)
-                        .join(", ")}
-                      {affected.length > 3 ? ", …" : ""}
-                      ). Links by slug still resolve, but their visible label
-                      keeps the old name; plain [[title]] links break.
-                    </AlertDescription>
+                      <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
+                      <AlertDescription className="text-amber-800">
+                        Renaming affects {affected.length} wiki link
+                        {affected.length !== 1 ? "s" : ""} in other documents that
+                        reference this one by its old title (
+                        {affected
+                          .slice(0, 3)
+                          .map((a) => a.title)
+                          .join(", ")}
+                        {affected.length > 3 ? ", …" : ""}
+                        ). Links by slug still resolve, but their visible label
+                        keeps the old name; plain [[title]] links break.
+                      </AlertDescription>
                     </div>
                   </Alert>
                 );
@@ -931,15 +980,15 @@ export function DocumentEditor({
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
                 <AlertDescription className="text-amber-800">
-                {staleLinks.length} link{staleLinks.length !== 1 ? "s" : ""} in
-                this document show an outdated name — the target document
-                {staleLinks.length !== 1 ? "s were" : " was"} renamed (
-                {staleLinks
-                  .slice(0, 3)
-                  .map((s) => `"${s.shownAs}" → "${s.currentTitle}"`)
-                  .join(", ")}
-                {staleLinks.length > 3 ? ", …" : ""}
-                ). The links still work; only the visible label is out of date.
+                  {staleLinks.length} link{staleLinks.length !== 1 ? "s" : ""} in
+                  this document show an outdated name — the target document
+                  {staleLinks.length !== 1 ? "s were" : " was"} renamed (
+                  {staleLinks
+                    .slice(0, 3)
+                    .map((s) => `"${s.shownAs}" → "${s.currentTitle}"`)
+                    .join(", ")}
+                  {staleLinks.length > 3 ? ", …" : ""}
+                  ). The links still work; only the visible label is out of date.
                 </AlertDescription>
               </div>
             </Alert>
@@ -1048,17 +1097,39 @@ export function DocumentEditor({
               );
             })()}
 
+          {/* New-document kind: markdown document vs hosted HTML artifact.
+              Only offered while authoring a new node; existing artifacts open
+              straight into the ArtifactViewer (handled above). */}
+          {isNew && !isViewOnly && (
+            <div className="max-w-[240px]">
+              <label className="block text-sm font-medium mb-1">Type</label>
+              <Select
+                value={newType}
+                onValueChange={(v) => setNewType(v as "document" | "artifact")}
+              >
+                <SelectTrigger data-testid="document-editor-type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="document">Document (markdown)</SelectItem>
+                  <SelectItem value="artifact">Artifact (hosted HTML)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
           {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
           <div
             onClick={() => {
-              if (isViewOnly || isLocked) return;
+              if (isViewOnly || isLocked || isArtifactDraft) return;
               if (mode === "view" && !isReviewerOnly) {
                 setMode("edit");
               }
             }}
           >
             <label className="block text-sm font-medium mb-1">
-              Content <span className="text-destructive">*</span>
+              {isArtifactDraft ? "Artifact HTML" : "Content"}{" "}
+              <span className="text-destructive">*</span>
             </label>
             {rawMode ? (
               <textarea
@@ -1075,6 +1146,17 @@ export function DocumentEditor({
                 placeholder="# Raw markdown"
                 className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
                 data-testid="document-editor-raw-markdown"
+              />
+            ) : isArtifactDraft ? (
+              <textarea
+                value={content}
+                onChange={(e) => {
+                  setContent(e.target.value);
+                  setTouched(true);
+                }}
+                placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
+                spellCheck={false}
+                className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
               />
             ) : mode === "view" && !looksLikeHtml(content) ? (
               <div className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text">
@@ -1212,14 +1294,14 @@ export function DocumentEditor({
                   isViewOnly
                     ? undefined
                     : async (v) => {
-                        try {
-                          await api.revertToVersion(nestId, nodeId, v);
-                          toast.success(`Reverted to version ${v}`);
-                          await Promise.all([loadNode(), loadVersions()]);
-                        } catch (e: any) {
-                          toast.error(e?.message || "Revert failed");
-                        }
+                      try {
+                        await api.revertToVersion(nestId, nodeId, v);
+                        toast.success(`Reverted to version ${v}`);
+                        await Promise.all([loadNode(), loadVersions()]);
+                      } catch (e: any) {
+                        toast.error(e?.message || "Revert failed");
                       }
+                    }
                 }
               />
             ) : (
@@ -1228,6 +1310,25 @@ export function DocumentEditor({
                 Loading versions…
               </div>
             )}
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {showComments && !isNew && (
+        <Dialog open onOpenChange={(o) => !o && setShowComments(false)}>
+          <DialogContent className="sm:max-w-[640px] max-h-[88vh] overflow-hidden flex flex-col gap-3">
+            <DialogHeader className="space-y-0">
+              <DialogTitle className="truncate">
+                Comments · {title || nodeId}
+              </DialogTitle>
+            </DialogHeader>
+            <CommentsPanel
+              nestId={nestId}
+              nodeId={nodeId}
+              currentEmail={currentEmail}
+              quote={commentQuote}
+              version={baseVersion}
+            />
           </DialogContent>
         </Dialog>
       )}

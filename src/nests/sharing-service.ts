@@ -4,12 +4,14 @@
  * creation, duplicate guard, granter resolution) lives in one place.
  *
  * Permission gating lives at the call sites: the REST middleware requires
- * nest 'admin'; the MCP tool checks the caller's effective roles.
+ * nest 'write' to invite (escalation-capped here); the MCP tool checks the
+ * caller's effective roles.
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
-import { ValidationError, ConflictError } from "../shared/errors.js";
+import { ValidationError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
+import { permissionLevel, type NestPermission } from "../shared/access.js";
 import type { NestCollaborator } from "../shared/types.js";
 
 const VALID_PERMISSIONS = ["read", "write", "admin"] as const;
@@ -23,6 +25,13 @@ export async function addCollaborator(params: {
   grantedByUserId?: string | null;
   /** Caller's email — resolved to a user id when grantedByUserId is absent. */
   grantedByEmail?: string | null;
+  /**
+   * Caller's effective permission on this nest. When provided, enforces the
+   * escalation cap: you can't grant access above your own level (a write
+   * collaborator can invite read/write, but only an admin/owner grants admin).
+   * Omitted by callers that gate admin themselves (e.g. the MCP tool).
+   */
+  callerPermission?: NestPermission;
 }): Promise<NestCollaborator> {
   const { nestId } = params;
   if (
@@ -30,6 +39,18 @@ export async function addCollaborator(params: {
     !VALID_PERMISSIONS.includes(params.permission as any)
   ) {
     throw new ValidationError("permission must be read, write, or admin");
+  }
+
+  // Escalation cap — no granting above your own level. Checked before any
+  // placeholder user is created, so a forbidden invite leaves no side effects.
+  if (
+    params.callerPermission &&
+    permissionLevel(params.permission as NestPermission) >
+      permissionLevel(params.callerPermission)
+  ) {
+    throw new ForbiddenError(
+      `You can only grant access up to your own level ('${params.callerPermission}'). Ask a nest admin to grant '${params.permission}'.`,
+    );
   }
 
   const db = getDb();

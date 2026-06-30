@@ -18,8 +18,26 @@ import {
 } from "./markdown-export.js";
 import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { permissionLevel } from "../shared/access.js";
+import { buildNestGraph } from "./graph-service.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
+
+// GET /nests/:nestId/graph
+// Ontology graph: nodes, resolved [[wikilink]] edges, tag/category counts, and
+// the stewardship overlay — for the graph view (links / stewardship / coverage
+// gaps). Read-only assembly, gated to what the caller can read.
+queryRoutes.get("/graph", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const userEmail = resolveCallerEmail(userId);
+  // Steward emails are write+ only — same rule as the collaborators roster, so
+  // a public/read tier can't enumerate member emails via the graph overlay.
+  const canSeeIdentities =
+    permissionLevel(c.get("nestPermission")) >= permissionLevel("write");
+  const graph = await buildNestGraph(nestId, userId, userEmail, canSeeIdentities);
+  return c.json(graph);
+});
 
 // ─── Token budgeting helper ───
 // Rough 4-chars-per-token estimator. Good enough for budgeting; exact
