@@ -12,13 +12,14 @@ import {
   type DatePreset, type SavedFilter,
 } from "../lib/saved-filters";
 import {
-  FileText, Plus, ArrowLeft, History, Shield, Search,
+  FileText, FileCode2, Plus, ArrowLeft, History, Shield, Search, Upload, Sparkles,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
+import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { DeleteNestDialog } from "./DeleteNestDialog";
@@ -258,6 +259,7 @@ export function NestView({
   }>({ versions: [], approvedVersion: null, currentVersion: 0 });
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
+  const [showGenerate, setShowGenerate] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
 
@@ -767,8 +769,101 @@ export function NestView({
     }
   };
 
+  // ── Drag-and-drop ingestion ────────────────────────────────────────────
+  // Drop .md/.markdown/.txt → a markdown document; .html/.htm → a hosted HTML
+  // artifact (commentable in the ArtifactViewer's Annotate pane). Title comes
+  // from the filename. A single dropped file opens straight into its editor.
+  const [dragOver, setDragOver] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const kindForFile = (name: string): "document" | "artifact" | null => {
+    const ext = name.toLowerCase().split(".").pop() || "";
+    if (ext === "html" || ext === "htm") return "artifact";
+    if (ext === "md" || ext === "markdown" || ext === "txt") return "document";
+    return null;
+  };
+
+  const importFiles = useCallback(
+    async (fileList: FileList) => {
+      const files = Array.from(fileList).filter((f) => kindForFile(f.name));
+      const skipped = fileList.length - files.length;
+      if (!files.length) {
+        toast.error("Drop .md or .html files to add them to this vault.");
+        return;
+      }
+      setImporting(true);
+      const createdIds: string[] = [];
+      try {
+        for (const file of files) {
+          const type = kindForFile(file.name)!;
+          const title = file.name.replace(/\.(md|markdown|txt|html|htm)$/i, "");
+          try {
+            const text = await file.text();
+            const res = await api.createNode(nestId, { title, content: text, type });
+            const id = (res as any)?.node?.id;
+            if (id) createdIds.push(id);
+          } catch (e: any) {
+            toast.error(`${file.name}: ${e?.message || "failed to import"}`);
+          }
+        }
+        if (createdIds.length) {
+          toast.success(
+            `Added ${createdIds.length} ${createdIds.length === 1 ? "item" : "items"}` +
+              (skipped ? ` (skipped ${skipped} unsupported)` : ""),
+          );
+          await fetchData();
+          if (createdIds.length === 1) onOpenDocument(createdIds[0]);
+        }
+      } finally {
+        setImporting(false);
+      }
+    },
+    [nestId, fetchData, onOpenDocument],
+  );
+
   return (
-    <div className="md:py-6">
+    <div
+      className="md:py-6 relative"
+      onDragOver={(e) => {
+        if (!canEditDocs) return;
+        if (Array.from(e.dataTransfer.types).includes("Files")) {
+          e.preventDefault();
+          setDragOver(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        // Only clear when leaving the whole region, not on child enter/leave.
+        if (e.currentTarget === e.target) setDragOver(false);
+      }}
+      onDrop={(e) => {
+        if (!canEditDocs) return;
+        e.preventDefault();
+        setDragOver(false);
+        if (e.dataTransfer.files?.length) void importFiles(e.dataTransfer.files);
+      }}
+    >
+      {/* Drop overlay — appears while dragging files over the vault. */}
+      {dragOver && canEditDocs && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/5 backdrop-blur-[1px]">
+          <div className="flex flex-col items-center gap-2 text-primary">
+            <Upload className="h-8 w-8" />
+            <div className="text-sm font-medium">
+              Drop to add to this vault
+            </div>
+            <div className="text-xs text-muted-foreground">
+              .md → document · .html → hosted artifact
+            </div>
+          </div>
+        </div>
+      )}
+      {importing && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-background/60">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Importing…
+          </div>
+        </div>
+      )}
       {/* Header — PromptOwl ContextDashboard layout */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4 mb-4">
         <div className="flex min-w-0 items-center gap-3">
@@ -886,10 +981,42 @@ export function NestView({
                 </Button>
               )}
               {canEditDocs && (
-                <Button onClick={() => onOpenDocument("new")}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  New Document
-                </Button>
+                <>
+                  {/* Visible import affordance — same path as drag-and-drop. */}
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    multiple
+                    accept=".md,.markdown,.txt,.html,.htm"
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files?.length) void importFiles(e.target.files);
+                      e.target.value = "";
+                    }}
+                  />
+                  <Button
+                    variant="outline"
+                    onClick={() => importInputRef.current?.click()}
+                    title="Import .md or .html files (or just drag them onto the page)"
+                    data-testid="nest-import-files"
+                  >
+                    <Upload className="h-4 w-4 mr-2" />
+                    Import
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setShowGenerate(true)}
+                    title="Generate context with an AI agent and push it into this nest"
+                    data-testid="nest-generate-context"
+                  >
+                    <Sparkles className="h-4 w-4 mr-2" />
+                    Add with AI
+                  </Button>
+                  <Button onClick={() => onOpenDocument("new")}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    New Document
+                  </Button>
+                </>
               )}
             </>
           )}
@@ -1143,10 +1270,22 @@ export function NestView({
                         onClick={() => onOpenDocument(n.id)}
                         className="w-full flex items-center gap-3 py-2 px-1 -mx-1 rounded hover:bg-muted/50 text-left group"
                       >
-                        <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                        {n.type === "artifact" ? (
+                          <FileCode2 className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                        ) : (
+                          <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                        )}
                         <span className="text-sm truncate flex-1">
                           {n.title || n.id}
                         </span>
+                        {n.type === "artifact" && (
+                          <span
+                            className="shrink-0 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide"
+                            title="Hosted HTML artifact"
+                          >
+                            HTML
+                          </span>
+                        )}
                         {n.updated_at && (
                           <span className="text-xs text-muted-foreground shrink-0">
                             {timeAgo(n.updated_at)}
@@ -1457,10 +1596,17 @@ export function NestView({
                     <button
                       key={n.id}
                       type="button"
-                      className="rounded-full border px-2 py-0.5 text-primary hover:bg-muted truncate max-w-[180px]"
+                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 hover:bg-muted truncate max-w-[180px] ${
+                        n.type === "artifact"
+                          ? "border-amber-300 text-amber-700 dark:text-amber-300"
+                          : "text-primary"
+                      }`}
                       onClick={() => onOpenDocument(n.id)}
                     >
-                      {n.title}
+                      {n.type === "artifact" && (
+                        <FileCode2 className="h-3 w-3 shrink-0" />
+                      )}
+                      <span className="truncate">{n.title}</span>
                     </button>
                   ))}
                 </div>
@@ -1470,9 +1616,25 @@ export function NestView({
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
               ) : filtered.length === 0 ? (
-                <div className="text-center py-8 text-sm text-muted-foreground">
-                  {hasActiveFilters ? "No matching documents" : "No documents yet"}
-                </div>
+                hasActiveFilters || !canEditDocs ? (
+                  <div className="text-center py-8 text-sm text-muted-foreground">
+                    {hasActiveFilters ? "No matching documents" : "No documents yet"}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => importInputRef.current?.click()}
+                    className="w-full flex flex-col items-center gap-2 rounded-lg border-2 border-dashed border-border py-10 text-muted-foreground hover:border-primary hover:text-primary transition-colors"
+                  >
+                    <Upload className="h-7 w-7" />
+                    <div className="text-sm font-medium">
+                      Drag files here, or click to import
+                    </div>
+                    <div className="text-xs">
+                      .md → document · .html → hosted artifact
+                    </div>
+                  </button>
+                )
               ) : (
                 <div
                   className={
@@ -1483,6 +1645,9 @@ export function NestView({
                 >
                   {filtered.map((node) => {
                     const cards = viewMode === "cards";
+                    // Hosted HTML artifacts get a distinct icon + badge so they
+                    // read differently from markdown documents in the list.
+                    const isArtifact = node.type === "artifact";
                     const canSubmit =
                       stewardshipEnabled &&
                       node.status === "draft" &&
@@ -1569,20 +1734,34 @@ export function NestView({
                           } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer`}
                         data-testid={`document-row-${node.id}`}
                       >
-                        {!cards && (
-                          <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                        )}
+                        {!cards &&
+                          (isArtifact ? (
+                            <FileCode2 className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                          ) : (
+                            <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                          ))}
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
-                            {cards && (
-                              <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                            )}
+                            {cards &&
+                              (isArtifact ? (
+                                <FileCode2 className="h-4 w-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                              ) : (
+                                <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                              ))}
                             <span
                               className="font-medium truncate min-w-0"
                               title={node.title}
                             >
                               {node.title}
                             </span>
+                            {isArtifact && (
+                              <span
+                                className="shrink-0 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide"
+                                title="Hosted HTML artifact"
+                              >
+                                HTML
+                              </span>
+                            )}
                             <LifecycleStatusBadge
                               status={(node.status as DocumentLifecycleStatus) || "draft"}
                               size="sm"
@@ -2068,6 +2247,16 @@ export function NestView({
           onClose={() => setShowConnect(false)}
           nestId={nestId}
           nestName={nestName}
+        />
+      )}
+
+      {showGenerate && (
+        <GenerateContextModal
+          isOpen={showGenerate}
+          onClose={() => setShowGenerate(false)}
+          nestId={nestId}
+          nestName={nestName}
+          openMode={authMode === "open"}
         />
       )}
 

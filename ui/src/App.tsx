@@ -5,8 +5,9 @@ import { NestView } from "./components/NestView";
 import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
+import { SettingsPage } from "./components/SettingsPage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, getNest, changePassword, type LicenseStatus } from "./lib/api";
+import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network } from "lucide-react";
@@ -69,6 +70,7 @@ type View =
       breadcrumb?: BreadcrumbEntry[];
     }
   | { page: "teammates" }
+  | { page: "settings" }
   | {
       page: "ontology-graph";
       nestId: string;
@@ -117,6 +119,25 @@ export default function App() {
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
+  // Server-wide settings for the admin Settings page. Loaded once for admins.
+  const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
+  useEffect(() => {
+    if (!isAdmin) return;
+    getAdminSettings()
+      .then(setServerSettings)
+      .catch(() => {});
+  }, [isAdmin]);
+  const updateServerSettings = useCallback(async (patch: Partial<AdminSettings>) => {
+    try {
+      const res = await updateAdminSettings(patch);
+      setServerSettings(res.settings);
+      toast.success("Settings saved");
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to save settings");
+      // Re-sync from server so the UI reflects the true state.
+      getAdminSettings().then(setServerSettings).catch(() => {});
+    }
+  }, []);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
   const [showQuickOpen, setShowQuickOpen] = useState(false);
 
@@ -472,6 +493,7 @@ export default function App() {
                 me={adminStatus.me}
                 isAdmin={isAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
+                onSettings={() => setView({ page: "settings" })}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
               />
@@ -667,6 +689,14 @@ export default function App() {
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}
+
+        {view.page === "settings" && (
+          <SettingsPage
+            onBack={() => setView({ page: "dashboard" })}
+            settings={serverSettings}
+            onUpdate={updateServerSettings}
+          />
+        )}
         {view.page === "ontology-graph" && (
           <OntologyGraphView
             nestId={view.nestId}
@@ -699,6 +729,7 @@ interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
   onTeammates: () => void;
+  onSettings: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
 }
@@ -707,6 +738,7 @@ function UserMenu({
   me,
   isAdmin,
   onTeammates,
+  onSettings,
   onChangePassword,
   onLogout,
 }: UserMenuProps) {
@@ -760,6 +792,10 @@ function UserMenu({
             <DropdownMenuItem onSelect={onTeammates} className="cursor-pointer">
               <Users className="h-3.5 w-3.5 mr-2" />
               Teammates
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onSettings} className="cursor-pointer">
+              <Shield className="h-3.5 w-3.5 mr-2" />
+              Server settings
             </DropdownMenuItem>
           </>
         )}
