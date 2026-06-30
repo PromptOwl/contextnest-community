@@ -1,5 +1,33 @@
 # @promptowl/contextnest-community
 
+## 1.5.0
+
+### Minor Changes
+
+- v1.5.0 — AI-assisted context authoring, drag-and-drop ingestion, editor power tools, and a dedicated Server settings page.
+
+  ### Authoring & AI
+
+  - **"Add with AI"** — generate structured context from a prompt and push it straight into the nest; the assistant interviews and organizes the material rather than dumping raw text (`ui/src/components/GenerateContextModal.tsx`, `ui/src/components/NestView.tsx`, `ui/src/lib/api.ts`).
+  - **Drag-and-drop file ingestion** — drop files directly onto a vault to import them, with a discoverable import button and an empty-state drop zone (`ui/src/components/NestView.tsx`).
+
+  ### Document editor
+
+  - **Raw markdown toggle** — switch the document editor between rich and raw markdown views (`ui/src/components/DocumentEditor.tsx`).
+  - **Inline version diff** — view a highlighted diff against a prior version from inside the editor, with an unsaved-changes indicator and diff reset (`ui/src/components/DocumentEditor.tsx`, `ui/src/components/governance/VersionHistory.tsx`).
+  - **HTML artifact markers** — documents containing HTML artifacts are flagged in both the document list and the recently-edited views (`ui/src/components/NestView.tsx`).
+
+  ### Server settings
+
+  - **Dedicated Server settings page** with admin controls for logo, telemetry, base URL, and upload size limit, backed by new `/admin/settings` GET/PATCH endpoints (`ui/src/components/SettingsPage.tsx`, `src/app.ts`, `ui/src/lib/api.ts`).
+  - **Admin sign-in gate toggle** — admins can set the PromptOwl sign-in gate (`open` / `admin-only` / `disabled`) from the user menu (`ui/src/App.tsx`, `ui/src/lib/api.ts`).
+
+  ### Fixes
+
+  - `/admin/settings` PATCH is now atomic, with test coverage (`src/app.ts`, `test/admin-settings.test.ts`).
+  - Whitespace-only passwords are rejected at registration/login (`src/auth/routes.ts`, `test/password-validation.test.ts`).
+  - The document list reappears after clearing a no-result search in the Link-to-Document modal (`ui/src/components/DocumentPickerModal.tsx`).
+
 ## 1.4.0
 
 ### Minor Changes
