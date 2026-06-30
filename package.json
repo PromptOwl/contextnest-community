@@ -55,7 +55,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublish": "npm run build",
+    "prepublishOnly": "npm run build",
     "version-packages": "changeset version && npm install --package-lock-only",
     "release": "npm run build && changeset publish"
   },
