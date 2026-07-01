@@ -1583,6 +1583,10 @@ export function DocumentEditor({
                 currentNodeId={isNew ? undefined : nodeId}
                 editable={!fieldsDisabled}
                 onRequestDocLink={() => setShowDocPicker(true)}
+                onUploadImage={async (file) => {
+                  const { url } = await api.uploadAsset(nestId, file);
+                  return url;
+                }}
                 onWikiLinkClick={handleWikiLinkClick}
                 placeholder="Start writing..."
               />
