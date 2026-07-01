@@ -65,6 +65,11 @@ export const TOOL_DEFINITIONS = [
       type: "object" as const,
       properties: {
         query: { type: "string", description: "Selector query" },
+        hops: {
+          type: "number",
+          description:
+            "Graph traversal depth from the matched nodes (default: 2). Use 1 for just the matches + direct links, higher to pull in more of the neighborhood.",
+        },
       },
       required: ["query"],
     },
@@ -107,6 +112,11 @@ export const TOOL_DEFINITIONS = [
         max_tokens: {
           type: "number",
           description: "Approximate token budget (default: 8000)",
+        },
+        hops: {
+          type: "number",
+          description:
+            "Graph traversal depth from the matched nodes (default: 2)",
         },
       },
       required: ["selector"],
@@ -392,7 +402,10 @@ export async function handleToolCall(
     }
 
     case "context_query": {
-      const result = await queryEngine.query(args.query, { hops: 2 });
+      // hops mirrors REST POST /context — caller-controlled traversal depth.
+      const result = await queryEngine.query(args.query, {
+        hops: args.hops ?? 2,
+      });
       const nodes = result.documents;
       if (!nodes.length) return `No nodes matched: ${args.query}`;
       const list = nodes
@@ -448,7 +461,9 @@ export async function handleToolCall(
     }
 
     case "context_resolve": {
-      const result = await queryEngine.query(args.selector, { hops: 2 });
+      const result = await queryEngine.query(args.selector, {
+        hops: args.hops ?? 2,
+      });
       const maxTokens = args.max_tokens || 8000;
       const approxChars = maxTokens * 4;
       let total = 0;

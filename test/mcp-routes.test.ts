@@ -201,6 +201,23 @@ describe("MCP tools/call — basic vault tools", () => {
     expect(text.length).toBeGreaterThan(0);
     expect(text).toMatch(/(API Reference|No nodes matched)/);
   });
+
+  it("context_query and context_resolve accept a caller-set hops depth", async () => {
+    // hops was hardcoded to 2; now it's caller-controlled (parity with REST
+    // POST /context). Same plumbing-level assertion as above — the param must
+    // be accepted by the schema and passed through without erroring.
+    const one = await callTool("context_query", { query: "#api", hops: 1 });
+    expect(typeof one).toBe("string");
+    expect(one).toMatch(/(API Reference|No nodes matched)/);
+
+    const resolved = await callTool("context_resolve", {
+      selector: "#api",
+      hops: 1,
+      max_tokens: 500,
+    });
+    expect(typeof resolved).toBe("string");
+    expect(resolved.length).toBeGreaterThan(0);
+  });
 });
 
 describe("MCP tools/call — error handling", () => {
