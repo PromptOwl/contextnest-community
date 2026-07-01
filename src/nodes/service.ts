@@ -90,7 +90,12 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
     updated_at: fm.updated_at,
     content: node.body || "",
     pendingChange: node.pendingChange ?? undefined,
-    schedule: (fm.metadata as any)?.schedule ?? undefined,
+    // Same YAML-coercion rule as title above: `schedule: 123` parses as a
+    // number — normalize to string at the API boundary.
+    schedule:
+      (fm.metadata as any)?.schedule != null
+        ? String((fm.metadata as any).schedule)
+        : undefined,
   };
 }
 
