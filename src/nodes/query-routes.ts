@@ -45,6 +45,25 @@ queryRoutes.get("/changes", async (c) => {
 
   const { listNodesForCaller } = await import("./service.js");
   const all = await listNodesForCaller(nestId, userId);
+  const { getDb } = await import("../db/client.js");
+  const db = getDb();
+
+  // Governed nests: an APPROVAL changes what read-tier mirrors see even
+  // when the frontmatter updated_at predates `since` (edit before, publish
+  // after). Treat approved_at as an additional change signal so a real
+  // publish event is never silently dropped from the feed.
+  const approvedRows = (await db.all(
+    "SELECT node_id, approved_at FROM approved_versions WHERE nest_id = ?",
+    [nestId],
+  )) as Array<{ node_id: string; approved_at: string }>;
+  // approved_at may be sqlite's "YYYY-MM-DD HH:MM:SS" (UTC) — normalize.
+  const parseDbTs = (t: string) =>
+    Date.parse(t.includes("T") ? t : `${t.replace(" ", "T")}Z`);
+  const publishedSince = new Set(
+    approvedRows
+      .filter((r) => parseDbTs(r.approved_at) > sinceMs)
+      .map((r) => r.node_id),
+  );
 
   const summarize = (n: (typeof all)[number]) => ({
     id: n.id,
@@ -63,19 +82,34 @@ queryRoutes.get("/changes", async (c) => {
     const updatedAt = Date.parse(n.updated_at || "");
     if (!Number.isNaN(createdAt) && createdAt > sinceMs) created.push(summarize(n));
     else if (!Number.isNaN(updatedAt) && updatedAt > sinceMs) updated.push(summarize(n));
+    else if (publishedSince.has(n.id)) updated.push(summarize(n));
   }
 
-  // Tombstones newer than `since`, minus anything that now exists again
-  // (delete → recreate lands in created[], not deleted[]).
-  const { getDb } = await import("../db/client.js");
-  const rows = (await getDb().all(
-    "SELECT node_id, deleted_by, deleted_at FROM node_deletions WHERE nest_id = ? AND deleted_at > ?",
-    [nestId, new Date(sinceMs).toISOString()],
-  )) as Array<{ node_id: string; deleted_by: string | null; deleted_at: string }>;
-  const liveIds = new Set(all.map((n) => n.id));
-  const deleted = rows
-    .filter((r) => !liveIds.has(r.node_id))
-    .map((r) => ({ id: r.node_id, deleted_by: r.deleted_by, deleted_at: r.deleted_at }));
+  // deleted[] is write+ only. Tombstones bypass the per-node read gates
+  // (the doc is gone, so filterAccessible can't vouch for it) — a read-tier
+  // or public caller could otherwise learn node ids and deleter emails for
+  // docs they were never allowed to see. `null` (not []) tells read-tier
+  // mirrors "not available at your access level — reconcile by id diff",
+  // so silence is never mistaken for "no deletions".
+  const canSeeDeleted =
+    permissionLevel(c.get("nestPermission")) >= permissionLevel("write");
+  let deleted: Array<{
+    id: string;
+    deleted_by: string | null;
+    deleted_at: string;
+  }> | null = null;
+  if (canSeeDeleted) {
+    // Tombstones newer than `since`, minus anything that now exists again
+    // (delete → recreate lands in created[], not deleted[]).
+    const rows = (await db.all(
+      "SELECT node_id, deleted_by, deleted_at FROM node_deletions WHERE nest_id = ? AND deleted_at > ?",
+      [nestId, new Date(sinceMs).toISOString()],
+    )) as Array<{ node_id: string; deleted_by: string | null; deleted_at: string }>;
+    const liveIds = new Set(all.map((n) => n.id));
+    deleted = rows
+      .filter((r) => !liveIds.has(r.node_id))
+      .map((r) => ({ id: r.node_id, deleted_by: r.deleted_by, deleted_at: r.deleted_at }));
+  }
 
   return c.json({
     since: new Date(sinceMs).toISOString(),

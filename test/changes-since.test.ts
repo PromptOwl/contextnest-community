@@ -119,6 +119,30 @@ describe("GET /nests/:id/changes", () => {
     expect(res.data.deleted).toEqual([]);
   });
 
+  it("read-tier callers get deleted: null (no tombstone leak), not an empty list", async () => {
+    const reader = await registerUser(app, "reader@acme.com", "Reader");
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: reader.email, permission: "read" },
+      alice.apiKey,
+    );
+    const res = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/changes?since=${encodeURIComponent(t0)}`,
+      undefined,
+      reader.apiKey,
+    );
+    expect(res.status).toBe(200);
+    // Tombstones bypass per-node read gates, so they're write+ only. null
+    // (not []) so a mirror can't mistake "not allowed" for "no deletions".
+    expect(res.data.deleted).toBeNull();
+    // created/updated stay caller-gated as before.
+    expect(res.data.created.map((n: any) => n.id)).toContain("nodes/new-doc");
+  });
+
   it("include_content=1 ships the bodies", async () => {
     const res = await jsonRequest(
       app,
