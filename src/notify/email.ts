@@ -31,8 +31,20 @@ async function getTransporter(): Promise<any | null> {
       nodemailer.default.createTransport(url, {
         disableFileAccess: true,
         disableUrlAccess: true,
-      }),
+        // Timeout parity with the Slack connector: an SMTP outage must not
+        // leave a connection hanging for nodemailer's ~2min defaults per
+        // event — bound every phase to seconds.
+        connectionTimeout: 5000,
+        greetingTimeout: 5000,
+        socketTimeout: 10000,
+      } as any),
     );
+    // A rejected build must not be cached forever (a settled Promise is
+    // truthy) — reset so the next event retries instead of silently dying.
+    transporterPromise.catch(() => {
+      transporterPromise = null;
+      configuredUrl = null;
+    });
   }
   return transporterPromise;
 }

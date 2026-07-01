@@ -315,13 +315,20 @@ export function createApp(): Hono<AuthEnv> {
         errors.push("smtp_url must be an smtp:// or smtps:// URL (or empty to disable)");
       else pending.push({ name: "SMTP_URL", value: v || null });
     }
+    // Loose shape check (something@something, no CR/LF) — these flow into
+    // nodemailer's envelope, so junk and header-injection shapes stop here.
+    const emailish = (v: string) => /^[^\s@]+@[^\s@]+$/.test(v);
     if ("notify_email_from" in body) {
       const v = String(body.notify_email_from ?? "").trim();
-      pending.push({ name: "NOTIFY_EMAIL_FROM", value: v || null });
+      if (v && !emailish(v))
+        errors.push("notify_email_from must be a plain email address");
+      else pending.push({ name: "NOTIFY_EMAIL_FROM", value: v || null });
     }
     if ("notify_email_to" in body) {
       const v = String(body.notify_email_to ?? "").trim();
-      pending.push({ name: "NOTIFY_EMAIL_TO", value: v || null });
+      if (v && !v.split(",").every((e) => emailish(e.trim())))
+        errors.push("notify_email_to must be a comma-separated list of email addresses");
+      else pending.push({ name: "NOTIFY_EMAIL_TO", value: v || null });
     }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);

@@ -217,12 +217,6 @@ export const config = {
     return (process.env.AUTH_MODE || "key") as "open" | "key";
   },
   /**
-   * Optional Slack incoming-webhook URL for team notifications (review
-   * submitted/approved/rejected, nest shared). Empty/unset = connector off.
-   * https only — a webhook carries an implicit secret in its path, so it
-   * never travels plaintext.
-   */
-  /**
    * Optional SMTP connection URL for email notifications, e.g.
    * smtps://user:pass@smtp.example.com:465. smtp:// or smtps:// only.
    * Empty/unset = email connector off. Requires NOTIFY_EMAIL_FROM/_TO.
@@ -246,6 +240,12 @@ export const config = {
   get NOTIFY_EMAIL_TO(): string | null {
     return process.env.NOTIFY_EMAIL_TO?.trim() || null;
   },
+  /**
+   * Optional Slack incoming-webhook URL for team notifications (review
+   * submitted/approved/rejected, nest shared). Empty/unset = connector off.
+   * https only — a webhook carries an implicit secret in its path, so it
+   * never travels plaintext.
+   */
   get SLACK_WEBHOOK_URL(): string | null {
     const raw = process.env.SLACK_WEBHOOK_URL?.trim();
     if (!raw) return null;
