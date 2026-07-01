@@ -160,8 +160,9 @@ export async function disableStewardshipAndWipeGovernance(
  * the same user already owns (UNIQUE(user_id, slug) would throw anyway —
  * surfacing a clean error keeps the autosave UX sane).
  *
- * On-disk state is untouched. The folder is still at <DATA_ROOT>/nests/<id>;
- * renaming a nest never relocates its files.
+ * On-disk state is untouched. The folder stays at its `resolveNestPath(id)`
+ * location (see shared/paths.ts — `<NEST_STORAGE_ROOT>/<id>`, default
+ * `<DATA_ROOT>/nests/<id>`); renaming a nest never relocates its files.
  */
 export async function renameNest(
   nestId: string,
@@ -410,11 +411,13 @@ export async function deleteNest(nestId: string): Promise<void> {
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 
-  // Reclaim the on-disk folder. Every nest (default or imported) lives under
-  // DATA_ROOT — imported nests copied their files in, so removing the folder
-  // never touches the user's original (untouched) source. Failure here is
-  // non-fatal: the DB rows are already gone, so the nest is unreachable from
-  // the app either way; an orphaned directory is harmless.
+  // Reclaim the on-disk folder at its resolved location (see shared/paths.ts —
+  // `<NEST_STORAGE_ROOT>/<id>`, default `<DATA_ROOT>/nests/<id>`). Every nest
+  // (default or imported) lives there — imported nests copied their files in,
+  // so removing the folder never touches the user's original (untouched)
+  // source. Failure here is non-fatal: the DB rows are already gone, so the
+  // nest is unreachable from the app either way; an orphaned directory is
+  // harmless.
   const path = resolveNestPath(nestId);
   try {
     rmSync(path, { recursive: true, force: true });

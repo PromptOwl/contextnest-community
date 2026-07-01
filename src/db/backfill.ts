@@ -14,8 +14,6 @@
 
 import { NestStorage } from "@promptowl/contextnest-engine";
 import { resolveNestPath } from "../shared/paths.js";
-import { join } from "path";
-import { config } from "../config.js";
 import type { DatabaseAdapter } from "./adapter.js";
 import { insertOrIgnore, nowExpr } from "./sql.js";
 
