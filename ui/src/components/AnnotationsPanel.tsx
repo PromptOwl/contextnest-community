@@ -150,6 +150,11 @@ export function AnnotationsPanel({
   };
 
   const count = threads?.length ?? 0;
+  // Newest thread first in the rail (replies inside a thread stay chronological).
+  // UI-only ordering — the server list + derived projection keep their own order.
+  const ordered = threads
+    ? [...threads].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    : threads;
 
   return (
     <section className="flex flex-col flex-1 min-h-0 max-h-[calc(100vh-2rem)] rounded-lg border border-border bg-card p-4" data-testid="annotations-panel">
@@ -250,7 +255,7 @@ export function AnnotationsPanel({
           <p className="text-sm text-muted-foreground py-2">No comments yet.</p>
         ) : (
           <ul className="space-y-3">
-            {threads.map((t) => (
+            {ordered!.map((t) => (
               <li
                 key={t.id}
                 ref={(el) => {
