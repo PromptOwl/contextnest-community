@@ -192,6 +192,7 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
             </CardHeader>
             <CardContent>
               <TextSetting
+                type="password"
                 value={settings.slack_webhook_url ?? ""}
                 placeholder="https://hooks.slack.com/services/…"
                 onSave={(v) => onUpdate({ slack_webhook_url: v })}
