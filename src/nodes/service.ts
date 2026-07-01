@@ -7,7 +7,7 @@ import { serializeDocument, parseDocument } from "@promptowl/contextnest-engine"
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { safePublishDocument } from "../governance/safe-publish.js";
 import { engineCache } from "./engine.js";
-import { NotFoundError, LockedError } from "../shared/errors.js";
+import { NotFoundError, LockedError, ValidationError } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { syncNodeTags } from "../governance/tag-index-service.js";
@@ -177,6 +177,10 @@ export interface CreateNodeInput {
    *  the title slug. Used by derived/system nodes that need a deterministic,
    *  collision-free id independent of the human-readable title. */
   id?: string;
+  /** Folder path under nodes/ (e.g. "gtm/deals"). Each segment is slugified;
+   *  storage and read/update/delete already handle nested ids, only creation
+   *  was flat. Ignored when an explicit id is given. */
+  folder?: string;
 }
 
 export interface UpdateNodePatch {
@@ -200,11 +204,26 @@ export async function createNode(
 ): Promise<NodeMutationResult> {
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
-  const slug = input.title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-  const id = input.id ?? `nodes/${slug}`;
+  const slugify = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+  const slug = slugify(input.title);
+  // Slugifying per segment means "../x" or absolute paths can never escape
+  // the vault — traversal characters collapse to "-" and empty segments drop.
+  const folderSegments = (input.folder ?? "")
+    .split("/")
+    .map(slugify)
+    .filter(Boolean);
+  if (folderSegments.length > 8) {
+    throw new ValidationError("folder may nest at most 8 levels deep");
+  }
+  const id =
+    input.id ??
+    (folderSegments.length > 0
+      ? `nodes/${folderSegments.join("/")}/${slug}`
+      : `nodes/${slug}`);
   const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
 

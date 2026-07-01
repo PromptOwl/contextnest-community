@@ -73,6 +73,12 @@ function prettyFolder(name: string) {
     .join(" ");
 }
 
+/** "nodes/gtm/deals" → "Nodes / Gtm / Deals" for nested group headers. */
+function prettyFolderPath(path: string) {
+  if (path === "Root") return "Root";
+  return path.split("/").map(prettyFolder).join(" / ");
+}
+
 interface NestViewProps {
   nestId: string;
   nestName: string;
@@ -613,10 +619,14 @@ export function NestView({
   // (excluded from the node list as a meta-file); surfacing that engine-built
   // index is a deeper follow-up — this is the lightweight UI overview.
   const tocGroups = (() => {
+    // Group by the FULL folder path (everything before the leaf), not just
+    // the first segment, so nested folders like nodes/gtm/deals each get
+    // their own group. Sorting by path keeps children right under parents;
+    // depth drives the header indent.
     const groups = new Map<string, any[]>();
     for (const n of nodes) {
       const id: string = n.id || "";
-      const slash = id.indexOf("/");
+      const slash = id.lastIndexOf("/");
       const folder = slash > 0 ? id.slice(0, slash) : "Root";
       if (!groups.has(folder)) groups.set(folder, []);
       groups.get(folder)!.push(n);
@@ -624,6 +634,7 @@ export function NestView({
     return [...groups.entries()]
       .map(([folder, items]) => ({
         folder,
+        depth: folder === "Root" ? 0 : folder.split("/").length - 1,
         items: [...items].sort((a, b) =>
           String(a.title || a.id).localeCompare(String(b.title || b.id)),
         ),
@@ -1322,11 +1333,14 @@ export function NestView({
               ) : (
                 <div className="space-y-5">
                   {tocGroups.map((g) => (
-                    <div key={g.folder}>
+                    <div
+                      key={g.folder}
+                      style={{ marginLeft: `${g.depth * 1.25}rem` }}
+                    >
                       <div className="flex items-center gap-2 mb-2">
                         <FolderOpen className="h-4 w-4 text-muted-foreground" />
                         <h4 className="text-sm font-medium">
-                          {prettyFolder(g.folder)}
+                          {prettyFolderPath(g.folder)}
                         </h4>
                         <Badge
                           variant="secondary"

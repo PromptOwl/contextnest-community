@@ -413,7 +413,13 @@ export async function getNode(nestId: string, nodeId: string) {
 
 export async function createNode(
   nestId: string,
-  data: { title: string; content: string; tags?: string[]; type?: string },
+  data: {
+    title: string;
+    content: string;
+    tags?: string[];
+    type?: string;
+    folder?: string;
+  },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
     method: "POST",

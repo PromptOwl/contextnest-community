@@ -133,6 +133,11 @@ export const TOOL_DEFINITIONS = [
           description: "Tags",
         },
         scope: { type: "string", description: "Visibility scope" },
+        folder: {
+          type: "string",
+          description:
+            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified',
+        },
       },
       required: ["title", "content"],
     },
@@ -476,6 +481,7 @@ export async function handleToolCall(
           type: args.type,
           tags: args.tags,
           scope: args.scope,
+          folder: args.folder,
         },
         userEmail,
       );
