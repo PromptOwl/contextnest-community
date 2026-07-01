@@ -212,18 +212,22 @@ export async function createNode(
   const slug = slugify(input.title);
   // Slugifying per segment means "../x" or absolute paths can never escape
   // the vault — traversal characters collapse to "-" and empty segments drop.
-  const folderSegments = (input.folder ?? "")
-    .split("/")
-    .map(slugify)
-    .filter(Boolean);
-  if (folderSegments.length > 8) {
-    throw new ValidationError("folder may nest at most 8 levels deep");
+  // An explicit id wins outright: folder is documented as ignored then, so
+  // it isn't derived or validated either.
+  let id = input.id;
+  if (!id) {
+    const folderSegments = (input.folder ?? "")
+      .split("/")
+      .map(slugify)
+      .filter(Boolean);
+    if (folderSegments.length > 8) {
+      throw new ValidationError("folder may nest at most 8 levels deep");
+    }
+    id =
+      folderSegments.length > 0
+        ? `nodes/${folderSegments.join("/")}/${slug}`
+        : `nodes/${slug}`;
   }
-  const id =
-    input.id ??
-    (folderSegments.length > 0
-      ? `nodes/${folderSegments.join("/")}/${slug}`
-      : `nodes/${slug}`);
   const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
 

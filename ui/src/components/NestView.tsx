@@ -631,6 +631,18 @@ export function NestView({
       if (!groups.has(folder)) groups.set(folder, []);
       groups.get(folder)!.push(n);
     }
+    // Compare paths segment-by-segment (not as flat strings) so children
+    // always sort directly under their parent — a sibling like "nodes-extra"
+    // would otherwise wedge between "nodes" and "nodes/a".
+    const byPathSegments = (a: string, b: string) => {
+      const as = a.split("/");
+      const bs = b.split("/");
+      for (let i = 0; i < Math.min(as.length, bs.length); i++) {
+        const cmp = as[i].localeCompare(bs[i]);
+        if (cmp !== 0) return cmp;
+      }
+      return as.length - bs.length;
+    };
     return [...groups.entries()]
       .map(([folder, items]) => ({
         folder,
@@ -644,7 +656,7 @@ export function NestView({
           ? -1
           : b.folder === "Root"
             ? 1
-            : a.folder.localeCompare(b.folder),
+            : byPathSegments(a.folder, b.folder),
       );
   })();
 
