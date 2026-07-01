@@ -54,15 +54,25 @@ const MIN_ZOOM = 0.15;
 const MAX_ZOOM = 5;
 
 /**
- * Deterministic selector for a graph node, in the engine grammar the
- * query endpoints accept: docs by exact title, tags by #name. Stewards
- * and the root have no selector of their own — callers fall back to the
- * neighborhood union.
+ * Deterministic selector for a graph node, in the grammar POST /context
+ * accepts: docs by exact [[Title]] (resolved server-side, hop-expanded),
+ * tags by #name. Stewards and the root have no selector of their own —
+ * callers fall back to the neighborhood union. A title containing "]]"
+ * can't be expressed in wiki syntax, so those yield no selector rather
+ * than a broken one.
  */
 function selectorForNode(n: GNode): string | null {
-  if (n.kind === "doc") return `[[${n.name}]]`;
+  if (n.kind === "doc") {
+    return n.name.includes("]]") ? null : `[[${n.name}]]`;
+  }
   if (n.kind === "tag") return `#${n.name.replace(/^#/, "")}`;
   return null;
+}
+
+/** Wrap for a single-quoted shell argument: ' → '\'' so a title with an
+ *  apostrophe can't break out of the copied curl -d payload. */
+function shellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /** Pan/zoom transform: screen = world * k + (x, y). */
@@ -577,13 +587,13 @@ function NodeDetail({
         .map(selectorForNode)
         .filter((s): s is string => !!s)
     : [];
-  const unionSelector = hoodSelectors.join("|");
+  const unionSelector = hoodSelectors.join(" | ");
   const serverUrl =
     typeof window !== "undefined" ? window.location.origin : "";
   // Anchor query: this node + hopDepth server-side hops. Matches what's
   // highlighted (the server traverses the same link graph).
   const curl = selector
-    ? `curl -X POST ${serverUrl}/nests/${nestId}/context \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer <api-key>" \\\n  -d '${JSON.stringify({ selector, hops: hopDepth })}'`
+    ? `curl -X POST ${serverUrl}/nests/${nestId}/context \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer <api-key>" \\\n  -d ${shellSingleQuote(JSON.stringify({ selector, hops: hopDepth }))}`
     : null;
 
   return (
