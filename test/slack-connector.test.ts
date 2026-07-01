@@ -21,10 +21,14 @@ beforeAll(async () => {
   vi.stubGlobal(
     "fetch",
     async (url: any, init?: any) => {
-      if (String(url) === WEBHOOK) {
-        sent.push({ url: String(url), text: JSON.parse(init.body).text });
+      const u = String(url);
+      if (u === WEBHOOK) {
+        sent.push({ url: u, text: JSON.parse(init.body).text });
         return new Response("ok", { status: 200 });
       }
+      // Any other webhook URL simulates an outage; nothing in this suite may
+      // touch the real network.
+      if (u.includes("hooks.slack.com")) throw new Error("simulated outage");
       return realFetch(url, init);
     },
   );

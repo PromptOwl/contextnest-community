@@ -31,6 +31,16 @@ export async function notifySlackForNest(
   return notifySlack(`*[${nestName}]* ${message}`);
 }
 
+/**
+ * Slack's mrkdwn treats <...> as control sequences: <!channel> mass-pings,
+ * <url|label> renders deceptive links. Message text carries user-controlled
+ * fragments (notes, emails, nest names), so escape &, <, > per Slack's own
+ * escaping rules before sending. Our * and ` formatting is unaffected.
+ */
+function escapeMrkdwn(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 export async function notifySlack(text: string): Promise<void> {
   const url = config.SLACK_WEBHOOK_URL;
   if (!url) return;
@@ -41,7 +51,7 @@ export async function notifySlack(text: string): Promise<void> {
       await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text: escapeMrkdwn(text) }),
         signal: ctrl.signal,
       });
     } finally {
