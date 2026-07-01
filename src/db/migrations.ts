@@ -689,4 +689,29 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("011_comments");
   }
+
+  // 015: glossary definitions (CU-wdqcpzv2eg). A literal table-based
+  //   ontology per nest: stewards define and articulate terms — existing
+  //   tags or brand-new ones — and external runtimes (quant analysis jobs,
+  //   agents) pull them in real time via GET /definitions?term=. One row
+  //   per (nest, term), case-insensitive.
+  if (!hasMigration("015_definitions")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS definitions (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          term TEXT NOT NULL,
+          definition TEXT NOT NULL,
+          linked_tag TEXT,               -- optional #tag this term maps to
+          defined_by TEXT NOT NULL,      -- email
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_definitions_term
+          ON definitions(nest_id, term COLLATE NOCASE);
+      `);
+    })();
+    recordMigration("015_definitions");
+  }
 }

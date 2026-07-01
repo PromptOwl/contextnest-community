@@ -403,6 +403,41 @@ export async function getServerStats() {
 
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
+// ─── Glossary definitions ──────────────────────────────────────────────
+
+export interface Definition {
+  id: string;
+  term: string;
+  definition: string;
+  linked_tag: string | null;
+  defined_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listDefinitions(nestId: string) {
+  return request<{ count: number; definitions: Definition[] }>(
+    `/nests/${nestId}/definitions`,
+  );
+}
+
+export async function upsertDefinition(
+  nestId: string,
+  data: { term: string; definition: string; linked_tag?: string | null },
+) {
+  return request<{ definition: Definition }>(`/nests/${nestId}/definitions`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteDefinition(nestId: string, id: string) {
+  return request<{ deleted: boolean }>(
+    `/nests/${nestId}/definitions/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
 export async function listNodes(nestId: string) {
   return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
 }
