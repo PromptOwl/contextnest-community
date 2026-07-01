@@ -62,6 +62,31 @@ describe("definitions CRUD", () => {
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/definitions`, undefined, owner.apiKey);
     expect(list.data.count).toBe(1);
     expect(list.data.definitions[0].definition).toBe("Updated articulation.");
+    // linked_tag was OMITTED in the redefine — it must survive, not clear.
+    expect(list.data.definitions[0].linked_tag).toBe("#gtm");
+  });
+
+  it("explicit linked_tag: null clears it", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/definitions`,
+      { term: "CAC", definition: "Updated articulation.", linked_tag: null },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.definition.linked_tag).toBeNull();
+  });
+
+  it("400s (not 500s) on non-string fields", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/definitions`,
+      { term: 123, definition: "x" },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(400);
   });
 
   it("rejects empty term or definition", async () => {

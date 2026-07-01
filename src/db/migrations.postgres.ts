@@ -40,6 +40,7 @@ const HISTORICAL_MIGRATIONS = [
   "009_lowercase_emails",
   "010_sso_used_jti",
   "011_comments",
+  "015_definitions",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -277,6 +278,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON comments(nest_id, node_id, status);
     CREATE INDEX IF NOT EXISTS idx_comments_thread
       ON comments(parent_id);
+
+    CREATE TABLE IF NOT EXISTS definitions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      term TEXT NOT NULL,
+      definition TEXT NOT NULL,
+      linked_tag TEXT,
+      defined_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    -- Case-insensitive uniqueness the portable way (SQLite side uses
+    -- COLLATE NOCASE; Postgres has no NOCASE collation).
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_definitions_term
+      ON definitions(nest_id, LOWER(term));
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

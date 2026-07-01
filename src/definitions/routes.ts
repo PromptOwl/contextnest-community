@@ -37,14 +37,14 @@ definitionRoutes.get("/", async (c) => {
   const term = c.req.query("term")?.trim();
   if (term) {
     const row = (await db.get(
-      "SELECT * FROM definitions WHERE nest_id = ? AND term = ? COLLATE NOCASE",
+      "SELECT * FROM definitions WHERE nest_id = ? AND LOWER(term) = LOWER(?)",
       [nestId, term],
     )) as DefinitionRow | undefined;
     if (!row) throw new NotFoundError(`No definition for "${term}"`);
     return c.json({ definition: row });
   }
   const rows = (await db.all(
-    "SELECT * FROM definitions WHERE nest_id = ? ORDER BY term COLLATE NOCASE",
+    "SELECT * FROM definitions WHERE nest_id = ? ORDER BY LOWER(term)",
     [nestId],
   )) as DefinitionRow[];
   return c.json({ count: rows.length, definitions: rows });
@@ -56,47 +56,75 @@ definitionRoutes.get("/", async (c) => {
 definitionRoutes.post("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   const body = await c.req.json<{
-    term?: string;
-    definition?: string;
-    linked_tag?: string | null;
+    term?: unknown;
+    definition?: unknown;
+    linked_tag?: unknown;
   }>();
-  const term = body.term?.trim();
-  const definition = body.definition?.trim();
+  // Runtime shape checks — the json<>() cast is compile-time only, and a
+  // numeric term would otherwise TypeError into a generic 500.
+  if (body.term !== undefined && typeof body.term !== "string")
+    throw new ValidationError("term must be a string");
+  if (body.definition !== undefined && typeof body.definition !== "string")
+    throw new ValidationError("definition must be a string");
+  if (
+    body.linked_tag !== undefined &&
+    body.linked_tag !== null &&
+    typeof body.linked_tag !== "string"
+  )
+    throw new ValidationError("linked_tag must be a string or null");
+  const term = (body.term as string | undefined)?.trim();
+  const definition = (body.definition as string | undefined)?.trim();
   if (!term || !definition) {
     throw new ValidationError("term and definition are required");
   }
   if (term.length > 200) {
     throw new ValidationError("term must be 200 characters or fewer");
   }
-  const linkedTag = body.linked_tag?.trim()
-    ? `#${body.linked_tag.trim().replace(/^#+/, "").toLowerCase()}`
+  // linked_tag semantics: omitted = leave unchanged on update; explicit
+  // null/"" = clear; string = set (normalized to #lowercase).
+  const linkedTagProvided = "linked_tag" in body;
+  const linkedTag = (body.linked_tag as string | null | undefined)?.trim()
+    ? `#${(body.linked_tag as string).trim().replace(/^#+/, "").toLowerCase()}`
     : null;
 
   const db = getDb();
   const definedBy = await resolveCallerEmail(c.get("userId"));
   const now = new Date().toISOString();
-  const existing = (await db.get(
-    "SELECT id FROM definitions WHERE nest_id = ? AND term = ? COLLATE NOCASE",
-    [nestId, term],
-  )) as { id: string } | undefined;
+  // Transaction closes the select-then-branch race: two concurrent defines
+  // of the same new term serialize instead of the loser 409ing on the
+  // unique index.
+  await db.transaction(async (tx) => {
+    const existing = (await tx.get(
+      "SELECT id FROM definitions WHERE nest_id = ? AND LOWER(term) = LOWER(?)",
+      [nestId, term],
+    )) as { id: string } | undefined;
 
-  if (existing) {
-    await db.run(
-      "UPDATE definitions SET term = ?, definition = ?, linked_tag = ?, defined_by = ?, updated_at = ? WHERE id = ?",
-      [term, definition, linkedTag, definedBy, now, existing.id],
-    );
-  } else {
-    await db.run(
-      `INSERT INTO definitions (id, nest_id, term, definition, linked_tag, defined_by, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [uuid(), nestId, term, definition, linkedTag, definedBy, now, now],
-    );
-  }
-  const row = await db.get(
-    "SELECT * FROM definitions WHERE nest_id = ? AND term = ? COLLATE NOCASE",
+    if (existing) {
+      if (linkedTagProvided) {
+        await tx.run(
+          "UPDATE definitions SET term = ?, definition = ?, linked_tag = ?, defined_by = ?, updated_at = ? WHERE id = ?",
+          [term, definition, linkedTag, definedBy, now, existing.id],
+        );
+      } else {
+        await tx.run(
+          "UPDATE definitions SET term = ?, definition = ?, defined_by = ?, updated_at = ? WHERE id = ?",
+          [term, definition, definedBy, now, existing.id],
+        );
+      }
+    } else {
+      await tx.run(
+        `INSERT INTO definitions (id, nest_id, term, definition, linked_tag, defined_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [uuid(), nestId, term, definition, linkedTag, definedBy, now, now],
+      );
+    }
+  });
+  const row = (await db.get(
+    "SELECT * FROM definitions WHERE nest_id = ? AND LOWER(term) = LOWER(?)",
     [nestId, term],
-  );
-  return c.json({ definition: row }, existing ? 200 : 201);
+  )) as DefinitionRow;
+  const created = row.created_at === now;
+  return c.json({ definition: row }, created ? 201 : 200);
 });
 
 // DELETE /nests/:nestId/definitions/:id
