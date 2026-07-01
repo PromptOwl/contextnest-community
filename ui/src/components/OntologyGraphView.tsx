@@ -14,7 +14,7 @@ import {
   forceCollide,
   type SimulationNodeDatum,
 } from "d3-force";
-import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2 } from "lucide-react";
+import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
 import { Button } from "./ui/button";
 
@@ -53,6 +53,18 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 const MIN_ZOOM = 0.15;
 const MAX_ZOOM = 5;
 
+/**
+ * Deterministic selector for a graph node, in the engine grammar the
+ * query endpoints accept: docs by exact title, tags by #name. Stewards
+ * and the root have no selector of their own — callers fall back to the
+ * neighborhood union.
+ */
+function selectorForNode(n: GNode): string | null {
+  if (n.kind === "doc") return `[[${n.name}]]`;
+  if (n.kind === "tag") return `#${n.name.replace(/^#/, "")}`;
+  return null;
+}
+
 /** Pan/zoom transform: screen = world * k + (x, y). */
 interface View {
   x: number;
@@ -72,6 +84,10 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [layers, setLayers] = useState({ links: true, stewardship: true, categories: true });
   const [selected, setSelected] = useState<GNode | null>(null);
+  // Traversal depth for the highlighted neighborhood AND the copyable
+  // query — the same number feeds the server's `hops` param, so what you
+  // see highlighted is what the query pulls.
+  const [hopDepth, setHopDepth] = useState(1);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -277,6 +293,40 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
 
   const radius = (n: GNode) => 3 + n.val;
 
+  // BFS the selected node's N-hop neighborhood over the visible links.
+  // Sim links carry resolved GNode refs after the force pass, so read ids
+  // off the endpoints. Null when nothing is selected → no dimming.
+  const neighborhood = useMemo<Set<string> | null>(() => {
+    if (!selected) return null;
+    const adj = new Map<string, string[]>();
+    for (const l of sim.links) {
+      const s = typeof l.source === "string" ? l.source : l.source.id;
+      const t = typeof l.target === "string" ? l.target : l.target.id;
+      (adj.get(s) ?? adj.set(s, []).get(s)!).push(t);
+      (adj.get(t) ?? adj.set(t, []).get(t)!).push(s);
+    }
+    const seen = new Set<string>([selected.id]);
+    let frontier = [selected.id];
+    for (let d = 0; d < hopDepth && frontier.length; d++) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        for (const nb of adj.get(id) ?? []) {
+          if (!seen.has(nb)) {
+            seen.add(nb);
+            next.push(nb);
+          }
+        }
+      }
+      frontier = next;
+    }
+    return seen;
+  }, [selected, hopDepth, sim.links]);
+
+  const nodesById = useMemo(
+    () => new Map(sim.nodes.map((n) => [n.id, n])),
+    [sim.nodes],
+  );
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
@@ -353,6 +403,9 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
                       const s = l.source as GNode;
                       const t = l.target as GNode;
                       if (s?.x == null || t?.x == null) return null;
+                      const inHood =
+                        !neighborhood ||
+                        (neighborhood.has(s.id) && neighborhood.has(t.id));
                       return (
                         <line
                           key={i}
@@ -361,30 +414,43 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
                           x2={t.x}
                           y2={t.y}
                           stroke={linkStroke(l.kind)}
-                          strokeWidth={1 / view.k}
+                          strokeWidth={(inHood && neighborhood ? 1.6 : 1) / view.k}
+                          opacity={inHood ? 1 : 0.15}
                         />
                       );
                     })}
                   </g>
                   <g>
-                    {sim.nodes.map((n) => (
-                      <g
-                        key={n.id}
-                        transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
-                        onClick={() => setSelected(n)}
-                        style={{ cursor: "pointer" }}
-                      >
-                        <circle
-                          r={radius(n)}
-                          fill={n.color}
-                          stroke={selected?.id === n.id ? "#111827" : "#ffffff"}
-                          strokeWidth={selected?.id === n.id ? 2 : 1}
-                        />
-                        <text x={radius(n) + 3} y={3} fontSize={9} fill="#475569">
-                          {n.name.length > 24 ? n.name.slice(0, 24) + "…" : n.name}
-                        </text>
-                      </g>
-                    ))}
+                    {sim.nodes.map((n) => {
+                      const inHood = !neighborhood || neighborhood.has(n.id);
+                      return (
+                        <g
+                          key={n.id}
+                          transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
+                          onClick={() =>
+                            setSelected((cur) => (cur?.id === n.id ? null : n))
+                          }
+                          style={{ cursor: "pointer" }}
+                          opacity={inHood ? 1 : 0.25}
+                        >
+                          <circle
+                            r={radius(n)}
+                            fill={n.color}
+                            stroke={
+                              selected?.id === n.id
+                                ? "#111827"
+                                : inHood && neighborhood
+                                  ? "#111827aa"
+                                  : "#ffffff"
+                            }
+                            strokeWidth={selected?.id === n.id ? 2 : 1}
+                          />
+                          <text x={radius(n) + 3} y={3} fontSize={9} fill="#475569">
+                            {n.name.length > 24 ? n.name.slice(0, 24) + "…" : n.name}
+                          </text>
+                        </g>
+                      );
+                    })}
                   </g>
                 </g>
               </svg>
@@ -433,7 +499,15 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           </div>
 
           {selected && (
-            <NodeDetail node={selected} graph={graph} />
+            <NodeDetail
+              node={selected}
+              graph={graph}
+              nestId={nestId}
+              hopDepth={hopDepth}
+              onHopDepth={setHopDepth}
+              neighborhood={neighborhood}
+              nodesById={nodesById}
+            />
           )}
 
           <div className="text-xs text-muted-foreground space-y-1">
@@ -470,18 +544,56 @@ function ZoomCtl({
   );
 }
 
-function NodeDetail({ node, graph }: { node: GNode; graph: NestGraph | null }) {
+function NodeDetail({
+  node,
+  graph,
+  nestId,
+  hopDepth,
+  onHopDepth,
+  neighborhood,
+  nodesById,
+}: {
+  node: GNode;
+  graph: NestGraph | null;
+  nestId: string;
+  hopDepth: number;
+  onHopDepth: (d: number) => void;
+  neighborhood: Set<string> | null;
+  nodesById: Map<string, GNode>;
+}) {
   const doc = node.kind === "doc" ? graph?.nodes.find((n) => n.id === node.id) : null;
   const linkCount =
     doc && graph
       ? graph.links.filter((l) => l.source === doc.id || l.target === doc.id).length
       : 0;
+
+  const selector = selectorForNode(node);
+  // Union selector for everything highlighted — the deterministic "give me
+  // exactly this set" query (hops:0), independent of server traversal.
+  const hoodSelectors = neighborhood
+    ? [...neighborhood]
+        .map((id) => nodesById.get(id))
+        .filter((n): n is GNode => !!n)
+        .map(selectorForNode)
+        .filter((s): s is string => !!s)
+    : [];
+  const unionSelector = hoodSelectors.join("|");
+  const serverUrl =
+    typeof window !== "undefined" ? window.location.origin : "";
+  // Anchor query: this node + hopDepth server-side hops. Matches what's
+  // highlighted (the server traverses the same link graph).
+  const curl = selector
+    ? `curl -X POST ${serverUrl}/nests/${nestId}/context \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer <api-key>" \\\n  -d '${JSON.stringify({ selector, hops: hopDepth })}'`
+    : null;
+
   return (
-    <div className="border border-border rounded-lg bg-card p-3 text-sm">
-      <div className="font-medium mb-1 break-all">{node.name}</div>
-      <div className="text-xs text-muted-foreground capitalize">{node.kind}</div>
+    <div className="border border-border rounded-lg bg-card p-3 text-sm space-y-2">
+      <div>
+        <div className="font-medium mb-1 break-all">{node.name}</div>
+        <div className="text-xs text-muted-foreground capitalize">{node.kind}</div>
+      </div>
       {doc && (
-        <div className="mt-2 space-y-1 text-xs">
+        <div className="space-y-1 text-xs">
           {doc.tags.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {doc.tags.map((t) => (
@@ -498,6 +610,83 @@ function NodeDetail({ node, graph }: { node: GNode; graph: NestGraph | null }) {
           </div>
         </div>
       )}
+
+      {/* Click-to-query: the selection IS a query. Depth drives both the
+          highlight and the copyable request. */}
+      <div className="border-t pt-2 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium">Query this selection</span>
+          <label className="flex items-center gap-1 text-xs text-muted-foreground">
+            hops
+            <select
+              className="border border-border rounded bg-card px-1 py-0.5 text-xs"
+              value={hopDepth}
+              onChange={(e) => onHopDepth(Number(e.target.value))}
+            >
+              {[0, 1, 2, 3].map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {selector && (
+          <QuerySnippet label="Selector" value={selector} />
+        )}
+        {curl && (
+          <QuerySnippet
+            label={`API call (this node + ${hopDepth} hop${hopDepth === 1 ? "" : "s"})`}
+            value={curl}
+          />
+        )}
+        {hoodSelectors.length > 1 && (
+          <QuerySnippet
+            label={`Highlighted set (${hoodSelectors.length} nodes, exact — use hops: 0)`}
+            value={unionSelector}
+          />
+        )}
+        {!selector && hoodSelectors.length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            No selector for this node kind — select a document or tag.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function QuerySnippet({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable (http, permissions) — nothing to do */
+    }
+  };
+  return (
+    <div className="min-w-0">
+      <div className="flex items-center justify-between gap-2 mb-0.5">
+        <span className="text-[11px] text-muted-foreground truncate">{label}</span>
+        <button
+          type="button"
+          aria-label={`Copy ${label}`}
+          onClick={copy}
+          className="flex h-5 w-5 items-center justify-center rounded hover:bg-accent shrink-0"
+        >
+          {copied ? (
+            <Check className="h-3 w-3 text-green-600" />
+          ) : (
+            <Copy className="h-3 w-3" />
+          )}
+        </button>
+      </div>
+      <pre className="bg-muted rounded px-2 py-1.5 text-[10px] font-mono whitespace-pre-wrap break-all max-h-28 overflow-y-auto">
+        {value}
+      </pre>
     </div>
   );
 }
