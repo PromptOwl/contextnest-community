@@ -228,7 +228,7 @@ export async function syncUnsyncedFolder(
   // picks the next free "<name> (n)" suffix so repeat syncs Just Work.
   const segments = folderName.split("/").filter(Boolean);
   const baseName = segments[segments.length - 1] || folderName;
-  const nestName = uniqueNestName(userId, baseName);
+  const nestName = await uniqueNestName(userId, baseName);
   if (nestName !== baseName) {
     console.log(
       `[unsynced] name "${baseName}" already in use, using "${nestName}" instead`,

@@ -62,11 +62,11 @@ export interface CompiledSelector {
  * known tags (from node_tag_index) and known titles (from storage). Call-site
  * supplies the title list so the compiler stays sync-only and testable.
  */
-export function compilePrompt(
+export async function compilePrompt(
   prompt: string,
   nestId: string,
   titles: string[],
-): CompiledSelector {
+): Promise<CompiledSelector> {
   const tokens = tokenizePrompt(prompt);
   if (tokens.length === 0) {
     return { selector: null, matchedTags: [], matchedTitles: [], unmatched: [] };
@@ -75,11 +75,11 @@ export function compilePrompt(
   // ── Tag match ──
   // Pull every active tag from node_tag_index, compare against each token.
   const db = getDb();
-  const tagRows = db
-    .prepare(
+  const tagRows = await db
+    .all(
       "SELECT DISTINCT tag_name FROM node_tag_index WHERE nest_id = ?",
-    )
-    .all(nestId) as Array<{ tag_name: string }>;
+      [nestId],
+    ) as Array<{ tag_name: string }>;
   const knownTags = new Set(tagRows.map((r) => r.tag_name));
 
   const matchedTags = new Set<string>();

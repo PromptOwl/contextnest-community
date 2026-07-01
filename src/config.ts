@@ -60,6 +60,62 @@ export const config = {
       process.env.DATABASE_PATH || join(dataRoot(), "community.db")
     );
   },
+  /**
+   * Which database backend to use.
+   *   "sqlite"   — default; the on-disk file at DATABASE_PATH (existing behaviour).
+   *   "postgres" — Cloud SQL / PostgreSQL, for durable Cloud Run deployments.
+   * Explicit DB_DRIVER wins; otherwise we infer "postgres" when a connection
+   * is configured (DATABASE_URL or CLOUD_SQL_CONNECTION_NAME), else "sqlite".
+   * So existing deployments with no new env vars keep using SQLite untouched.
+   */
+  get DB_DRIVER(): "sqlite" | "postgres" {
+    const v = (process.env.DB_DRIVER || "").trim().toLowerCase();
+    if (v === "postgres" || v === "postgresql" || v === "pg") return "postgres";
+    if (v === "sqlite") return "sqlite";
+    return process.env.DATABASE_URL || process.env.CLOUD_SQL_CONNECTION_NAME
+      ? "postgres"
+      : "sqlite";
+  },
+  /** Postgres connection string, e.g. postgres://user:pass@host:5432/db (TCP). */
+  get DATABASE_URL(): string {
+    return process.env.DATABASE_URL || "";
+  },
+  /**
+   * Cloud SQL instance connection name (project:region:instance). When set,
+   * the server connects over the unix socket at /cloudsql/<name> created by
+   * the Cloud SQL Auth Proxy (the recommended Cloud Run setup). Combine with
+   * DB_USER / DB_PASSWORD / DB_NAME.
+   */
+  get CLOUD_SQL_CONNECTION_NAME(): string {
+    return process.env.CLOUD_SQL_CONNECTION_NAME || "";
+  },
+  get DB_HOST(): string {
+    return process.env.DB_HOST || "";
+  },
+  get DB_PORT(): number {
+    return parseInt(process.env.DB_PORT || "5432", 10);
+  },
+  get DB_USER(): string {
+    return process.env.DB_USER || "";
+  },
+  get DB_PASSWORD(): string {
+    return process.env.DB_PASSWORD || "";
+  },
+  get DB_NAME(): string {
+    return process.env.DB_NAME || "";
+  },
+  /** Max Postgres pool connections. Keep modest — Cloud SQL tiers cap connections. */
+  get DB_POOL_MAX(): number {
+    return parseInt(process.env.DB_POOL_MAX || "10", 10);
+  },
+  /** Enable TLS for Postgres TCP connections (not needed over the unix socket). */
+  get DB_SSL(): boolean {
+    return process.env.DB_SSL === "true";
+  },
+  /** Optional path to a CA cert (PEM) for verify-ca/verify-full TLS. */
+  get DB_SSL_CA(): string {
+    return process.env.DB_SSL_CA || "";
+  },
   get PROMPTOWL_API_URL() {
     return process.env.PROMPTOWL_API_URL || "https://app.promptowl.ai";
   },

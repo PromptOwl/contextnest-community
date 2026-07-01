@@ -60,17 +60,19 @@ export async function addCollaborator(params: {
   let userId = params.userId;
   if (!userId && params.email) {
     const email = normalizeEmail(params.email);
-    const existing = db
-      .prepare("SELECT id FROM users WHERE LOWER(email) = ?")
-      .get(email) as { id: string } | undefined;
+    const existing = (await db.get(
+      "SELECT id FROM users WHERE LOWER(email) = ?",
+      [email],
+    )) as { id: string } | undefined;
     if (existing) {
       userId = existing.id;
     } else {
       const { hashPassword } = await import("../auth/keys.js");
       userId = uuid();
-      db.prepare(
+      await db.run(
         "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-      ).run(userId, email, null, await hashPassword(uuid()));
+        [userId, email, null, await hashPassword(uuid())],
+      );
     }
   }
   if (!userId) {
@@ -80,9 +82,10 @@ export async function addCollaborator(params: {
   // The nest owner already has full access — never add them as a collaborator
   // (a redundant grant whose role would just shadow ownership). And whoever is
   // granting access can't add themselves. Both keep the roster to delegated users.
-  const ownerRow = db
-    .prepare("SELECT user_id FROM nests WHERE id = ?")
-    .get(nestId) as { user_id: string } | undefined;
+  const ownerRow = (await db.get(
+    "SELECT user_id FROM nests WHERE id = ?",
+    [nestId],
+  )) as { user_id: string } | undefined;
   if (!ownerRow) {
     throw new ValidationError("Nest not found");
   }
@@ -102,9 +105,10 @@ export async function addCollaborator(params: {
 
   // One row per (nest, user) — block duplicates. To change someone's level,
   // update their permission instead of adding a second row.
-  const dupe = db
-    .prepare("SELECT id FROM nest_collaborators WHERE nest_id = ? AND user_id = ?")
-    .get(nestId, userId) as { id: string } | undefined;
+  const dupe = (await db.get(
+    "SELECT id FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
+    [nestId, userId],
+  )) as { id: string } | undefined;
   if (dupe) {
     throw new ConflictError(
       `${params.email || "This user"} already has access to this nest. Change their permission instead of adding them again.`,
@@ -116,20 +120,23 @@ export async function addCollaborator(params: {
   const granterByEmail =
     !params.grantedByUserId && params.grantedByEmail
       ? (
-          db
-            .prepare("SELECT id FROM users WHERE LOWER(email) = LOWER(?)")
-            .get(params.grantedByEmail) as { id: string } | undefined
+          (await db.get(
+            "SELECT id FROM users WHERE LOWER(email) = LOWER(?)",
+            [params.grantedByEmail],
+          )) as { id: string } | undefined
         )?.id
       : undefined;
   const granterId =
     params.grantedByUserId || granterByEmail || ownerRow.user_id;
 
   const collabId = uuid();
-  db.prepare(
+  await db.run(
     "INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by) VALUES (?, ?, ?, ?, ?)",
-  ).run(collabId, nestId, userId, params.permission, granterId);
+    [collabId, nestId, userId, params.permission, granterId],
+  );
 
-  return db
-    .prepare("SELECT * FROM nest_collaborators WHERE id = ?")
-    .get(collabId) as NestCollaborator;
+  return (await db.get(
+    "SELECT * FROM nest_collaborators WHERE id = ?",
+    [collabId],
+  )) as NestCollaborator;
 }

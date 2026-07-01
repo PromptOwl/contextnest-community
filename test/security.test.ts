@@ -57,9 +57,10 @@ describe("bcrypt password hashing + legacy rehash", () => {
     await registerUser(app, "alice@example.com");
     // Crack open the DB — confirm the stored hash is bcrypt
     const { getDb } = await import("../src/db/client");
-    const row = getDb()
-      .prepare("SELECT password_hash FROM users WHERE email = ?")
-      .get("alice@example.com") as { password_hash: string };
+    const row = (await getDb().get(
+      "SELECT password_hash FROM users WHERE email = ?",
+      ["alice@example.com"],
+    )) as { password_hash: string };
     expect(row.password_hash.startsWith("$2")).toBe(true);
   });
 
@@ -80,9 +81,10 @@ describe("bcrypt password hashing + legacy rehash", () => {
     const salt = randomBytes(16).toString("hex");
     const legacyHash =
       salt + ":" + createHash("sha256").update(salt + password).digest("hex");
-    db.prepare(
+    await db.run(
       "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
-    ).run("u-legacy", "legacy@example.com", null, legacyHash);
+      ["u-legacy", "legacy@example.com", null, legacyHash],
+    );
 
     const { status } = await jsonRequest(app, "POST", "/auth/login", {
       email: "legacy@example.com",
@@ -91,9 +93,10 @@ describe("bcrypt password hashing + legacy rehash", () => {
     expect(status).toBe(200);
 
     // Hash should now be upgraded to bcrypt on disk.
-    const row = db
-      .prepare("SELECT password_hash FROM users WHERE email = ?")
-      .get("legacy@example.com") as { password_hash: string };
+    const row = (await db.get(
+      "SELECT password_hash FROM users WHERE email = ?",
+      ["legacy@example.com"],
+    )) as { password_hash: string };
     expect(row.password_hash.startsWith("$2")).toBe(true);
     expect(bcrypt.compareSync(password, row.password_hash)).toBe(true);
   });

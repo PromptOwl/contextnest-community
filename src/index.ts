@@ -2,7 +2,7 @@
 import { serve } from "@hono/node-server";
 import { config } from "./config.js";
 import { createApp } from "./app.js";
-import { getDb } from "./db/client.js";
+import { initDb } from "./db/client.js";
 import { backfillNodeVersionsFromHistory } from "./db/backfill.js";
 import {
   validateLicense,
@@ -13,8 +13,9 @@ import { loadAccessConfig } from "./governance/access-service.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 
 async function main() {
-  // Initialize SQLite
-  const db = getDb();
+  // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
+  // when configured) and run migrations before anything touches the DB.
+  const db = await initDb();
 
   // One-shot: catch historic nests up where engine history.yaml ran
   // ahead of node_versions (pre-fix steward approvals). Gated by
@@ -87,11 +88,17 @@ async function main() {
       ? "open (no auth — single-user / LAN only)"
       : "key (API key required on every request)";
 
+  const dbDesc =
+    db.dialect === "postgres"
+      ? `postgres (${config.CLOUD_SQL_CONNECTION_NAME ? `cloudsql ${config.CLOUD_SQL_CONNECTION_NAME}` : config.DATABASE_URL ? "DATABASE_URL" : `${config.DB_HOST || "localhost"}:${config.DB_PORT}/${config.DB_NAME}`})`
+      : `sqlite (${config.DATABASE_PATH})`;
+
   console.log(`
   ContextNest Community Server v0.1.0
   ────────────────────────────────────
   Port:      ${config.PORT}
   Data:      ${config.DATA_ROOT}
+  Database:  ${dbDesc}
   License:   ${license.valid ? `${license.tier}${license.org ? ` (${license.org})` : ""}` : "unlicensed (register at promptowl.ai)"}
   Auth:      ${authDesc}
   Telemetry: ${config.TELEMETRY_ENABLED ? "on" : "off"}

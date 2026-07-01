@@ -14,12 +14,13 @@ import { getApprovedVersion } from "./version-service.js";
  * Resolve the caller's email from the auth context.
  * Falls back to "admin@localhost" in open mode (anonymous).
  */
-export function resolveCallerEmail(userId: string | undefined): string {
+export async function resolveCallerEmail(userId: string | undefined): Promise<string> {
   if (!userId) return "admin@localhost";
   const db = getDb();
-  const row = db
-    .prepare("SELECT email FROM users WHERE id = ?")
-    .get(userId) as { email: string } | undefined;
+  const row = await db.get(
+    "SELECT email FROM users WHERE id = ?",
+    [userId],
+  ) as { email: string } | undefined;
   return row?.email || "admin@localhost";
 }
 
@@ -32,17 +33,17 @@ export function resolveCallerEmail(userId: string | undefined): string {
  *   2. Stewardship disabled — open read.
  *   3. Stewardship enabled — gate via canUserAccess.
  */
-export function canReadNode(
+export async function canReadNode(
   nestId: string,
   nodeId: string,
   userId: string,
   userEmail: string,
-): boolean {
-  if (isPublicReader(nestId, userId)) {
-    return getApprovedVersion(nestId, nodeId) !== null;
+): Promise<boolean> {
+  if (await isPublicReader(nestId, userId)) {
+    return (await getApprovedVersion(nestId, nodeId)) !== null;
   }
-  if (!isStewardshipEnabled(nestId)) return true;
-  return canUserAccess(nestId, nodeId, userEmail).allowed;
+  if (!(await isStewardshipEnabled(nestId))) return true;
+  return (await canUserAccess(nestId, nodeId, userEmail)).allowed;
 }
 
 /**
@@ -51,15 +52,27 @@ export function canReadNode(
  * nodes only; collaborators bypass the gate when stewardship is off; with
  * stewardship on, each node is gated via canUserAccess.
  */
-export function filterAccessible<T extends { id: string }>(
+export async function filterAccessible<T extends { id: string }>(
   nestId: string,
   userId: string,
   userEmail: string,
   nodes: T[],
-): T[] {
-  if (isPublicReader(nestId, userId)) {
-    return nodes.filter((n) => getApprovedVersion(nestId, n.id) !== null);
+): Promise<T[]> {
+  if (await isPublicReader(nestId, userId)) {
+    const filtered: T[] = [];
+    for (const n of nodes) {
+      if ((await getApprovedVersion(nestId, n.id)) !== null) {
+        filtered.push(n);
+      }
+    }
+    return filtered;
   }
-  if (!isStewardshipEnabled(nestId)) return nodes;
-  return nodes.filter((n) => canUserAccess(nestId, n.id, userEmail).allowed);
+  if (!(await isStewardshipEnabled(nestId))) return nodes;
+  const accessible: T[] = [];
+  for (const n of nodes) {
+    if ((await canUserAccess(nestId, n.id, userEmail)).allowed) {
+      accessible.push(n);
+    }
+  }
+  return accessible;
 }
