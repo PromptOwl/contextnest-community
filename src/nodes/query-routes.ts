@@ -23,6 +23,35 @@ import { buildNestGraph } from "./graph-service.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
+// GET /nests/:nestId/runnables
+// Orchestrator surface: every runnable node (type agent/skill) with its
+// schedule and content, so an external scheduler can connect, discover
+// what to run and when, and pull the prompt/skill body in one call.
+// Reuses listNodesForCaller, so stewardship gating and the public-reader
+// approved-only rule apply — an orchestrator with a read key never sees
+// unapproved agent definitions.
+queryRoutes.get("/runnables", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const { listNodesForCaller, RUNNABLE_NODE_TYPES } = await import(
+    "./service.js"
+  );
+  const all = await listNodesForCaller(nestId, userId);
+  const runnables = all
+    .filter((n) => (RUNNABLE_NODE_TYPES as readonly string[]).includes(n.type))
+    .map((n) => ({
+      id: n.id,
+      title: n.title,
+      type: n.type,
+      schedule: n.schedule ?? null,
+      status: n.status,
+      tags: n.tags,
+      updated_at: n.updated_at,
+      content: n.content,
+    }));
+  return c.json({ count: runnables.length, runnables });
+});
+
 // GET /nests/:nestId/graph
 // Ontology graph: nodes, resolved [[wikilink]] edges, tag/category counts, and
 // the stewardship overlay — for the graph view (links / stewardship / coverage
