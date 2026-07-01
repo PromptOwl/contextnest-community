@@ -203,6 +203,58 @@ describe("MCP tools/call — basic vault tools", () => {
   });
 });
 
+describe("MCP tools/call — context_export (whole nest)", () => {
+  it("tools/list includes context_export and context_comments", async () => {
+    const res = await mcpCall("tools/list", {});
+    const names = res.result.tools.map((t: any) => t.name);
+    expect(names).toContain("context_export");
+    expect(names).toContain("context_comments");
+  });
+
+  it("exports every document's full content in one call", async () => {
+    const text = await callTool("context_export");
+    expect(text).toMatch(/Nest export/);
+    // Full bodies of all three seeded docs, not just titles/snippets.
+    expect(text).toContain("Documentation for the public API");
+    expect(text).toContain("System-level design notes");
+    expect(text).toContain("Logo, colors, voice");
+  });
+
+  it("respects the token budget and notes truncation", async () => {
+    // Tiny budget → only the first doc(s) fit, with a truncation note.
+    const text = await callTool("context_export", { max_tokens: 20 });
+    expect(text).toMatch(/Token budget reached/);
+  });
+});
+
+describe("MCP tools/call — context_comments", () => {
+  it("returns a document's anchored comment threads", async () => {
+    // Seed an annotation on the API Reference node via REST.
+    const anno = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/api-reference/annotations`,
+      {
+        body: "Please clarify the auth section.",
+        anchor: { quote: "public API", before: "", after: "" },
+      },
+    );
+    expect([200, 201]).toContain(anno.status);
+
+    const text = await callTool("context_comments", {
+      id: "nodes/api-reference",
+    });
+    expect(text).toContain("Comments on \"API Reference\"");
+    expect(text).toContain("Please clarify the auth section.");
+    expect(text).toContain("public API"); // the anchored quote
+  });
+
+  it("reports when a document has no comments", async () => {
+    const text = await callTool("context_comments", { title: "Brand Guide" });
+    expect(text).toMatch(/No comments on/);
+  });
+});
+
 describe("MCP tools/call — error handling", () => {
   it("returns a JSON-RPC error for an unknown tool", async () => {
     const res = await mcpCall(
