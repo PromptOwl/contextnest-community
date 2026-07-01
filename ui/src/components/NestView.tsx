@@ -169,10 +169,13 @@ export function NestView({
   // real user's nest. Delegation (mirrors server canManageStewards): the
   // nest owner or an admin collaborator also manages governance, so owners
   // can hand people-management to other admins.
+  // Server admins resolve to "admin" on EVERY nest (resolveNestPermission),
+  // so gate the delegated branch on !isAdmin — otherwise the roster/settings
+  // UI would reappear for admins viewing other users' nests, which the rule
+  // above deliberately hides.
   const canManageGovernance =
     (isAdmin && (isOwner || isAnonOwned)) ||
-    permission === "owner" ||
-    permission === "admin";
+    (!isAdmin && (permission === "owner" || permission === "admin"));
   // Caller's merged effective roles (collaborator + steward), nest-wide.
   const [roles, setRoles] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
