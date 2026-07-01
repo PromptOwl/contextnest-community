@@ -689,4 +689,30 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("011_comments");
   }
+
+  // 014: activity trace (CU-wdqcpzv21h). One row per API request and per MCP
+  //   tool invocation so the server admin has a single place to audit what
+  //   every client and agent did. Simple form by design: who, what, where,
+  //   outcome, duration. Pruned on a rolling window (see trace-log.ts).
+  if (!hasMigration("014_api_events")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS api_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('api', 'mcp')),
+          method TEXT,                 -- HTTP method (api rows)
+          path TEXT,                   -- request path (api rows)
+          tool TEXT,                   -- tool name (mcp rows)
+          nest_id TEXT,
+          user_id TEXT,
+          user_email TEXT,
+          status INTEGER,              -- HTTP status (api rows)
+          duration_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_events_ts ON api_events(ts);
+      `);
+    })();
+    recordMigration("014_api_events");
+  }
 }

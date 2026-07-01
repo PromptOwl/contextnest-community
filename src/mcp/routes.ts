@@ -5,6 +5,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
 import { TOOL_DEFINITIONS, handleToolCall } from "./tools.js";
+import { logTraceEvent } from "../telemetry/trace-log.js";
 import { z } from "zod";
 
 export const mcpRoutes = new Hono<AuthEnv>();
@@ -45,6 +46,7 @@ function createMcpServerForNest(
     }
 
     server.tool(tool.name, tool.description, shape, async (args) => {
+      const started = Date.now();
       const engine = await engineCache.get(nestId);
       const text = await handleToolCall(tool.name, args, {
         storage: engine.storage,
@@ -53,6 +55,15 @@ function createMcpServerForNest(
         nestId,
         userId,
         userEmail,
+      });
+      // Operator audit row — tool-level, richer than the transport POST.
+      void logTraceEvent({
+        kind: "mcp",
+        tool: tool.name,
+        nestId,
+        userId,
+        userEmail,
+        durationMs: Date.now() - started,
       });
       return { content: [{ type: "text" as const, text }] };
     });
