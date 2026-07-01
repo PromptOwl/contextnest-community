@@ -15,6 +15,11 @@ import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
+import {
+  llmsTxtRoutes,
+  nestIndexRoutes,
+  serverMcpRoutes,
+} from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import {
@@ -368,6 +373,14 @@ export function createApp(): Hono<AuthEnv> {
       users: usersRow.c,
     });
   });
+
+  // === Agent entry point: /llms.txt (public manual), /index (person nest
+  // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
+  app.route("/llms.txt", llmsTxtRoutes);
+  app.use("/index", flexAuthMiddleware);
+  app.route("/index", nestIndexRoutes);
+  app.use("/mcp", flexAuthMiddleware);
+  app.route("/mcp", serverMcpRoutes);
 
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
