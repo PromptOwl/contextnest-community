@@ -37,12 +37,16 @@ describe("flushTelemetry batch_id", () => {
     env.cleanup();
   });
 
-  function insertEvent(name: string): number {
+  async function insertEvent(name: string): Promise<number> {
     const db = getDb();
-    const info = db
-      .prepare("INSERT INTO telemetry_events (event, data_json) VALUES (?, NULL)")
-      .run(name);
-    return Number(info.lastInsertRowid);
+    await db.run(
+      "INSERT INTO telemetry_events (event, data_json) VALUES (?, NULL)",
+      [name],
+    );
+    const row = (await db.get(
+      "SELECT id FROM telemetry_events ORDER BY id DESC LIMIT 1",
+    )) as { id: number };
+    return row.id;
   }
 
   function lastPayload(): { batch_id: string; events: unknown[] } {
@@ -52,8 +56,8 @@ describe("flushTelemetry batch_id", () => {
   }
 
   it("sends the same batch_id when the same pending set is flushed twice", async () => {
-    insertEvent("nest.create");
-    insertEvent("node.create");
+    await insertEvent("nest.create");
+    await insertEvent("node.create");
 
     // First flush — server returns 500 so events stay pending (no sent=1).
     fetchMock.mockResolvedValueOnce({ ok: false, status: 500, statusText: "x" });
@@ -68,12 +72,12 @@ describe("flushTelemetry batch_id", () => {
   });
 
   it("sends a different batch_id when a new event is added", async () => {
-    insertEvent("nest.create");
+    await insertEvent("nest.create");
     fetchMock.mockResolvedValueOnce({ ok: false, status: 500, statusText: "x" });
     await flushTelemetry();
     const before = lastPayload().batch_id;
 
-    insertEvent("node.create");
+    await insertEvent("node.create");
     fetchMock.mockResolvedValueOnce({ ok: false, status: 500, statusText: "x" });
     await flushTelemetry();
     const after = lastPayload().batch_id;

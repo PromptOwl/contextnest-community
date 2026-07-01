@@ -12,7 +12,7 @@ export async function buildTitleMap(
   nestId: string,
 ): Promise<Map<string, string>> {
   try {
-    const { storage } = engineCache.get(nestId);
+    const { storage } = await engineCache.get(nestId);
     const docs = await storage.discoverDocuments();
     return new Map(docs.map((d) => [d.id, d.frontmatter.title as string]));
   } catch {
