@@ -179,6 +179,26 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
             </CardContent>
           </Card>
 
+          {/* Slack connector */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Slack notifications</CardTitle>
+              <CardDescription>
+                Post governance events (review requested, approved, rejected,
+                nest shared) to a Slack channel via an incoming-webhook URL.
+                Leave empty to turn the connector off. The URL contains a
+                secret — treat it like a password.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <TextSetting
+                value={settings.slack_webhook_url ?? ""}
+                placeholder="https://hooks.slack.com/services/…"
+                onSave={(v) => onUpdate({ slack_webhook_url: v })}
+              />
+            </CardContent>
+          </Card>
+
           {/* Max upload size */}
           <Card>
             <CardHeader>

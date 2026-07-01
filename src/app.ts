@@ -256,6 +256,7 @@ export function createApp(): Hono<AuthEnv> {
     telemetry_enabled: config.TELEMETRY_ENABLED,
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
+    slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
   });
 
   app.get("/admin/settings", async (c) => {
@@ -296,6 +297,14 @@ export function createApp(): Hono<AuthEnv> {
     }
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
+    }
+    if ("slack_webhook_url" in body) {
+      const v = String(body.slack_webhook_url ?? "").trim();
+      // Empty clears (connector off). A webhook URL carries an implicit
+      // secret in its path — https only.
+      if (v && !/^https:\/\//i.test(v))
+        errors.push("slack_webhook_url must be an https:// URL (or empty to disable)");
+      else pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
     }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);

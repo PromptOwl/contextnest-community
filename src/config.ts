@@ -217,6 +217,23 @@ export const config = {
     return (process.env.AUTH_MODE || "key") as "open" | "key";
   },
   /**
+   * Optional Slack incoming-webhook URL for team notifications (review
+   * submitted/approved/rejected, nest shared). Empty/unset = connector off.
+   * https only — a webhook carries an implicit secret in its path, so it
+   * never travels plaintext.
+   */
+  get SLACK_WEBHOOK_URL(): string | null {
+    const raw = process.env.SLACK_WEBHOOK_URL?.trim();
+    if (!raw) return null;
+    if (!/^https:\/\//i.test(raw)) {
+      console.warn(
+        "[config] SLACK_WEBHOOK_URL rejected: must be an https:// URL. Slack notifications disabled.",
+      );
+      return null;
+    }
+    return raw;
+  },
+  /**
    * CORS origin allowlist. Comma-separated list of origins or "*".
    * Defaults to "*" in open mode (read-heavy, no credentials to steal)
    * and a locked-down list in key mode (Bearer tokens flow, CSRF matters).

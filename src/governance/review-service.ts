@@ -7,6 +7,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { notifySlackForNest } from "../notify/slack.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
@@ -63,6 +64,11 @@ export async function submitForReview(params: {
   await db.run(
     "UPDATE node_versions SET status = 'pending_review' WHERE nest_id = ? AND node_id = ? AND version = ?",
     [params.nestId, params.nodeId, params.version],
+  );
+
+  void notifySlackForNest(
+    params.nestId,
+    `:memo: Review requested on \`${params.nodeId}\` (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
   );
 
   return (await getReviewRequest(id))!;
@@ -180,6 +186,11 @@ export async function approve(params: {
     );
   }
 
+  void notifySlackForNest(
+    params.nestId,
+    `:white_check_mark: \`${params.nodeId}\` v${params.version} approved by ${params.approvedBy}`,
+  );
+
   return (await getReviewRequest(pending.id))!;
 }
 
@@ -223,6 +234,11 @@ export async function reject(params: {
   await db.run(
     "UPDATE node_versions SET status = 'rejected' WHERE nest_id = ? AND node_id = ? AND version = ?",
     [params.nestId, params.nodeId, params.version],
+  );
+
+  void notifySlackForNest(
+    params.nestId,
+    `:x: \`${params.nodeId}\` v${params.version} rejected by ${params.rejectedBy} — "${params.note}"`,
   );
 
   return (await getReviewRequest(pending.id))!;
