@@ -23,6 +23,69 @@ import { buildNestGraph } from "./graph-service.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
+// GET /nests/:nestId/changes?since=<ISO>&include_content=1
+// Sync primitive for external mirrors (GitHub, GitBook): everything that
+// changed after a point in time, in one deterministic call — created and
+// updated docs (caller-gated via listNodesForCaller, so drafts/approvals
+// follow the same rules as the node list) plus deletions from the
+// node_deletions tombstones (DELETE purges all other traces of a node).
+queryRoutes.get("/changes", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  const sinceRaw = c.req.query("since");
+  const sinceMs = sinceRaw ? Date.parse(sinceRaw) : NaN;
+  if (!sinceRaw || Number.isNaN(sinceMs)) {
+    throw new ValidationError(
+      'since must be an ISO-8601 date, e.g. ?since=2026-07-01T00:00:00Z',
+    );
+  }
+  const includeContent = ["1", "true"].includes(
+    c.req.query("include_content") || "",
+  );
+
+  const { listNodesForCaller } = await import("./service.js");
+  const all = await listNodesForCaller(nestId, userId);
+
+  const summarize = (n: (typeof all)[number]) => ({
+    id: n.id,
+    title: n.title,
+    type: n.type,
+    status: n.status,
+    tags: n.tags,
+    created_at: n.created_at,
+    updated_at: n.updated_at,
+    ...(includeContent ? { content: n.content } : {}),
+  });
+  const created = [] as ReturnType<typeof summarize>[];
+  const updated = [] as ReturnType<typeof summarize>[];
+  for (const n of all) {
+    const createdAt = Date.parse(n.created_at || "");
+    const updatedAt = Date.parse(n.updated_at || "");
+    if (!Number.isNaN(createdAt) && createdAt > sinceMs) created.push(summarize(n));
+    else if (!Number.isNaN(updatedAt) && updatedAt > sinceMs) updated.push(summarize(n));
+  }
+
+  // Tombstones newer than `since`, minus anything that now exists again
+  // (delete → recreate lands in created[], not deleted[]).
+  const { getDb } = await import("../db/client.js");
+  const rows = (await getDb().all(
+    "SELECT node_id, deleted_by, deleted_at FROM node_deletions WHERE nest_id = ? AND deleted_at > ?",
+    [nestId, new Date(sinceMs).toISOString()],
+  )) as Array<{ node_id: string; deleted_by: string | null; deleted_at: string }>;
+  const liveIds = new Set(all.map((n) => n.id));
+  const deleted = rows
+    .filter((r) => !liveIds.has(r.node_id))
+    .map((r) => ({ id: r.node_id, deleted_by: r.deleted_by, deleted_at: r.deleted_at }));
+
+  return c.json({
+    since: new Date(sinceMs).toISOString(),
+    now: new Date().toISOString(),
+    created,
+    updated,
+    deleted,
+  });
+});
+
 // GET /nests/:nestId/graph
 // Ontology graph: nodes, resolved [[wikilink]] edges, tag/category counts, and
 // the stewardship overlay — for the graph view (links / stewardship / coverage
