@@ -17,6 +17,7 @@ import {
   setAllowSelfApprove,
 } from "./service.js";
 import { registerImportedDocuments } from "../nodes/service.js";
+import { engineCache } from "../nodes/engine.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -107,7 +108,46 @@ nestRoutes.get("/", async (c) => {
     seen.add(n.id);
     out.push(annotate(n));
   }
-  return c.json({ nests: out });
+
+  // Tile metadata: per-nest document count + people (collaborators + active
+  // stewards). Counts are grouped queries; the doc count comes from the same
+  // storage.discoverDocuments() the rest of the app uses.
+  const collabByNest = new Map(
+    (
+      db
+        .prepare(
+          "SELECT nest_id, COUNT(*) AS c FROM nest_collaborators GROUP BY nest_id",
+        )
+        .all() as Array<{ nest_id: string; c: number }>
+    ).map((r) => [r.nest_id, r.c]),
+  );
+  const stewardByNest = new Map(
+    (
+      db
+        .prepare(
+          "SELECT nest_id, COUNT(DISTINCT user_email) AS c FROM stewards WHERE is_active = 1 GROUP BY nest_id",
+        )
+        .all() as Array<{ nest_id: string; c: number }>
+    ).map((r) => [r.nest_id, r.c]),
+  );
+  const withMeta = await Promise.all(
+    out.map(async (n) => {
+      let document_count = 0;
+      try {
+        const { storage } = engineCache.get(n.id);
+        document_count = (await storage.discoverDocuments()).length;
+      } catch {
+        document_count = 0;
+      }
+      return {
+        ...n,
+        document_count,
+        collaborator_count: collabByNest.get(n.id) ?? 0,
+        steward_count: stewardByNest.get(n.id) ?? 0,
+      };
+    }),
+  );
+  return c.json({ nests: withMeta });
 });
 
 // POST /nests
