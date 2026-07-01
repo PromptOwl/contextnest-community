@@ -256,16 +256,44 @@ export function DocumentEditor({
 
   // Turn the live selection into a resilient anchor: quote + up to 250c of
   // surrounding rendered text + a best-effort source line hint.
+  //
+  // Offsets come from the actual selection Range — NOT String.indexOf — so that
+  // selecting the 2nd/3rd occurrence of a repeated phrase anchors to that exact
+  // spot. We measure against the same flat text the read side builds (raw text
+  // nodes concatenated in order, which is what Range.toString() yields), so the
+  // `before` tail that anchor-highlight.ts#locate uses to disambiguate matches.
   const stageAnchorFromSelection = useCallback(() => {
     const sel = window.getSelection();
     const container = docViewRef.current;
-    if (!sel || sel.isCollapsed || !container) return;
-    const quote = sel.toString().trim();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !container) return;
+    const range = sel.getRangeAt(0);
+    if (!container.contains(range.commonAncestorContainer)) return;
+
+    // Global char offset of a (node, offset) boundary within the container's
+    // flattened text: length of the text from container start up to that point.
+    const offsetOf = (node: Node, nodeOffset: number): number => {
+      const r = document.createRange();
+      r.setStart(container, 0);
+      r.setEnd(node, nodeOffset);
+      return r.toString().length;
+    };
+
+    const contents = document.createRange();
+    contents.selectNodeContents(container);
+    const full = contents.toString();
+
+    let start = offsetOf(range.startContainer, range.startOffset);
+    let end = offsetOf(range.endContainer, range.endOffset);
+    if (start > end) [start, end] = [end, start];
+    // Trim whitespace at the selection edges, keeping offsets in sync so the
+    // quote and its context stay consistent with the flattened text.
+    while (start < end && /\s/.test(full[start])) start++;
+    while (end > start && /\s/.test(full[end - 1])) end--;
+
+    const quote = full.slice(start, end);
     if (!quote) return;
-    const full = container.innerText || container.textContent || "";
-    const idx = full.indexOf(quote);
-    const before = idx >= 0 ? full.slice(Math.max(0, idx - 250), idx) : "";
-    const after = idx >= 0 ? full.slice(idx + quote.length, idx + quote.length + 250) : "";
+    const before = full.slice(Math.max(0, start - 250), start);
+    const after = full.slice(end, end + 250);
     const srcIdx = content.indexOf(quote);
     const line = srcIdx >= 0 ? content.slice(0, srcIdx).split("\n").length : undefined;
     setPendingAnchor({ quote, before, after, line });
