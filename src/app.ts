@@ -257,6 +257,9 @@ export function createApp(): Hono<AuthEnv> {
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
+    smtp_url: config.SMTP_URL ?? "",
+    notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
+    notify_email_to: config.NOTIFY_EMAIL_TO ?? "",
   });
 
   app.get("/admin/settings", async (c) => {
@@ -305,6 +308,20 @@ export function createApp(): Hono<AuthEnv> {
       if (v && !/^https:\/\//i.test(v))
         errors.push("slack_webhook_url must be an https:// URL (or empty to disable)");
       else pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
+    }
+    if ("smtp_url" in body) {
+      const v = String(body.smtp_url ?? "").trim();
+      if (v && !/^smtps?:\/\//i.test(v))
+        errors.push("smtp_url must be an smtp:// or smtps:// URL (or empty to disable)");
+      else pending.push({ name: "SMTP_URL", value: v || null });
+    }
+    if ("notify_email_from" in body) {
+      const v = String(body.notify_email_from ?? "").trim();
+      pending.push({ name: "NOTIFY_EMAIL_FROM", value: v || null });
+    }
+    if ("notify_email_to" in body) {
+      const v = String(body.notify_email_to ?? "").trim();
+      pending.push({ name: "NOTIFY_EMAIL_TO", value: v || null });
     }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);

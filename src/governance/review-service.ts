@@ -7,7 +7,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
-import { notifySlackForNest } from "../notify/slack.js";
+import { notifyNestEvent } from "../notify/notify.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
@@ -66,7 +66,7 @@ export async function submitForReview(params: {
     [params.nestId, params.nodeId, params.version],
   );
 
-  void notifySlackForNest(
+  void notifyNestEvent(
     params.nestId,
     `:memo: Review requested on \`${params.nodeId}\` (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
   );
@@ -186,7 +186,7 @@ export async function approve(params: {
     );
   }
 
-  void notifySlackForNest(
+  void notifyNestEvent(
     params.nestId,
     `:white_check_mark: \`${params.nodeId}\` v${params.version} approved by ${params.approvedBy}`,
   );
@@ -236,7 +236,7 @@ export async function reject(params: {
     [params.nestId, params.nodeId, params.version],
   );
 
-  void notifySlackForNest(
+  void notifyNestEvent(
     params.nestId,
     `:x: \`${params.nodeId}\` v${params.version} rejected by ${params.rejectedBy} — "${params.note}"`,
   );

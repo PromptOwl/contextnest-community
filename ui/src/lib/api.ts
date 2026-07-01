@@ -142,6 +142,9 @@ export interface AdminSettings {
   public_base_url: string;
   max_body_bytes: number;
   slack_webhook_url: string;
+  smtp_url: string;
+  notify_email_from: string;
+  notify_email_to: string;
 }
 
 export async function getAdminSettings() {

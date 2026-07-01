@@ -199,6 +199,36 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
             </CardContent>
           </Card>
 
+          {/* Email connector */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Email notifications</CardTitle>
+              <CardDescription>
+                Send the same governance events over SMTP. Set the connection
+                URL (smtp:// or smtps://, credentials inline), a From address,
+                and one or more recipients (comma-separated). Leave the URL
+                empty to turn the connector off.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <TextSetting
+                value={settings.smtp_url ?? ""}
+                placeholder="smtps://user:pass@smtp.example.com:465"
+                onSave={(v) => onUpdate({ smtp_url: v })}
+              />
+              <TextSetting
+                value={settings.notify_email_from ?? ""}
+                placeholder="From — nest@yourcompany.com"
+                onSave={(v) => onUpdate({ notify_email_from: v })}
+              />
+              <TextSetting
+                value={settings.notify_email_to ?? ""}
+                placeholder="To — team@yourcompany.com, ops@yourcompany.com"
+                onSave={(v) => onUpdate({ notify_email_to: v })}
+              />
+            </CardContent>
+          </Card>
+
           {/* Max upload size */}
           <Card>
             <CardHeader>

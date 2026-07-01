@@ -9,7 +9,7 @@
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
-import { notifySlackForNest } from "../notify/slack.js";
+import { notifyNestEvent } from "../notify/notify.js";
 import { ValidationError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
 import { permissionLevel, type NestPermission } from "../shared/access.js";
@@ -136,7 +136,7 @@ export async function addCollaborator(params: {
     [collabId, nestId, userId, params.permission, granterId],
   );
 
-  void notifySlackForNest(
+  void notifyNestEvent(
     nestId,
     `:key: ${params.email || userId} added as *${params.permission}*${params.grantedByEmail ? ` by ${params.grantedByEmail}` : ""}`,
   );

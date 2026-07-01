@@ -222,6 +222,30 @@ export const config = {
    * https only — a webhook carries an implicit secret in its path, so it
    * never travels plaintext.
    */
+  /**
+   * Optional SMTP connection URL for email notifications, e.g.
+   * smtps://user:pass@smtp.example.com:465. smtp:// or smtps:// only.
+   * Empty/unset = email connector off. Requires NOTIFY_EMAIL_FROM/_TO.
+   */
+  get SMTP_URL(): string | null {
+    const raw = process.env.SMTP_URL?.trim();
+    if (!raw) return null;
+    if (!/^smtps?:\/\//i.test(raw)) {
+      console.warn(
+        "[config] SMTP_URL rejected: must be an smtp:// or smtps:// URL. Email notifications disabled.",
+      );
+      return null;
+    }
+    return raw;
+  },
+  /** From address for notification emails. */
+  get NOTIFY_EMAIL_FROM(): string | null {
+    return process.env.NOTIFY_EMAIL_FROM?.trim() || null;
+  },
+  /** Comma-separated recipient list for notification emails. */
+  get NOTIFY_EMAIL_TO(): string | null {
+    return process.env.NOTIFY_EMAIL_TO?.trim() || null;
+  },
   get SLACK_WEBHOOK_URL(): string | null {
     const raw = process.env.SLACK_WEBHOOK_URL?.trim();
     if (!raw) return null;
