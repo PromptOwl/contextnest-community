@@ -247,8 +247,9 @@ export function createApp(): Hono<AuthEnv> {
   // persists to ENV_FILE_PATH so it survives a restart. In open mode the
   // anonymous admin may edit; in key mode it's the license admin only.
   app.use("/admin/settings", flexAuthMiddleware);
-  const adminSettingsAllowed = (c: any) =>
-    config.AUTH_MODE === "open" || isLicenseAdminUserId(c.get("userId"));
+  const adminSettingsAllowed = async (c: any) =>
+    config.AUTH_MODE === "open" ||
+    (await isLicenseAdminUserId(c.get("userId")));
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     logo_url: config.LOGO_URL,
@@ -257,14 +258,14 @@ export function createApp(): Hono<AuthEnv> {
     max_body_bytes: config.MAX_BODY_BYTES,
   });
 
-  app.get("/admin/settings", (c) => {
-    if (!adminSettingsAllowed(c))
+  app.get("/admin/settings", async (c) => {
+    if (!(await adminSettingsAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     return c.json(currentServerSettings());
   });
 
   app.patch("/admin/settings", async (c) => {
-    if (!adminSettingsAllowed(c))
+    if (!(await adminSettingsAllowed(c)))
       return c.json({ error: "Only the server admin can change this." }, 403);
     let body: Record<string, unknown>;
     try {
