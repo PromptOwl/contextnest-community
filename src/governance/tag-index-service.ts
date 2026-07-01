@@ -7,6 +7,7 @@
  */
 
 import { getDb } from "../db/client.js";
+import { insertOrIgnore } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
 
 export function normalizeTag(raw: string): string {
@@ -17,11 +18,11 @@ export function normalizeTag(raw: string): string {
  * Replace the tag set for a node. Idempotent.
  * Pass an empty array to clear.
  */
-export function syncNodeTags(
+export async function syncNodeTags(
   nestId: string,
   nodeId: string,
   tags: string[],
-): void {
+): Promise<void> {
   const db = getDb();
   const normalized = Array.from(
     new Set(
@@ -32,37 +33,42 @@ export function syncNodeTags(
     ),
   );
 
-  db.transaction(() => {
-    db.prepare(
+  const insertSql = insertOrIgnore(
+    db,
+    "INSERT INTO node_tag_index (nest_id, node_id, tag_name) VALUES (?, ?, ?)",
+  );
+  await db.transaction(async (tx) => {
+    await tx.run(
       "DELETE FROM node_tag_index WHERE nest_id = ? AND node_id = ?",
-    ).run(nestId, nodeId);
-    const insert = db.prepare(
-      "INSERT OR IGNORE INTO node_tag_index (nest_id, node_id, tag_name) VALUES (?, ?, ?)",
+      [nestId, nodeId],
     );
     for (const tag of normalized) {
-      insert.run(nestId, nodeId, tag);
+      await tx.run(insertSql, [nestId, nodeId, tag]);
     }
-  })();
+  });
 }
 
-export function getTagsForNode(nestId: string, nodeId: string): string[] {
+export async function getTagsForNode(
+  nestId: string,
+  nodeId: string,
+): Promise<string[]> {
   const db = getDb();
-  const rows = db
-    .prepare(
-      "SELECT tag_name FROM node_tag_index WHERE nest_id = ? AND node_id = ? ORDER BY tag_name",
-    )
-    .all(nestId, nodeId) as Array<{ tag_name: string }>;
+  const rows = (await db.all(
+    "SELECT tag_name FROM node_tag_index WHERE nest_id = ? AND node_id = ? ORDER BY tag_name",
+    [nestId, nodeId],
+  )) as Array<{ tag_name: string }>;
   return rows.map((r) => r.tag_name);
 }
 
-export function removeNodeFromTagIndex(
+export async function removeNodeFromTagIndex(
   nestId: string,
   nodeId: string,
-): void {
+): Promise<void> {
   const db = getDb();
-  db.prepare(
+  await db.run(
     "DELETE FROM node_tag_index WHERE nest_id = ? AND node_id = ?",
-  ).run(nestId, nodeId);
+    [nestId, nodeId],
+  );
 }
 
 /**
@@ -70,24 +76,25 @@ export function removeNodeFromTagIndex(
  * and rebuild the index. Idempotent. Expected to be slow on large vaults.
  */
 export async function rebuildTagIndex(nestId: string): Promise<number> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const documents = await storage.discoverDocuments();
   const db = getDb();
 
-  db.transaction(() => {
-    db.prepare("DELETE FROM node_tag_index WHERE nest_id = ?").run(nestId);
-    const insert = db.prepare(
-      "INSERT OR IGNORE INTO node_tag_index (nest_id, node_id, tag_name) VALUES (?, ?, ?)",
-    );
+  const insertSql = insertOrIgnore(
+    db,
+    "INSERT INTO node_tag_index (nest_id, node_id, tag_name) VALUES (?, ?, ?)",
+  );
+  await db.transaction(async (tx) => {
+    await tx.run("DELETE FROM node_tag_index WHERE nest_id = ?", [nestId]);
     for (const doc of documents) {
       const tags = (doc.frontmatter.tags || [])
         .map(normalizeTag)
         .filter(Boolean);
       for (const tag of tags) {
-        insert.run(nestId, doc.id, tag);
+        await tx.run(insertSql, [nestId, doc.id, tag]);
       }
     }
-  })();
+  });
 
   return documents.length;
 }

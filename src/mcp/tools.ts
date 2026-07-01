@@ -314,8 +314,8 @@ async function resolveLlmBody(
   ctx: McpToolContext,
   node: ContextNode,
 ): Promise<string | null> {
-  if (!isStewardshipEnabled(ctx.nestId)) return node.body || "";
-  const approved = versions.getApprovedVersion(ctx.nestId, node.id);
+  if (!(await isStewardshipEnabled(ctx.nestId))) return node.body || "";
+  const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
   if (approved == null) return null;
   try {
     return await ctx.versionManager.reconstructVersion(node.id, approved);
@@ -465,7 +465,7 @@ export async function handleToolCall(
     case "context_create": {
       // Defense-in-depth: the /mcp middleware already requires nest write,
       // but gate here too so creation stays locked if that ever changes.
-      if (!stewardship.canCreateInNest(nestId, userEmail)) {
+      if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
         return "You don't have permission to create documents in this nest.";
       }
       const { node } = await createNode(
@@ -491,7 +491,7 @@ export async function handleToolCall(
       if (!node) return `Node not found: ${args.title}`;
       // Defense-in-depth: same per-node edit check REST resolves, so editing
       // stays gated regardless of the /mcp middleware.
-      const editCheck = stewardship.canUserEdit(nestId, node.id, userEmail);
+      const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
       if (!editCheck.allowed) {
         return `You don't have permission to edit "${args.title}": ${editCheck.reason}`;
       }
@@ -518,7 +518,7 @@ export async function handleToolCall(
           (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
         );
         const nodeId = node?.id || "";
-        const resolved = stewardship.resolveStewardsForNode(ctx.nestId, nodeId);
+        const resolved = await stewardship.resolveStewardsForNode(ctx.nestId, nodeId);
 
         if (resolved.length === 0) {
           return `No stewards configured for "${args.title}". Changes are auto-approved.`;
@@ -598,16 +598,16 @@ export async function handleToolCall(
 
       // Defense-in-depth: submitting a draft for review is an edit-level
       // action — gate it with the same per-node edit check.
-      const submitCheck = stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
+      const submitCheck = await stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
       if (!submitCheck.allowed) {
         return `You don't have permission to submit "${args.title}" for review: ${submitCheck.reason}`;
       }
 
-      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
+      const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
       if (currentVersion === 0) return `No versions found for "${args.title}"`;
 
       try {
-        const request = reviews.submitForReview({
+        const request = await reviews.submitForReview({
           nestId: ctx.nestId,
           nodeId: node.id,
           version: currentVersion,
@@ -616,7 +616,7 @@ export async function handleToolCall(
           priority: args.priority as any,
         });
 
-        const resolved = stewardship.resolveStewardsForNode(
+        const resolved = await stewardship.resolveStewardsForNode(
           ctx.nestId,
           node.id,
         );
@@ -638,7 +638,7 @@ export async function handleToolCall(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
+      const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
 
       try {
         const request = await reviews.approve({
@@ -662,10 +662,10 @@ export async function handleToolCall(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
+      const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
 
       try {
-        const request = reviews.reject({
+        const request = await reviews.reject({
           nestId: ctx.nestId,
           nodeId: node.id,
           version: currentVersion,
@@ -686,8 +686,8 @@ export async function handleToolCall(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const allVersions = versions.getVersions(ctx.nestId, node.id);
-      const approved = versions.getApprovedVersion(ctx.nestId, node.id);
+      const allVersions = await versions.getVersions(ctx.nestId, node.id);
+      const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
 
       if (allVersions.length === 0) {
         return `No version history for "${args.title}".`;
@@ -745,7 +745,7 @@ export async function handleToolCall(
       // capped in addCollaborator); this MCP tool still requires nest admin.
       // TODO(CU-wdqcpzudw5 follow-up): bring MCP to parity — accept write+ and
       // pass callerPermission into addCollaborator so the cap applies here too.
-      const roles = stewardship.resolveUserRoles(ctx.nestId, ctx.userEmail);
+      const roles = await stewardship.resolveUserRoles(ctx.nestId, ctx.userEmail);
       if (!canManageWith(roles)) {
         return "You don't have permission to share this nest via this tool (admin only). You can still invite from the UI with write access, or ask a nest admin.";
       }
@@ -772,7 +772,7 @@ export async function handleToolCall(
     case "context_unsynced_list": {
       // Same admin gate as REST GET /nests/unsynced — listing reflects
       // server-side filesystem state, so non-admins shouldn't probe it.
-      if (config.AUTH_MODE !== "open" && !isLicenseAdminUserId(userId)) {
+      if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
         return "You don't have permission to list unsynced folders. Server admin only.";
       }
       const folders = listUnsyncedFolders();
@@ -788,7 +788,7 @@ export async function handleToolCall(
 
     case "context_sync_folder": {
       // Same admin gate as REST POST /nests/unsynced/sync.
-      if (config.AUTH_MODE !== "open" && !isLicenseAdminUserId(userId)) {
+      if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
         return "You don't have permission to sync folders. Server admin only.";
       }
       try {

@@ -108,7 +108,7 @@ export async function loadLatestApprovedNode(
   nestId: string,
   documentId: string,
 ): Promise<ContextNode | null> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const head = await loadChainHead(storage, documentId);
   if (!head) return null;
   return parseDocument(docPath(nestId, documentId), head.content, documentId);
@@ -154,7 +154,7 @@ async function scanDocumentForDriftInternal(
   documentId: string,
   actor: string,
 ): Promise<{ meta: SuggestionMeta; created: boolean } | null> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const node = await storage.readDocument(documentId).catch(() => null);
   if (!node) return null;
 
@@ -205,7 +205,7 @@ export async function scanNestForDrift(
   nestId: string,
   actor: string = "system:scanner",
 ): Promise<{ scanned: number; staged: number }> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
   const results = await Promise.all(
     docs.map((doc) => scanDocumentForDriftInternal(nestId, doc.id, actor)),
@@ -225,7 +225,7 @@ export async function getPendingChange(
   nestId: string,
   documentId: string,
 ): Promise<PendingChange | null> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const list = await listSuggestions(storage, documentId);
   for (let i = list.length - 1; i >= 0; i--) {
     const meta = list[i];
@@ -251,7 +251,7 @@ export async function getPendingChange(
 export async function listNestExternalEdits(
   nestId: string,
 ): Promise<ExternalEditEntry[]> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
   const lists = await Promise.all(
     docs.map(async (doc) => {
@@ -286,7 +286,7 @@ export async function getExternalEditDetail(
   documentId: string,
   suggestionId: string,
 ): Promise<ExternalEditEntry | null> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const found = await readSuggestion(storage, documentId, suggestionId);
   if (!found) return null;
   return {
@@ -311,7 +311,7 @@ export async function approveExternalEdit(input: {
   actor: string;
   comment?: string;
 }) {
-  const { storage } = engineCache.get(input.nestId);
+  const { storage } = await engineCache.get(input.nestId);
   let result;
   try {
     result = await approveSuggestion({
@@ -343,7 +343,7 @@ export async function approveExternalEdit(input: {
     const { createVersion, setApprovedVersion } = await import(
       "./version-service.js"
     );
-    createVersion({
+    await createVersion({
       nestId: input.nestId,
       nodeId: input.documentId,
       version: versionNum,
@@ -353,7 +353,12 @@ export async function approveExternalEdit(input: {
       tags,
       changeNote: input.comment || "External edit approved",
     });
-    setApprovedVersion(input.nestId, input.documentId, versionNum, input.actor);
+    await setApprovedVersion(
+      input.nestId,
+      input.documentId,
+      versionNum,
+      input.actor,
+    );
   } catch (err) {
     console.error(
       `[external-edit] failed to mirror approved version into node_versions for ${input.nestId}/${input.documentId}:`,
@@ -380,7 +385,7 @@ export async function rejectExternalEdit(input: {
   actor: string;
   reason: string;
 }) {
-  const { storage } = engineCache.get(input.nestId);
+  const { storage } = await engineCache.get(input.nestId);
   const result = await rejectSuggestion({
     storage,
     rbac: communityRbac,
@@ -416,9 +421,7 @@ let scannerTimer: NodeJS.Timeout | null = null;
 /** Iterate every nest on disk and scan for drift. */
 async function scanAllNests(): Promise<void> {
   const db = getDb();
-  const rows = db
-    .prepare("SELECT id FROM nests")
-    .all() as Array<{ id: string }>;
+  const rows = await db.all("SELECT id FROM nests") as Array<{ id: string }>;
   await Promise.all(
     rows.map(({ id }) =>
       scanNestForDrift(id).catch((err) =>
