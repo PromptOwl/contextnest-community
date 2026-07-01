@@ -689,4 +689,211 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("011_comments");
   }
+
+  // 012: merge case-colliding user rows that 009 deliberately left for manual
+  //   reconciliation. 009 only builds the NOCASE-unique email index when the
+  //   table is already clean; pre-existing collisions (e.g. Bob@x.com AND
+  //   bob@x.com) make login and admin reset resolve DIFFERENT rows — so
+  //   "rotate the password and they still can't log in" and re-adding never
+  //   helps. This merges each collision group into one user (repointing keys,
+  //   sessions, ownership, collaborators, stewards and every email-keyed
+  //   attribution column), then builds the NOCASE unique index 009 skipped.
+  if (!hasMigration("012_merge_case_colliding_users")) {
+    db.transaction(() => {
+      const { groups, merged } = mergeCaseCollidingUsers(db);
+      if (merged > 0) {
+        console.warn(
+          `[migration 012] merged ${merged} duplicate user row(s) across ${groups} case-collision group(s).`,
+        );
+      }
+      // Canonicalize any remaining mixed-case emails 009 left behind. After the
+      // merge each LOWER(email) group has exactly one row, so this can't collide.
+      db.exec(
+        "UPDATE users SET email = LOWER(email) WHERE email <> LOWER(email)",
+      );
+      // Enforce case-insensitive uniqueness going forward (009 skipped it while
+      // collisions remained).
+      db.exec(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nocase ON users(email COLLATE NOCASE)",
+      );
+    })();
+    recordMigration("012_merge_case_colliding_users");
+  }
+}
+
+/**
+ * Merge user rows whose emails differ only in case into a single row per
+ * person. Extracted from migration 012 so it can be unit-tested directly.
+ *
+ * For each LOWER(email) group with >1 row (excluding the anon sentinel) it
+ * picks a winner — a real (claimed) account beats an invited placeholder, then
+ * one with an active credential (API key / session), then the most recently
+ * created — and repoints every reference from the losing rows to the winner:
+ *
+ *  - id-keyed FKs: sessions.user_id, nest_collaborators.user_id/granted_by,
+ *    stewards.user_id, nests.user_id (UNIQUE(user_id, slug) — conflicting slugs
+ *    are suffixed, never dropped), api_keys.user_id (UNIQUE(user_id) — keep the
+ *    winner's key if present).
+ *  - email-keyed attribution (no FK): annotation_threads.created_by/resolved_by,
+ *    annotation_comments.author, review_requests.requested_by/resolved_by,
+ *    node_versions.author, approved_versions.approved_by, comments.author/
+ *    resolved_by, license_cache.owner_email, stewards.assigned_by/user_email.
+ *
+ * Idempotent: a no-op when there are no collisions. Run inside a transaction by
+ * the caller. All repoints happen before each loser row is deleted so no FK
+ * dangles (foreign_keys is ON).
+ */
+export function mergeCaseCollidingUsers(db: Database.Database): {
+  groups: number;
+  merged: number;
+} {
+  const groups = db
+    .prepare(
+      `SELECT LOWER(email) AS le
+         FROM users
+        WHERE id != ?
+        GROUP BY LOWER(email)
+       HAVING COUNT(*) > 1`,
+    )
+    .all(ANON_USER_ID) as Array<{ le: string }>;
+
+  // Every table+column that stores a user's login email (no FK, so a miss
+  // silently orphans attribution rather than erroring).
+  const emailCols: Array<[string, string]> = [
+    ["annotation_threads", "created_by"],
+    ["annotation_threads", "resolved_by"],
+    ["annotation_comments", "author"],
+    ["review_requests", "requested_by"],
+    ["review_requests", "resolved_by"],
+    ["node_versions", "author"],
+    ["approved_versions", "approved_by"],
+    ["comments", "author"],
+    ["comments", "resolved_by"],
+    ["license_cache", "owner_email"],
+    ["stewards", "assigned_by"],
+  ];
+
+  let merged = 0;
+  for (const { le } of groups) {
+    const rows = db
+      .prepare(
+        `SELECT u.id, u.email, u.is_invited, u.is_admin, u.name, u.created_at,
+                (SELECT COUNT(*) FROM api_keys k WHERE k.user_id = u.id) AS keys,
+                (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id) AS sessions
+           FROM users u
+          WHERE LOWER(u.email) = ? AND u.id != ?`,
+      )
+      .all(le, ANON_USER_ID) as Array<{
+      id: string;
+      email: string;
+      is_invited: number;
+      is_admin: number;
+      name: string | null;
+      created_at: string;
+      keys: number;
+      sessions: number;
+    }>;
+    if (rows.length < 2) continue;
+
+    // Winner: claimed account (is_invited=0) > placeholder; then has an active
+    // credential; then most recently created.
+    rows.sort((a, b) => {
+      if (a.is_invited !== b.is_invited) return a.is_invited - b.is_invited;
+      const aCred = a.keys + a.sessions > 0 ? 1 : 0;
+      const bCred = b.keys + b.sessions > 0 ? 1 : 0;
+      if (aCred !== bCred) return bCred - aCred;
+      return b.created_at.localeCompare(a.created_at);
+    });
+    const winner = rows[0];
+    const losers = rows.slice(1);
+    const anyAdmin = rows.some((r) => r.is_admin) ? 1 : 0;
+    const winnerName = winner.name ?? rows.find((r) => r.name)?.name ?? null;
+
+    for (const loser of losers) {
+      const w = winner.id;
+      const l = loser.id;
+      const loserLower = loser.email.toLowerCase();
+
+      // id-keyed repoints with no per-user uniqueness — bulk safe.
+      db.prepare("UPDATE sessions SET user_id = ? WHERE user_id = ?").run(w, l);
+      db.prepare(
+        "UPDATE nest_collaborators SET granted_by = ? WHERE granted_by = ?",
+      ).run(w, l);
+      db.prepare("UPDATE stewards SET user_id = ? WHERE user_id = ?").run(w, l);
+
+      // nests: UNIQUE(user_id, slug). Repoint non-conflicting slugs, then suffix
+      // the leftovers so nothing is dropped.
+      db.prepare(
+        `UPDATE nests SET user_id = ?
+           WHERE user_id = ?
+             AND slug NOT IN (SELECT slug FROM nests WHERE user_id = ?)`,
+      ).run(w, l, w);
+      db.prepare(
+        `UPDATE nests
+            SET slug = slug || '-merged-' || substr(id, 1, 8), user_id = ?
+          WHERE user_id = ?`,
+      ).run(w, l);
+
+      // api_keys: UNIQUE(user_id). Keep the winner's key if any, else promote
+      // the loser's.
+      db.prepare(
+        `DELETE FROM api_keys
+           WHERE user_id = ?
+             AND EXISTS (SELECT 1 FROM api_keys WHERE user_id = ?)`,
+      ).run(l, w);
+      db.prepare("UPDATE api_keys SET user_id = ? WHERE user_id = ?").run(w, l);
+
+      // nest_collaborators: one row per (nest, user). Dedupe then repoint, and
+      // drop rows that would make the winner a collaborator on a nest they own.
+      db.prepare(
+        `DELETE FROM nest_collaborators
+           WHERE user_id = ?
+             AND nest_id IN (SELECT nest_id FROM nest_collaborators WHERE user_id = ?)`,
+      ).run(l, w);
+      db.prepare(
+        "UPDATE nest_collaborators SET user_id = ? WHERE user_id = ?",
+      ).run(w, l);
+      db.prepare(
+        `DELETE FROM nest_collaborators
+           WHERE user_id = ?
+             AND nest_id IN (SELECT id FROM nests WHERE user_id = ?)`,
+      ).run(w, w);
+
+      // email-keyed attribution — match case-insensitively, write the canonical
+      // lowercased winner email.
+      for (const [table, col] of emailCols) {
+        db.prepare(
+          `UPDATE ${table} SET ${col} = ? WHERE LOWER(${col}) = ?`,
+        ).run(le, loserLower);
+      }
+
+      // stewards.user_email has partial unique indexes per (nest, scope,
+      // target, email) while is_active=1. Drop loser rows that would collide
+      // with an active winner row, then repoint the rest.
+      db.prepare(
+        `DELETE FROM stewards
+           WHERE LOWER(user_email) = ? AND is_active = 1
+             AND EXISTS (
+               SELECT 1 FROM stewards w
+                WHERE LOWER(w.user_email) = ? AND w.is_active = 1
+                  AND w.nest_id = stewards.nest_id AND w.scope = stewards.scope
+                  AND IFNULL(w.node_pattern, '') = IFNULL(stewards.node_pattern, '')
+                  AND IFNULL(w.tag_name, '') = IFNULL(stewards.tag_name, '')
+             )`,
+      ).run(loserLower, le);
+      db.prepare(
+        "UPDATE stewards SET user_email = ?, user_id = ? WHERE LOWER(user_email) = ?",
+      ).run(le, w, loserLower);
+
+      db.prepare("DELETE FROM users WHERE id = ?").run(l);
+      merged++;
+    }
+
+    // Canonicalize the surviving winner row.
+    db.prepare(
+      "UPDATE users SET email = ?, is_admin = ?, name = ? WHERE id = ?",
+    ).run(le, anyAdmin, winnerName, winner.id);
+  }
+
+  return { groups: groups.length, merged };
 }
