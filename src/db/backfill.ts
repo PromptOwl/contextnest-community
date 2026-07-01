@@ -13,8 +13,7 @@
  */
 
 import { NestStorage } from "@promptowl/contextnest-engine";
-import { join } from "path";
-import { config } from "../config.js";
+import { resolveNestPath } from "../shared/paths.js";
 import type { DatabaseAdapter } from "./adapter.js";
 import { insertOrIgnore, nowExpr } from "./sql.js";
 
@@ -72,7 +71,7 @@ export async function backfillNodeVersionsFromHistory(
   let totalDocs = 0;
 
   for (const { id: nestId } of nests) {
-    const nestPath = join(config.DATA_ROOT, "nests", nestId);
+    const nestPath = resolveNestPath(nestId);
     const storage = new NestStorage(nestPath);
 
     let docs;

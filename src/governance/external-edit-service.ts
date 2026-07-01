@@ -28,7 +28,7 @@ import {
 } from "@promptowl/contextnest-engine";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
-import { config } from "../config.js";
+import { resolveNestPath } from "../shared/paths.js";
 
 /** Community-tier RBAC stub.
  *
@@ -59,7 +59,7 @@ export interface ExternalEditEntry {
 
 /** Resolve a document's on-disk path inside a nest. */
 function docPath(nestId: string, documentId: string): string {
-  return join(config.DATA_ROOT, "nests", nestId, `${documentId}.md`);
+  return join(resolveNestPath(nestId), `${documentId}.md`);
 }
 
 /** Read raw file bytes; null if the file is gone (treat as deletion drift). */

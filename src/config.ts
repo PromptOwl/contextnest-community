@@ -61,6 +61,14 @@ export const config = {
     );
   },
   /**
+   * Root directory for nest vault files. Defaults to `<DATA_ROOT>/nests`.
+   * Override (e.g. a GCS volume mount on Cloud Run) to store nest files
+   * separately from the SQLite DB. See `src/shared/paths.ts`.
+   */
+  get NEST_STORAGE_ROOT() {
+    return process.env.NEST_STORAGE_ROOT || join(dataRoot(), "nests");
+  },
+  /**
    * Which database backend to use.
    *   "sqlite"   — default; the on-disk file at DATABASE_PATH (existing behaviour).
    *   "postgres" — Cloud SQL / PostgreSQL, for durable Cloud Run deployments.

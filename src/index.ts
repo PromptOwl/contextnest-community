@@ -70,7 +70,15 @@ async function main() {
 
   // Periodic drift scanner: detects out-of-band file edits and stages
   // them as suggestions for approval (bridge-function-spec Story 3.1).
-  const driftScanIntervalMs = Number(process.env.DRIFT_SCAN_INTERVAL_MS) || 30_000;
+  // Explicit parse so DRIFT_SCAN_INTERVAL_MS=0 actually disables the scanner
+  // (a plain `Number(...) || 30_000` would treat 0 as falsy and reset to the
+  // default — disabling is exactly what a GCS FUSE mount needs). Unset / empty
+  // / non-numeric falls back to the 30s default.
+  const driftRaw = process.env.DRIFT_SCAN_INTERVAL_MS;
+  const driftScanIntervalMs =
+    driftRaw != null && driftRaw !== "" && Number.isFinite(Number(driftRaw))
+      ? Number(driftRaw)
+      : 30_000;
   if (driftScanIntervalMs > 0) {
     startDriftScanner(driftScanIntervalMs);
   }

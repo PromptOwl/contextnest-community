@@ -1,4 +1,3 @@
-import { join } from "path";
 import { rmSync, mkdirSync } from "fs";
 import { v4 as uuid } from "uuid";
 import { NestStorage } from "@promptowl/contextnest-engine";
@@ -9,6 +8,7 @@ import {
 } from "../fs/vault-import.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import { resolveNestPath } from "../shared/paths.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { isSuperAdmin } from "../governance/access-service.js";
@@ -17,14 +17,11 @@ import { ValidationError } from "../shared/errors.js";
 import type { Nest } from "../shared/types.js";
 
 /**
- * On-disk storage root for a nest — always <DATA_ROOT>/nests/<id>. Imported
- * nests copy their files here on import (rather than linking an external host
- * path), so every nest lives under DATA_ROOT. Single source of truth for every
- * disk read/write (engineCache + create/delete).
+ * On-disk storage root for a nest. Resolution lives in `shared/paths.ts`
+ * (honours NEST_STORAGE_ROOT, default `<DATA_ROOT>/nests`); re-exported here
+ * for backward compatibility with existing importers (e.g. `nodes/engine.ts`).
  */
-export function resolveNestPath(nestId: string): string {
-  return join(config.DATA_ROOT, "nests", nestId);
-}
+export { resolveNestPath };
 
 /**
  * True when the nest was imported from a folder. Imported nests use flat
@@ -163,8 +160,9 @@ export async function disableStewardshipAndWipeGovernance(
  * the same user already owns (UNIQUE(user_id, slug) would throw anyway —
  * surfacing a clean error keeps the autosave UX sane).
  *
- * On-disk state is untouched. The folder is still at <DATA_ROOT>/nests/<id>;
- * renaming a nest never relocates its files.
+ * On-disk state is untouched. The folder stays at its `resolveNestPath(id)`
+ * location (see shared/paths.ts — `<NEST_STORAGE_ROOT>/<id>`, default
+ * `<DATA_ROOT>/nests/<id>`); renaming a nest never relocates its files.
  */
 export async function renameNest(
   nestId: string,
@@ -413,11 +411,13 @@ export async function deleteNest(nestId: string): Promise<void> {
     await tx.run("DELETE FROM nests WHERE id = ?", [id]);
   });
 
-  // Reclaim the on-disk folder. Every nest (default or imported) lives under
-  // DATA_ROOT — imported nests copied their files in, so removing the folder
-  // never touches the user's original (untouched) source. Failure here is
-  // non-fatal: the DB rows are already gone, so the nest is unreachable from
-  // the app either way; an orphaned directory is harmless.
+  // Reclaim the on-disk folder at its resolved location (see shared/paths.ts —
+  // `<NEST_STORAGE_ROOT>/<id>`, default `<DATA_ROOT>/nests/<id>`). Every nest
+  // (default or imported) lives there — imported nests copied their files in,
+  // so removing the folder never touches the user's original (untouched)
+  // source. Failure here is non-fatal: the DB rows are already gone, so the
+  // nest is unreachable from the app either way; an orphaned directory is
+  // harmless.
   const path = resolveNestPath(nestId);
   try {
     rmSync(path, { recursive: true, force: true });
