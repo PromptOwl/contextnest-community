@@ -112,9 +112,9 @@ export async function buildNestGraph(
    *  public/read tier can't enumerate them via the graph. */
   canSeeIdentities: boolean,
 ): Promise<NestGraph> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const docs: ContextNode[] = await storage.discoverDocuments();
-  const accessible = filterAccessible(nestId, userId, userEmail, docs);
+  const accessible = await filterAccessible(nestId, userId, userEmail, docs);
 
   const idSet = new Set(accessible.map((d) => d.id));
   const titleToId = new Map<string, string>();
@@ -169,7 +169,8 @@ export async function buildNestGraph(
   // isn't governed (every other endpoint treats disabled stewardship as no
   // rows; returning stale rows here would contradict them).
   const exposeStewards =
-    isStewardshipEnabled(nestId) && !isPublicReader(nestId, userId);
+    (await isStewardshipEnabled(nestId)) &&
+    !(await isPublicReader(nestId, userId));
   const stewardRows = exposeStewards
     ? (await listStewards({ nestId })).filter(
         // Drop document-scoped rows whose node the caller can't see.

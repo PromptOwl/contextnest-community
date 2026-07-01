@@ -20,11 +20,11 @@ export async function resolveReadableBody(
   userId: string,
   workingBody: string,
 ): Promise<string> {
-  if (!isPublicReader(nestId, userId)) return workingBody;
-  const approved = getApprovedVersion(nestId, nodeId);
+  if (!(await isPublicReader(nestId, userId))) return workingBody;
+  const approved = await getApprovedVersion(nestId, nodeId);
   if (approved == null) return "";
   try {
-    const { versions } = engineCache.get(nestId);
+    const { versions } = await engineCache.get(nestId);
     const raw = await versions.reconstructVersion(nodeId, approved);
     return bodyOnly(nodeId, raw);
   } catch {
@@ -46,11 +46,11 @@ export async function resolveExportBody(
   nodeId: string,
   workingBody: string,
 ): Promise<string | null> {
-  if (!isStewardshipEnabled(nestId)) return workingBody;
-  const approved = getApprovedVersion(nestId, nodeId);
+  if (!(await isStewardshipEnabled(nestId))) return workingBody;
+  const approved = await getApprovedVersion(nestId, nodeId);
   if (approved == null) return null;
   try {
-    const { versions } = engineCache.get(nestId);
+    const { versions } = await engineCache.get(nestId);
     const raw = await versions.reconstructVersion(nodeId, approved);
     return bodyOnly(nodeId, raw);
   } catch {

@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, rmSync, statSync, type Dirent } from "fs";
-import { join, relative } from "path";
+import { join, relative, resolve } from "path";
 import { config } from "../config.js";
+import { nestStorageRoot } from "../shared/paths.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { importNest, uniqueNestName } from "./service.js";
 import { registerImportedDocuments } from "../nodes/service.js";
@@ -25,6 +26,18 @@ export interface UnsyncedFolder {
 
 /** Top-level entries we never treat as syncable folders. */
 const RESERVED = new Set(["nests"]);
+
+/**
+ * True when `absPath` IS the live nest vault root. Compared by resolved path,
+ * not folder name: the default root (`<DATA_ROOT>/nests`) is already covered by
+ * RESERVED, but a configured NEST_STORAGE_ROOT can point at a differently-named
+ * folder under DATA_ROOT — and surfacing THAT as an "unsynced" candidate would
+ * let a sync duplicate then delete every live nest. Guard by real path so any
+ * name is caught.
+ */
+function isNestStorageRoot(absPath: string): boolean {
+  return resolve(absPath) === resolve(nestStorageRoot());
+}
 
 /** Walk a directory recursively, counting .md files + total size. Skips dot dirs. */
 function scanMarkdown(dir: string): { count: number; size: number } {
@@ -125,7 +138,9 @@ export function listUnsyncedFolders(): UnsyncedFolder[] {
     if (!e.isDirectory()) continue;
     if (e.name.startsWith(".")) continue;
     if (RESERVED.has(e.name)) continue;
-    out.push(...collectLeafFolders(e.name, join(root, e.name)));
+    const abs = join(root, e.name);
+    if (isNestStorageRoot(abs)) continue;
+    out.push(...collectLeafFolders(e.name, abs));
   }
   out.sort((a, b) => a.name.localeCompare(b.name));
   console.log(
@@ -202,6 +217,11 @@ export async function syncUnsyncedFolder(
   assertSafeFolderName(folderName);
 
   const src = join(config.DATA_ROOT, folderName);
+  // Never sync (and then delete) the live nest vault root itself, even if a
+  // NEST_STORAGE_ROOT under DATA_ROOT let it slip past name-based checks.
+  if (isNestStorageRoot(src)) {
+    throw new ValidationError("Folder is not eligible for sync");
+  }
   let stat;
   try {
     stat = statSync(src);
@@ -228,7 +248,7 @@ export async function syncUnsyncedFolder(
   // picks the next free "<name> (n)" suffix so repeat syncs Just Work.
   const segments = folderName.split("/").filter(Boolean);
   const baseName = segments[segments.length - 1] || folderName;
-  const nestName = uniqueNestName(userId, baseName);
+  const nestName = await uniqueNestName(userId, baseName);
   if (nestName !== baseName) {
     console.log(
       `[unsynced] name "${baseName}" already in use, using "${nestName}" instead`,

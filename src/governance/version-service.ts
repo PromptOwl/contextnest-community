@@ -7,6 +7,7 @@
 
 import { createHash } from "crypto";
 import { getDb } from "../db/client.js";
+import { insertOrReplace, nowExpr } from "../db/sql.js";
 import type { DocumentVersion, DocumentLifecycleStatus } from "./types.js";
 
 export function hashContent(content: string): string {
@@ -29,7 +30,7 @@ export function systemAuthor(email: string): string {
 
 // ─── Create Version ─────────────────────────────────────────────────────
 
-export function createVersion(params: {
+export async function createVersion(params: {
   nestId: string;
   nodeId: string;
   version: number;
@@ -38,22 +39,23 @@ export function createVersion(params: {
   status: DocumentLifecycleStatus;
   changeNote?: string;
   tags?: string[];
-}): DocumentVersion {
+}): Promise<DocumentVersion> {
   const db = getDb();
   const contentHash = hashContent(params.content);
 
-  db.prepare(
+  await db.run(
     `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, change_note, tags_json)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    params.nestId,
-    params.nodeId,
-    params.version,
-    contentHash,
-    params.author,
-    params.status,
-    params.changeNote || null,
-    params.tags ? JSON.stringify(params.tags) : null,
+    [
+      params.nestId,
+      params.nodeId,
+      params.version,
+      contentHash,
+      params.author,
+      params.status,
+      params.changeNote || null,
+      params.tags ? JSON.stringify(params.tags) : null,
+    ],
   );
 
   return {
@@ -68,75 +70,77 @@ export function createVersion(params: {
 
 // ─── Query Versions ─────────────────────────────────────────────────────
 
-export function getVersions(
+export async function getVersions(
   nestId: string,
   nodeId: string,
-): DocumentVersion[] {
+): Promise<DocumentVersion[]> {
   const db = getDb();
-  const rows = db
-    .prepare(
-      "SELECT * FROM node_versions WHERE nest_id = ? AND node_id = ? ORDER BY version DESC",
-    )
-    .all(nestId, nodeId) as any[];
+  const rows = (await db.all(
+    "SELECT * FROM node_versions WHERE nest_id = ? AND node_id = ? ORDER BY version DESC",
+    [nestId, nodeId],
+  )) as any[];
 
   return rows.map(rowToVersion);
 }
 
-export function getVersion(
+export async function getVersion(
   nestId: string,
   nodeId: string,
   version: number,
-): DocumentVersion | null {
+): Promise<DocumentVersion | null> {
   const db = getDb();
-  const row = db
-    .prepare(
-      "SELECT * FROM node_versions WHERE nest_id = ? AND node_id = ? AND version = ?",
-    )
-    .get(nestId, nodeId, version) as any;
+  const row = (await db.get(
+    "SELECT * FROM node_versions WHERE nest_id = ? AND node_id = ? AND version = ?",
+    [nestId, nodeId, version],
+  )) as any;
   return row ? rowToVersion(row) : null;
 }
 
-export function getCurrentVersion(
+export async function getCurrentVersion(
   nestId: string,
   nodeId: string,
-): number {
+): Promise<number> {
   const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT MAX(version) as v FROM node_versions
+  const row = (await db.get(
+    `SELECT MAX(version) as v FROM node_versions
         WHERE nest_id = ? AND node_id = ?
           AND author NOT LIKE ?`,
-    )
-    .get(nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`) as { v: number | null };
+    [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`],
+  )) as { v: number | null };
   return row?.v || 0;
 }
 
 // ─── Approved Version ───────────────────────────────────────────────────
 
-export function getApprovedVersion(
+export async function getApprovedVersion(
   nestId: string,
   nodeId: string,
-): number | null {
+): Promise<number | null> {
   const db = getDb();
-  const row = db
-    .prepare(
-      "SELECT approved_version FROM approved_versions WHERE nest_id = ? AND node_id = ?",
-    )
-    .get(nestId, nodeId) as { approved_version: number } | undefined;
+  const row = (await db.get(
+    "SELECT approved_version FROM approved_versions WHERE nest_id = ? AND node_id = ?",
+    [nestId, nodeId],
+  )) as { approved_version: number } | undefined;
   return row?.approved_version ?? null;
 }
 
-export function setApprovedVersion(
+export async function setApprovedVersion(
   nestId: string,
   nodeId: string,
   version: number,
   approvedBy: string,
-): void {
+): Promise<void> {
   const db = getDb();
-  db.prepare(
-    `INSERT OR REPLACE INTO approved_versions (nest_id, node_id, approved_version, approved_by)
+  // SQLite OR REPLACE resets approved_at to its default (now); mirror that on
+  // Postgres by setting approved_at in the conflict update.
+  const sql = insertOrReplace(
+    db,
+    `INSERT INTO approved_versions (nest_id, node_id, approved_version, approved_by)
      VALUES (?, ?, ?, ?)`,
-  ).run(nestId, nodeId, version, approvedBy);
+    ["nest_id", "node_id"],
+    `approved_version = excluded.approved_version, approved_by = excluded.approved_by, approved_at = ${nowExpr(db)}`,
+  );
+  await db.run(sql, [nestId, nodeId, version, approvedBy]);
 }
 
 // ─── Conflict Detection ─────────────────────────────────────────────────
@@ -149,22 +153,21 @@ export interface ConflictCheckResult {
   updatedAt?: string;
 }
 
-export function checkConflict(
+export async function checkConflict(
   nestId: string,
   nodeId: string,
   baseVersion: number,
-): ConflictCheckResult {
+): Promise<ConflictCheckResult> {
   const db = getDb();
-  const current = db
-    .prepare(
-      `SELECT version, content_hash, author, created_at
+  const current = (await db.get(
+    `SELECT version, content_hash, author, created_at
          FROM node_versions
         WHERE nest_id = ? AND node_id = ?
           AND author NOT LIKE ?
         ORDER BY version DESC
         LIMIT 1`,
-    )
-    .get(nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`) as
+    [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`],
+  )) as
     | {
         version: number;
         content_hash: string;
@@ -196,13 +199,15 @@ export function checkConflict(
 
 // ─── Get Tags ───────────────────────────────────────────────────────────
 
-export function getNodeTags(nestId: string, nodeId: string): string[] {
+export async function getNodeTags(
+  nestId: string,
+  nodeId: string,
+): Promise<string[]> {
   const db = getDb();
-  const row = db
-    .prepare(
-      "SELECT tags_json FROM node_versions WHERE nest_id = ? AND node_id = ? ORDER BY version DESC LIMIT 1",
-    )
-    .get(nestId, nodeId) as { tags_json: string | null } | undefined;
+  const row = (await db.get(
+    "SELECT tags_json FROM node_versions WHERE nest_id = ? AND node_id = ? ORDER BY version DESC LIMIT 1",
+    [nestId, nodeId],
+  )) as { tags_json: string | null } | undefined;
   if (!row?.tags_json) return [];
   try {
     return JSON.parse(row.tags_json);
@@ -219,31 +224,27 @@ export function getNodeTags(nestId: string, nodeId: string): string[] {
 // and bloating git diffs. Compute from DB instead so the file stays
 // stable across draft → pending → approved cycles.
 
-export function getDisplayStatus(
+export async function getDisplayStatus(
   nestId: string,
   nodeId: string,
-): "draft" | "pending_review" | "approved" | "published" | "rejected" {
+): Promise<"draft" | "pending_review" | "approved" | "published" | "rejected"> {
   const db = getDb();
 
   // 1. Any pending review wins — even if the current version row says
   // something else, an open review request is the live workflow state.
-  const pending = db
-    .prepare(
-      "SELECT 1 FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' LIMIT 1",
-    )
-    .get(nestId, nodeId) as { 1: number } | undefined;
+  const pending = (await db.get(
+    "SELECT 1 FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' LIMIT 1",
+    [nestId, nodeId],
+  )) as { 1: number } | undefined;
   if (pending) return "pending_review";
 
   // 2. Otherwise look at the current (latest) version's recorded status.
-  const current = db
-    .prepare(
-      `SELECT version, status FROM node_versions
+  const current = (await db.get(
+    `SELECT version, status FROM node_versions
        WHERE nest_id = ? AND node_id = ?
        ORDER BY version DESC LIMIT 1`,
-    )
-    .get(nestId, nodeId) as
-    | { version: number; status: string }
-    | undefined;
+    [nestId, nodeId],
+  )) as { version: number; status: string } | undefined;
   if (!current) return "draft";
 
   // 3. Terminal "published" / "approved" only when the latest version is
@@ -251,11 +252,10 @@ export function getDisplayStatus(
   // the new (latest) version is a draft even though an older row is
   // still serving LLM traffic — display reflects the latest row.
   if (current.status === "published" || current.status === "approved") {
-    const approved = db
-      .prepare(
-        "SELECT approved_version FROM approved_versions WHERE nest_id = ? AND node_id = ?",
-      )
-      .get(nestId, nodeId) as { approved_version: number } | undefined;
+    const approved = (await db.get(
+      "SELECT approved_version FROM approved_versions WHERE nest_id = ? AND node_id = ?",
+      [nestId, nodeId],
+    )) as { approved_version: number } | undefined;
     if (approved?.approved_version === current.version) {
       return current.status === "published" ? "published" : "approved";
     }
