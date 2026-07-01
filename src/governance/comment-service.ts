@@ -14,12 +14,13 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { nowExpr } from "../db/sql.js";
 import { listNestExternalEdits } from "./external-edit-service.js";
 import type { Comment, CommentStatus, ActivityEntry } from "./types.js";
 
 // ─── Create ─────────────────────────────────────────────────────────────
 
-export function createComment(params: {
+export async function createComment(params: {
   nestId: string;
   nodeId: string;
   author: string;
@@ -27,7 +28,7 @@ export function createComment(params: {
   version?: number;
   anchor?: { start?: number; end?: number; text?: string };
   parentId?: string;
-}): Comment {
+}): Promise<Comment> {
   const db = getDb();
 
   const body = (params.body ?? "").trim();
@@ -38,11 +39,10 @@ export function createComment(params: {
   // A reply must point at a real comment on the same node — otherwise the
   // thread would dangle (or cross-link two documents).
   if (params.parentId) {
-    const parent = db
-      .prepare(
-        "SELECT id FROM comments WHERE id = ? AND nest_id = ? AND node_id = ?",
-      )
-      .get(params.parentId, params.nestId, params.nodeId) as
+    const parent = await db.get(
+      "SELECT id FROM comments WHERE id = ? AND nest_id = ? AND node_id = ?",
+      [params.parentId, params.nestId, params.nodeId],
+    ) as
       | { id: string }
       | undefined;
     if (!parent) {
@@ -51,34 +51,35 @@ export function createComment(params: {
   }
 
   const id = uuid();
-  db.prepare(
+  await db.run(
     `INSERT INTO comments
        (id, nest_id, node_id, version, anchor_start, anchor_end, anchor_text,
         parent_id, author, body)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    id,
-    params.nestId,
-    params.nodeId,
-    params.version ?? null,
-    params.anchor?.start ?? null,
-    params.anchor?.end ?? null,
-    params.anchor?.text ?? null,
-    params.parentId ?? null,
-    params.author,
-    body,
+    [
+      id,
+      params.nestId,
+      params.nodeId,
+      params.version ?? null,
+      params.anchor?.start ?? null,
+      params.anchor?.end ?? null,
+      params.anchor?.text ?? null,
+      params.parentId ?? null,
+      params.author,
+      body,
+    ],
   );
 
-  return getComment(id)!;
+  return (await getComment(id))!;
 }
 
 // ─── List ───────────────────────────────────────────────────────────────
 
-export function listComments(
+export async function listComments(
   nestId: string,
   nodeId: string,
   opts: { status?: CommentStatus } = {},
-): Comment[] {
+): Promise<Comment[]> {
   const db = getDb();
   const args: any[] = [nestId, nodeId];
   let statusClause = "";
@@ -87,39 +88,37 @@ export function listComments(
     args.push(opts.status);
   }
   // Chronological so the UI can fold replies under their parent in order.
-  const rows = db
-    .prepare(
-      `SELECT * FROM comments
+  const rows = await db.all(
+    `SELECT * FROM comments
         WHERE nest_id = ? AND node_id = ?${statusClause}
         ORDER BY created_at ASC`,
-    )
-    .all(...args) as any[];
+    args,
+  ) as any[];
   return rows.map(rowToComment);
 }
 
-export function getComment(id: string): Comment | null {
+export async function getComment(id: string): Promise<Comment | null> {
   const db = getDb();
-  const row = db.prepare("SELECT * FROM comments WHERE id = ?").get(id) as any;
+  const row = await db.get("SELECT * FROM comments WHERE id = ?", [id]) as any;
   return row ? rowToComment(row) : null;
 }
 
 // ─── Resolve ────────────────────────────────────────────────────────────
 
-export function resolveComment(params: {
+export async function resolveComment(params: {
   nestId: string;
   nodeId: string;
   commentId: string;
   resolvedBy: string;
-}): Comment {
+}): Promise<Comment> {
   const db = getDb();
   // Scope the lookup to the node in the URL too — otherwise a nest-read user
   // could resolve a comment on ANY node in the nest (incl. steward-restricted
   // ones) by guessing a commentId, with the route's nodeId silently ignored.
-  const existing = db
-    .prepare(
-      "SELECT id, status FROM comments WHERE id = ? AND nest_id = ? AND node_id = ?",
-    )
-    .get(params.commentId, params.nestId, params.nodeId) as
+  const existing = await db.get(
+    "SELECT id, status FROM comments WHERE id = ? AND nest_id = ? AND node_id = ?",
+    [params.commentId, params.nestId, params.nodeId],
+  ) as
     | { id: string; status: string }
     | undefined;
   if (!existing) {
@@ -130,12 +129,13 @@ export function resolveComment(params: {
   if (existing.status === "resolved") {
     throw new Error("Comment is already resolved");
   }
-  db.prepare(
+  await db.run(
     `UPDATE comments
-        SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now')
+        SET status = 'resolved', resolved_by = ?, resolved_at = ${nowExpr(db)}
       WHERE id = ?`,
-  ).run(params.resolvedBy, params.commentId);
-  return getComment(params.commentId)!;
+    [params.resolvedBy, params.commentId],
+  );
+  return (await getComment(params.commentId))!;
 }
 
 // ─── Activity log ───────────────────────────────────────────────────────
@@ -172,15 +172,14 @@ export async function getActivity(params: {
   // table is correct (we over-fetch slightly because a row can emit 2 events).
 
   // Comments — both the leaving and the resolving are events.
-  const commentRows = db
-    .prepare(
-      `SELECT id, node_id, author, body, status, created_at, resolved_by, resolved_at
+  const commentRows = await db.all(
+    `SELECT id, node_id, author, body, status, created_at, resolved_by, resolved_at
          FROM comments
         WHERE nest_id = ?${nodeFilter}
         ORDER BY COALESCE(resolved_at, created_at) DESC
         LIMIT ?`,
-    )
-    .all(...baseArgs, limit) as any[];
+    [...baseArgs, limit],
+  ) as any[];
   for (const r of commentRows) {
     entries.push({
       type: "comment",
@@ -203,15 +202,14 @@ export async function getActivity(params: {
   }
 
   // Edits — every node_versions row is an edit by its author.
-  const versionRows = db
-    .prepare(
-      `SELECT node_id, version, author, change_note, created_at
+  const versionRows = await db.all(
+    `SELECT node_id, version, author, change_note, created_at
          FROM node_versions
         WHERE nest_id = ?${nodeFilter}
         ORDER BY created_at DESC
         LIMIT ?`,
-    )
-    .all(...baseArgs, limit) as any[];
+    [...baseArgs, limit],
+  ) as any[];
   for (const r of versionRows) {
     entries.push({
       type: "edit",
@@ -224,15 +222,14 @@ export async function getActivity(params: {
   }
 
   // Reviews — request + resolution are distinct events.
-  const reviewRows = db
-    .prepare(
-      `SELECT id, node_id, requested_by, requested_at, status, resolved_by, resolved_at
+  const reviewRows = await db.all(
+    `SELECT id, node_id, requested_by, requested_at, status, resolved_by, resolved_at
          FROM review_requests
         WHERE nest_id = ?${nodeFilter}
         ORDER BY COALESCE(resolved_at, requested_at) DESC
         LIMIT ?`,
-    )
-    .all(...baseArgs, limit) as any[];
+    [...baseArgs, limit],
+  ) as any[];
   for (const r of reviewRows) {
     entries.push({
       type: "review_requested",

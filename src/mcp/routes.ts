@@ -9,11 +9,10 @@ import { z } from "zod";
 
 export const mcpRoutes = new Hono<AuthEnv>();
 
-function getUserEmail(userId: string): string {
+async function getUserEmail(userId: string): Promise<string> {
   const db = getDb();
-  const user = db
-    .prepare("SELECT email FROM users WHERE id = ?")
-    .get(userId) as { email: string } | undefined;
+  const user = await db
+    .get("SELECT email FROM users WHERE id = ?", [userId]) as { email: string } | undefined;
   return user?.email || "anonymous@localhost";
 }
 
@@ -26,8 +25,6 @@ function createMcpServerForNest(
     { name: `contextnest-${nestId}`, version: "1.0.0" },
     { capabilities: { tools: {} } },
   );
-
-  const engine = engineCache.get(nestId);
 
   for (const tool of TOOL_DEFINITIONS) {
     const props = (tool.inputSchema as any).properties || {};
@@ -48,6 +45,7 @@ function createMcpServerForNest(
     }
 
     server.tool(tool.name, tool.description, shape, async (args) => {
+      const engine = await engineCache.get(nestId);
       const text = await handleToolCall(tool.name, args, {
         storage: engine.storage,
         queryEngine: engine.query,
@@ -67,7 +65,7 @@ function createMcpServerForNest(
 mcpRoutes.all("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
-  const userEmail = getUserEmail(userId);
+  const userEmail = await getUserEmail(userId);
   // Create a fresh server per request (stateless) with the current user's identity
   const server = createMcpServerForNest(nestId, userId, userEmail);
 

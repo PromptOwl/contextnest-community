@@ -7,7 +7,7 @@
 
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
-import { config } from "../config.js";
+import { resolveNestPath } from "../shared/paths.js";
 import type { StewardsConfig, StewardEntry } from "./types.js";
 
 /**
@@ -106,8 +106,7 @@ function parseEntry(str: string): StewardEntry | null {
  * Returns null if the file doesn't exist.
  */
 export function loadStewardsConfig(nestId: string): StewardsConfig | null {
-  const dataRoot = config.DATA_ROOT;
-  const nestPath = join(dataRoot, "nests", nestId);
+  const nestPath = resolveNestPath(nestId);
 
   // Check multiple possible locations
   const candidates = [

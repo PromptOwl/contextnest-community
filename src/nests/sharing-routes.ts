@@ -15,24 +15,27 @@ export const sharingRoutes = new Hono<AuthEnv>();
 sharingRoutes.get("/collaborators", async (c) => {
   const db = getDb();
   const nestId = c.req.param("nestId")!;
-  const collabs = db
-    .prepare(
-      `SELECT nc.*, u.email FROM nest_collaborators nc
+  const collabs = (await db.all(
+    `SELECT nc.*, u.email FROM nest_collaborators nc
        LEFT JOIN users u ON nc.user_id = u.id
        WHERE nc.nest_id = ?
        ORDER BY nc.granted_at`,
-    )
-    .all(nestId) as Array<NestCollaborator & { email?: string }>;
+    [nestId],
+  )) as Array<NestCollaborator & { email?: string }>;
   // Annotate with the user's steward roles + merged effective roles so the
   // UI shows the full picture (a collaborator may also be a reviewer steward).
-  const enriched = collabs.map((collab) => {
-    if (!collab.email) return { ...collab, stewardRoles: [], roles: [] };
-    return {
+  const enriched = [];
+  for (const collab of collabs) {
+    if (!collab.email) {
+      enriched.push({ ...collab, stewardRoles: [], roles: [] });
+      continue;
+    }
+    enriched.push({
       ...collab,
-      stewardRoles: getStewardRolesForUser(nestId, collab.email),
-      roles: resolveUserRoles(nestId, collab.email),
-    };
-  });
+      stewardRoles: await getStewardRolesForUser(nestId, collab.email),
+      roles: await resolveUserRoles(nestId, collab.email),
+    });
+  }
   return c.json({ collaborators: enriched });
 });
 
@@ -69,9 +72,10 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   // Scope to the nest in the URL — the guard authorised the caller against
   // THIS nest, so the row we touch must belong to it (a bare `id =` match
   // would let an admin of nest A mutate a collaborator row from nest B).
-  const info = db.prepare(
+  const info = await db.run(
     "UPDATE nest_collaborators SET permission = ? WHERE id = ? AND nest_id = ?",
-  ).run(body.permission, c.req.param("collabId")!, c.req.param("nestId")!);
+    [body.permission, c.req.param("collabId")!, c.req.param("nestId")!],
+  );
   // No row matched → the collabId is unknown or belongs to another nest. Don't
   // claim success for a no-op.
   if (info.changes === 0) {
@@ -86,9 +90,10 @@ sharingRoutes.delete("/collaborators/:collabId", async (c) => {
   const db = getDb();
   // Scope to the nest in the URL (see PATCH above) — never delete a row that
   // belongs to a different nest just because the UUID matches.
-  const info = db.prepare(
+  const info = await db.run(
     "DELETE FROM nest_collaborators WHERE id = ? AND nest_id = ?",
-  ).run(c.req.param("collabId")!, c.req.param("nestId")!);
+    [c.req.param("collabId")!, c.req.param("nestId")!],
+  );
   if (info.changes === 0) {
     throw new NotFoundError("Collaborator not found");
   }
@@ -103,9 +108,9 @@ sharingRoutes.patch("/visibility", async (c) => {
   }
 
   const db = getDb();
-  db.prepare("UPDATE nests SET visibility = ? WHERE id = ?").run(
+  await db.run("UPDATE nests SET visibility = ? WHERE id = ?", [
     body.visibility,
     c.req.param("nestId")!,
-  );
+  ]);
   return c.json({ visibility: body.visibility });
 });
