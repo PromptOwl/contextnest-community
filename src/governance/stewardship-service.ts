@@ -603,13 +603,23 @@ export interface PermissionResult {
 /**
  * Can this user manage the steward roster (assign/remove/sync)? Single
  * authority shared by REST (app.ts), MCP, and any other caller so the rule
- * lives in one place. Only the server admin governs stewards:
+ * lives in one place. Stewards are governed by:
  *   - open mode has no real auth — everyone is effectively owner
  *   - the license/server admin, or an access.yaml super_admin
+ *   - the nest owner or an admin collaborator on THIS nest — so an owner can
+ *     delegate people-management (collaborators AND stewards) by granting
+ *     admin, instead of every roster change routing through the server admin
  */
-export function canManageStewards(userEmail: string): boolean {
+export async function canManageStewards(
+  nestId: string,
+  userEmail: string,
+): Promise<boolean> {
   if (config.AUTH_MODE === "open") return true;
-  return isLicenseAdminEmail(userEmail) || isSuperAdmin(userEmail);
+  if (isLicenseAdminEmail(userEmail) || isSuperAdmin(userEmail)) return true;
+  const userId = await userIdForEmail(userEmail);
+  if (!userId) return false;
+  const perm = await resolveNestPermission(nestId, userId);
+  return perm === "owner" || perm === "admin";
 }
 
 /**

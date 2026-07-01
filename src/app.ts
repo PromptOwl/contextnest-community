@@ -503,17 +503,21 @@ export function createApp(): Hono<AuthEnv> {
       /\/comments$/.test(path) ||
       /\/comments\/[^/]+\/resolve$/.test(path);
     // The steward roster — list, assign, remove, sync — is restricted to the
-    // server (license) admin: not nest owners or collaborators. All methods
-    // on /nests/:id/stewards are locked. The node-level resolve route
+    // server (license) admin plus the nest owner/admin collaborators, so an
+    // owner can delegate vault people-management by granting admin. All
+    // methods on /nests/:id/stewards are gated. The node-level resolve route
     // (/nodes/:id/stewards) stays readable so the editor UI can resolve a
     // caller's per-node role.
     const isStewardRoster =
       path.includes("/stewards") && !path.includes("/nodes/");
-    if (isStewardRoster && !canManageStewards(await resolveCallerEmail(userId))) {
+    if (
+      isStewardRoster &&
+      !(await canManageStewards(nestId, await resolveCallerEmail(userId)))
+    ) {
       return c.json(
         {
           error:
-            "You don't have permission to manage stewards. Only the super admin can do this.",
+            "You don't have permission to manage stewards. Only a nest admin, the nest owner, or the server admin can do this.",
         },
         403,
       );

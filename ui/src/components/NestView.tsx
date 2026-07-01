@@ -101,11 +101,6 @@ export function NestView({
   //   - anon-owned + key mode → license-admin caretaker only
   const canDeleteNest =
     isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
-  // Stewardship is governance of the commons / one's own nests, not a tool
-  // server admins impose on other users' nests. So the steward roster,
-  // assign-steward UI, and Settings modal are hidden when an admin views a
-  // real user's nest.
-  const canManageGovernance = isAdmin && (isOwner || isAnonOwned);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
 
   // Local mirror of the nest name so inline rename feels instant while the
@@ -168,6 +163,16 @@ export function NestView({
   const [isImported, setIsImported] = useState(false);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
+  // Stewardship is governance of the commons / one's own nests, not a tool
+  // server admins impose on other users' nests. So the steward roster,
+  // assign-steward UI, and Settings modal are hidden when an admin views a
+  // real user's nest. Delegation (mirrors server canManageStewards): the
+  // nest owner or an admin collaborator also manages governance, so owners
+  // can hand people-management to other admins.
+  const canManageGovernance =
+    (isAdmin && (isOwner || isAnonOwned)) ||
+    permission === "owner" ||
+    permission === "admin";
   // Caller's merged effective roles (collaborator + steward), nest-wide.
   const [roles, setRoles] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);

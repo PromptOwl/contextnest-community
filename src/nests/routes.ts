@@ -284,15 +284,17 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
 
-  // Must be server admin OR nest owner
+  // Server admin, nest owner, or an admin collaborator — owners delegate
+  // governance (stewards, settings, people) by granting admin; destructive
+  // owner-only actions (delete, transfer) stay with the owner.
   const isServerAdmin = await isLicenseAdminUserId(userId);
   const permission = await effectivePermission(nestId, userId);
 
-  if (!isServerAdmin && permission !== "owner") {
+  if (!isServerAdmin && permission !== "owner" && permission !== "admin") {
     return c.json(
       {
         error:
-          "Only the nest owner or the server license-admin can update nest settings.",
+          "Only a nest admin, the nest owner, or the server license-admin can update nest settings.",
       },
       403,
     );
