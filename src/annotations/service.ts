@@ -274,7 +274,7 @@ export async function readArtifact(
  * title→slug algorithm ever changes. Passed as an explicit id to createNode so
  * create and update agree on the same id forever.
  */
-function derivedAnnotationsId(sourceNodeId: string): string {
+export function derivedAnnotationsId(sourceNodeId: string): string {
   const base = sourceNodeId.replace(/^nodes\//, "");
   return `nodes/${base}--annotations`;
 }
@@ -293,13 +293,23 @@ export async function syncAnnotationsNode(
 ): Promise<void> {
   try {
     let title = nodeId;
+    let type: string | null = null;
     try {
       const { storage } = await engineCache.get(nestId);
       const node = await storage.readDocument(nodeId);
       title = node.frontmatter?.title || nodeId;
+      type = (node.frontmatter?.type as string) || "document";
     } catch {
       /* artifact gone — still project an empty/placeholder doc */
     }
+
+    // Only artifacts feed the regen/MCP loop through a derived node — an agent
+    // regenerates the artifact from this feedback. Plain documents keep their
+    // comments in SQLite only: no derived `— Annotations` node (which would
+    // itself be annotatable → recursion, and clutter the nest). A failed read
+    // (type === null) is a deleted node — fall through so any existing derived
+    // node still gets its placeholder refresh.
+    if (type !== null && type !== "artifact") return;
 
     const threads = await listThreads(nestId, nodeId);
     const derivedTitle = `${title} — Annotations`;

@@ -1564,7 +1564,7 @@ export function DocumentEditor({
 
           {/* Ever-present comments rail — beside the doc, not stacked below. */}
           {!isNew && (
-            <aside className="w-full lg:w-80 shrink-0 lg:sticky lg:top-4 self-start max-h-[calc(100vh-2rem)] overflow-y-auto">
+            <aside className="w-full lg:w-80 shrink-0 self-start lg:sticky lg:top-4 flex flex-col min-h-0 max-h-[70vh]">
               <AnnotationsPanel
                 nestId={nestId}
                 nodeId={nodeId}
