@@ -18,6 +18,7 @@ import {
 } from "./markdown-export.js";
 import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel } from "../shared/access.js";
 import { buildNestGraph } from "./graph-service.js";
 
@@ -302,6 +303,14 @@ queryRoutes.get("/overview", async (c) => {
       snippet: (n.body || "").slice(0, 120).replace(/\n/g, " "),
     })),
   });
+});
+
+// GET /nests/:nestId/comment-counts
+// Per-node annotation (comment) counts for the whole nest, so the UI can sort
+// document lists by "most comments" in one call instead of N per-node fetches.
+queryRoutes.get("/comment-counts", async (c) => {
+  const counts = countThreadsByNode(c.req.param("nestId")!);
+  return c.json({ counts });
 });
 
 // GET /nests/:nestId/context

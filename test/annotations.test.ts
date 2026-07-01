@@ -508,3 +508,37 @@ describe("annotations: thread scope is enforced (no cross-node hijack)", () => {
     expect(list.data.threads[0].status).toBe("open");
   });
 });
+
+describe("annotations: per-nest comment counts (document-list sorting)", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let alice: { apiKey: string; userId: string; email: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    alice = await registerUser(app, "alice@acme.com", "Alice");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Sortable" }, alice.apiKey);
+    nestId = nest.data.nest.id;
+
+    // Two docs: "Popular" gets 2 comment threads, "Quiet" gets none.
+    const popular = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Popular", content: "# Popular\n\nlots to say" }, alice.apiKey);
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Quiet", content: "# Quiet" }, alice.apiKey);
+
+    for (const body of ["first note", "second note"]) {
+      await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${popular.data.node.id}/annotations`, { body }, alice.apiKey);
+    }
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("returns per-node comment counts for the nest", async () => {
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}/comment-counts`, undefined, alice.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.counts["nodes/popular"].count).toBe(2);
+    expect(res.data.counts["nodes/popular"].lastAt).toBeTruthy();
+    // A node with no comments simply isn't in the map.
+    expect(res.data.counts["nodes/quiet"]).toBeUndefined();
+  });
+});
