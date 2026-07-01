@@ -346,7 +346,7 @@ authRoutes.post("/login", async (c) => {
 
   const db = getDb();
   const user = await db.get(
-    "SELECT id, email, name, password_hash, is_admin FROM users WHERE LOWER(email) = ?",
+    "SELECT id, email, name, password_hash, is_admin, is_invited FROM users WHERE LOWER(email) = ?",
     [emailLower],
   ) as
     | {
@@ -355,6 +355,7 @@ authRoutes.post("/login", async (c) => {
       name: string | null;
       password_hash: string;
       is_admin: number;
+      is_invited: number;
     }
     | undefined;
 
@@ -372,6 +373,20 @@ authRoutes.post("/login", async (c) => {
   console.log(`[auth] login OK — counter reset ip=${ip} email=${emailLower}`);
   if (hasIp) clear(ipKey);
   clear(emailKey);
+
+  // A first successful login is a real "claim" too — an invited teammate has
+  // now accessed the account, so clear is_invited. This clears the "Invited"
+  // badge and makes a later /auth/invite on this email return 409 instead of
+  // silently overwriting a working login (re-invite only refreshes the temp
+  // password of someone who has NOT logged in yet). Use Reset password to
+  // re-issue a credential for an already-active teammate.
+  if (user.is_invited === 1) {
+    try {
+      await db.run("UPDATE users SET is_invited = 0 WHERE id = ?", [user.id]);
+    } catch {
+      // best-effort; never block a valid login on this bookkeeping update
+    }
+  }
 
   // Legacy SHA-256 password? Silently upgrade to bcrypt on this successful
   // login so the DB migrates itself over time without forcing a reset.
@@ -812,7 +827,12 @@ authRoutes.post("/password", authMiddleware, async (c) => {
   }
 
   const newHash = await hashPassword(body.next);
-  await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [
+  // Clear is_invited: choosing your own password is the real "claim" moment for
+  // an invited teammate (invite no longer routes through /auth/register). This
+  // is what makes the /auth/invite 409 guard fire on a re-invite — otherwise a
+  // teammate who claimed via temp-password→change-password stays is_invited=1
+  // forever and a later re-invite would silently clobber their chosen password.
+  await db.run("UPDATE users SET password_hash = ?, is_invited = 0 WHERE id = ?", [
     newHash,
     userId,
   ]);
