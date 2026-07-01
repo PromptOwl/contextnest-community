@@ -277,16 +277,14 @@ async function handleServerToolCall(
     return renderNestIndexMarkdown(nests, baseUrl);
   }
 
+  // One indistinguishable message for "doesn't exist", "out of key scope",
+  // and "no read grant" — otherwise the tool becomes an existence oracle
+  // for other users' private nests (probe by name, compare messages).
+  const inaccessible = `Nest not found or not accessible: "${args.nest}". Use nest_index to see what these credentials can read.`;
   const nest = await resolveNestRef(String(args.nest ?? ""));
-  if (!nest) {
-    return `Nest not found: "${args.nest}". Use the id (or an unambiguous name) from nest_index.`;
-  }
-  if (nestScope && nest.id !== nestScope) {
-    return "This API key is scoped to a different nest — it can't read that one.";
-  }
-  if (!(await canRead(nest.id, userId))) {
-    return `You don't have read access to "${nest.name}".`;
-  }
+  if (!nest) return inaccessible;
+  if (nestScope && nest.id !== nestScope) return inaccessible;
+  if (!(await canRead(nest.id, userId))) return inaccessible;
 
   const engine = await engineCache.get(nest.id);
   return handleToolCall(toolName, args, {

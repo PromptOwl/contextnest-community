@@ -141,18 +141,19 @@ describe("server-level /mcp — one connection, all nests", () => {
     expect(text).toContain("Why we win.");
   });
 
-  it("denies reads on a nest the caller can't access", async () => {
-    const text = await callTool(alice.apiKey, "context_get", {
+  it("denies inaccessible nests with the SAME message as unknown ones", async () => {
+    // No existence oracle: no-access and nonexistent are indistinguishable.
+    const denied = await callTool(alice.apiKey, "context_get", {
       nest: privateNestId,
       title: "anything",
     });
-    expect(text).toMatch(/don't have read access/i);
-  });
-
-  it("reports unknown nests instead of leaking", async () => {
-    const text = await callTool(alice.apiKey, "context_list", {
+    const unknown = await callTool(alice.apiKey, "context_list", {
       nest: "no-such-nest",
     });
-    expect(text).toMatch(/Nest not found/);
+    expect(denied).toMatch(/not found or not accessible/i);
+    expect(unknown).toMatch(/not found or not accessible/i);
+    expect(denied.replace(privateNestId, "X")).toBe(
+      unknown.replace("no-such-nest", "X"),
+    );
   });
 });

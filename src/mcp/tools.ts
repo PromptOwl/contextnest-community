@@ -23,6 +23,12 @@ import {
   listNodesForCallerByEmail,
 } from "../nodes/service.js";
 
+/** Caller-supplied traversal depth → non-negative integer, default 2. */
+function normalizeHops(raw: unknown): number {
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 2;
+}
+
 export interface McpToolContext {
   storage: NestStorage;
   queryEngine: GraphQueryEngine;
@@ -392,7 +398,12 @@ export async function handleToolCall(
     }
 
     case "context_query": {
-      const result = await queryEngine.query(args.query, { hops: 2 });
+      // hops mirrors REST POST /context — caller-controlled traversal depth.
+      // External LLM callers set this directly, so normalize junk values
+      // (negative, fractional, NaN) to a sane non-negative integer.
+      const result = await queryEngine.query(args.query, {
+        hops: normalizeHops(args.hops),
+      });
       const nodes = result.documents;
       if (!nodes.length) return `No nodes matched: ${args.query}`;
       const list = nodes
@@ -448,7 +459,9 @@ export async function handleToolCall(
     }
 
     case "context_resolve": {
-      const result = await queryEngine.query(args.selector, { hops: 2 });
+      const result = await queryEngine.query(args.selector, {
+        hops: normalizeHops(args.hops),
+      });
       const maxTokens = args.max_tokens || 8000;
       const approxChars = maxTokens * 4;
       let total = 0;
