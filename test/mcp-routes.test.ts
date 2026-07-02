@@ -11,6 +11,7 @@ import {
   createTestApp,
   jsonRequest,
 } from "./helpers";
+import { normalizeHops } from "../src/mcp/tools";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -220,6 +221,27 @@ describe("MCP tools/call — basic vault tools", () => {
     });
     expect(typeof resolved).toBe("string");
     expect(resolved.length).toBeGreaterThan(0);
+  });
+});
+
+describe("normalizeHops", () => {
+  it("keeps valid non-negative integers", () => {
+    expect(normalizeHops(0)).toBe(0);
+    expect(normalizeHops(1)).toBe(1);
+    expect(normalizeHops(5)).toBe(5);
+  });
+
+  it("defaults to 2 for null/undefined/non-numeric", () => {
+    expect(normalizeHops(undefined)).toBe(2);
+    expect(normalizeHops(null)).toBe(2); // clients may serialize unset args as null
+    expect(normalizeHops("nope")).toBe(2);
+    expect(normalizeHops(NaN)).toBe(2);
+  });
+
+  it("floors fractions and clamps out-of-range input", () => {
+    expect(normalizeHops(1.9)).toBe(1);
+    expect(normalizeHops(-3)).toBe(0);
+    expect(normalizeHops(999999)).toBe(10); // MAX_HOPS
   });
 });
 

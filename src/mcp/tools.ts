@@ -27,10 +27,18 @@ import {
 } from "../nodes/service.js";
 import { listThreads } from "../annotations/service.js";
 
-/** Caller-supplied traversal depth → non-negative integer, default 2. */
-function normalizeHops(raw: unknown): number {
+/** Upper bound on caller-set traversal depth — real graphs terminate long
+ *  before this; the cap just fences a misbehaving client from a runaway query. */
+const MAX_HOPS = 10;
+
+/** Caller-supplied traversal depth → integer in [0, MAX_HOPS], default 2.
+ *  null/undefined/non-numeric all fall through to the default (some tool-calling
+ *  clients serialize an unset optional arg as JSON `null` rather than omitting). */
+export function normalizeHops(raw: unknown): number {
+  if (raw == null) return 2;
   const n = Number(raw);
-  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 2;
+  if (!Number.isFinite(n)) return 2;
+  return Math.max(0, Math.min(MAX_HOPS, Math.floor(n)));
 }
 
 export interface McpToolContext {
@@ -450,7 +458,15 @@ export async function handleToolCall(
       const result = await queryEngine.query(args.query, {
         hops: normalizeHops(args.hops),
       });
-      const nodes = result.documents;
+      // Hide nodes the caller can't see (approved-only under stewardship) so the
+      // listing doesn't leak restricted titles — same gate as context_search.
+      const visibility = await Promise.all(
+        result.documents.map(async (n) => ({
+          node: n,
+          visible: (await resolveLlmBody(ctx, n)) !== null,
+        })),
+      );
+      const nodes = visibility.filter((e) => e.visible).map((e) => e.node);
       if (!nodes.length) return `No nodes matched: ${args.query}`;
       const list = nodes
         .map(
@@ -510,10 +526,20 @@ export async function handleToolCall(
       });
       const maxTokens = args.max_tokens || 8000;
       const approxChars = maxTokens * 4;
+      // Gate bodies the same way context_get/search/export do — approved-only
+      // under stewardship. Raw `n.body` here would leak draft/unapproved text,
+      // and caller-set hops now widens the neighborhood pulled through this path.
+      const resolvedBodies = await Promise.all(
+        result.documents.map(async (n) => ({
+          node: n,
+          body: await resolveLlmBody(ctx, n),
+        })),
+      );
       let total = 0;
       const resolved: string[] = [];
-      for (const n of result.documents) {
-        const entry = `## ${n.frontmatter.title}\n\n${n.body || ""}`;
+      for (const { node: n, body } of resolvedBodies) {
+        if (body === null) continue; // not visible / no approved version yet
+        const entry = `## ${n.frontmatter.title}\n\n${body}`;
         if (total + entry.length > approxChars) break;
         resolved.push(entry);
         total += entry.length;
