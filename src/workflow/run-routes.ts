@@ -20,6 +20,7 @@ import { config } from "../config.js";
 import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
+import { isSuspended, getSuspensionReason, getCurrentLicense } from "../auth/license.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
 
 const RUNNABLE_TYPES = ["agent", "skill"];
@@ -61,7 +62,8 @@ async function flowSubgraph(nestId: string, agentNode: string) {
   }>;
   const byFrom = new Map<string, typeof rows>();
   for (const r of rows) {
-    (byFrom.get(r.from_node) ?? byFrom.set(r.from_node, []).get(r.from_node)!).push(r);
+    if (!byFrom.has(r.from_node)) byFrom.set(r.from_node, []);
+    byFrom.get(r.from_node)!.push(r);
   }
   const seen = new Set([agentNode]);
   const queue = [agentNode];
@@ -127,8 +129,8 @@ runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const agentNode = c.req.param("agentNode")!;
   const body = await c.req
-    .json<{ inputs?: unknown; triggered_by?: string }>()
-    .catch(() => ({}) as { inputs?: unknown; triggered_by?: string });
+    .json<{ inputs?: unknown }>()
+    .catch(() => ({}) as { inputs?: unknown });
 
   const { storage } = await engineCache.get(nestId);
   let doc;
@@ -146,10 +148,11 @@ runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
 
   const edges = await flowSubgraph(nestId, agentNode);
   const definitions = await referencedDefinitions(nestId, edges);
-  const triggeredBy =
-    typeof body.triggered_by === "string" && body.triggered_by.trim()
-      ? body.triggered_by.trim()
-      : await resolveCallerEmail(c.get("userId"));
+  // Derived from auth, never client-supplied — this is the accountability
+  // field ("who triggered this run"), so it must be trustworthy. A scheduler
+  // or external runner authenticates with its own key; that identity is the
+  // honest answer.
+  const triggeredBy = await resolveCallerEmail(c.get("userId"));
 
   const id = `run_${uuid()}`;
   await getDb().run(
@@ -231,6 +234,30 @@ async function loadRunWithPermission(
     runId,
   ])) as RunRow | undefined;
   if (!run) throw new NotFoundError("Run not found");
+
+  // These /runs/:id routes sit OUTSIDE the nestsApp gate, so the checks that
+  // gate does for every other nest-scoped route must be replicated here —
+  // otherwise a nest-scoped key (or a suspended/unlicensed server) could act
+  // on runs it shouldn't. This route family is the one handed to external
+  // runners, so the guarantee matters most here.
+  const nestScope = c.get("nestScope");
+  if (nestScope && nestScope !== run.nest_id) {
+    // Mirror the nest gate's message so scoped keys fail the same way everywhere.
+    throw new ForbiddenError("API key not authorized for this nest");
+  }
+  if (required === "write") {
+    if (isSuspended()) {
+      throw new ForbiddenError(
+        `Server suspended by PromptOwl: ${getSuspensionReason()}`,
+      );
+    }
+    if (!getCurrentLicense()?.valid) {
+      throw new ForbiddenError(
+        "A valid PromptOwl license is required to write runs.",
+      );
+    }
+  }
+
   const perm =
     config.AUTH_MODE === "open"
       ? "owner"
@@ -254,28 +281,28 @@ runDetailRoutes.post("/:id/steps", async (c) => {
   if (typeof body.action !== "string" || !body.action.trim()) {
     throw new ValidationError("action is required (read|write|branch|notify|external)");
   }
+  const action = body.action.trim();
+  const nodeId = typeof body.node_id === "string" ? body.node_id : null;
+  const edgeId = typeof body.edge_id === "string" ? body.edge_id : null;
+  const detail = body.detail === undefined ? null : JSON.stringify(body.detail);
+  // seq is server-assigned inside a transaction (not client-supplied): the
+  // ordered trace is what replay depends on, so max+insert must be atomic.
+  // A UNIQUE(run_id, seq) index (migration 017) is the backstop against any
+  // cross-connection race the transaction doesn't serialize.
   const db = getDb();
-  const last = (await db.get(
-    "SELECT MAX(seq) as m FROM run_steps WHERE run_id = ?",
-    [run.id],
-  )) as { m: number | null };
-  const seq =
-    typeof body.seq === "number" && Number.isInteger(body.seq)
-      ? body.seq
-      : (last.m ?? 0) + 1;
-  await db.run(
-    `INSERT INTO run_steps (run_id, seq, node_id, edge_id, action, detail, at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [
-      run.id,
-      seq,
-      typeof body.node_id === "string" ? body.node_id : null,
-      typeof body.edge_id === "string" ? body.edge_id : null,
-      body.action.trim(),
-      body.detail === undefined ? null : JSON.stringify(body.detail),
-      new Date().toISOString(),
-    ],
-  );
+  let seq = 0;
+  await db.transaction(async (tx) => {
+    const last = (await tx.get(
+      "SELECT MAX(seq) as m FROM run_steps WHERE run_id = ?",
+      [run.id],
+    )) as { m: number | null };
+    seq = (last.m ?? 0) + 1;
+    await tx.run(
+      `INSERT INTO run_steps (run_id, seq, node_id, edge_id, action, detail, at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [run.id, seq, nodeId, edgeId, action, detail, new Date().toISOString()],
+    );
+  });
   return c.json({ ok: true, seq }, 201);
 });
 

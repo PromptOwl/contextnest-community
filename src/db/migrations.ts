@@ -771,7 +771,7 @@ export function runMigrations(db: Database.Database): void {
           detail TEXT,
           at TEXT NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
       `);
     })();
     recordMigration("017_workflow_runs");

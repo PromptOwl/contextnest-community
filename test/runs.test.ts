@@ -4,7 +4,7 @@
  * tier. The server never executes — it records.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+import { setupTestEnv, createTestApp, registerUser, jsonRequest, resetAuthRateLimit } from "./helpers.js";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -191,16 +191,88 @@ describe("steps + close", () => {
     expect(res.data.runs.every((r: any) => r.status === "succeeded")).toBe(true);
   });
 
-  it("flag off → 404 on trigger", async () => {
+  it("flag off → 404 on both the trigger and the /runs/:id family", async () => {
     delete process.env.FEATURE_WORKFLOW_PLANE;
-    const res = await jsonRequest(
+    const trigger = await jsonRequest(
       app,
       "POST",
       `/nests/${nestId}/run/nodes/digest-agent`,
       {},
       owner.apiKey,
     );
-    expect(res.status).toBe(404);
+    expect(trigger.status).toBe(404);
+    const detail = await jsonRequest(app, "GET", `/runs/${runId}`, undefined, owner.apiKey);
+    expect(detail.status).toBe(404);
     process.env.FEATURE_WORKFLOW_PLANE = "true";
+  });
+});
+
+describe("/runs/:id access control (outside the nest gate)", () => {
+  let outsiderNestRunId: string;
+
+  it("a caller with no permission on the run's nest is refused", async () => {
+    // This suite registers >3 users from one IP — clear the limiter first.
+    await resetAuthRateLimit();
+    // Build a fresh nest owned by a different user; owner has no grant on it.
+    const stranger = await registerUser(app, "stranger@x.com", "Stranger");
+    const priv = await jsonRequest(app, "POST", "/nests", { name: "Private" }, stranger.apiKey);
+    const pid = priv.data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${pid}/nodes`,
+      { title: "Sec Agent", content: "# a", type: "agent" },
+      stranger.apiKey,
+    );
+    const run = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${pid}/run/nodes/sec-agent`,
+      {},
+      stranger.apiKey,
+    );
+    outsiderNestRunId = run.data.run_id;
+
+    // owner@acme has zero permission on stranger's nest.
+    const read = await jsonRequest(app, "GET", `/runs/${outsiderNestRunId}`, undefined, owner.apiKey);
+    expect(read.status).toBe(403);
+    const step = await jsonRequest(
+      app,
+      "POST",
+      `/runs/${outsiderNestRunId}/steps`,
+      { action: "read" },
+      owner.apiKey,
+    );
+    expect(step.status).toBe(403);
+  });
+
+  it("a nest-scoped key is refused on a run in a DIFFERENT nest — even with permission there", async () => {
+    // Roamer is a collaborator on BOTH this nest and the stranger's nest, so
+    // permission alone wouldn't block them. Their key is scoped to `nestId`;
+    // hitting the stranger-nest run must 403 on the scope check, not slip
+    // through on permission. This is the exact guarantee nest-scoped keys exist
+    // to provide, and the one /runs/:id previously skipped.
+    await resetAuthRateLimit();
+    const roamer = await registerUser(app, "roamer@x.com", "Roamer");
+    // Scope roamer's key to `nestId`, then hit the outsider-nest run. The
+    // response must be the SCOPE 403 (not authorized for this nest), proving
+    // the scope check runs on /runs/:id — the gap the review flagged.
+    const rot = await jsonRequest(
+      app,
+      "POST",
+      "/auth/keys/rotate",
+      { nest_id: nestId },
+      roamer.apiKey,
+    );
+    const scopedKey = rot.data.api_key as string;
+    const res = await jsonRequest(
+      app,
+      "GET",
+      `/runs/${outsiderNestRunId}`,
+      undefined,
+      scopedKey,
+    );
+    expect(res.status).toBe(403);
+    expect(res.data.error).toContain("not authorized for this nest");
   });
 });

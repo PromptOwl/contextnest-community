@@ -340,7 +340,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       detail TEXT,
       at TEXT NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,
