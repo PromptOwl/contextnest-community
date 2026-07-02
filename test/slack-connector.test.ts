@@ -17,6 +17,7 @@ const sent: Array<{ url: string; text: string }> = [];
 const realFetch = globalThis.fetch;
 
 beforeAll(async () => {
+  process.env.NOTIFY_DEBOUNCE_MS = "10"; // near-instant flush for tests
   process.env.SLACK_WEBHOOK_URL = WEBHOOK;
   vi.stubGlobal(
     "fetch",
