@@ -55,7 +55,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublish": "npm run build",
+    "prepublishOnly": "npm run build",
     "version-packages": "changeset version && npm install --package-lock-only",
     "release": "npm run build && changeset publish"
   },
@@ -73,6 +73,7 @@
     "better-sqlite3": "^11.8.2",
     "dotenv": "^16.6.1",
     "hono": "^4.7.6",
+    "pg": "^8.13.1",
     "uuid": "^14.0.0",
     "zod": "^4.3.6"
   },
@@ -117,6 +118,7 @@
     "@types/bcryptjs": "^3.0.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/d3-force": "^3.0.10",
+    "@types/pg": "^8.11.10",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@types/uuid": "^10.0.0",

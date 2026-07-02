@@ -30,20 +30,19 @@ const PERMISSION_LEVELS: Record<NestPermission, number> = {
  * 5. Nest visibility = 'public' -> 'read'
  * 6. Otherwise -> 'none'
  */
-export function resolveNestPermission(
+export async function resolveNestPermission(
   nestId: string,
   userId: string,
-): NestPermission {
+): Promise<NestPermission> {
   const db = getDb();
 
-  const nest = db
-    .prepare("SELECT user_id, visibility FROM nests WHERE id = ?")
-    .get(nestId) as { user_id: string; visibility: string } | undefined;
+  const nest = await db
+    .get("SELECT user_id, visibility FROM nests WHERE id = ?", [nestId]) as { user_id: string; visibility: string } | undefined;
 
   if (!nest) return "none";
   if (nest.user_id === userId) return "owner";
 
-  if (nest.user_id === ANON_USER_ID && isLicenseAdminUserId(userId)) {
+  if (nest.user_id === ANON_USER_ID && (await isLicenseAdminUserId(userId))) {
     return "owner";
   }
 
@@ -52,19 +51,18 @@ export function resolveNestPermission(
   // admin identity; super_admins is the access.yaml extension for multi-admin
   // setups. Both get the same nest-level 'admin' — owner-only delete/transfer
   // still stays with the real owner.
-  if (isLicenseAdminUserId(userId)) return "admin";
-  const caller = db
-    .prepare("SELECT email FROM users WHERE id = ?")
-    .get(userId) as { email?: string } | undefined;
+  if (await isLicenseAdminUserId(userId)) return "admin";
+  const caller = await db
+    .get("SELECT email FROM users WHERE id = ?", [userId]) as { email?: string } | undefined;
   if (caller?.email && isSuperAdmin(caller.email)) {
     return "admin";
   }
 
-  const directGrant = db
-    .prepare(
+  const directGrant = await db
+    .get(
       "SELECT permission FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
-    )
-    .get(nestId, userId) as { permission: NestPermission } | undefined;
+      [nestId, userId],
+    ) as { permission: NestPermission } | undefined;
 
   if (directGrant) return directGrant.permission;
 
@@ -72,15 +70,15 @@ export function resolveNestPermission(
   // govern, even without a collaborator grant. Matched by email because a
   // steward row may predate the user registering an account. Edit/approve is
   // still enforced per node by the governance handlers (resolveUserRoles).
-  const stewardGrant = db
-    .prepare(
+  const stewardGrant = await db
+    .get(
       `SELECT 1 FROM stewards s
          JOIN users u ON u.id = ?
         WHERE s.nest_id = ? AND s.is_active = 1
           AND LOWER(s.user_email) = LOWER(u.email)
         LIMIT 1`,
-    )
-    .get(userId, nestId);
+      [userId, nestId],
+    );
   if (stewardGrant) return "read";
 
   if (nest.visibility === "public") return "read";
@@ -98,39 +96,37 @@ export function permissionLevel(p: NestPermission): number {
  * visibility='public'. These callers see approved content only; drafts
  * and pending versions stay private to collaborators/stewards.
  */
-export function isPublicReader(nestId: string, userId: string): boolean {
+export async function isPublicReader(nestId: string, userId: string): Promise<boolean> {
   const db = getDb();
-  const nest = db
-    .prepare("SELECT user_id, visibility FROM nests WHERE id = ?")
-    .get(nestId) as { user_id: string; visibility: string } | undefined;
+  const nest = await db
+    .get("SELECT user_id, visibility FROM nests WHERE id = ?", [nestId]) as { user_id: string; visibility: string } | undefined;
   if (!nest) return false;
   if (nest.visibility !== "public") return false;
   if (nest.user_id === userId) return false;
-  const directGrant = db
-    .prepare(
+  const directGrant = await db
+    .get(
       "SELECT 1 FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
-    )
-    .get(nestId, userId);
+      [nestId, userId],
+    );
   if (directGrant) return false;
   // Server admin (license admin or access.yaml super_admin) holds 'admin' via
   // resolveNestPermission; they should see drafts/pending like any admin, not
   // be downgraded to approved-only.
-  if (isLicenseAdminUserId(userId)) return false;
-  const caller = db
-    .prepare("SELECT email FROM users WHERE id = ?")
-    .get(userId) as { email?: string } | undefined;
+  if (await isLicenseAdminUserId(userId)) return false;
+  const caller = await db
+    .get("SELECT email FROM users WHERE id = ?", [userId]) as { email?: string } | undefined;
   if (caller?.email && isSuperAdmin(caller.email)) return false;
   // A steward is not a mere public reader — they govern (and may see drafts
   // of) the documents in their scope. Matched by email like resolveNestPermission.
-  const stewardGrant = db
-    .prepare(
+  const stewardGrant = await db
+    .get(
       `SELECT 1 FROM stewards s
          JOIN users u ON u.id = ?
         WHERE s.nest_id = ? AND s.is_active = 1
           AND LOWER(s.user_email) = LOWER(u.email)
         LIMIT 1`,
-    )
-    .get(userId, nestId);
+      [userId, nestId],
+    );
   if (stewardGrant) return false;
   return true;
 }

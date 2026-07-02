@@ -77,13 +77,13 @@ describe("tokenizePrompt", () => {
 });
 
 describe("compilePrompt — against seeded nest", () => {
-  it("matches prompt tokens to node tags from node_tag_index", () => {
+  it("matches prompt tokens to node tags from node_tag_index", async () => {
     const titles = [
       "API Authentication Guide",
       "Database Setup",
       "Brand Guidelines",
     ];
-    const result = compilePrompt("How do I authenticate?", nestId, titles);
+    const result = await compilePrompt("How do I authenticate?", nestId, titles);
     // "authenticate" token matches title "API Authentication Guide" (via its
     // "authentication" word)? No — tokenizePrompt on "API Authentication Guide"
     // gives ["api", "authentication", "guide"], and prompt tokens are
@@ -92,9 +92,9 @@ describe("compilePrompt — against seeded nest", () => {
     expect(result.unmatched).toContain("authenticate");
   });
 
-  it("matches exact tag names in the prompt", () => {
+  it("matches exact tag names in the prompt", async () => {
     const titles = ["API Authentication Guide", "Database Setup"];
-    const result = compilePrompt(
+    const result = await compilePrompt(
       "I need help with database and auth",
       nestId,
       titles,
@@ -104,17 +104,17 @@ describe("compilePrompt — against seeded nest", () => {
     expect(result.selector).toContain("#database");
   });
 
-  it("matches titles whose words overlap with prompt tokens", () => {
+  it("matches titles whose words overlap with prompt tokens", async () => {
     const titles = ["API Authentication Guide", "Database Setup"];
-    const result = compilePrompt("database setup walkthrough", nestId, titles);
+    const result = await compilePrompt("database setup walkthrough", nestId, titles);
     expect(result.matchedTitles).toContain("Database Setup");
     // Selector carries tags only; titles are resolved via direct lookup
     // because the engine's selector grammar doesn't support [[Title]].
     expect(result.selector).toContain("#database");
   });
 
-  it("returns selector=null when nothing matches", () => {
-    const result = compilePrompt(
+  it("returns selector=null when nothing matches", async () => {
+    const result = await compilePrompt(
       "quantum supply-chain logistics",
       nestId,
       ["API Authentication Guide"],

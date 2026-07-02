@@ -7,6 +7,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { nowExpr } from "../db/sql.js";
 import * as versions from "../governance/version-service.js";
 import { engineCache } from "../nodes/engine.js";
 import { createNode, updateNode, bodyOnly } from "../nodes/service.js";
@@ -41,13 +42,13 @@ interface CommentRow {
   created_at: string;
 }
 
-function loadComments(threadId: string): AnnotationComment[] {
+async function loadComments(threadId: string): Promise<AnnotationComment[]> {
   const db = getDb();
-  const rows = db
-    .prepare(
-      "SELECT id, author, body, created_at FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC",
-    )
-    .all(threadId) as Array<Omit<CommentRow, "thread_id">>;
+  const rows = await db
+    .all(
+      "SELECT id, author, body, created_at FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
+      [threadId],
+    ) as Array<Omit<CommentRow, "thread_id">>;
   return rows.map((r) => ({
     id: r.id,
     author: r.author,
@@ -56,7 +57,7 @@ function loadComments(threadId: string): AnnotationComment[] {
   }));
 }
 
-function rowToThread(row: ThreadRow): AnnotationThread {
+async function rowToThread(row: ThreadRow): Promise<AnnotationThread> {
   let anchor: AnnotationAnchor | null = null;
   if (row.anchor_json) {
     try {
@@ -76,36 +77,35 @@ function rowToThread(row: ThreadRow): AnnotationThread {
     createdAt: row.created_at,
     resolvedBy: row.resolved_by,
     resolvedAt: row.resolved_at,
-    comments: loadComments(row.id),
+    comments: await loadComments(row.id),
   };
 }
 
-function getThreadRow(threadId: string): ThreadRow | undefined {
-  return getDb()
-    .prepare("SELECT * FROM annotation_threads WHERE id = ?")
-    .get(threadId) as ThreadRow | undefined;
+async function getThreadRow(threadId: string): Promise<ThreadRow | undefined> {
+  return await getDb()
+    .get("SELECT * FROM annotation_threads WHERE id = ?", [threadId]) as ThreadRow | undefined;
 }
 
-export function getThread(threadId: string): AnnotationThread | null {
-  const row = getThreadRow(threadId);
-  return row ? rowToThread(row) : null;
+export async function getThread(threadId: string): Promise<AnnotationThread | null> {
+  const row = await getThreadRow(threadId);
+  return row ? await rowToThread(row) : null;
 }
 
-export function listThreads(nestId: string, nodeId: string): AnnotationThread[] {
-  const rows = getDb()
-    .prepare(
-      "SELECT * FROM annotation_threads WHERE nest_id = ? AND node_id = ? ORDER BY created_at ASC, rowid ASC",
-    )
-    .all(nestId, nodeId) as ThreadRow[];
-  return rows.map(rowToThread);
+export async function listThreads(nestId: string, nodeId: string): Promise<AnnotationThread[]> {
+  const rows = await getDb()
+    .all(
+      "SELECT * FROM annotation_threads WHERE nest_id = ? AND node_id = ? ORDER BY created_at ASC, id ASC",
+      [nestId, nodeId],
+    ) as ThreadRow[];
+  return Promise.all(rows.map(rowToThread));
 }
 
-export function createThread(
+export async function createThread(
   nestId: string,
   nodeId: string,
   input: CreateThreadInput,
   authorEmail: string,
-): AnnotationThread {
+): Promise<AnnotationThread> {
   const body = (input.body ?? "").trim();
   if (!body) {
     throw new Error("comment body is required");
@@ -114,28 +114,29 @@ export function createThread(
   const id = uuid();
   const anchor = clampAnchor(input.anchor);
   const snapshot =
-    input.snapshotVersion ?? versions.getApprovedVersion(nestId, nodeId) ?? null;
+    input.snapshotVersion ?? (await versions.getApprovedVersion(nestId, nodeId)) ?? null;
 
-  const tx = db.transaction(() => {
-    db.prepare(
+  await db.transaction(async (tx) => {
+    await tx.run(
       `INSERT INTO annotation_threads
          (id, nest_id, node_id, snapshot_version, anchor_json, status, created_by)
        VALUES (?, ?, ?, ?, ?, 'open', ?)`,
-    ).run(
-      id,
-      nestId,
-      nodeId,
-      snapshot,
-      anchor ? JSON.stringify(anchor) : null,
-      authorEmail,
+      [
+        id,
+        nestId,
+        nodeId,
+        snapshot,
+        anchor ? JSON.stringify(anchor) : null,
+        authorEmail,
+      ],
     );
-    db.prepare(
+    await tx.run(
       "INSERT INTO annotation_comments (id, thread_id, author, body) VALUES (?, ?, ?, ?)",
-    ).run(uuid(), id, authorEmail, body);
+      [uuid(), id, authorEmail, body],
+    );
   });
-  tx();
 
-  return rowToThread(getThreadRow(id)!);
+  return rowToThread((await getThreadRow(id))!);
 }
 
 /**
@@ -145,63 +146,62 @@ export function createThread(
  * knowing its UUID (IDOR). Treat a scope mismatch as not-found so we don't leak
  * the existence of threads the caller can't see.
  */
-function getScopedThreadRow(
+async function getScopedThreadRow(
   threadId: string,
   nestId: string,
   nodeId: string,
-): ThreadRow {
-  const row = getThreadRow(threadId);
+): Promise<ThreadRow> {
+  const row = await getThreadRow(threadId);
   if (!row || row.nest_id !== nestId || row.node_id !== nodeId) {
     throw new NotFoundError(`Thread not found: ${threadId}`);
   }
   return row;
 }
 
-export function addComment(
+export async function addComment(
   nestId: string,
   nodeId: string,
   threadId: string,
   authorEmail: string,
   body: string,
-): AnnotationThread {
+): Promise<AnnotationThread> {
   const trimmed = (body ?? "").trim();
   if (!trimmed) {
     throw new Error("comment body is required");
   }
-  getScopedThreadRow(threadId, nestId, nodeId);
+  await getScopedThreadRow(threadId, nestId, nodeId);
 
-  getDb()
-    .prepare(
+  await getDb()
+    .run(
       "INSERT INTO annotation_comments (id, thread_id, author, body) VALUES (?, ?, ?, ?)",
-    )
-    .run(uuid(), threadId, authorEmail, trimmed);
+      [uuid(), threadId, authorEmail, trimmed],
+    );
 
-  return rowToThread(getThreadRow(threadId)!);
+  return rowToThread((await getThreadRow(threadId))!);
 }
 
-export function setThreadStatus(
+export async function setThreadStatus(
   nestId: string,
   nodeId: string,
   threadId: string,
   status: ThreadStatus,
   byEmail: string,
-): AnnotationThread {
-  getScopedThreadRow(threadId, nestId, nodeId);
+): Promise<AnnotationThread> {
+  await getScopedThreadRow(threadId, nestId, nodeId);
 
+  const db = getDb();
   if (status === "resolved") {
-    getDb()
-      .prepare(
-        "UPDATE annotation_threads SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now') WHERE id = ?",
-      )
-      .run(byEmail, threadId);
+    await db.run(
+      `UPDATE annotation_threads SET status = 'resolved', resolved_by = ?, resolved_at = ${nowExpr(db)} WHERE id = ?`,
+      [byEmail, threadId],
+    );
   } else {
-    getDb()
-      .prepare(
-        "UPDATE annotation_threads SET status = 'open', resolved_by = NULL, resolved_at = NULL WHERE id = ?",
-      )
-      .run(threadId);
+    await db.run(
+      "UPDATE annotation_threads SET status = 'open', resolved_by = NULL, resolved_at = NULL WHERE id = ?",
+      [threadId],
+    );
   }
-  return rowToThread(getThreadRow(threadId)!);
+  return rowToThread((await getThreadRow(threadId))!);
 }
 
 /**
@@ -228,10 +228,10 @@ export async function readArtifact(
   version: number | null;
   type: string | null;
 }> {
-  const { storage, versions: versionManager } = engineCache.get(nestId);
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
 
   const target =
-    version ?? versions.getApprovedVersion(nestId, nodeId) ?? null;
+    version ?? (await versions.getApprovedVersion(nestId, nodeId)) ?? null;
 
   // Title/type + live body from the on-disk doc (cheap, stable label). Missing
   // doc is only fatal when we also have no snapshot to fall back on.
@@ -274,7 +274,7 @@ export async function readArtifact(
  * title→slug algorithm ever changes. Passed as an explicit id to createNode so
  * create and update agree on the same id forever.
  */
-function derivedAnnotationsId(sourceNodeId: string): string {
+export function derivedAnnotationsId(sourceNodeId: string): string {
   const base = sourceNodeId.replace(/^nodes\//, "");
   return `nodes/${base}--annotations`;
 }
@@ -293,15 +293,25 @@ export async function syncAnnotationsNode(
 ): Promise<void> {
   try {
     let title = nodeId;
+    let type: string | null = null;
     try {
-      const { storage } = engineCache.get(nestId);
+      const { storage } = await engineCache.get(nestId);
       const node = await storage.readDocument(nodeId);
       title = node.frontmatter?.title || nodeId;
+      type = (node.frontmatter?.type as string) || "document";
     } catch {
       /* artifact gone — still project an empty/placeholder doc */
     }
 
-    const threads = listThreads(nestId, nodeId);
+    // Only artifacts feed the regen/MCP loop through a derived node — an agent
+    // regenerates the artifact from this feedback. Plain documents keep their
+    // comments in SQLite only: no derived `— Annotations` node (which would
+    // itself be annotatable → recursion, and clutter the nest). A failed read
+    // (type === null) is a deleted node — fall through so any existing derived
+    // node still gets its placeholder refresh.
+    if (type !== null && type !== "artifact") return;
+
+    const threads = await listThreads(nestId, nodeId);
     const derivedTitle = `${title} — Annotations`;
     const markdown = projectThreadsToMarkdown(title, threads);
     const derivedId = derivedAnnotationsId(nodeId);
