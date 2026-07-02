@@ -96,17 +96,16 @@ export async function getThread(threadId: string): Promise<AnnotationThread | nu
  * "most comments" without N per-node queries. Counts annotation THREADS (each
  * a distinct comment discussion) and the most recent thread time.
  */
-export function countThreadsByNode(
+export async function countThreadsByNode(
   nestId: string,
-): Record<string, { count: number; lastAt: string | null }> {
-  const rows = getDb()
-    .prepare(
-      `SELECT node_id, COUNT(*) AS count, MAX(created_at) AS last_at
+): Promise<Record<string, { count: number; lastAt: string | null }>> {
+  const rows = (await getDb().all(
+    `SELECT node_id, CAST(COUNT(*) AS INTEGER) AS count, MAX(created_at) AS last_at
          FROM annotation_threads
         WHERE nest_id = ?
         GROUP BY node_id`,
-    )
-    .all(nestId) as Array<{ node_id: string; count: number; last_at: string | null }>;
+    [nestId],
+  )) as Array<{ node_id: string; count: number; last_at: string | null }>;
   const out: Record<string, { count: number; lastAt: string | null }> = {};
   for (const r of rows) out[r.node_id] = { count: r.count, lastAt: r.last_at };
   return out;
@@ -118,7 +117,7 @@ export async function listThreads(nestId: string, nodeId: string): Promise<Annot
       "SELECT * FROM annotation_threads WHERE nest_id = ? AND node_id = ? ORDER BY created_at ASC, id ASC",
       [nestId, nodeId],
     ) as ThreadRow[];
-  return Promise.all(rows.map(rowToThread));;
+  return Promise.all(rows.map(rowToThread));
 }
 
 export async function createThread(

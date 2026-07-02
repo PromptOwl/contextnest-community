@@ -309,7 +309,7 @@ queryRoutes.get("/overview", async (c) => {
 // Per-node annotation (comment) counts for the whole nest, so the UI can sort
 // document lists by "most comments" in one call instead of N per-node fetches.
 queryRoutes.get("/comment-counts", async (c) => {
-  const counts = countThreadsByNode(c.req.param("nestId")!);
+  const counts = await countThreadsByNode(c.req.param("nestId")!);
   return c.json({ counts });
 });
 
