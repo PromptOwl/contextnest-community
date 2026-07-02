@@ -18,8 +18,9 @@ import {
 } from "./markdown-export.js";
 import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel } from "../shared/access.js";
-import { buildNestGraph } from "./graph-service.js";
+import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
@@ -80,13 +81,48 @@ queryRoutes.post("/context", async (c) => {
   const hops = body.hops ?? 2;
   const includeDrafts = body.include_drafts === true;
 
+  // Mirror the engine's draft rule (isPublished: status === "published") so the
+  // hand-rolled [[Title]] + hop path below never surfaces drafts the engine's
+  // selector path would have filtered out for the same include_drafts value.
+  const isVisible = (d: ContextNode) =>
+    includeDrafts || d.frontmatter.status === "published";
+
   // ── 1. Resolve selector + title-match list ──
   let selector: string | null = body.selector?.trim() || null;
   let compileDetail: Awaited<ReturnType<typeof compilePrompt>> | null = null;
   let titleMatches: ContextNode[] = [];
+  // True once an explicit selector's [[Title]] parts were peeled + resolved —
+  // guards the prompt branch below from clobbering those matches.
+  let resolvedTitleSelector = false;
   const allDocs = await storage.discoverDocuments();
 
-  if (!selector && body.prompt) {
+  // Explicit selectors may carry [[Title]] parts in an OR union — that's
+  // what the graph view's click-to-query and the API docs emit. The engine
+  // grammar doesn't accept wiki syntax, so peel those parts off here: match
+  // titles directly (case-insensitive) and hand the rest to the engine.
+  // Hop expansion for the title matches happens after the merge below, over
+  // the same wikilink graph the engine traverses.
+  if (selector && selector.includes("[[")) {
+    const parts = selector.split("|").map((p) => p.trim()).filter(Boolean);
+    const wantedTitles = new Set<string>();
+    const rest: string[] = [];
+    for (const p of parts) {
+      const m = /^\[\[(.+)\]\]$/.exec(p);
+      if (m) wantedTitles.add(m[1].trim().toLowerCase());
+      else rest.push(p);
+    }
+    if (wantedTitles.size > 0) {
+      selector = rest.join("|") || null;
+      resolvedTitleSelector = true;
+      titleMatches = allDocs.filter(
+        (d: ContextNode) =>
+          wantedTitles.has(String(d.frontmatter.title || "").toLowerCase()) &&
+          isVisible(d),
+      );
+    }
+  }
+
+  if (!selector && !resolvedTitleSelector && body.prompt) {
     const titles = allDocs.map((d: ContextNode) => d.frontmatter.title);
     compileDetail = await compilePrompt(body.prompt, nestId, titles);
     selector = compileDetail.selector;
@@ -120,6 +156,54 @@ queryRoutes.post("/context", async (c) => {
     documents = result.documents;
     hopsUsed = result.hopsUsed;
     nodesTraversed = result.nodesTraversed;
+  }
+
+  // Hop-expand title matches over the wikilink graph (both directions) so
+  // "[[Title]] + hops" pulls the same neighborhood the engine would for a
+  // selector match — and the same one the graph view highlights.
+  if (titleMatches.length > 0 && hops > 0) {
+    const byTitle = new Map(
+      allDocs.map((d: ContextNode) => [
+        String(d.frontmatter.title || "").toLowerCase(),
+        d,
+      ]),
+    );
+    const byId = new Map(allDocs.map((d: ContextNode) => [d.id, d]));
+    const adj = new Map<string, Set<string>>();
+    const link = (a: string, b: string) => {
+      (adj.get(a) ?? adj.set(a, new Set()).get(a)!).add(b);
+      (adj.get(b) ?? adj.set(b, new Set()).get(b)!).add(a);
+    };
+    for (const d of allDocs) {
+      for (const target of extractWikiTargets(d.body || "")) {
+        // Resolve id-style targets ([[nodes/some-id]]) as well as titles, the
+        // same way buildNestGraph does — otherwise the hop neighborhood the API
+        // returns disagrees with the one the graph view highlights.
+        const t = byId.get(target) ?? byTitle.get(target.toLowerCase());
+        if (t && t.id !== d.id) link(d.id, t.id);
+      }
+    }
+    const seen = new Set(titleMatches.map((d) => d.id));
+    let frontier = titleMatches.map((d) => d.id);
+    for (let depth = 0; depth < hops && frontier.length; depth++) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        for (const nb of adj.get(id) ?? []) {
+          if (seen.has(nb)) continue;
+          seen.add(nb);
+          const doc = byId.get(nb);
+          // Skip drafts entirely when include_drafts is off — don't return them
+          // and don't traverse through them, so the neighborhood matches what
+          // the engine selector path would have produced.
+          if (!doc || !isVisible(doc)) continue;
+          next.push(nb);
+          titleMatches.push(doc);
+        }
+      }
+      frontier = next;
+      hopsUsed = Math.max(hopsUsed, depth + 1);
+    }
+    nodesTraversed += seen.size;
   }
 
   // Merge title-matched docs, de-duped by id.
@@ -302,6 +386,14 @@ queryRoutes.get("/overview", async (c) => {
       snippet: (n.body || "").slice(0, 120).replace(/\n/g, " "),
     })),
   });
+});
+
+// GET /nests/:nestId/comment-counts
+// Per-node annotation (comment) counts for the whole nest, so the UI can sort
+// document lists by "most comments" in one call instead of N per-node fetches.
+queryRoutes.get("/comment-counts", async (c) => {
+  const counts = await countThreadsByNode(c.req.param("nestId")!);
+  return c.json({ counts });
 });
 
 // GET /nests/:nestId/context

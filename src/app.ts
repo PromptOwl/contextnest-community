@@ -7,10 +7,7 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { listNests, listSharedNests } from "./nests/service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
-import {
-  resolveStewardsForNode,
-  canManageStewards,
-} from "./governance/stewardship-service.js";
+import { resolveStewardsForNode } from "./governance/stewardship-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
@@ -74,6 +71,14 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 function isPublicReadEligiblePath(method: string, path: string): boolean {
   if (method !== "GET") return false;
   if (!/^\/nests\/[^/]+(\/.*)?$/.test(path)) return false;
+  // The nest steward roster (/nests/:id/stewards) is admin-gated, never
+  // public — keep it behind real auth. Without this, an anonymous caller on
+  // an anon-owned nest (nests.user_id === ANON_USER_ID, e.g. created under a
+  // previous AUTH_MODE=open run) is treated as the anon owner, so the
+  // roster gate below resolves "owner" and leaks emails/roles. The
+  // node-level resolve (/nests/:id/nodes/:nid/stewards) stays public so the
+  // editor UI can still resolve a caller's per-node role.
+  if (/^\/nests\/[^/]+\/stewards/.test(path)) return false;
   return !/\/(collaborators|visibility|settings|mcp)/.test(path);
 }
 
@@ -516,17 +521,22 @@ export function createApp(): Hono<AuthEnv> {
       /\/comments$/.test(path) ||
       /\/comments\/[^/]+\/resolve$/.test(path);
     // The steward roster — list, assign, remove, sync — is restricted to the
-    // server (license) admin: not nest owners or collaborators. All methods
-    // on /nests/:id/stewards are locked. The node-level resolve route
+    // server (license) admin plus the nest owner/admin collaborators, so an
+    // owner can delegate vault people-management by granting admin. All
+    // methods on /nests/:id/stewards are gated. The node-level resolve route
     // (/nodes/:id/stewards) stays readable so the editor UI can resolve a
     // caller's per-node role.
     const isStewardRoster =
       path.includes("/stewards") && !path.includes("/nodes/");
-    if (isStewardRoster && !canManageStewards(await resolveCallerEmail(userId))) {
+    // Reuse the permission already resolved above — resolveNestPermission
+    // folds the license/super admin into "admin", so owner/admin covers
+    // server admin, nest owner, and admin collaborators (same rule as the
+    // shared canManageStewards used by MCP).
+    if (isStewardRoster && permission !== "owner" && permission !== "admin") {
       return c.json(
         {
           error:
-            "You don't have permission to manage stewards. Only the super admin can do this.",
+            "You don't have permission to manage stewards. Only a nest admin, the nest owner, or the server admin can do this.",
         },
         403,
       );

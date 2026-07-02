@@ -26,7 +26,10 @@ import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors
 import {
   resolveUserRoles,
   getStewardsForUser,
+  getCollaboratorRole,
+  getStewardRolesForUser,
 } from "../governance/stewardship-service.js";
+import { collabPermToRole } from "../governance/roles.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
@@ -87,11 +90,24 @@ nestRoutes.get("/", async (c) => {
     const permission = await effectivePermission(n.id, userId);
     const is_owner = permission === "owner";
     let owner_email: string | null = null;
-    // Merged effective roles (collaborator + steward), nest-wide. Only needed
-    // for shared cards (owner cards don't show a role badge).
-    const roles = is_owner
-      ? ["owner"]
-      : await resolveUserRoles(n.id, callerEmail);
+    // Role badge on shared cards. Derive from the caller's ACTUAL grant on
+    // this nest (collaborator row + steward rows), NOT resolveUserRoles —
+    // that folds a license/super admin to "admin" on every nest, so a server
+    // admin who is only an editor collaborator here would be mislabeled
+    // "Admin" on a nest they don't own. getCollaboratorRole reads the raw
+    // grant, so the badge shows their real relationship.
+    let roles: string[];
+    if (is_owner) {
+      roles = ["owner"];
+    } else {
+      const grantRole = collabPermToRole(
+        await getCollaboratorRole(n.id, callerEmail),
+      );
+      const stewardRoles = await getStewardRolesForUser(n.id, callerEmail);
+      roles = [
+        ...new Set([grantRole, ...stewardRoles].filter(Boolean) as string[]),
+      ];
+    }
     if (!is_owner && n.user_id !== ANON_USER_ID) {
       const row = (await db.get(ownerEmailSql, [n.user_id])) as
         | { email?: string }
@@ -108,7 +124,31 @@ nestRoutes.get("/", async (c) => {
     seen.add(n.id);
     out.push(await annotate(n));
   }
-  return c.json({ nests: out });
+
+  // Tile metadata: per-nest document count + people (collaborators + active
+  // stewards). All three are single grouped queries rather than per-nest
+  // work — the doc count uses node_versions (every live doc, API-created or
+  // imported, is registered there; deletes remove its rows) so listing stays
+  // one round-trip instead of a filesystem scan per card on every load.
+  const docRows = (await db.all(
+    "SELECT nest_id, COUNT(DISTINCT node_id) AS c FROM node_versions GROUP BY nest_id",
+  )) as Array<{ nest_id: string; c: number }>;
+  const docByNest = new Map(docRows.map((r) => [r.nest_id, r.c]));
+  const collabRows = (await db.all(
+    "SELECT nest_id, COUNT(*) AS c FROM nest_collaborators GROUP BY nest_id",
+  )) as Array<{ nest_id: string; c: number }>;
+  const collabByNest = new Map(collabRows.map((r) => [r.nest_id, r.c]));
+  const stewardRows = (await db.all(
+    "SELECT nest_id, COUNT(DISTINCT user_email) AS c FROM stewards WHERE is_active = 1 GROUP BY nest_id",
+  )) as Array<{ nest_id: string; c: number }>;
+  const stewardByNest = new Map(stewardRows.map((r) => [r.nest_id, r.c]));
+  const withMeta = out.map((n) => ({
+    ...n,
+    document_count: docByNest.get(n.id) ?? 0,
+    collaborator_count: collabByNest.get(n.id) ?? 0,
+    steward_count: stewardByNest.get(n.id) ?? 0,
+  }));
+  return c.json({ nests: withMeta });
 });
 
 // POST /nests
@@ -284,15 +324,17 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
 
-  // Must be server admin OR nest owner
+  // Server admin, nest owner, or an admin collaborator — owners delegate
+  // governance (stewards, settings, people) by granting admin; destructive
+  // owner-only actions (delete, transfer) stay with the owner.
   const isServerAdmin = await isLicenseAdminUserId(userId);
   const permission = await effectivePermission(nestId, userId);
 
-  if (!isServerAdmin && permission !== "owner") {
+  if (!isServerAdmin && permission !== "owner" && permission !== "admin") {
     return c.json(
       {
         error:
-          "Only the nest owner or the server license-admin can update nest settings.",
+          "Only a nest admin, the nest owner, or the server license-admin can update nest settings.",
       },
       403,
     );
@@ -310,9 +352,22 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     if (body.stewardship_enabled) {
       await setStewardshipEnabled(nestId, true);
     } else {
-      // Disable tears down governance (stewards + pending reviews) atomically
-      // with the flag flip. Collaborator shares are left intact — sharing is
-      // independent of governance. See disableStewardshipAndWipeGovernance.
+      // Disabling hard-deletes every steward + pending review for the nest
+      // (see disableStewardshipAndWipeGovernance) — irreversible. Keep this
+      // destructive teardown with the owner/server-admin, alongside the other
+      // owner-only actions (delete, transfer). An admin collaborator may
+      // toggle the harmless settings below but not wipe governance state.
+      if (!isServerAdmin && permission !== "owner") {
+        return c.json(
+          {
+            error:
+              "Only the nest owner or the server license-admin can disable stewardship (this permanently wipes stewards and pending reviews).",
+          },
+          403,
+        );
+      }
+      // Collaborator shares are left intact — sharing is independent of
+      // governance.
       wiped = await disableStewardshipAndWipeGovernance(nestId);
     }
   }
