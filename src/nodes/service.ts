@@ -223,6 +223,12 @@ export async function createNode(
     if (folderSegments.length > 8) {
       throw new ValidationError("folder may nest at most 8 levels deep");
     }
+    // Bound each slug so an overlong segment (folder or title) fails as a
+    // clean 400 instead of an ENAMETOOLONG surfacing as an unhandled 500 at
+    // storage.writeDocument.
+    if ([...folderSegments, slug].some((seg) => seg.length > 100)) {
+      throw new ValidationError("each folder or title segment must be at most 100 characters");
+    }
     id =
       folderSegments.length > 0
         ? `nodes/${folderSegments.join("/")}/${slug}`

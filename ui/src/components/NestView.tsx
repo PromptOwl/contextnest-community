@@ -663,8 +663,11 @@ export function NestView({
     const groups = new Map<string, any[]>();
     for (const n of nodes) {
       const id: string = n.id || "";
-      const slash = id.lastIndexOf("/");
-      const folder = slash > 0 ? id.slice(0, slash) : "Root";
+      // Strip the "nodes/" storage root — it's not a user folder. What's left
+      // is the real folder path; a doc directly under nodes/ has none → Root.
+      const rel = id.startsWith("nodes/") ? id.slice(6) : id;
+      const slash = rel.lastIndexOf("/");
+      const folder = slash > 0 ? rel.slice(0, slash) : "Root";
       if (!groups.has(folder)) groups.set(folder, []);
       groups.get(folder)!.push(n);
     }
@@ -683,7 +686,7 @@ export function NestView({
     return [...groups.entries()]
       .map(([folder, items]) => ({
         folder,
-        depth: folder === "Root" ? 0 : folder.split("/").length - 1,
+        depth: folder === "Root" ? 0 : folder.split("/").length,
         items: [...items].sort((a, b) =>
           String(a.title || a.id).localeCompare(String(b.title || b.id)),
         ),
@@ -1386,18 +1389,21 @@ export function NestView({
                       key={g.folder}
                       style={{ marginLeft: `${g.depth * 1.25}rem` }}
                     >
-                      <div className="flex items-center gap-2 mb-2">
-                        <FolderOpen className="h-4 w-4 text-muted-foreground" />
-                        <h4 className="text-sm font-medium">
-                          {prettyFolderPath(g.folder)}
-                        </h4>
-                        <Badge
-                          variant="secondary"
-                          className="text-[10px] px-1.5 py-0 h-5"
-                        >
-                          {g.items.length}
-                        </Badge>
-                      </div>
+                      {/* Root = docs directly under nodes/; no folder header. */}
+                      {g.folder !== "Root" && (
+                        <div className="flex items-center gap-2 mb-2">
+                          <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                          <h4 className="text-sm font-medium">
+                            {prettyFolderPath(g.folder)}
+                          </h4>
+                          <Badge
+                            variant="secondary"
+                            className="text-[10px] px-1.5 py-0 h-5"
+                          >
+                            {g.items.length}
+                          </Badge>
+                        </div>
+                      )}
                       <div className="grid gap-1 sm:grid-cols-2">
                         {g.items.map((n) => (
                           <button

@@ -505,6 +505,23 @@ export function DocumentEditor({
     return [...opts].sort();
   }, [nestNodes]);
 
+  // Folder path this doc lives under (id minus the "nodes/" root and the leaf
+  // slug), prettified for the header breadcrumb so users see where a nested
+  // doc sits. Empty for new docs and docs directly under nodes/.
+  const folderSegments = useMemo(() => {
+    if (isNew || !nodeId) return [];
+    const rel = nodeId.startsWith("nodes/") ? nodeId.slice(6) : nodeId;
+    return rel
+      .split("/")
+      .slice(0, -1)
+      .map((seg) =>
+        seg
+          .split("-")
+          .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+          .join(" "),
+      );
+  }, [isNew, nodeId]);
+
   // Docs in this nest that wiki-link to this one ("what links here").
   const backlinks = useMemo(
     () => (isNew ? [] : findBacklinks(nestNodes, { id: nodeId, title })),
@@ -1011,6 +1028,18 @@ export function DocumentEditor({
                 >
                   {entry.title}
                 </button>
+              </Fragment>
+            ))}
+            {/* Folder path (nested docs only) so the location is visible. */}
+            {folderSegments.map((seg, i) => (
+              <Fragment key={`folder-${i}`}>
+                <span className="text-muted-foreground shrink-0">›</span>
+                <span
+                  className="text-sm text-muted-foreground truncate max-w-[160px]"
+                  title={seg}
+                >
+                  {seg}
+                </span>
               </Fragment>
             ))}
             <span className="text-muted-foreground shrink-0">›</span>

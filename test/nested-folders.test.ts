@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+import { createNode } from "../src/nodes/service.js";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -89,5 +90,43 @@ describe("nested folder creation", () => {
     );
     expect(res.status).toBe(201);
     expect(res.data.node.id).toBe("nodes/flat-doc");
+  });
+
+  it("rejects a non-string folder", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Bad Folder", content: "# B", folder: 123 },
+      alice.apiKey,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects an overlong folder segment", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Too Long", content: "# T", folder: "a".repeat(101) },
+      alice.apiKey,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("ignores folder (incl. its depth limit) when an explicit id is given", async () => {
+    // Regression for the fix commit: an explicit id skips folder derivation
+    // AND folder validation, so a >8-level folder must not throw here.
+    const { node } = await createNode(
+      nestId,
+      {
+        id: "nodes/derived-fixed-id",
+        title: "Derived",
+        content: "# D",
+        folder: "a/b/c/d/e/f/g/h/i/j",
+      },
+      alice.email,
+    );
+    expect(node.id).toBe("nodes/derived-fixed-id");
   });
 });
