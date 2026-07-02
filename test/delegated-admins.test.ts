@@ -108,4 +108,46 @@ describe("nest settings delegation", () => {
     );
     expect(res.status).toBe(403);
   });
+
+  it("admin collaborator cannot disable stewardship (destructive, owner-only)", async () => {
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/settings`,
+      { stewardship_enabled: false },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(403);
+    // Governance survives — the roster the owner seeded is still intact.
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/stewards`, undefined, owner.apiKey);
+    expect(list.data.stewards.length).toBeGreaterThan(0);
+  });
+
+  it("owner can disable stewardship (wipes governance)", async () => {
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/settings`,
+      { stewardship_enabled: false },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.stewardship_enabled).toBe(false);
+    expect(res.data.wiped?.stewards).toBeGreaterThan(0);
+    // Re-enable so later assertions (if any) aren't affected by the teardown.
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/settings`,
+      { stewardship_enabled: true },
+      owner.apiKey,
+    );
+  });
+});
+
+describe("steward roster is not publicly readable", () => {
+  it("an unauthenticated request cannot read the roster", async () => {
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}/stewards`);
+    expect(res.status).toBe(401);
+  });
 });

@@ -26,7 +26,10 @@ import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors
 import {
   resolveUserRoles,
   getStewardsForUser,
+  getCollaboratorRole,
+  getStewardRolesForUser,
 } from "../governance/stewardship-service.js";
+import { collabPermToRole } from "../governance/roles.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
@@ -87,11 +90,24 @@ nestRoutes.get("/", async (c) => {
     const permission = await effectivePermission(n.id, userId);
     const is_owner = permission === "owner";
     let owner_email: string | null = null;
-    // Merged effective roles (collaborator + steward), nest-wide. Only needed
-    // for shared cards (owner cards don't show a role badge).
-    const roles = is_owner
-      ? ["owner"]
-      : await resolveUserRoles(n.id, callerEmail);
+    // Role badge on shared cards. Derive from the caller's ACTUAL grant on
+    // this nest (collaborator row + steward rows), NOT resolveUserRoles —
+    // that folds a license/super admin to "admin" on every nest, so a server
+    // admin who is only an editor collaborator here would be mislabeled
+    // "Admin" on a nest they don't own. getCollaboratorRole reads the raw
+    // grant, so the badge shows their real relationship.
+    let roles: string[];
+    if (is_owner) {
+      roles = ["owner"];
+    } else {
+      const grantRole = collabPermToRole(
+        await getCollaboratorRole(n.id, callerEmail),
+      );
+      const stewardRoles = await getStewardRolesForUser(n.id, callerEmail);
+      roles = [
+        ...new Set([grantRole, ...stewardRoles].filter(Boolean) as string[]),
+      ];
+    }
     if (!is_owner && n.user_id !== ANON_USER_ID) {
       const row = (await db.get(ownerEmailSql, [n.user_id])) as
         | { email?: string }
@@ -336,9 +352,22 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
     if (body.stewardship_enabled) {
       await setStewardshipEnabled(nestId, true);
     } else {
-      // Disable tears down governance (stewards + pending reviews) atomically
-      // with the flag flip. Collaborator shares are left intact — sharing is
-      // independent of governance. See disableStewardshipAndWipeGovernance.
+      // Disabling hard-deletes every steward + pending review for the nest
+      // (see disableStewardshipAndWipeGovernance) — irreversible. Keep this
+      // destructive teardown with the owner/server-admin, alongside the other
+      // owner-only actions (delete, transfer). An admin collaborator may
+      // toggle the harmless settings below but not wipe governance state.
+      if (!isServerAdmin && permission !== "owner") {
+        return c.json(
+          {
+            error:
+              "Only the nest owner or the server license-admin can disable stewardship (this permanently wipes stewards and pending reviews).",
+          },
+          403,
+        );
+      }
+      // Collaborator shares are left intact — sharing is independent of
+      // governance.
       wiped = await disableStewardshipAndWipeGovernance(nestId);
     }
   }

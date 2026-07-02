@@ -660,7 +660,7 @@ export async function handleToolCall(
       // Listing the full roster is admin-only (same as REST GET /stewards).
       // Resolving stewards for a specific node above stays open so callers
       // can see who'd review their work.
-      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userEmail))) {
+      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userId))) {
         return "You don't have permission to list stewards. Only a nest admin, the nest owner, or the server admin can do this.";
       }
 
@@ -836,7 +836,7 @@ export async function handleToolCall(
       // Same authority as REST/UI — server admin or nest owner/admin manages
       // stewards. MCP calls don't pass through the /stewards HTTP middleware,
       // so gate here with the shared helper.
-      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userEmail))) {
+      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userId))) {
         return "You don't have permission to manage stewards. Only a nest admin, the nest owner, or the server admin can do this.";
       }
 
