@@ -235,6 +235,19 @@ export const config = {
     const n = parseInt(process.env.SUBAGENT_MAX_DEPTH || "8", 10);
     return Number.isFinite(n) ? Math.min(32, Math.max(1, n)) : 8;
   },
+  /** Max direct children a single run may spawn. Depth bounds the tree's
+   *  height; this bounds its width — together they cap total size so a
+   *  runner can't fork-bomb the DB. Clamped to [1, 128]. */
+  get SUBAGENT_MAX_CHILDREN(): number {
+    const n = parseInt(process.env.SUBAGENT_MAX_CHILDREN || "16", 10);
+    return Number.isFinite(n) ? Math.min(128, Math.max(1, n)) : 16;
+  },
+  /** Max steps a single run may accumulate — bounds a runaway/hostile
+   *  runner's step log. Clamped to [10, 100000]. */
+  get RUN_MAX_STEPS(): number {
+    const n = parseInt(process.env.RUN_MAX_STEPS || "10000", 10);
+    return Number.isFinite(n) ? Math.min(100000, Math.max(10, n)) : 10000;
+  },
   get AUTH_MODE(): "open" | "key" {
     // Default is "key" — requires an explicit AUTH_MODE=open to run
     // without authentication. Safer default for public deployments;

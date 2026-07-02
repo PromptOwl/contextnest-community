@@ -142,13 +142,16 @@ describe("steps + close", () => {
     expect(s2.data.seq).toBe(2);
   });
 
-  it("read tier sees steps but not detail; write tier sees all", async () => {
+  it("read tier sees steps but not detail/inputs/trace; write tier sees all", async () => {
     const asReader = await jsonRequest(app, "GET", `/runs/${runId}`, undefined, reader.apiKey);
     expect(asReader.status).toBe(200);
     expect(asReader.data.steps.length).toBe(2);
     expect(asReader.data.steps[1].detail).toBeNull();
+    // inputs + trace are as sensitive as step detail — redacted at read tier.
+    expect(asReader.data.run.inputs).toBeNull();
     const asOwner = await jsonRequest(app, "GET", `/runs/${runId}`, undefined, owner.apiKey);
     expect(asOwner.data.steps[1].detail.rationale).toContain("price");
+    expect(asOwner.data.run.inputs).toEqual({ date: "2026-07-02" });
   });
 
   it("closes the run; terminal is final (409 on further steps/PATCH)", async () => {
@@ -189,6 +192,25 @@ describe("steps + close", () => {
     expect(res.status).toBe(200);
     expect(res.data.runs.some((r: any) => r.id === runId)).toBe(true);
     expect(res.data.runs.every((r: any) => r.status === "succeeded")).toBe(true);
+  });
+
+  it("SECURITY: rejects path traversal in the agent-node param (no cross-nest read)", async () => {
+    // A caller with write on this nest must not reach another nest's files by
+    // tuning ../ segments. The guard 400s before storage.readDocument.
+    for (const evil of [
+      "..%2Fother%2Fnodes%2Fsecret",
+      "nodes%2F..%2F..%2Fetc%2Fpasswd",
+      "%2e%2e%2fnodes%2fx",
+    ]) {
+      const res = await app.request(`/nests/${nestId}/run/${evil}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${owner.apiKey}` },
+        body: "{}",
+      });
+      const data = await res.json().catch(() => ({}));
+      expect([400]).toContain(res.status);
+      expect(JSON.stringify(data)).toMatch(/invalid node id/i);
+    }
   });
 
   it("flag off → 404 on both the trigger and the /runs/:id family", async () => {

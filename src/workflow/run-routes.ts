@@ -21,6 +21,7 @@ import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from ".
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { isSuspended, getSuspensionReason, getCurrentLicense } from "../auth/license.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
 
 const RUNNABLE_TYPES = ["agent", "skill"];
@@ -185,13 +186,28 @@ async function resolveParentRun(
       `sub-agent depth ${depth} exceeds the limit of ${config.SUBAGENT_MAX_DEPTH}`,
     );
   }
+  // Depth bounds tree HEIGHT; this bounds WIDTH. Without it, a parent could
+  // spawn unbounded siblings (each passes the per-chain checks) — a fork bomb
+  // of DB rows and per-spawn work. Together they cap total tree size.
+  const kids = (await db.get(
+    "SELECT COUNT(*) as c FROM runs WHERE parent_run_id = ?",
+    [parentRunId],
+  )) as { c: number };
+  if (kids.c >= config.SUBAGENT_MAX_CHILDREN) {
+    throw new ForbiddenError(
+      `parent run already has ${kids.c} children (limit ${config.SUBAGENT_MAX_CHILDREN})`,
+    );
+  }
   return { depth };
 }
 
 // POST /nests/:nestId/run/:agentNode{.+}
 runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const agentNode = c.req.param("agentNode")!;
+  // SECURITY: the catch-all param can carry `../` — validate before it reaches
+  // storage.readDocument, or a caller with write on nest A reads nest B's
+  // agent bodies via `..%2FB%2Fnodes%2Fsecret`. (See src/shared/node-id.ts.)
+  const agentNode = assertSafeNodeId(c.req.param("agentNode")!);
   const body = await c.req
     .json<{ inputs?: unknown; parent_run_id?: unknown }>()
     .catch(() => ({}) as { inputs?: unknown; parent_run_id?: unknown });
@@ -290,9 +306,17 @@ runListRoutes.get("/", async (c) => {
   sql += " ORDER BY started_at DESC LIMIT ?";
   args.push(Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 500));
   const rows = (await db.all(sql, args as any)) as RunRow[];
+  // Same redaction as GET /runs/:id — inputs/trace are write-tier only. The
+  // nestsApp gate guarantees read here; nestPermission carries the tier.
+  const canSeeDetail =
+    permissionLevel(c.get("nestPermission")) >= permissionLevel("write");
   return c.json({
     count: rows.length,
-    runs: rows.map((r) => ({ ...r, inputs: safeJson(r.inputs), trace: safeJson(r.trace) })),
+    runs: rows.map((r) => ({
+      ...r,
+      inputs: canSeeDetail ? safeJson(r.inputs) : null,
+      trace: canSeeDetail ? safeJson(r.trace) : null,
+    })),
   });
 });
 
@@ -364,6 +388,16 @@ runDetailRoutes.post("/:id/steps", async (c) => {
   const nodeId = typeof body.node_id === "string" ? body.node_id : null;
   const edgeId = typeof body.edge_id === "string" ? body.edge_id : null;
   const detail = body.detail === undefined ? null : JSON.stringify(body.detail);
+  // Bound the step log — a runaway/hostile runner can't grow it without limit.
+  const stepCount = (await getDb().get(
+    "SELECT COUNT(*) as c FROM run_steps WHERE run_id = ?",
+    [run.id],
+  )) as { c: number };
+  if (stepCount.c >= config.RUN_MAX_STEPS) {
+    throw new ConflictError(
+      `run has reached the step limit (${config.RUN_MAX_STEPS})`,
+    );
+  }
   // seq is server-assigned inside a transaction (not client-supplied): the
   // ordered trace is what replay depends on, so max+insert must be atomic.
   // A UNIQUE(run_id, seq) index (migration 017) is the backstop against any
@@ -422,8 +456,14 @@ runDetailRoutes.get("/:id", async (c) => {
     "SELECT seq, node_id, edge_id, action, detail, at FROM run_steps WHERE run_id = ? ORDER BY seq",
     [run.id],
   )) as Array<{ seq: number; node_id: string | null; edge_id: string | null; action: string; detail: string | null; at: string }>;
+  // inputs + trace are as sensitive as step detail (closing rationale,
+  // trigger payload) — gate them on the same write tier, not just detail.
   return c.json({
-    run: { ...run, inputs: safeJson(run.inputs), trace: safeJson(run.trace) },
+    run: {
+      ...run,
+      inputs: canSeeDetail ? safeJson(run.inputs) : null,
+      trace: canSeeDetail ? safeJson(run.trace) : null,
+    },
     steps: steps.map((s) => ({
       ...s,
       detail: canSeeDetail ? safeJson(s.detail) : null,

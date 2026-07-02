@@ -19,6 +19,7 @@ beforeAll(async () => {
   process.env.FEATURE_WORKFLOW_PLANE = "true";
   process.env.FEATURE_SUBAGENT_RUNS = "true";
   process.env.SUBAGENT_MAX_DEPTH = "2";
+  process.env.SUBAGENT_MAX_CHILDREN = "2";
   env = setupTestEnv();
   app = await createTestApp("key");
   owner = await registerUser(app, "owner@acme.com", "Owner");
@@ -39,6 +40,7 @@ afterAll(() => {
   delete process.env.FEATURE_WORKFLOW_PLANE;
   delete process.env.FEATURE_SUBAGENT_RUNS;
   delete process.env.SUBAGENT_MAX_DEPTH;
+  delete process.env.SUBAGENT_MAX_CHILDREN;
   env.cleanup();
 });
 
@@ -77,6 +79,19 @@ describe("nested runs", () => {
     const tooDeep = await trigger("great-grandchild-agent", { parent_run_id: parent });
     expect(tooDeep.status).toBe(403);
     expect(tooDeep.data.error).toContain("depth");
+  });
+
+  it("caps fan-out per parent (SUBAGENT_MAX_CHILDREN=2) — bounds tree WIDTH", async () => {
+    // Distinct children under one fresh root so it's the width cap firing, not
+    // depth or re-entrancy. Depth bounds height; this bounds the fork-bomb.
+    const root = (await trigger("root-agent")).data.run_id;
+    const c1 = await trigger("child-agent", { parent_run_id: root });
+    const c2 = await trigger("grandchild-agent", { parent_run_id: root });
+    expect(c1.status).toBe(201);
+    expect(c2.status).toBe(201);
+    const c3 = await trigger("great-grandchild-agent", { parent_run_id: root });
+    expect(c3.status).toBe(403);
+    expect(c3.data.error).toContain("children");
   });
 
   it("rejects re-entrancy: an agent already in the ancestor chain", async () => {
