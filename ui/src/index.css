@@ -41,3 +41,22 @@
     @apply font-semibold tracking-tight;
   }
 }
+
+/* Brief highlight when jumping to an anchored comment's quote. */
+@keyframes anchor-flash {
+  0%   { background-color: rgb(253 230 138 / 0.9); }
+  100% { background-color: transparent; }
+}
+.anchor-flash {
+  animation: anchor-flash 1.6s ease-out;
+  border-radius: 2px;
+}
+
+/* Painted comment-anchor highlights (CSS Custom Highlight API). */
+::highlight(comment-anchor) {
+  background-color: rgb(251 191 36 / 0.30);
+  border-radius: 2px;
+}
+::highlight(comment-anchor-active) {
+  background-color: rgb(251 191 36 / 0.65);
+}
