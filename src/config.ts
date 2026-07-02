@@ -210,6 +210,15 @@ export const config = {
     }
     return raw;
   },
+  /**
+   * Workflow plane ("turing" track): typed edges, edge-type registry, runs.
+   * OFF by default — an optional feature an admin turns on (env or Settings).
+   * This flag is also the future license-tier hook: gating a paid tier here
+   * is a one-line change because every plane route checks it per request.
+   */
+  get FEATURE_WORKFLOW_PLANE(): boolean {
+    return process.env.FEATURE_WORKFLOW_PLANE === "true";
+  },
   get AUTH_MODE(): "open" | "key" {
     // Default is "key" — requires an explicit AUTH_MODE=open to run
     // without authentication. Safer default for public deployments;

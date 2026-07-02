@@ -689,4 +689,53 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("011_comments");
   }
+
+  // 016: workflow plane foundations (CU-wdqcpzv34u, "turing" track). Typed
+  //   edges between nodes, with a steward-defined registry articulating what
+  //   each connection MEANS (the definitions-table move, applied to
+  //   relations). Feature-flagged: routes 404 unless FEATURE_WORKFLOW_PLANE
+  //   is on, but the schema ships so flipping the flag needs no migration.
+  //   Case-insensitive uniqueness via LOWER() (portable — NOT COLLATE
+  //   NOCASE; keep in lockstep with migrations.postgres.ts).
+  if (!hasMigration("016_workflow_edges")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS edge_types (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL,
+          direction TEXT NOT NULL DEFAULT 'directed'
+            CHECK(direction IN ('directed', 'undirected')),
+          is_flow INTEGER NOT NULL DEFAULT 0,   -- flow types form the DAG
+          condition_schema TEXT,                -- JSON template | NULL
+          color TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_types_name
+          ON edge_types(nest_id, LOWER(name));
+
+        CREATE TABLE IF NOT EXISTS edges (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          from_node TEXT NOT NULL,
+          to_node TEXT NOT NULL,
+          type_id TEXT NOT NULL REFERENCES edge_types(id) ON DELETE CASCADE,
+          condition_mode TEXT
+            CHECK(condition_mode IN ('structured', 'nl', 'open')),
+          condition TEXT,
+          metadata TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(nest_id, from_node);
+        CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(nest_id, to_node);
+        CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(nest_id, type_id);
+      `);
+    })();
+    recordMigration("016_workflow_edges");
+  }
 }

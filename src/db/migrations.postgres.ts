@@ -40,6 +40,7 @@ const HISTORICAL_MIGRATIONS = [
   "009_lowercase_emails",
   "010_sso_used_jti",
   "011_comments",
+  "016_workflow_edges",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -277,6 +278,41 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON comments(nest_id, node_id, status);
     CREATE INDEX IF NOT EXISTS idx_comments_thread
       ON comments(parent_id);
+
+    CREATE TABLE IF NOT EXISTS edge_types (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      direction TEXT NOT NULL DEFAULT 'directed'
+        CHECK(direction IN ('directed', 'undirected')),
+      is_flow INTEGER NOT NULL DEFAULT 0,
+      condition_schema TEXT,
+      color TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_types_name
+      ON edge_types(nest_id, LOWER(name));
+
+    CREATE TABLE IF NOT EXISTS edges (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      from_node TEXT NOT NULL,
+      to_node TEXT NOT NULL,
+      type_id TEXT NOT NULL REFERENCES edge_types(id) ON DELETE CASCADE,
+      condition_mode TEXT
+        CHECK(condition_mode IN ('structured', 'nl', 'open')),
+      condition TEXT,
+      metadata TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(nest_id, from_node);
+    CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(nest_id, to_node);
+    CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(nest_id, type_id);
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,
