@@ -40,6 +40,12 @@ const HISTORICAL_MIGRATIONS = [
   "009_lowercase_emails",
   "010_sso_used_jti",
   "011_comments",
+  // 012 merges case-colliding SQLite user rows. Postgres can never have them:
+  // the NOCASE-unique idx_users_email_nocase (lower(email)) exists from table
+  // creation, so duplicates are rejected on insert and there's nothing to merge.
+  // Seed the id so bookkeeping matches SQLite and future incremental Postgres
+  // migrations gate correctly.
+  "012_merge_case_colliding_users",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
