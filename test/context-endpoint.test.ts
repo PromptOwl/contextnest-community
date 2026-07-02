@@ -264,6 +264,19 @@ describe("POST /context — explicit [[Title]] selector", () => {
     expect(res.data.trace.hops_used).toBeGreaterThanOrEqual(1);
   });
 
+  it("keeps explicit [[Title]] matches even when prompt is also sent", async () => {
+    // A pure [[Title]] selector fully consumes `selector`; the prompt branch
+    // must not then overwrite the resolved title matches.
+    const res = await jsonRequest(app, "POST", `/nests/${nestId}/context`, {
+      selector: "[[Hub Note]]",
+      prompt: "tell me about brand guidelines",
+      hops: 0,
+    });
+    expect(res.status).toBe(200);
+    const ids = res.data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/hub-note");
+  });
+
   it("mixes [[Title]] parts with engine selector parts in an OR union", async () => {
     const res = await jsonRequest(app, "POST", `/nests/${nestId}/context`, {
       selector: "[[Spoke Note]] | #brand",

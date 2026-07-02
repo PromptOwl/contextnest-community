@@ -57,13 +57,16 @@ const MAX_ZOOM = 5;
  * Deterministic selector for a graph node, in the grammar POST /context
  * accepts: docs by exact [[Title]] (resolved server-side, hop-expanded),
  * tags by #name. Stewards and the root have no selector of their own —
- * callers fall back to the neighborhood union. A title containing "]]"
- * can't be expressed in wiki syntax, so those yield no selector rather
+ * callers fall back to the neighborhood union. A title containing "]]" or
+ * "|" can't be expressed in an OR-union of wiki selectors (the server splits
+ * parts on "|" before matching [[...]]), so those yield no selector rather
  * than a broken one.
  */
 function selectorForNode(n: GNode): string | null {
   if (n.kind === "doc") {
-    return n.name.includes("]]") ? null : `[[${n.name}]]`;
+    return n.name.includes("]]") || n.name.includes("|")
+      ? null
+      : `[[${n.name}]]`;
   }
   if (n.kind === "tag") return `#${n.name.replace(/^#/, "")}`;
   return null;
