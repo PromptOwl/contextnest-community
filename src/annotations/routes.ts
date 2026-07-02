@@ -36,11 +36,11 @@ annotationRoutes.get("/:nodeId{.+}/annotations", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = getNodeId(c);
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
-  return c.json({ threads: listThreads(nestId, nodeId) });
+  return c.json({ threads: await listThreads(nestId, nodeId) });
 });
 
 // POST /nests/:nestId/nodes/:nodeId/annotations — create a thread (anchored or whole-artifact)
@@ -48,8 +48,8 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = getNodeId(c);
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
 
@@ -62,7 +62,7 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
     throw new ValidationError("body is required");
   }
 
-  const thread = createThread(
+  const thread = await createThread(
     nestId,
     nodeId,
     {
@@ -82,8 +82,8 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/comments", async (c) =
   const nodeId = getNodeId(c);
   const threadId = c.req.param("threadId")!;
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
 
@@ -92,7 +92,7 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/comments", async (c) =
     throw new ValidationError("body is required");
   }
 
-  const thread = addComment(nestId, nodeId, threadId, userEmail, input.body);
+  const thread = await addComment(nestId, nodeId, threadId, userEmail, input.body);
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 });
@@ -103,12 +103,12 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/resolve", async (c) =>
   const nodeId = getNodeId(c);
   const threadId = c.req.param("threadId")!;
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
 
-  const thread = setThreadStatus(nestId, nodeId, threadId, "resolved", userEmail);
+  const thread = await setThreadStatus(nestId, nodeId, threadId, "resolved", userEmail);
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 });
@@ -119,12 +119,12 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/reopen", async (c) => 
   const nodeId = getNodeId(c);
   const threadId = c.req.param("threadId")!;
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
 
-  const thread = setThreadStatus(nestId, nodeId, threadId, "open", userEmail);
+  const thread = await setThreadStatus(nestId, nodeId, threadId, "open", userEmail);
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 });
@@ -137,8 +137,8 @@ annotationRoutes.get("/:nodeId{.+}/hosted", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = getNodeId(c);
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
 

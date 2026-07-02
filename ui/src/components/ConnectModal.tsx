@@ -214,12 +214,15 @@ export function ConnectModal({
       mcpServers: {
         [slugify(nestName)]: {
           command: "npx",
+          // Open mode needs no credential — omit the auth header so the copied
+          // config connects as-is.
           args: [
             "-y",
             "mcp-remote",
             mcpUrl,
-            "--header",
-            `Authorization: Bearer ${KEY_PLACEHOLDER}`,
+            ...(authMode === "open"
+              ? []
+              : ["--header", `Authorization: Bearer ${KEY_PLACEHOLDER}`]),
           ],
         },
       },
@@ -230,7 +233,11 @@ export function ConnectModal({
 
   // Only `ctx push` talks to a remote server; the other ctx commands operate on
   // a local vault. Push uploads the local vault into this nest.
-  const ctxCommand = `ctx push --server ${serverUrl} --nest ${nestId} --key ${KEY_PLACEHOLDER}`;
+  // Open mode needs no credential — drop --key so the copied command runs as-is.
+  const ctxCommand =
+    authMode === "open"
+      ? `ctx push --server ${serverUrl} --nest ${nestId}`
+      : `ctx push --server ${serverUrl} --nest ${nestId} --key ${KEY_PLACEHOLDER}`;
 
   const showOpenModeBanner = authMode === "open";
   const showLoginBanner = !authenticated && authMode === "key";
@@ -466,10 +473,10 @@ export function ConnectModal({
               <TabsContent value="mcp" className="space-y-4 pt-4">
                 <div>
                   <p className="text-sm mb-3">
-                    Streamable HTTP MCP endpoint with 18 tools (11 content + 7
-                    governance). Works with native HTTP MCP clients (Claude
-                    Code, Cursor, VS Code); for Claude Desktop use the Claude
-                    Desktop tab.
+                    Streamable HTTP MCP endpoint with 21 tools (11 content + 7
+                    governance + 3 admin/sync). Works with native HTTP MCP
+                    clients (Claude Code, Cursor, VS Code); for Claude Desktop
+                    use the Claude Desktop tab.
                     {!showOpenModeBanner && (
                       <>
                         {" "}
@@ -492,24 +499,30 @@ export function ConnectModal({
                 <div className="text-xs text-muted-foreground space-y-2">
                   <p className="font-medium">Available tools:</p>
                   <div className="grid grid-cols-2 gap-x-4 font-mono text-[11px]">
+                    {/* content (11) */}
                     <span>context_init</span>
-                    <span>context_stewards</span>
-                    <span>context_overview</span>
-                    <span>context_review_queue</span>
-                    <span>context_search</span>
-                    <span>context_submit_review</span>
-                    <span>context_query</span>
-                    <span>context_approve</span>
-                    <span>context_get</span>
-                    <span>context_reject</span>
-                    <span>context_list</span>
-                    <span>context_versions</span>
                     <span>context_resolve</span>
-                    <span>context_assign_steward</span>
-                    <span>context_export</span>
+                    <span>context_overview</span>
                     <span>context_create</span>
-                    <span>context_comments</span>
+                    <span>context_search</span>
                     <span>context_update</span>
+                    <span>context_query</span>
+                    <span>context_export</span>
+                    <span>context_get</span>
+                    <span>context_comments</span>
+                    <span>context_list</span>
+                    {/* governance (7) */}
+                    <span>context_stewards</span>
+                    <span>context_review_queue</span>
+                    <span>context_submit_review</span>
+                    <span>context_approve</span>
+                    <span>context_reject</span>
+                    <span>context_versions</span>
+                    <span>context_assign_steward</span>
+                    {/* admin / sync (3) */}
+                    <span>context_share_nest</span>
+                    <span>context_unsynced_list</span>
+                    <span>context_sync_folder</span>
                   </div>
                 </div>
               </TabsContent>
@@ -779,7 +792,9 @@ function Snippet({
         className={`${
           multiline ? "p-3" : "px-3 py-2"
         } bg-muted rounded text-xs font-mono min-w-0 ${
-          multiline ? "whitespace-pre overflow-x-auto" : "truncate"
+          multiline
+            ? "whitespace-pre overflow-x-auto"
+            : "whitespace-pre-wrap break-all"
         }`}
       >
         {value}

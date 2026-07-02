@@ -7,10 +7,7 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { listNests, listSharedNests } from "./nests/service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
-import {
-  resolveStewardsForNode,
-  canManageStewards,
-} from "./governance/stewardship-service.js";
+import { resolveStewardsForNode } from "./governance/stewardship-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
@@ -56,7 +53,7 @@ const UI_DIR_REL = relative(process.cwd(), UI_DIR_ABS) || ".";
 // In open mode, assign the anonymous admin user to every request.
 // This gives full access without requiring auth headers.
 const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
-  const anonId = ensureAnonymousUser();
+  const anonId = await ensureAnonymousUser();
   c.set("userId", anonId);
   c.set("nestScope", null);
   await next();
@@ -69,6 +66,14 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 function isPublicReadEligiblePath(method: string, path: string): boolean {
   if (method !== "GET") return false;
   if (!/^\/nests\/[^/]+(\/.*)?$/.test(path)) return false;
+  // The nest steward roster (/nests/:id/stewards) is admin-gated, never
+  // public — keep it behind real auth. Without this, an anonymous caller on
+  // an anon-owned nest (nests.user_id === ANON_USER_ID, e.g. created under a
+  // previous AUTH_MODE=open run) is treated as the anon owner, so the
+  // roster gate below resolves "owner" and leaks emails/roles. The
+  // node-level resolve (/nests/:id/nodes/:nid/stewards) stays public so the
+  // editor UI can still resolve a caller's per-node role.
+  if (/^\/nests\/[^/]+\/stewards/.test(path)) return false;
   return !/\/(collaborators|visibility|settings|mcp)/.test(path);
 }
 
@@ -80,14 +85,14 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   }
 
   if (config.AUTH_MODE === "open") {
-    const anonId = ensureAnonymousUser();
+    const anonId = await ensureAnonymousUser();
     c.set("userId", anonId);
     c.set("nestScope", null);
     return next();
   }
 
   if (isPublicReadEligiblePath(c.req.method, c.req.path)) {
-    const anonId = ensureAnonymousUser();
+    const anonId = await ensureAnonymousUser();
     c.set("userId", anonId);
     c.set("nestScope", null);
     return next();
@@ -247,8 +252,9 @@ export function createApp(): Hono<AuthEnv> {
   // persists to ENV_FILE_PATH so it survives a restart. In open mode the
   // anonymous admin may edit; in key mode it's the license admin only.
   app.use("/admin/settings", flexAuthMiddleware);
-  const adminSettingsAllowed = (c: any) =>
-    config.AUTH_MODE === "open" || isLicenseAdminUserId(c.get("userId"));
+  const adminSettingsAllowed = async (c: any) =>
+    config.AUTH_MODE === "open" ||
+    (await isLicenseAdminUserId(c.get("userId")));
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     logo_url: config.LOGO_URL,
@@ -257,14 +263,14 @@ export function createApp(): Hono<AuthEnv> {
     max_body_bytes: config.MAX_BODY_BYTES,
   });
 
-  app.get("/admin/settings", (c) => {
-    if (!adminSettingsAllowed(c))
+  app.get("/admin/settings", async (c) => {
+    if (!(await adminSettingsAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     return c.json(currentServerSettings());
   });
 
   app.patch("/admin/settings", async (c) => {
-    if (!adminSettingsAllowed(c))
+    if (!(await adminSettingsAllowed(c)))
       return c.json({ error: "Only the server admin can change this." }, 403);
     let body: Record<string, unknown>;
     try {
@@ -337,9 +343,11 @@ export function createApp(): Hono<AuthEnv> {
   app.get("/stats", async (c) => {
     const db = getDb();
     const userId = c.get("userId");
-    const userEmail = resolveCallerEmail(userId);
+    const userEmail = await resolveCallerEmail(userId);
 
-    const visibleNests = [...listNests(userId), ...listSharedNests(userId)];
+    const owned = await listNests(userId);
+    const sharedNests = await listSharedNests(userId);
+    const visibleNests = [...owned, ...sharedNests];
 
     // Count accessible documents across every nest the caller can see.
     // Mirrors the per-nest filterAccessible logic used by GET /nests/:id/nodes
@@ -347,17 +355,17 @@ export function createApp(): Hono<AuthEnv> {
     let documents = 0;
     for (const nest of visibleNests) {
       try {
-        const { storage } = engineCache.get(nest.id);
+        const { storage } = await engineCache.get(nest.id);
         const docs = await storage.discoverDocuments();
-        documents += filterAccessible(nest.id, userId, userEmail, docs).length;
+        documents += (await filterAccessible(nest.id, userId, userEmail, docs)).length;
       } catch {
         // Nest with filesystem issue — skip; don't break the whole count.
       }
     }
 
-    const usersRow = db
-      .prepare("SELECT COUNT(*) as c FROM users")
-      .get() as { c: number };
+    const usersRow = (await db.get(
+      "SELECT COUNT(*) as c FROM users",
+    )) as { c: number };
 
     return c.json({
       nests: visibleNests.length,
@@ -459,7 +467,7 @@ export function createApp(): Hono<AuthEnv> {
       return next();
     }
 
-    const permission = resolveNestPermission(nestId, userId);
+    const permission = await resolveNestPermission(nestId, userId);
     if (permission === "none") {
       return c.json({ error: "Nest not found" }, 404);
     }
@@ -500,17 +508,22 @@ export function createApp(): Hono<AuthEnv> {
       /\/comments$/.test(path) ||
       /\/comments\/[^/]+\/resolve$/.test(path);
     // The steward roster — list, assign, remove, sync — is restricted to the
-    // server (license) admin: not nest owners or collaborators. All methods
-    // on /nests/:id/stewards are locked. The node-level resolve route
+    // server (license) admin plus the nest owner/admin collaborators, so an
+    // owner can delegate vault people-management by granting admin. All
+    // methods on /nests/:id/stewards are gated. The node-level resolve route
     // (/nodes/:id/stewards) stays readable so the editor UI can resolve a
     // caller's per-node role.
     const isStewardRoster =
       path.includes("/stewards") && !path.includes("/nodes/");
-    if (isStewardRoster && !canManageStewards(resolveCallerEmail(userId))) {
+    // Reuse the permission already resolved above — resolveNestPermission
+    // folds the license/super admin into "admin", so owner/admin covers
+    // server admin, nest owner, and admin collaborators (same rule as the
+    // shared canManageStewards used by MCP).
+    if (isStewardRoster && permission !== "owner" && permission !== "admin") {
       return c.json(
         {
           error:
-            "You don't have permission to manage stewards. Only the super admin can do this.",
+            "You don't have permission to manage stewards. Only a nest admin, the nest owner, or the server admin can do this.",
         },
         403,
       );
@@ -552,7 +565,7 @@ export function createApp(): Hono<AuthEnv> {
       parts[parts.length - 1] === "revert";
     let stewardEditorBypass = false;
     if (required === "write" && permission === "read" && parts[1] === "nodes") {
-      const userEmail = resolveCallerEmail(userId);
+      const userEmail = await resolveCallerEmail(userId);
       if (
         parts.length >= 3 &&
         (c.req.method === "PATCH" || c.req.method === "DELETE" || isNodeRevert)
@@ -567,7 +580,7 @@ export function createApp(): Hono<AuthEnv> {
         } catch {
           /* malformed escape */
         }
-        const resolved = resolveStewardsForNode(nestId, nodeId);
+        const resolved = await resolveStewardsForNode(nestId, nodeId);
         stewardEditorBypass = resolved.some(
           (r) =>
             r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
@@ -575,7 +588,7 @@ export function createApp(): Hono<AuthEnv> {
         );
       } else if (parts.length === 2 && c.req.method === "POST") {
         // Empty nodeId: doc/tag branches won't match; nest branch returns all.
-        const resolved = resolveStewardsForNode(nestId, "");
+        const resolved = await resolveStewardsForNode(nestId, "");
         stewardEditorBypass = resolved.some(
           (r) =>
             r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&

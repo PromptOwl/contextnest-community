@@ -101,9 +101,10 @@ describe("validateLicense", () => {
     // network to be called even on cache hit, so age the row.
     const { getDb } = await import("../src/db/client.js");
     const db = getDb();
-    db.prepare(
+    await db.run(
       "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
-    ).run("pk_test_2");
+      ["pk_test_2"],
+    );
 
     const result = await license2.validateLicense();
     expect(fetchMock).toHaveBeenCalled();
@@ -138,11 +139,10 @@ describe("validateLicense", () => {
 
     // Age the cache so the next call goes to network, then 500
     const { getDb } = await import("../src/db/client.js");
-    getDb()
-      .prepare(
-        "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
-      )
-      .run("pk_test_5");
+    await getDb().run(
+      "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
+      ["pk_test_5"],
+    );
 
     process.env.PROMPTOWL_KEY = "pk_test_5";
     mockFetch({ ok: false, status: 500 });
@@ -201,11 +201,10 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
 
     // Force the cache to be stale so the second call hits network
     const { getDb } = await import("../src/db/client.js");
-    getDb()
-      .prepare(
-        "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
-      )
-      .run("pk_susp_2");
+    await getDb().run(
+      "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
+      ["pk_susp_2"],
+    );
 
     // Jump past the 1h confirmation window
     vi.spyOn(Date, "now").mockReturnValue(realNow + 61 * 60 * 1000);
@@ -226,11 +225,10 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
 
     // Age cache so next call goes to network, then return suspended:false
     const { getDb } = await import("../src/db/client.js");
-    getDb()
-      .prepare(
-        "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
-      )
-      .run("pk_susp_3");
+    await getDb().run(
+      "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
+      ["pk_susp_3"],
+    );
     mockFetch({ body: { valid: true, tier: "team" } });
     await license.validateLicense();
     expect(license.isSuspended()).toBe(false);

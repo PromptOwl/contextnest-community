@@ -47,9 +47,10 @@ describe("email is case-insensitive", () => {
       email: "USER@x.com",
       password: "testpass8",
     });
-    const { c } = getDb()
-      .prepare("SELECT COUNT(*) AS c FROM users WHERE LOWER(email) = LOWER(?)")
-      .get("user@x.com") as { c: number };
+    const { c } = (await getDb().get(
+      "SELECT COUNT(*) AS c FROM users WHERE LOWER(email) = LOWER(?)",
+      ["user@x.com"],
+    )) as { c: number };
     expect(c).toBe(1);
   });
 
@@ -83,9 +84,10 @@ describe("email is case-insensitive", () => {
     const ids = (list.data.nests || []).map((n: any) => n.id);
     expect(ids).toContain(nestId);
 
-    const { c } = getDb()
-      .prepare("SELECT COUNT(*) AS c FROM users WHERE LOWER(email) = LOWER(?)")
-      .get("her@x.com") as { c: number };
+    const { c } = (await getDb().get(
+      "SELECT COUNT(*) AS c FROM users WHERE LOWER(email) = LOWER(?)",
+      ["her@x.com"],
+    )) as { c: number };
     expect(c).toBe(1);
   });
 });

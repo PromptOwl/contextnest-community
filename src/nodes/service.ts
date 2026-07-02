@@ -7,7 +7,7 @@ import { serializeDocument, parseDocument } from "@promptowl/contextnest-engine"
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { safePublishDocument } from "../governance/safe-publish.js";
 import { engineCache } from "./engine.js";
-import { NotFoundError, LockedError } from "../shared/errors.js";
+import { NotFoundError, LockedError, ValidationError } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { syncNodeTags } from "../governance/tag-index-service.js";
@@ -23,11 +23,10 @@ import { getDb } from "../db/client.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
-function userIdFromEmail(email: string): string {
+async function userIdFromEmail(email: string): Promise<string> {
   const db = getDb();
-  const row = db
-    .prepare("SELECT id FROM users WHERE LOWER(email) = LOWER(?)")
-    .get(email) as { id: string } | undefined;
+  const row = await db
+    .get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [email]) as { id: string } | undefined;
   return row?.id ?? ANON_USER_ID;
 }
 
@@ -101,7 +100,7 @@ export async function listNodesForCaller(
   userId: string,
   filters: ListNodesFilters = {},
 ): Promise<NodeResponse[]> {
-  const { storage, versions: versionManager } = engineCache.get(nestId);
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
   let documents = await storage.discoverDocuments();
 
   // Cheap on-frontmatter filters first — narrows what we enrich below.
@@ -115,16 +114,16 @@ export async function listNodesForCaller(
     );
   }
 
-  const userEmail = resolveCallerEmail(userId);
-  const accessible = filterAccessible(nestId, userId, userEmail, documents);
-  const publicReader = isPublicReader(nestId, userId);
+  const userEmail = await resolveCallerEmail(userId);
+  const accessible = await filterAccessible(nestId, userId, userEmail, documents);
+  const publicReader = await isPublicReader(nestId, userId);
 
   const enriched = await Promise.all(
     accessible.map(async (doc) => {
       const r = toNodeResponse(doc);
 
       if (publicReader) {
-        const approved = versions.getApprovedVersion(nestId, doc.id);
+        const approved = await versions.getApprovedVersion(nestId, doc.id);
         if (approved != null) {
           try {
             const raw = await versionManager.reconstructVersion(doc.id, approved);
@@ -149,7 +148,7 @@ export async function listNodesForCaller(
         r.pendingChange = pending;
         r.status = "external_edit_pending";
       } else {
-        r.status = versions.getDisplayStatus(nestId, r.id);
+        r.status = await versions.getDisplayStatus(nestId, r.id);
       }
       return r;
     }),
@@ -164,7 +163,7 @@ export async function listNodesForCallerByEmail(
   userEmail: string,
   filters: ListNodesFilters = {},
 ): Promise<NodeResponse[]> {
-  return listNodesForCaller(nestId, userIdFromEmail(userEmail), filters);
+  return listNodesForCaller(nestId, await userIdFromEmail(userEmail), filters);
 }
 
 export interface CreateNodeInput {
@@ -178,6 +177,10 @@ export interface CreateNodeInput {
    *  the title slug. Used by derived/system nodes that need a deterministic,
    *  collision-free id independent of the human-readable title. */
   id?: string;
+  /** Folder path under nodes/ (e.g. "gtm/deals"). Each segment is slugified;
+   *  storage and read/update/delete already handle nested ids, only creation
+   *  was flat. Ignored when an explicit id is given. */
+  folder?: string;
 }
 
 export interface UpdateNodePatch {
@@ -199,17 +202,42 @@ export async function createNode(
   input: CreateNodeInput,
   userEmail: string,
 ): Promise<NodeMutationResult> {
-  const { storage, versions: versionManager } = engineCache.get(nestId);
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
 
-  const slug = input.title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-  const id = input.id ?? `nodes/${slug}`;
+  const slugify = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+  const slug = slugify(input.title);
+  // Slugifying per segment means "../x" or absolute paths can never escape
+  // the vault — traversal characters collapse to "-" and empty segments drop.
+  // An explicit id wins outright: folder is documented as ignored then, so
+  // it isn't derived or validated either.
+  let id = input.id;
+  if (!id) {
+    const folderSegments = (input.folder ?? "")
+      .split("/")
+      .map(slugify)
+      .filter(Boolean);
+    if (folderSegments.length > 8) {
+      throw new ValidationError("folder may nest at most 8 levels deep");
+    }
+    // Bound each slug so an overlong segment (folder or title) fails as a
+    // clean 400 instead of an ENAMETOOLONG surfacing as an unhandled 500 at
+    // storage.writeDocument.
+    if ([...folderSegments, slug].some((seg) => seg.length > 100)) {
+      throw new ValidationError("each folder or title segment must be at most 100 characters");
+    }
+    id =
+      folderSegments.length > 0
+        ? `nodes/${folderSegments.join("/")}/${slug}`
+        : `nodes/${slug}`;
+  }
   const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
 
-  const hasStewards = isStewardshipEnabled(nestId);
+  const hasStewards = await isStewardshipEnabled(nestId);
   const initialStatus = hasStewards ? "draft" : "published";
   // Ungoverned starts at v=0 so engine publish bump lands at v=1.
   const initialVersion = hasStewards ? 1 : 0;
@@ -231,7 +259,7 @@ export async function createNode(
     rawContent: "",
   };
   await storage.writeDocument(id, serializeDocument(node));
-  syncNodeTags(nestId, id, tags);
+  await syncNodeTags(nestId, id, tags);
 
   let savedVersion = 1;
   if (hasStewards) {
@@ -240,7 +268,7 @@ export async function createNode(
     } catch (err) {
       console.error("VersionManager.createVersion failed (node create)", err);
     }
-    versions.createVersion({
+    await versions.createVersion({
       nestId,
       nodeId: id,
       version: 1,
@@ -256,7 +284,7 @@ export async function createNode(
         note: "Auto-published on create (no stewards configured)",
       });
       savedVersion = result.node.frontmatter.version || 1;
-      versions.createVersion({
+      await versions.createVersion({
         nestId,
         nodeId: id,
         version: savedVersion,
@@ -265,11 +293,11 @@ export async function createNode(
         status: "published",
         tags,
       });
-      versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
+      await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
       node = result.node;
     } catch (err) {
       console.error("publishDocument failed (node create auto-publish)", err);
-      versions.createVersion({
+      await versions.createVersion({
         nestId,
         nodeId: id,
         version: 1,
@@ -281,7 +309,7 @@ export async function createNode(
     }
   }
 
-  trackEvent("node.create", { nestId, nodeId: id });
+  await trackEvent("node.create", { nestId, nodeId: id });
   return { node, version: savedVersion };
 }
 
@@ -311,7 +339,7 @@ export async function registerImportedDocuments(
   nestId: string,
   userEmail: string,
 ): Promise<number> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   let docs: ContextNode[];
   try {
     docs = await storage.discoverDocuments();
@@ -323,7 +351,7 @@ export async function registerImportedDocuments(
   let registered = 0;
   for (const doc of docs) {
     const nodeId = doc.id;
-    if (versions.getCurrentVersion(nestId, nodeId) > 0) continue; // already tracked
+    if ((await versions.getCurrentVersion(nestId, nodeId)) > 0) continue; // already tracked
     const rawTags = Array.isArray(doc.frontmatter?.tags)
       ? doc.frontmatter.tags
       : [];
@@ -346,7 +374,7 @@ export async function registerImportedDocuments(
       console.error("safePublishDocument failed (import register)", nodeId, err);
     }
 
-    versions.createVersion({
+    await versions.createVersion({
       nestId,
       nodeId,
       version,
@@ -356,12 +384,12 @@ export async function registerImportedDocuments(
       changeNote: "Imported from existing folder",
       tags,
     });
-    versions.setApprovedVersion(nestId, nodeId, version, userEmail);
-    syncNodeTags(nestId, nodeId, tags);
+    await versions.setApprovedVersion(nestId, nodeId, version, userEmail);
+    await syncNodeTags(nestId, nodeId, tags);
     registered++;
   }
 
-  trackEvent("nest.import.documents", { nestId, registered });
+  await trackEvent("nest.import.documents", { nestId, registered });
   return registered;
 }
 
@@ -371,7 +399,7 @@ export async function updateNode(
   patch: UpdateNodePatch,
   userEmail: string,
 ): Promise<NodeMutationResult> {
-  const { storage, versions: versionManager } = engineCache.get(nestId);
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
 
   let node: ContextNode;
   try {
@@ -398,14 +426,14 @@ export async function updateNode(
     node = { ...node, frontmatter: { ...node.frontmatter, title: patch.title } };
   }
 
-  const hasStewards = isStewardshipEnabled(nestId);
+  const hasStewards = await isStewardshipEnabled(nestId);
   const currentTags = (node.frontmatter.tags || []) as string[];
 
   // Stewardship lock: a node with an open review request is frozen. The
   // reviewer is evaluating a specific version, so edits are rejected (423)
   // until the review is approved or rejected — that's the only path that
   // releases the lock.
-  if (hasStewards && getPendingReview(nestId, nodeId)) {
+  if (hasStewards && (await getPendingReview(nestId, nodeId))) {
     throw new LockedError(
       "This document is awaiting steward review and is locked. Approve or reject the pending review before editing.",
     );
@@ -413,7 +441,7 @@ export async function updateNode(
 
   let responseVersion: number;
   if (hasStewards) {
-    const currentVersion = versions.getCurrentVersion(nestId, nodeId);
+    const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
     const newVersion = currentVersion + 1;
     node = {
       ...node,
@@ -428,14 +456,14 @@ export async function updateNode(
     };
     node = { ...node, frontmatter: stripUndefined(node.frontmatter) };
     await storage.writeDocument(nodeId, serializeDocument(node));
-    syncNodeTags(nestId, nodeId, currentTags);
+    await syncNodeTags(nestId, nodeId, currentTags);
 
     try {
       await versionManager.createVersion(node, userEmail, { note: patch.changeNote });
     } catch (err) {
       console.error("VersionManager.createVersion failed (node patch)", err);
     }
-    versions.createVersion({
+    await versions.createVersion({
       nestId,
       nodeId,
       version: newVersion,
@@ -457,7 +485,7 @@ export async function updateNode(
     };
     node = { ...node, frontmatter: stripUndefined(node.frontmatter) };
     await storage.writeDocument(nodeId, serializeDocument(node));
-    syncNodeTags(nestId, nodeId, currentTags);
+    await syncNodeTags(nestId, nodeId, currentTags);
 
     let publishedVersion = (node.frontmatter.version || 0) + 1;
     try {
@@ -470,7 +498,7 @@ export async function updateNode(
     } catch (err) {
       console.error("publishDocument failed (node patch auto-publish)", err);
     }
-    versions.createVersion({
+    await versions.createVersion({
       nestId,
       nodeId,
       version: publishedVersion,
@@ -480,7 +508,7 @@ export async function updateNode(
       tags: currentTags,
       changeNote: patch.changeNote,
     });
-    versions.setApprovedVersion(nestId, nodeId, publishedVersion, userEmail);
+    await versions.setApprovedVersion(nestId, nodeId, publishedVersion, userEmail);
     responseVersion = publishedVersion;
   }
 

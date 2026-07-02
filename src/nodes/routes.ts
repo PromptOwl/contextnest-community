@@ -20,6 +20,7 @@ import {
   getPendingChange,
   loadLatestApprovedNode,
 } from "../governance/external-edit-service.js";
+import { derivedAnnotationsId } from "../annotations/service.js";
 import {
   createNode,
   updateNode,
@@ -61,14 +62,18 @@ nodeRoutes.post("/", async (c) => {
     tags?: string[];
     scope?: string;
     status?: string;
+    folder?: string;
   }>();
 
   if (!body.title || !body.content) {
     throw new ValidationError("title and content are required");
   }
+  if (body.folder !== undefined && typeof body.folder !== "string") {
+    throw new ValidationError("folder must be a string path like \"gtm/deals\"");
+  }
 
   const nestId = c.req.param("nestId")!;
-  const authorEmail = getUserEmail(c);
+  const authorEmail = await getUserEmail(c);
   const { node } = await createNode(
     nestId,
     {
@@ -78,12 +83,13 @@ nodeRoutes.post("/", async (c) => {
       tags: body.tags,
       scope: body.scope,
       status: body.status,
+      folder: body.folder,
     },
     authorEmail,
   );
 
   // Resolve stewards for the response
-  const resolved = stewardship.resolveStewardsForNode(nestId, node.id);
+  const resolved = await stewardship.resolveStewardsForNode(nestId, node.id);
 
   return c.json({
     node: toNodeResponse(node),
@@ -107,7 +113,7 @@ nodeRoutes.get("/:nodeId{.+?}/stewards", async (c) => {
   const nodeId = c.req.param("nodeId")!;
 
   const { resolveStewardsWithFallback } = await import("../governance/stewardship-service.js");
-  const { stewards, fallbackToOwner, ownerEmail } = resolveStewardsWithFallback(
+  const { stewards, fallbackToOwner, ownerEmail } = await resolveStewardsWithFallback(
     nestId,
     nodeId,
   );
@@ -131,24 +137,24 @@ nodeRoutes.get("/:nodeId{.+?}/versions", async (c) => {
   const nodeId = c.req.param("nodeId")!;
 
   const { getVersions, getApprovedVersion } = await import("../governance/version-service.js");
-  const allVersions = getVersions(nestId, nodeId);
-  const approved = getApprovedVersion(nestId, nodeId);
+  const allVersions = await getVersions(nestId, nodeId);
+  const approved = await getApprovedVersion(nestId, nodeId);
 
   // Enrich each version with the resolver (approver/rejecter) so the UI
   // can show "approved by X" next to the row. We pull the latest
   // resolution per version from review_requests; node_versions itself
   // doesn't carry approver email.
   const db = getDb();
-  const resolutions = db
-    .prepare(
+  const resolutions = await db
+    .all(
       `SELECT version, status, resolved_by, resolved_at
          FROM review_requests
         WHERE nest_id = ? AND node_id = ?
           AND status IN ('approved', 'rejected')
           AND resolved_by IS NOT NULL
         ORDER BY resolved_at DESC`,
-    )
-    .all(nestId, nodeId) as Array<{
+      [nestId, nodeId],
+    ) as Array<{
       version: number;
       status: string;
       resolved_by: string;
@@ -177,7 +183,7 @@ nodeRoutes.get("/:nodeId{.+?}/reviews", async (c) => {
   const nodeId = c.req.param("nodeId")!;
 
   const { getReviewHistory } = await import("../governance/review-service.js");
-  const history = getReviewHistory(nestId, nodeId);
+  const history = await getReviewHistory(nestId, nodeId);
   return c.json({ reviews: history });
 });
 
@@ -189,11 +195,11 @@ nodeRoutes.get("/:nodeId{.+?}/reviews", async (c) => {
 nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const { versions: versionManager } = engineCache.get(nestId);
+  const { versions: versionManager } = await engineCache.get(nestId);
 
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json(
       { error: "Access denied — no steward assignment for this node" },
       403,
@@ -223,18 +229,18 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
     { content, changeNote: `Restored from version ${targetVersion}` },
     userEmail,
   );
-  trackEvent("node.revert", { nestId, nodeId, targetVersion });
+  await trackEvent("node.revert", { nestId, nodeId, targetVersion });
   return c.json({ ok: true, version, node: toNodeResponse(node) });
 });
 
 nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const { storage, versions: versionManager } = engineCache.get(nestId);
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
 
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json(
       { error: "Access denied — no steward assignment for this node" },
       403,
@@ -277,8 +283,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const response = toNodeResponse(node);
 
   // Public readers see approved version body only.
-  if (isPublicReader(nestId, userId)) {
-    const approved = versions.getApprovedVersion(nestId, nodeId);
+  if (await isPublicReader(nestId, userId)) {
+    const approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       try {
         const raw = await versionManager.reconstructVersion(
@@ -311,11 +317,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   // transitions.
   response.status = node.pendingChange
     ? "external_edit_pending"
-    : versions.getDisplayStatus(nestId, nodeId);
+    : await versions.getDisplayStatus(nestId, nodeId);
   // Surface the pending review's submitter so the UI can hide the
   // approve/reject affordance from that user (SoD). Server enforces too.
   if (response.status === "pending_review") {
-    const pending = reviews.getPendingReview(nestId, nodeId);
+    const pending = await reviews.getPendingReview(nestId, nodeId);
     (response as any).pendingReviewBy = pending?.requestedBy ?? null;
   }
   if (isMarkdownFormat(c)) {
@@ -343,7 +349,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   const baseVersionHeader = c.req.header("X-Base-Version");
   if (baseVersionHeader) {
     const baseVersion = parseInt(baseVersionHeader, 10);
-    const conflict = versions.checkConflict(nestId, nodeId, baseVersion);
+    const conflict = await versions.checkConflict(nestId, nodeId, baseVersion);
     if (conflict.conflict) {
       return c.json(
         {
@@ -359,7 +365,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     }
   }
 
-  const authorEmail = getUserEmail(c);
+  const authorEmail = await getUserEmail(c);
   const { node, version: responseVersion } = await updateNode(
     nestId,
     nodeId,
@@ -381,11 +387,11 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
 nodeRoutes.delete("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
 
   // Stewardship lock: a node under open review can't be deleted out from
   // under the reviewer (423). Mirrors the edit lock in updateNode.
-  if (isStewardshipEnabled(nestId) && reviews.getPendingReview(nestId, nodeId)) {
+  if ((await isStewardshipEnabled(nestId)) && (await reviews.getPendingReview(nestId, nodeId))) {
     throw new LockedError(
       "This document is awaiting steward review and is locked. Approve or reject the pending review before deleting.",
     );
@@ -397,7 +403,20 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
     throw new NotFoundError(`Node not found: ${nodeId}`);
   }
 
-  removeNodeFromTagIndex(nestId, nodeId);
+  await removeNodeFromTagIndex(nestId, nodeId);
+
+  // A node's review comments and its derived annotations node are tied to the
+  // node id, not FK'd to it — so deleting the node would otherwise orphan both.
+  // Remove the derived `— Annotations` node's storage doc (best-effort: plain
+  // documents and never-commented artifacts have none) here; its DB rows and
+  // the annotation threads themselves are purged in the transaction below.
+  const derivedId = derivedAnnotationsId(nodeId);
+  try {
+    await storage.deleteDocument(derivedId);
+    await removeNodeFromTagIndex(nestId, derivedId);
+  } catch {
+    /* no derived annotations node — nothing to remove */
+  }
 
   // Purge governance rows tied to this node id. Without this, recreating
   // a doc with the same title (→ same slug → same node id) hits a UNIQUE
@@ -406,38 +425,64 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
   // requests and the approved-version pin so the recreated doc starts
   // from a clean slate.
   const db = getDb();
-  db.transaction(() => {
-    db.prepare(
+  await db.transaction(async (tx) => {
+    await tx.run(
       "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
-    ).run(nestId, nodeId);
-    db.prepare(
+      [nestId, nodeId],
+    );
+    await tx.run(
       "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
-    ).run(nestId, nodeId);
-    db.prepare(
+      [nestId, nodeId],
+    );
+    await tx.run(
       "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
-    ).run(nestId, nodeId);
+      [nestId, nodeId],
+    );
     // Document-scoped steward rows pin to this exact node_pattern. Tag
     // and nest-scoped stewards stay — they govern the whole nest, not
     // this single doc. Without this purge, recreating a doc with the
     // same slug silently inherits the prior doc's reviewer assignments.
-    db.prepare(
+    await tx.run(
       `DELETE FROM stewards
        WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
-    ).run(nestId, nodeId);
-  })();
+      [nestId, nodeId],
+    );
+    // Annotation threads for this node — comments cascade via the thread FK.
+    await tx.run(
+      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
+      [nestId, nodeId],
+    );
+    // The derived annotations node's own rows (version history it accrued, plus
+    // any stray threads if someone commented on it before this cleanup existed).
+    await tx.run(
+      "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
+    );
+    await tx.run(
+      "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
+    );
+    await tx.run(
+      "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
+    );
+    await tx.run(
+      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
+    );
+  });
 
-  trackEvent("node.delete", { nestId, nodeId });
+  await trackEvent("node.delete", { nestId, nodeId });
 
   return c.json({ deleted: true });
 });
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
-function getUserEmail(c: any): string {
+async function getUserEmail(c: any): Promise<string> {
   const userId = c.get("userId");
   const db = getDb();
-  const user = db
-    .prepare("SELECT email FROM users WHERE id = ?")
-    .get(userId) as { email: string } | undefined;
+  const user = await db
+    .get("SELECT email FROM users WHERE id = ?", [userId]) as { email: string } | undefined;
   return user?.email || "anonymous@localhost";
 }

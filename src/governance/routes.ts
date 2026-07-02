@@ -53,18 +53,19 @@ governanceRoutes.get("/stewards", async (c) => {
     string,
     { collaboratorRole: string | null; roles: string[] }
   >();
-  const enriched = stewards.map((s) => {
+  const enriched = [];
+  for (const s of stewards) {
     const key = s.userEmail.toLowerCase();
     let merged = cache.get(key);
     if (!merged) {
       merged = {
-        collaboratorRole: stewardship.getCollaboratorRole(nestId, s.userEmail),
-        roles: stewardship.resolveUserRoles(nestId, s.userEmail),
+        collaboratorRole: await stewardship.getCollaboratorRole(nestId, s.userEmail),
+        roles: await stewardship.resolveUserRoles(nestId, s.userEmail),
       };
       cache.set(key, merged);
     }
-    return { ...s, ...merged };
-  });
+    enriched.push({ ...s, ...merged });
+  }
   return c.json({ stewards: enriched });
 });
 
@@ -75,7 +76,7 @@ governanceRoutes.get("/stewards", async (c) => {
 governanceRoutes.post("/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
   const body = await c.req.json<any>();
-  const assignedBy = getUserEmail(c);
+  const assignedBy = await getUserEmail(c);
 
   if (!body.scope) throw new ValidationError("scope is required");
   if (body.scope === "folder") {
@@ -129,7 +130,7 @@ governanceRoutes.patch("/stewards/:stewardId", async (c) => {
   if (!body.role && !body.scope) {
     throw new ValidationError("role or scope is required");
   }
-  const steward = stewardship.updateSteward(stewardId, {
+  const steward = await stewardship.updateSteward(stewardId, {
     role: body.role as any,
     scope: body.scope as any,
     documentId: body.nodePattern,
@@ -141,7 +142,7 @@ governanceRoutes.patch("/stewards/:stewardId", async (c) => {
 // DELETE /nests/:nestId/stewards/:stewardId — soft-remove one row
 governanceRoutes.delete("/stewards/:stewardId", async (c) => {
   const stewardId = c.req.param("stewardId")!;
-  stewardship.removeSteward(stewardId);
+  await stewardship.removeSteward(stewardId);
   return c.json({ removed: true });
 });
 
@@ -152,7 +153,7 @@ governanceRoutes.post("/stewards/sync", async (c) => {
   if (!stewardsConfig) {
     return c.json({ synced: 0, message: "No stewards.yaml found" });
   }
-  const count = stewardship.syncFromConfig(nestId, stewardsConfig);
+  const count = await stewardship.syncFromConfig(nestId, stewardsConfig);
   return c.json({ synced: count });
 });
 
@@ -176,16 +177,17 @@ governanceRoutes.get("/review-queue", async (c) => {
   // instead of re-deriving steward scope client-side, which diverged for
   // reviewer-stewards reaching the nest via public visibility (CU-wdqcpzudt3
   // follow-up). Cached per node across rows.
-  const email = getUserEmail(c);
+  const email = await getUserEmail(c);
   const canReviewCache = new Map<string, boolean>();
-  const requests = result.requests.map((r) => {
+  const requests = [];
+  for (const r of result.requests) {
     let canReview = canReviewCache.get(r.nodeId);
     if (canReview === undefined) {
-      canReview = stewardship.canUserApprove(nestId, r.nodeId, email).allowed;
+      canReview = (await stewardship.canUserApprove(nestId, r.nodeId, email)).allowed;
       canReviewCache.set(r.nodeId, canReview);
     }
-    return { ...r, canReview };
-  });
+    requests.push({ ...r, canReview });
+  }
 
   return c.json({ ...result, requests });
 });
@@ -206,7 +208,7 @@ governanceRoutes.get("/external-edits", async (c) => {
 // Force a drift scan and return what was newly staged.
 governanceRoutes.post("/external-edits/scan", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const actor = getUserEmail(c);
+  const actor = await getUserEmail(c);
   const result = await externalEdits.scanNestForDrift(nestId, actor);
   return c.json(result);
 });
@@ -232,7 +234,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
   const nodeId = c.req.param("nodeId")!;
 
   const { stewards: resolved, fallbackToOwner, ownerEmail } =
-    stewardship.resolveStewardsWithFallback(nestId, nodeId);
+    await stewardship.resolveStewardsWithFallback(nestId, nodeId);
   return c.json({
     nodeId,
     stewards: resolved.map((r) => ({
@@ -252,13 +254,13 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
-  const allVersions = versions.getVersions(nestId, nodeId);
-  const approved = versions.getApprovedVersion(nestId, nodeId);
+  const allVersions = await versions.getVersions(nestId, nodeId);
+  const approved = await versions.getApprovedVersion(nestId, nodeId);
 
   // getVersions returns content:"" (bodies live on disk, not the table).
   // Reconstruct each version's body so the history panel can preview it
   // before restoring. Failures just leave content empty for that row.
-  const { versions: versionManager } = engineCache.get(nestId);
+  const { versions: versionManager } = await engineCache.get(nestId);
   const withContent = await Promise.all(
     allVersions.map(async (v) => {
       try {
@@ -282,7 +284,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/reviews", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
-  const history = reviews.getReviewHistory(nestId, nodeId);
+  const history = await reviews.getReviewHistory(nestId, nodeId);
   return c.json({ reviews: history });
 });
 
@@ -293,7 +295,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/comments", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const status = c.req.query("status") as "open" | "resolved" | undefined;
-  const list = comments.listComments(nestId, nodeId, {
+  const list = await comments.listComments(nestId, nodeId, {
     status: status === "open" || status === "resolved" ? status : undefined,
   });
   return c.json({ comments: list });
@@ -310,9 +312,9 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
     anchor?: { start?: number; end?: number; text?: string };
     parentId?: string;
   }>();
-  const author = getUserEmail(c);
+  const author = await getUserEmail(c);
   try {
-    const comment = comments.createComment({
+    const comment = await comments.createComment({
       nestId,
       nodeId,
       author,
@@ -337,9 +339,9 @@ governanceNodeRoutes.post(
     const nestId = c.req.param("nestId")!;
     const nodeId = c.req.param("nodeId")!;
     const commentId = c.req.param("commentId")!;
-    const resolvedBy = getUserEmail(c);
+    const resolvedBy = await getUserEmail(c);
     try {
-      const comment = comments.resolveComment({
+      const comment = await comments.resolveComment({
         nestId,
         nodeId,
         commentId,
@@ -374,16 +376,16 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   const body = await c.req.json<{ note?: string; priority?: string }>();
 
-  const currentVersion = versions.getCurrentVersion(nestId, nodeId);
+  const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
   if (currentVersion === 0) {
     throw new ValidationError("Node has no versions to review");
   }
 
-  const userEmail = getUserEmail(c);
+  const userEmail = await getUserEmail(c);
 
   let request;
   try {
-    request = reviews.submitForReview({
+    request = await reviews.submitForReview({
       nestId,
       nodeId,
       version: currentVersion,
@@ -402,7 +404,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
     throw err;
   }
 
-  const resolved = stewardship.resolveStewardsForNode(nestId, nodeId);
+  const resolved = await stewardship.resolveStewardsForNode(nestId, nodeId);
 
   return c.json(
     {
@@ -423,14 +425,14 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   const body = await c.req.json<{ note?: string; override?: boolean }>();
 
-  const userEmail = getUserEmail(c);
+  const userEmail = await getUserEmail(c);
   const isAdmin = isSuperAdmin(userEmail);
 
   try {
     const request = await reviews.approve({
       nestId,
       nodeId,
-      version: versions.getCurrentVersion(nestId, nodeId),
+      version: await versions.getCurrentVersion(nestId, nodeId),
       approvedBy: userEmail,
       note: body.note,
       override: body.override && isAdmin,
@@ -451,13 +453,13 @@ governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
     throw new ValidationError("Rejection note is required");
   }
 
-  const userEmail = getUserEmail(c);
+  const userEmail = await getUserEmail(c);
 
   try {
-    const request = reviews.reject({
+    const request = await reviews.reject({
       nestId,
       nodeId,
-      version: versions.getCurrentVersion(nestId, nodeId),
+      version: await versions.getCurrentVersion(nestId, nodeId),
       rejectedBy: userEmail,
       note: body.note,
     });
@@ -471,24 +473,24 @@ governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
 governanceNodeRoutes.get("/:nodeId{.+}/can-access", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const userEmail = getUserEmail(c);
-  return c.json(stewardship.canUserAccess(nestId, nodeId, userEmail));
+  const userEmail = await getUserEmail(c);
+  return c.json(await stewardship.canUserAccess(nestId, nodeId, userEmail));
 });
 
 // GET /nests/:nestId/nodes/:nodeId/can-approve
 governanceNodeRoutes.get("/:nodeId{.+}/can-approve", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const userEmail = getUserEmail(c);
-  return c.json(stewardship.canUserApprove(nestId, nodeId, userEmail));
+  const userEmail = await getUserEmail(c);
+  return c.json(await stewardship.canUserApprove(nestId, nodeId, userEmail));
 });
 
 // GET /nests/:nestId/nodes/:nodeId/can-edit
 governanceNodeRoutes.get("/:nodeId{.+}/can-edit", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const userEmail = getUserEmail(c);
-  return c.json(stewardship.canUserEdit(nestId, nodeId, userEmail));
+  const userEmail = await getUserEmail(c);
+  return c.json(await stewardship.canUserEdit(nestId, nodeId, userEmail));
 });
 
 // GET /nests/:nestId/nodes/:nodeId/external-edits
@@ -528,7 +530,7 @@ governanceNodeRoutes.post(
     const body = await c.req
       .json<{ comment?: string }>()
       .catch(() => ({}) as { comment?: string });
-    const actor = getUserEmail(c);
+    const actor = await getUserEmail(c);
     try {
       const result = await externalEdits.approveExternalEdit({
         nestId,
@@ -568,7 +570,7 @@ governanceNodeRoutes.post(
     if (!body.reason) {
       throw new ValidationError("Rejection reason is required");
     }
-    const actor = getUserEmail(c);
+    const actor = await getUserEmail(c);
     try {
       const result = await externalEdits.rejectExternalEdit({
         nestId,
@@ -592,8 +594,8 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
-  const userEmail = getUserEmail(c);
-  const request = reviews.cancelReview({
+  const userEmail = await getUserEmail(c);
+  const request = await reviews.cancelReview({
     nestId,
     nodeId,
     cancelledBy: userEmail,
@@ -604,11 +606,12 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
-function getUserEmail(c: any): string {
+async function getUserEmail(c: any): Promise<string> {
   const userId = c.get("userId");
   const db = getDb();
-  const user = db
-    .prepare("SELECT email FROM users WHERE id = ?")
-    .get(userId) as { email: string } | undefined;
+  const user = await db.get(
+    "SELECT email FROM users WHERE id = ?",
+    [userId],
+  ) as { email: string } | undefined;
   return user?.email || "anonymous@localhost";
 }

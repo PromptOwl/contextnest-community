@@ -7,6 +7,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
@@ -22,48 +23,49 @@ import type {
 // ─── Submit for Review ──────────────────────────────────────────────────
 // Ported from PromptOwl submitForReview()
 
-export function submitForReview(params: {
+export async function submitForReview(params: {
   nestId: string;
   nodeId: string;
   version: number;
   requestedBy: string;
   note?: string;
   priority?: ReviewRequestPriority;
-}): ReviewRequest {
+}): Promise<ReviewRequest> {
   const db = getDb();
 
   // Check no pending review already exists for this node
-  const existing = db
-    .prepare(
-      "SELECT id FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending'",
-    )
-    .get(params.nestId, params.nodeId) as { id: string } | undefined;
+  const existing = (await db.get(
+    "SELECT id FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending'",
+    [params.nestId, params.nodeId],
+  )) as { id: string } | undefined;
 
   if (existing) {
     throw new Error("A review is already pending for this node");
   }
 
   const id = uuid();
-  db.prepare(
+  await db.run(
     `INSERT INTO review_requests
      (id, nest_id, node_id, version, requested_by, request_note, priority)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    id,
-    params.nestId,
-    params.nodeId,
-    params.version,
-    params.requestedBy,
-    params.note || null,
-    params.priority || "normal",
+    [
+      id,
+      params.nestId,
+      params.nodeId,
+      params.version,
+      params.requestedBy,
+      params.note || null,
+      params.priority || "normal",
+    ],
   );
 
   // Update node version status to pending_review
-  db.prepare(
+  await db.run(
     "UPDATE node_versions SET status = 'pending_review' WHERE nest_id = ? AND node_id = ? AND version = ?",
-  ).run(params.nestId, params.nodeId, params.version);
+    [params.nestId, params.nodeId, params.version],
+  );
 
-  return getReviewRequest(id)!;
+  return (await getReviewRequest(id))!;
 }
 
 // ─── Approve ────────────────────────────────────────────────────────────
@@ -80,11 +82,10 @@ export async function approve(params: {
   const db = getDb();
 
   // Find pending review
-  const pending = db
-    .prepare(
-      "SELECT * FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' ORDER BY requested_at DESC LIMIT 1",
-    )
-    .get(params.nestId, params.nodeId) as any;
+  const pending = (await db.get(
+    "SELECT * FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' ORDER BY requested_at DESC LIMIT 1",
+    [params.nestId, params.nodeId],
+  )) as any;
 
   if (!pending) {
     throw new Error("No pending review for this node");
@@ -92,7 +93,7 @@ export async function approve(params: {
 
   // Check permissions (unless override by super admin)
   if (!params.override) {
-    const check = canUserApprove(
+    const check = await canUserApprove(
       params.nestId,
       params.nodeId,
       params.approvedBy,
@@ -103,31 +104,34 @@ export async function approve(params: {
   }
 
   // Resolve the review
-  db.prepare(
+  await db.run(
     `UPDATE review_requests
-     SET status = 'approved', resolved_by = ?, resolved_at = datetime('now'),
+     SET status = 'approved', resolved_by = ?, resolved_at = ${nowExpr(db)},
          resolution_note = ?, is_override = ?
      WHERE id = ?`,
-  ).run(
-    params.approvedBy,
-    params.note || null,
-    params.override ? 1 : 0,
-    pending.id,
+    [params.approvedBy, params.note || null, params.override ? 1 : 0, pending.id],
   );
 
   // Update version status. We write 'published' (not 'approved') so the DB
   // mirrors the engine's terminal status — history.yaml/frontmatter record
   // the post-approve state as published, and divergence between the two
   // breaks drift detection and display-status resolution.
-  db.prepare(
+  await db.run(
     "UPDATE node_versions SET status = 'published' WHERE nest_id = ? AND node_id = ? AND version = ?",
-  ).run(params.nestId, params.nodeId, params.version);
+    [params.nestId, params.nodeId, params.version],
+  );
 
   // Pin this as the approved version (for AI queries)
-  db.prepare(
-    `INSERT OR REPLACE INTO approved_versions (nest_id, node_id, approved_version, approved_by)
-     VALUES (?, ?, ?, ?)`,
-  ).run(params.nestId, params.nodeId, params.version, params.approvedBy);
+  await db.run(
+    insertOrReplace(
+      db,
+      `INSERT INTO approved_versions (nest_id, node_id, approved_version, approved_by)
+       VALUES (?, ?, ?, ?)`,
+      ["nest_id", "node_id"],
+      `approved_version = excluded.approved_version, approved_by = excluded.approved_by, approved_at = ${nowExpr(db)}`,
+    ),
+    [params.nestId, params.nodeId, params.version, params.approvedBy],
+  );
 
   // Run engine publish so the on-disk file gets frontmatter.checksum +
   // status:published. Without this, drift detection silently no-ops on
@@ -140,7 +144,7 @@ export async function approve(params: {
   // X-Base-Version: N+1, and checkConflict (which reads node_versions)
   // sees the DB stuck at N and 409s on every save.
   try {
-    const { storage } = engineCache.get(params.nestId);
+    const { storage } = await engineCache.get(params.nestId);
     const result = await safePublishDocument(storage, params.nodeId, {
       editedBy: params.approvedBy,
       note: params.note || `Approved review request ${pending.id}`,
@@ -149,7 +153,7 @@ export async function approve(params: {
     if (engineVersion !== params.version) {
       const node = result.node;
       const tags = (node.frontmatter.tags || []) as string[];
-      versions.createVersion({
+      await versions.createVersion({
         nestId: params.nestId,
         nodeId: params.nodeId,
         version: engineVersion,
@@ -162,7 +166,7 @@ export async function approve(params: {
       // Re-pin to the engine-bumped version so getDisplayStatus() resolves
       // the latest row (N+1) as "approved" rather than falling through to
       // "draft" because approved_version still pointed at N.
-      versions.setApprovedVersion(
+      await versions.setApprovedVersion(
         params.nestId,
         params.nodeId,
         engineVersion,
@@ -176,32 +180,31 @@ export async function approve(params: {
     );
   }
 
-  return getReviewRequest(pending.id)!;
+  return (await getReviewRequest(pending.id))!;
 }
 
 // ─── Reject ─────────────────────────────────────────────────────────────
 // Ported from PromptOwl rejectVersion()
 
-export function reject(params: {
+export async function reject(params: {
   nestId: string;
   nodeId: string;
   version: number;
   rejectedBy: string;
   note: string;
-}): ReviewRequest {
+}): Promise<ReviewRequest> {
   const db = getDb();
 
-  const pending = db
-    .prepare(
-      "SELECT * FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' ORDER BY requested_at DESC LIMIT 1",
-    )
-    .get(params.nestId, params.nodeId) as any;
+  const pending = (await db.get(
+    "SELECT * FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' ORDER BY requested_at DESC LIMIT 1",
+    [params.nestId, params.nodeId],
+  )) as any;
 
   if (!pending) {
     throw new Error("No pending review for this node");
   }
 
-  const check = canUserApprove(
+  const check = await canUserApprove(
     params.nestId,
     params.nodeId,
     params.rejectedBy,
@@ -210,47 +213,50 @@ export function reject(params: {
     throw new Error(check.reason);
   }
 
-  db.prepare(
+  await db.run(
     `UPDATE review_requests
-     SET status = 'rejected', resolved_by = ?, resolved_at = datetime('now'), resolution_note = ?
+     SET status = 'rejected', resolved_by = ?, resolved_at = ${nowExpr(db)}, resolution_note = ?
      WHERE id = ?`,
-  ).run(params.rejectedBy, params.note, pending.id);
+    [params.rejectedBy, params.note, pending.id],
+  );
 
-  db.prepare(
+  await db.run(
     "UPDATE node_versions SET status = 'rejected' WHERE nest_id = ? AND node_id = ? AND version = ?",
-  ).run(params.nestId, params.nodeId, params.version);
+    [params.nestId, params.nodeId, params.version],
+  );
 
-  return getReviewRequest(pending.id)!;
+  return (await getReviewRequest(pending.id))!;
 }
 
 // ─── Cancel ─────────────────────────────────────────────────────────────
 
-export function cancelReview(params: {
+export async function cancelReview(params: {
   nestId: string;
   nodeId: string;
   cancelledBy: string;
-}): ReviewRequest | null {
+}): Promise<ReviewRequest | null> {
   const db = getDb();
 
-  const pending = db
-    .prepare(
-      "SELECT * FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' ORDER BY requested_at DESC LIMIT 1",
-    )
-    .get(params.nestId, params.nodeId) as any;
+  const pending = (await db.get(
+    "SELECT * FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' ORDER BY requested_at DESC LIMIT 1",
+    [params.nestId, params.nodeId],
+  )) as any;
 
   if (!pending) return null;
 
-  db.prepare(
+  await db.run(
     `UPDATE review_requests
-     SET status = 'cancelled', resolved_by = ?, resolved_at = datetime('now')
+     SET status = 'cancelled', resolved_by = ?, resolved_at = ${nowExpr(db)}
      WHERE id = ?`,
-  ).run(params.cancelledBy, pending.id);
+    [params.cancelledBy, pending.id],
+  );
 
-  db.prepare(
+  await db.run(
     "UPDATE node_versions SET status = 'draft' WHERE nest_id = ? AND node_id = ? AND version = ?",
-  ).run(params.nestId, params.nodeId, pending.version);
+    [params.nestId, params.nodeId, pending.version],
+  );
 
-  return getReviewRequest(pending.id)!;
+  return (await getReviewRequest(pending.id))!;
 }
 
 // ─── Queue ──────────────────────────────────────────────────────────────
@@ -285,34 +291,36 @@ export async function getReviewQueue(params: {
     whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
   const total = (
-    db
-      .prepare(`SELECT COUNT(*) as c FROM review_requests ${where}`)
-      .get(...args) as { c: number }
+    (await db.get(
+      `SELECT COUNT(*) as c FROM review_requests ${where}`,
+      args,
+    )) as { c: number }
   ).c;
 
   const limit = params.limit || 50;
   const offset = params.offset || 0;
 
-  const rows = db
-    .prepare(
-      `SELECT * FROM review_requests ${where}
+  const rows = (await db.all(
+    `SELECT * FROM review_requests ${where}
        ORDER BY
          CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
          requested_at DESC
        LIMIT ? OFFSET ?`,
-    )
-    .all(...args, limit, offset) as any[];
+    [...args, limit, offset],
+  )) as any[];
 
   // If filtering by steward email, post-filter by steward resolution.
   // Resolver reads node_tag_index directly — no tags argument needed.
   let requests = rows.map(rowToReviewRequest);
   if (params.stewardEmail) {
-    requests = requests.filter((r) => {
-      const stewards = resolveStewardsForNode(r.nestId, r.nodeId);
-      return stewards.some(
-        (s) => s.steward.userEmail === params.stewardEmail,
-      );
-    });
+    const filtered: ReviewRequest[] = [];
+    for (const r of requests) {
+      const stewards = await resolveStewardsForNode(r.nestId, r.nodeId);
+      if (stewards.some((s) => s.steward.userEmail === params.stewardEmail)) {
+        filtered.push(r);
+      }
+    }
+    requests = filtered;
   }
 
   // Resolve human-facing document titles. The governance DB only stores
@@ -334,29 +342,27 @@ export async function getReviewQueue(params: {
   return { requests, total };
 }
 
-export function getReviewHistory(
+export async function getReviewHistory(
   nestId: string,
   nodeId: string,
-): ReviewRequest[] {
+): Promise<ReviewRequest[]> {
   const db = getDb();
-  const rows = db
-    .prepare(
-      "SELECT * FROM review_requests WHERE nest_id = ? AND node_id = ? ORDER BY requested_at DESC",
-    )
-    .all(nestId, nodeId) as any[];
+  const rows = (await db.all(
+    "SELECT * FROM review_requests WHERE nest_id = ? AND node_id = ? ORDER BY requested_at DESC",
+    [nestId, nodeId],
+  )) as any[];
   return rows.map(rowToReviewRequest);
 }
 
-export function getPendingReview(
+export async function getPendingReview(
   nestId: string,
   nodeId: string,
-): ReviewRequest | null {
+): Promise<ReviewRequest | null> {
   const db = getDb();
-  const row = db
-    .prepare(
-      "SELECT * FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' ORDER BY requested_at DESC LIMIT 1",
-    )
-    .get(nestId, nodeId) as any;
+  const row = (await db.get(
+    "SELECT * FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' ORDER BY requested_at DESC LIMIT 1",
+    [nestId, nodeId],
+  )) as any;
   return row ? rowToReviewRequest(row) : null;
 }
 
@@ -367,11 +373,12 @@ export { canUserApprove };
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
-function getReviewRequest(id: string): ReviewRequest | null {
+async function getReviewRequest(id: string): Promise<ReviewRequest | null> {
   const db = getDb();
-  const row = db
-    .prepare("SELECT * FROM review_requests WHERE id = ?")
-    .get(id) as any;
+  const row = (await db.get(
+    "SELECT * FROM review_requests WHERE id = ?",
+    [id],
+  )) as any;
   return row ? rowToReviewRequest(row) : null;
 }
 

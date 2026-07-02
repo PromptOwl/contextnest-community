@@ -8,7 +8,10 @@ import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
-import { canManageWith } from "../governance/roles.js";
+import {
+  resolveNestPermission,
+  permissionLevel,
+} from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import {
@@ -22,6 +25,7 @@ import {
   updateNode,
   listNodesForCallerByEmail,
 } from "../nodes/service.js";
+import { listThreads } from "../annotations/service.js";
 
 /** Caller-supplied traversal depth → non-negative integer, default 2. */
 function normalizeHops(raw: unknown): number {
@@ -129,6 +133,33 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_export",
+    description:
+      "Export the ENTIRE nest as one markdown bundle — every accessible document's FULL content. Use when you need the whole nest as context rather than a targeted query. Respects an optional token budget.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        max_tokens: {
+          type: "number",
+          description:
+            "Approximate token budget; documents are included until it's reached (omit for no cap).",
+        },
+      },
+    },
+  },
+  {
+    name: "context_comments",
+    description:
+      "Get the review comments/annotations on a document — anchored quotes, threaded replies, and open/resolved status — by title or ID. Use to pull human feedback into context.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node" },
+        id: { type: "string", description: "ID of the node" },
+      },
+    },
+  },
+  {
     name: "context_create",
     description: "Create a new knowledge node in the vault.",
     inputSchema: {
@@ -149,6 +180,11 @@ export const TOOL_DEFINITIONS = [
           description: "Tags",
         },
         scope: { type: "string", description: "Visibility scope" },
+        folder: {
+          type: "string",
+          description:
+            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified',
+        },
       },
       required: ["title", "content"],
     },
@@ -330,8 +366,8 @@ async function resolveLlmBody(
   ctx: McpToolContext,
   node: ContextNode,
 ): Promise<string | null> {
-  if (!isStewardshipEnabled(ctx.nestId)) return node.body || "";
-  const approved = versions.getApprovedVersion(ctx.nestId, node.id);
+  if (!(await isStewardshipEnabled(ctx.nestId))) return node.body || "";
+  const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
   if (approved == null) return null;
   try {
     return await ctx.versionManager.reconstructVersion(node.id, approved);
@@ -485,10 +521,97 @@ export async function handleToolCall(
       return resolved.join("\n\n---\n\n") || "No nodes resolved.";
     }
 
+    case "context_export": {
+      // Whole-nest bundle: every accessible document's full body, gated the
+      // same way context_get is (approved-only under stewardship). Optional
+      // token budget; include in discovery order until it's reached.
+      const docs = await storage.discoverDocuments();
+      const approxChars = args.max_tokens ? args.max_tokens * 4 : Infinity;
+      // Resolve every approved body up front (concurrent), matching
+      // context_search, then apply the token budget over the resolved list in
+      // discovery order.
+      const resolved = await Promise.all(
+        docs.map(async (n) => ({ node: n, body: await resolveLlmBody(ctx, n) })),
+      );
+      let total = 0;
+      let budgetHit = false;
+      const parts: string[] = [];
+      for (const { node: n, body } of resolved) {
+        if (body === null) continue; // not visible / no approved version yet
+        const meta = [
+          `**Title:** ${n.frontmatter.title}`,
+          `**Type:** ${n.frontmatter.type || "document"}`,
+          n.frontmatter.tags?.length
+            ? `**Tags:** ${n.frontmatter.tags.join(" ")}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const entry = `${meta}\n\n${body || "(no content)"}`;
+        if (total + entry.length > approxChars) {
+          budgetHit = true;
+          break;
+        }
+        parts.push(entry);
+        total += entry.length;
+      }
+      if (!parts.length) {
+        return budgetHit
+          ? "Token budget reached before any document fit — raise max_tokens, or use context_query/context_resolve to target."
+          : "No documents available to export.";
+      }
+      const note = budgetHit
+        ? `\n\n_(Token budget reached — ${parts.length} of ${docs.length} documents included. Raise max_tokens, or use context_query/context_resolve to target.)_`
+        : "";
+      return `# Nest export — ${parts.length} document(s)\n\n${parts.join(
+        "\n\n---\n\n",
+      )}${note}`;
+    }
+
+    case "context_comments": {
+      const docs = await storage.discoverDocuments();
+      let node: ContextNode | undefined;
+      if (args.title) {
+        node = docs.find(
+          (n) =>
+            n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+        );
+      } else if (args.id) {
+        node = docs.find((n) => n.id === args.id);
+      }
+      if (!node) return `Node not found: ${args.title || args.id}`;
+      // Gate the same way context_get/context_export do: under stewardship a
+      // node with no approved version is invisible to AI. Its threads embed
+      // draft body text (anchor.quote) and paraphrases in comment bodies, so
+      // serving them would leak unapproved content through the side door.
+      if ((await resolveLlmBody(ctx, node)) === null) {
+        return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;
+      }
+      const threads = await listThreads(nestId, node.id);
+      if (!threads.length)
+        return `No comments on "${node.frontmatter.title}".`;
+      const openCount = threads.filter((t) => t.status === "open").length;
+      const sections = threads
+        .map((t, i) => {
+          const quote = t.anchor?.quote
+            ? `> ${t.anchor.quote.replace(/\n/g, " ")}\n\n`
+            : "";
+          const head = `### ${i + 1}. [${t.status}]${
+            t.anchor?.quote ? "" : " (whole-document)"
+          }`;
+          const comments = t.comments
+            .map((c) => `- **${c.author}** (${c.createdAt}): ${c.body}`)
+            .join("\n");
+          return `${head}\n${quote}${comments}`;
+        })
+        .join("\n\n");
+      return `# Comments on "${node.frontmatter.title}" — ${threads.length} thread(s), ${openCount} open\n\n${sections}`;
+    }
+
     case "context_create": {
       // Defense-in-depth: the /mcp middleware already requires nest write,
       // but gate here too so creation stays locked if that ever changes.
-      if (!stewardship.canCreateInNest(nestId, userEmail)) {
+      if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
         return "You don't have permission to create documents in this nest.";
       }
       const { node } = await createNode(
@@ -499,6 +622,7 @@ export async function handleToolCall(
           type: args.type,
           tags: args.tags,
           scope: args.scope,
+          folder: args.folder,
         },
         userEmail,
       );
@@ -514,7 +638,7 @@ export async function handleToolCall(
       if (!node) return `Node not found: ${args.title}`;
       // Defense-in-depth: same per-node edit check REST resolves, so editing
       // stays gated regardless of the /mcp middleware.
-      const editCheck = stewardship.canUserEdit(nestId, node.id, userEmail);
+      const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
       if (!editCheck.allowed) {
         return `You don't have permission to edit "${args.title}": ${editCheck.reason}`;
       }
@@ -541,7 +665,7 @@ export async function handleToolCall(
           (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
         );
         const nodeId = node?.id || "";
-        const resolved = stewardship.resolveStewardsForNode(ctx.nestId, nodeId);
+        const resolved = await stewardship.resolveStewardsForNode(ctx.nestId, nodeId);
 
         if (resolved.length === 0) {
           return `No stewards configured for "${args.title}". Changes are auto-approved.`;
@@ -559,8 +683,8 @@ export async function handleToolCall(
       // Listing the full roster is admin-only (same as REST GET /stewards).
       // Resolving stewards for a specific node above stays open so callers
       // can see who'd review their work.
-      if (!stewardship.canManageStewards(ctx.userEmail)) {
-        return "You don't have permission to list stewards. Only the super admin can do this.";
+      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userId))) {
+        return "You don't have permission to list stewards. Only a nest admin, the nest owner, or the server admin can do this.";
       }
 
       // List all stewards for the nest
@@ -621,16 +745,16 @@ export async function handleToolCall(
 
       // Defense-in-depth: submitting a draft for review is an edit-level
       // action — gate it with the same per-node edit check.
-      const submitCheck = stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
+      const submitCheck = await stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
       if (!submitCheck.allowed) {
         return `You don't have permission to submit "${args.title}" for review: ${submitCheck.reason}`;
       }
 
-      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
+      const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
       if (currentVersion === 0) return `No versions found for "${args.title}"`;
 
       try {
-        const request = reviews.submitForReview({
+        const request = await reviews.submitForReview({
           nestId: ctx.nestId,
           nodeId: node.id,
           version: currentVersion,
@@ -639,7 +763,7 @@ export async function handleToolCall(
           priority: args.priority as any,
         });
 
-        const resolved = stewardship.resolveStewardsForNode(
+        const resolved = await stewardship.resolveStewardsForNode(
           ctx.nestId,
           node.id,
         );
@@ -661,7 +785,7 @@ export async function handleToolCall(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
+      const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
 
       try {
         const request = await reviews.approve({
@@ -685,10 +809,10 @@ export async function handleToolCall(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
+      const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
 
       try {
-        const request = reviews.reject({
+        const request = await reviews.reject({
           nestId: ctx.nestId,
           nodeId: node.id,
           version: currentVersion,
@@ -709,8 +833,8 @@ export async function handleToolCall(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const allVersions = versions.getVersions(ctx.nestId, node.id);
-      const approved = versions.getApprovedVersion(ctx.nestId, node.id);
+      const allVersions = await versions.getVersions(ctx.nestId, node.id);
+      const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
 
       if (allVersions.length === 0) {
         return `No version history for "${args.title}".`;
@@ -732,11 +856,11 @@ export async function handleToolCall(
         return `Invalid scope "${args.scope}". Use: nest, tag, or document.`;
       }
 
-      // Same authority as REST/UI — only the server admin manages stewards.
-      // MCP calls don't pass through the /stewards HTTP middleware, so gate
-      // here with the shared helper.
-      if (!stewardship.canManageStewards(ctx.userEmail)) {
-        return "You don't have permission to manage stewards. Only the super admin can do this.";
+      // Same authority as REST/UI — server admin or nest owner/admin manages
+      // stewards. MCP calls don't pass through the /stewards HTTP middleware,
+      // so gate here with the shared helper.
+      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userId))) {
+        return "You don't have permission to manage stewards. Only a nest admin, the nest owner, or the server admin can do this.";
       }
 
       try {
@@ -763,14 +887,16 @@ export async function handleToolCall(
     }
 
     case "context_share_nest": {
-      // NOTE: this gate is intentionally stricter than REST/UI for now. REST
-      // POST /collaborators allows write+ collaborators to invite (escalation-
-      // capped in addCollaborator); this MCP tool still requires nest admin.
-      // TODO(CU-wdqcpzudw5 follow-up): bring MCP to parity — accept write+ and
-      // pass callerPermission into addCollaborator so the cap applies here too.
-      const roles = stewardship.resolveUserRoles(ctx.nestId, ctx.userEmail);
-      if (!canManageWith(roles)) {
-        return "You don't have permission to share this nest via this tool (admin only). You can still invite from the UI with write access, or ask a nest admin.";
+      // Parity with REST POST /collaborators (CU-wdqcpzudw5 follow-up):
+      // write+ may invite; the escalation cap in addCollaborator stops
+      // anyone granting above their own level, so only admin/owner can
+      // hand out admin.
+      const callerPermission =
+        config.AUTH_MODE === "open"
+          ? ("owner" as const)
+          : await resolveNestPermission(ctx.nestId, ctx.userId);
+      if (permissionLevel(callerPermission) < permissionLevel("write")) {
+        return "You don't have permission to share this nest. Sharing needs write access — ask a nest admin or the owner.";
       }
       const permission = (args.permission as string) || "read";
       try {
@@ -779,6 +905,7 @@ export async function handleToolCall(
           email: args.email,
           permission,
           grantedByEmail: ctx.userEmail,
+          callerPermission,
         });
         const label =
           permission === "admin"
@@ -795,7 +922,7 @@ export async function handleToolCall(
     case "context_unsynced_list": {
       // Same admin gate as REST GET /nests/unsynced — listing reflects
       // server-side filesystem state, so non-admins shouldn't probe it.
-      if (config.AUTH_MODE !== "open" && !isLicenseAdminUserId(userId)) {
+      if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
         return "You don't have permission to list unsynced folders. Server admin only.";
       }
       const folders = listUnsyncedFolders();
@@ -811,7 +938,7 @@ export async function handleToolCall(
 
     case "context_sync_folder": {
       // Same admin gate as REST POST /nests/unsynced/sync.
-      if (config.AUTH_MODE !== "open" && !isLicenseAdminUserId(userId)) {
+      if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
         return "You don't have permission to sync folders. Server admin only.";
       }
       try {

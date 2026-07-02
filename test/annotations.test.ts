@@ -11,6 +11,7 @@ import {
   MAX_CONTEXT_CHARS,
   MAX_QUOTE_CHARS,
 } from "../src/annotations/projection.js";
+import { listThreads } from "../src/annotations/service.js";
 import type { AnnotationThread } from "../src/annotations/types.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -271,6 +272,106 @@ describe("annotations: hosted artifact + threaded comments", () => {
     expect(derived.content).toContain("Should be ARR not MRR.");
     expect(derived.content).toContain('quote "MRR of $400K"');
   });
+
+  it("does NOT create a derived node when annotating a plain document", async () => {
+    // Comments on a hand-written document live in SQLite only — no derived
+    // `— Annotations` node (which would itself be annotatable → recursion).
+    const doc = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Plain Doc", content: "# hello world", type: "document" },
+      alice.apiKey,
+    );
+    const docId = doc.data.node.id;
+
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${docId}/annotations`,
+      { body: "a note on the doc" },
+      alice.apiKey,
+    );
+    expect(created.status).toBe(201);
+
+    // The thread persists and is listable…
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${docId}/annotations`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(list.data.threads).toHaveLength(1);
+
+    // …but no derived annotations node was minted for the document.
+    const nodes = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    const derived = nodes.data.nodes.find(
+      (n: any) => n.title === "Plain Doc — Annotations",
+    );
+    expect(derived).toBeUndefined();
+  });
+
+  it("purges threads + derived node when the source node is deleted", async () => {
+    // Fresh artifact so we don't disturb the shared fixture.
+    const art = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Temp Deck", content: HTML, type: "artifact" },
+      alice.apiKey,
+    );
+    const tempId = art.data.node.id;
+
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${tempId}/annotations`,
+      { body: "please clean me up" },
+      alice.apiKey,
+    );
+
+    // Pre-delete: a thread exists in SQLite and the derived node was minted.
+    expect(await listThreads(nestId, tempId)).toHaveLength(1);
+    let nodes = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(
+      nodes.data.nodes.some((n: any) => n.title === "Temp Deck — Annotations"),
+    ).toBe(true);
+
+    const del = await jsonRequest(
+      app,
+      "DELETE",
+      `/nests/${nestId}/nodes/${tempId}`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(del.status).toBe(200);
+
+    // Post-delete: threads purged (no orphan rows) and derived node gone.
+    expect(await listThreads(nestId, tempId)).toHaveLength(0);
+    nodes = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(
+      nodes.data.nodes.some((n: any) => n.title === "Temp Deck — Annotations"),
+    ).toBe(false);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -506,5 +607,39 @@ describe("annotations: thread scope is enforced (no cross-node hijack)", () => {
     // And B's thread is untouched.
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${artB}/annotations`, undefined, alice.apiKey);
     expect(list.data.threads[0].status).toBe("open");
+  });
+});
+
+describe("annotations: per-nest comment counts (document-list sorting)", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let alice: { apiKey: string; userId: string; email: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    alice = await registerUser(app, "alice@acme.com", "Alice");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Sortable" }, alice.apiKey);
+    nestId = nest.data.nest.id;
+
+    // Two docs: "Popular" gets 2 comment threads, "Quiet" gets none.
+    const popular = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Popular", content: "# Popular\n\nlots to say" }, alice.apiKey);
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Quiet", content: "# Quiet" }, alice.apiKey);
+
+    for (const body of ["first note", "second note"]) {
+      await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${popular.data.node.id}/annotations`, { body }, alice.apiKey);
+    }
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("returns per-node comment counts for the nest", async () => {
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}/comment-counts`, undefined, alice.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.counts["nodes/popular"].count).toBe(2);
+    expect(res.data.counts["nodes/popular"].lastAt).toBeTruthy();
+    // A node with no comments simply isn't in the map.
+    expect(res.data.counts["nodes/quiet"]).toBeUndefined();
   });
 });

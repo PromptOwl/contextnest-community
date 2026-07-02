@@ -20,13 +20,13 @@ interface NestEngine {
 class NestEngineCache {
   private cache = new Map<string, NestEngine>();
 
-  get(nestId: string): NestEngine {
+  async get(nestId: string): Promise<NestEngine> {
     let engine = this.cache.get(nestId);
     if (!engine) {
       const nestPath = resolveNestPath(nestId);
       // Imported nests discover markdown anywhere in the copied folder;
       // default nests keep the engine's structured (nodes/) layout.
-      const storage = isImportedNest(nestId)
+      const storage = (await isImportedNest(nestId))
         ? new FlatNestStorage(nestPath)
         : new NestStorage(nestPath);
       const query = new GraphQueryEngine(storage as any);
