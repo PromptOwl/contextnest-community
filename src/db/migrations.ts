@@ -776,4 +776,18 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("017_workflow_runs");
   }
+
+  // 018: sub-agent runs (CU-wdqcpzv3kp). parent_run_id links a nested run to
+  //   the run that spawned it (the call tree); depth bounds recursion so the
+  //   tree stays finite/haltable. Columns ship regardless of the
+  //   FEATURE_SUBAGENT_RUNS flag (schema-first, flag gates behaviour).
+  if (!hasMigration("018_subagent_runs")) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE runs ADD COLUMN parent_run_id TEXT;
+        ALTER TABLE runs ADD COLUMN depth INTEGER NOT NULL DEFAULT 0;
+      `);
+    })();
+    recordMigration("018_subagent_runs");
+  }
 }

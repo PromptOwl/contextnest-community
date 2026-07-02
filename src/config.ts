@@ -219,6 +219,22 @@ export const config = {
   get FEATURE_WORKFLOW_PLANE(): boolean {
     return process.env.FEATURE_WORKFLOW_PLANE === "true";
   },
+  /**
+   * Sub-agent runs: lets a run spawn nested runs (an external runner calling
+   * back into POST /run for a child agent). Gated SEPARATELY from the base
+   * plane because recursion is the risky surface — unbounded fan-out,
+   * re-entrancy, resource exhaustion. Off by default; must clear a security
+   * review before an operator turns it on. Requires FEATURE_WORKFLOW_PLANE too.
+   */
+  get FEATURE_SUBAGENT_RUNS(): boolean {
+    return process.env.FEATURE_SUBAGENT_RUNS === "true";
+  },
+  /** Hard ceiling on sub-agent nesting depth — keeps the call tree finite
+   *  (haltable / statically bounded). Clamped to [1, 32]. */
+  get SUBAGENT_MAX_DEPTH(): number {
+    const n = parseInt(process.env.SUBAGENT_MAX_DEPTH || "8", 10);
+    return Number.isFinite(n) ? Math.min(32, Math.max(1, n)) : 8;
+  },
   get AUTH_MODE(): "open" | "key" {
     // Default is "key" — requires an explicit AUTH_MODE=open to run
     // without authentication. Safer default for public deployments;

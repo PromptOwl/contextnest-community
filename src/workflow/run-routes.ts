@@ -35,6 +35,8 @@ interface RunRow {
   trace: string | null;
   started_at: string;
   finished_at: string | null;
+  parent_run_id: string | null;
+  depth: number;
 }
 
 const safeJson = (s: string | null): unknown => {
@@ -124,13 +126,75 @@ async function referencedDefinitions(
 export const runTriggerRoutes = new Hono<AuthEnv>();
 runTriggerRoutes.use("*", requireWorkflowPlane);
 
+/**
+ * Sub-agent recursion guard (FEATURE_SUBAGENT_RUNS). Given a claimed parent
+ * run, validate it and return {depth, ancestors}. Enforces:
+ *   - parent exists, same nest, still running (can't graft onto a closed run)
+ *   - depth ≤ SUBAGENT_MAX_DEPTH (finite tree = haltable)
+ *   - re-entrancy: the child agent isn't already anywhere in the ancestor
+ *     chain (agent A→B→A would loop forever; the per-nest flow DAG guard
+ *     can't see across run boundaries, so this is the cross-run cycle check)
+ * The whole thing is gated: with the flag off, ANY parent_run_id is rejected.
+ */
+async function resolveParentRun(
+  nestId: string,
+  parentRunId: string,
+  childAgent: string,
+): Promise<{ depth: number }> {
+  if (!config.FEATURE_SUBAGENT_RUNS) {
+    throw new ValidationError(
+      "Sub-agent runs are not enabled on this server (FEATURE_SUBAGENT_RUNS).",
+    );
+  }
+  const db = getDb();
+  const seen = new Set<string>();
+  let cursor: string | null = parentRunId;
+  let parentDepth = -1;
+  // Walk the ancestor chain to the root, collecting agent_nodes. The depth
+  // cap also bounds this walk, so a corrupted chain can't loop unbounded.
+  for (let i = 0; i <= config.SUBAGENT_MAX_DEPTH + 1; i++) {
+    if (!cursor) break;
+    const row = (await db.get(
+      "SELECT id, nest_id, agent_node, status, depth, parent_run_id FROM runs WHERE id = ?",
+      [cursor],
+    )) as
+      | { id: string; nest_id: string; agent_node: string; status: string; depth: number; parent_run_id: string | null }
+      | undefined;
+    if (!row) throw new NotFoundError(`Parent run not found: ${cursor}`);
+    if (row.nest_id !== nestId) {
+      // Never let a parent in another nest pull a child into this one.
+      throw new ForbiddenError("Parent run belongs to a different nest");
+    }
+    if (cursor === parentRunId && row.status !== "running") {
+      throw new ConflictError(
+        `Parent run is ${row.status} — cannot spawn a sub-agent under a closed run`,
+      );
+    }
+    if (row.agent_node === childAgent || seen.has(childAgent)) {
+      throw new ConflictError(
+        `re-entrancy: "${childAgent}" is already running in this call chain — sub-agent recursion must be acyclic`,
+      );
+    }
+    seen.add(row.agent_node);
+    if (cursor === parentRunId) parentDepth = row.depth;
+    cursor = row.parent_run_id;
+  }
+  const depth = parentDepth + 1;
+  if (depth > config.SUBAGENT_MAX_DEPTH) {
+    throw new ForbiddenError(
+      `sub-agent depth ${depth} exceeds the limit of ${config.SUBAGENT_MAX_DEPTH}`,
+    );
+  }
+  return { depth };
+}
+
 // POST /nests/:nestId/run/:agentNode{.+}
 runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const agentNode = c.req.param("agentNode")!;
   const body = await c.req
-    .json<{ inputs?: unknown }>()
-    .catch(() => ({}) as { inputs?: unknown });
+    .json<{ inputs?: unknown; parent_run_id?: unknown }>()
+    .catch(() => ({}) as { inputs?: unknown; parent_run_id?: unknown });
 
   const { storage } = await engineCache.get(nestId);
   let doc;
@@ -146,6 +210,17 @@ runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
     );
   }
 
+  // Sub-agent (nested) run? Validate the parent chain before creating anything.
+  let parentRunId: string | null = null;
+  let depth = 0;
+  if (body.parent_run_id !== undefined && body.parent_run_id !== null) {
+    if (typeof body.parent_run_id !== "string") {
+      throw new ValidationError("parent_run_id must be a string");
+    }
+    ({ depth } = await resolveParentRun(nestId, body.parent_run_id, agentNode));
+    parentRunId = body.parent_run_id;
+  }
+
   const edges = await flowSubgraph(nestId, agentNode);
   const definitions = await referencedDefinitions(nestId, edges);
   // Derived from auth, never client-supplied — this is the accountability
@@ -156,8 +231,8 @@ runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
 
   const id = `run_${uuid()}`;
   await getDb().run(
-    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at)
-     VALUES (?, ?, ?, ?, 'running', ?, ?)`,
+    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth)
+     VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`,
     [
       id,
       nestId,
@@ -165,12 +240,16 @@ runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
       triggeredBy,
       body.inputs === undefined ? null : JSON.stringify(body.inputs),
       new Date().toISOString(),
+      parentRunId,
+      depth,
     ],
   );
 
   return c.json(
     {
       run_id: id,
+      parent_run_id: parentRunId,
+      depth,
       agent: {
         id: agentNode,
         title: String(doc.frontmatter.title ?? agentNode),
