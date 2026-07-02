@@ -152,6 +152,9 @@ export function DocumentEditor({
   >([]);
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
+  // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
+  // moving an existing doc is a rename with backlink fallout, handled elsewhere.
+  const [folder, setFolder] = useState("");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState<string[]>([]);
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
@@ -464,7 +467,9 @@ export function DocumentEditor({
     Array<{ id: string; title: string; content?: string; tags?: string[] }>
   >([]);
   useEffect(() => {
-    if (isNew || loading) return;
+    // New docs need the list too — the folder picker derives its
+    // suggestions from existing node ids.
+    if (loading) return;
     let cancelled = false;
     (async () => {
       try {
@@ -487,6 +492,35 @@ export function DocumentEditor({
       cancelled = true;
     };
   }, [isNew, loading, nestId]);
+
+  // Every folder prefix in use (ids minus the nodes/ root and the leaf),
+  // so the folder picker suggests existing paths at each depth.
+  const folderOptions = useMemo(() => {
+    const opts = new Set<string>();
+    for (const n of nestNodes) {
+      const rel = n.id.startsWith("nodes/") ? n.id.slice(6) : n.id;
+      const segs = rel.split("/").slice(0, -1);
+      for (let i = 1; i <= segs.length; i++) opts.add(segs.slice(0, i).join("/"));
+    }
+    return [...opts].sort();
+  }, [nestNodes]);
+
+  // Folder path this doc lives under (id minus the "nodes/" root and the leaf
+  // slug), prettified for the header breadcrumb so users see where a nested
+  // doc sits. Empty for new docs and docs directly under nodes/.
+  const folderSegments = useMemo(() => {
+    if (isNew || !nodeId) return [];
+    const rel = nodeId.startsWith("nodes/") ? nodeId.slice(6) : nodeId;
+    return rel
+      .split("/")
+      .slice(0, -1)
+      .map((seg) =>
+        seg
+          .split("-")
+          .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+          .join(" "),
+      );
+  }, [isNew, nodeId]);
 
   // Docs in this nest that wiki-link to this one ("what links here").
   const backlinks = useMemo(
@@ -712,7 +746,11 @@ export function DocumentEditor({
     const payload = { title: title.trim(), content, tags };
     let savedId: string | undefined;
     if (isNew) {
-      const res = await api.createNode(nestId, { ...payload, type: newType });
+      const res = await api.createNode(nestId, {
+        ...payload,
+        type: newType,
+        ...(folder.trim() ? { folder: folder.trim() } : {}),
+      });
       savedId = (res as any)?.node?.id;
     } else {
       const res = await api.updateNode(nestId, nodeId, payload, baseVersion);
@@ -990,6 +1028,18 @@ export function DocumentEditor({
                 >
                   {entry.title}
                 </button>
+              </Fragment>
+            ))}
+            {/* Folder path (nested docs only) so the location is visible. */}
+            {folderSegments.map((seg, i) => (
+              <Fragment key={`folder-${i}`}>
+                <span className="text-muted-foreground shrink-0">›</span>
+                <span
+                  className="text-sm text-muted-foreground truncate max-w-[160px]"
+                  title={seg}
+                >
+                  {seg}
+                </span>
               </Fragment>
             ))}
             <span className="text-muted-foreground shrink-0">›</span>
@@ -1291,6 +1341,29 @@ export function DocumentEditor({
                 </AlertDescription>
               </div>
             </Alert>
+          )}
+
+          {/* Folder (create-only): files the doc under nodes/<path>/ */}
+          {isNew && (
+            <div>
+              <label className="block mb-1 text-sm font-medium">Folder</label>
+              <Input
+                list="document-editor-folder-options"
+                value={folder}
+                onChange={(e) => {
+                  setFolder(e.target.value);
+                  setTouched(true);
+                }}
+                placeholder='Optional — e.g. "gtm/deals" to nest this document'
+                disabled={fieldsDisabled}
+                data-testid="document-editor-folder-input"
+              />
+              <datalist id="document-editor-folder-options">
+                {folderOptions.map((f) => (
+                  <option key={f} value={f} />
+                ))}
+              </datalist>
+            </div>
           )}
 
           {/* Tags */}

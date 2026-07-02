@@ -73,6 +73,12 @@ function prettyFolder(name: string) {
     .join(" ");
 }
 
+/** "nodes/gtm/deals" → "Nodes / Gtm / Deals" for nested group headers. */
+function prettyFolderPath(path: string) {
+  if (path === "Root") return "Root";
+  return path.split("/").map(prettyFolder).join(" / ");
+}
+
 interface NestViewProps {
   nestId: string;
   nestName: string;
@@ -650,17 +656,37 @@ export function NestView({
   // (excluded from the node list as a meta-file); surfacing that engine-built
   // index is a deeper follow-up — this is the lightweight UI overview.
   const tocGroups = (() => {
+    // Group by the FULL folder path (everything before the leaf), not just
+    // the first segment, so nested folders like nodes/gtm/deals each get
+    // their own group. Sorting by path keeps children right under parents;
+    // depth drives the header indent.
     const groups = new Map<string, any[]>();
     for (const n of nodes) {
       const id: string = n.id || "";
-      const slash = id.indexOf("/");
-      const folder = slash > 0 ? id.slice(0, slash) : "Root";
+      // Strip the "nodes/" storage root — it's not a user folder. What's left
+      // is the real folder path; a doc directly under nodes/ has none → Root.
+      const rel = id.startsWith("nodes/") ? id.slice(6) : id;
+      const slash = rel.lastIndexOf("/");
+      const folder = slash > 0 ? rel.slice(0, slash) : "Root";
       if (!groups.has(folder)) groups.set(folder, []);
       groups.get(folder)!.push(n);
     }
+    // Compare paths segment-by-segment (not as flat strings) so children
+    // always sort directly under their parent — a sibling like "nodes-extra"
+    // would otherwise wedge between "nodes" and "nodes/a".
+    const byPathSegments = (a: string, b: string) => {
+      const as = a.split("/");
+      const bs = b.split("/");
+      for (let i = 0; i < Math.min(as.length, bs.length); i++) {
+        const cmp = as[i].localeCompare(bs[i]);
+        if (cmp !== 0) return cmp;
+      }
+      return as.length - bs.length;
+    };
     return [...groups.entries()]
       .map(([folder, items]) => ({
         folder,
+        depth: folder === "Root" ? 0 : folder.split("/").length,
         items: [...items].sort((a, b) =>
           String(a.title || a.id).localeCompare(String(b.title || b.id)),
         ),
@@ -670,7 +696,7 @@ export function NestView({
           ? -1
           : b.folder === "Root"
             ? 1
-            : a.folder.localeCompare(b.folder),
+            : byPathSegments(a.folder, b.folder),
       );
   })();
 
@@ -1359,19 +1385,25 @@ export function NestView({
               ) : (
                 <div className="space-y-5">
                   {tocGroups.map((g) => (
-                    <div key={g.folder}>
-                      <div className="flex items-center gap-2 mb-2">
-                        <FolderOpen className="h-4 w-4 text-muted-foreground" />
-                        <h4 className="text-sm font-medium">
-                          {prettyFolder(g.folder)}
-                        </h4>
-                        <Badge
-                          variant="secondary"
-                          className="text-[10px] px-1.5 py-0 h-5"
-                        >
-                          {g.items.length}
-                        </Badge>
-                      </div>
+                    <div
+                      key={g.folder}
+                      style={{ marginLeft: `${g.depth * 1.25}rem` }}
+                    >
+                      {/* Root = docs directly under nodes/; no folder header. */}
+                      {g.folder !== "Root" && (
+                        <div className="flex items-center gap-2 mb-2">
+                          <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                          <h4 className="text-sm font-medium">
+                            {prettyFolderPath(g.folder)}
+                          </h4>
+                          <Badge
+                            variant="secondary"
+                            className="text-[10px] px-1.5 py-0 h-5"
+                          >
+                            {g.items.length}
+                          </Badge>
+                        </div>
+                      )}
                       <div className="grid gap-1 sm:grid-cols-2">
                         {g.items.map((n) => (
                           <button

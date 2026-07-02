@@ -291,10 +291,12 @@ Lists all readable docs.
   "tags": ["api", "v2"],
   "type": "document",
   "scope": "team",
-  "status": "draft"
+  "status": "draft",
+  "folder": "gtm/deals"
 }
 ```
 - Slug derived from title → `nodes/<slug>`.
+- Optional `folder` (string) nests the doc → `nodes/<folder>/<slug>`. Each `/`-separated segment is slugified independently (so `../` or absolute paths can't escape the vault); empty segments drop. Max 8 levels deep; each segment (and the title slug) max 100 chars — otherwise `400`.
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Auto-syncs tag index for steward resolution.
 
