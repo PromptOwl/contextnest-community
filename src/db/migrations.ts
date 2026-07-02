@@ -738,4 +738,42 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("016_workflow_edges");
   }
+
+  // 017: run records (CU-wdqcpzv363, "turing" track). One row per agent
+  //   execution + an append-only step log — the operational trace that
+  //   makes workflows replayable (reads are recorded as selector+hops;
+  //   deterministic retrieval reproduces the identical read-set).
+  if (!hasMigration("017_workflow_runs")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS runs (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          agent_node TEXT NOT NULL,
+          triggered_by TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'running'
+            CHECK(status IN ('running', 'succeeded', 'failed', 'cancelled')),
+          inputs TEXT,
+          trace TEXT,
+          started_at TEXT NOT NULL,
+          finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_runs_nest ON runs(nest_id, started_at);
+        CREATE INDEX IF NOT EXISTS idx_runs_agent ON runs(nest_id, agent_node);
+
+        CREATE TABLE IF NOT EXISTS run_steps (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          seq INTEGER NOT NULL,
+          node_id TEXT,
+          edge_id TEXT,
+          action TEXT NOT NULL,
+          detail TEXT,
+          at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
+      `);
+    })();
+    recordMigration("017_workflow_runs");
+  }
 }
