@@ -11,6 +11,7 @@ import {
   createTestApp,
   jsonRequest,
 } from "./helpers";
+import { normalizeHops } from "../src/mcp/tools";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -203,6 +204,44 @@ describe("MCP tools/call — basic vault tools", () => {
     expect(typeof text).toBe("string");
     expect(text.length).toBeGreaterThan(0);
     expect(text).toMatch(/(API Reference|No nodes matched)/);
+  });
+
+  it("context_query and context_resolve accept a caller-set hops depth", async () => {
+    // hops was hardcoded to 2; now it's caller-controlled (parity with REST
+    // POST /context). Same plumbing-level assertion as above — the param must
+    // be accepted by the schema and passed through without erroring.
+    const one = await callTool("context_query", { query: "#api", hops: 1 });
+    expect(typeof one).toBe("string");
+    expect(one).toMatch(/(API Reference|No nodes matched)/);
+
+    const resolved = await callTool("context_resolve", {
+      selector: "#api",
+      hops: 1,
+      max_tokens: 500,
+    });
+    expect(typeof resolved).toBe("string");
+    expect(resolved.length).toBeGreaterThan(0);
+  });
+});
+
+describe("normalizeHops", () => {
+  it("keeps valid non-negative integers", () => {
+    expect(normalizeHops(0)).toBe(0);
+    expect(normalizeHops(1)).toBe(1);
+    expect(normalizeHops(5)).toBe(5);
+  });
+
+  it("defaults to 2 for null/undefined/non-numeric", () => {
+    expect(normalizeHops(undefined)).toBe(2);
+    expect(normalizeHops(null)).toBe(2); // clients may serialize unset args as null
+    expect(normalizeHops("nope")).toBe(2);
+    expect(normalizeHops(NaN)).toBe(2);
+  });
+
+  it("floors fractions and clamps out-of-range input", () => {
+    expect(normalizeHops(1.9)).toBe(1);
+    expect(normalizeHops(-3)).toBe(0);
+    expect(normalizeHops(999999)).toBe(10); // MAX_HOPS
   });
 });
 

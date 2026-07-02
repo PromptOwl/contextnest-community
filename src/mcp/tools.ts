@@ -27,6 +27,20 @@ import {
 } from "../nodes/service.js";
 import { listThreads } from "../annotations/service.js";
 
+/** Upper bound on caller-set traversal depth — real graphs terminate long
+ *  before this; the cap just fences a misbehaving client from a runaway query. */
+const MAX_HOPS = 10;
+
+/** Caller-supplied traversal depth → integer in [0, MAX_HOPS], default 2.
+ *  null/undefined/non-numeric all fall through to the default (some tool-calling
+ *  clients serialize an unset optional arg as JSON `null` rather than omitting). */
+export function normalizeHops(raw: unknown): number {
+  if (raw == null) return 2;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 2;
+  return Math.max(0, Math.min(MAX_HOPS, Math.floor(n)));
+}
+
 export interface McpToolContext {
   storage: NestStorage;
   queryEngine: GraphQueryEngine;
@@ -69,6 +83,11 @@ export const TOOL_DEFINITIONS = [
       type: "object" as const,
       properties: {
         query: { type: "string", description: "Selector query" },
+        hops: {
+          type: "number",
+          description:
+            "Graph traversal depth from the matched nodes (default: 2). Use 1 for just the matches + direct links, higher to pull in more of the neighborhood.",
+        },
       },
       required: ["query"],
     },
@@ -111,6 +130,11 @@ export const TOOL_DEFINITIONS = [
         max_tokens: {
           type: "number",
           description: "Approximate token budget (default: 8000)",
+        },
+        hops: {
+          type: "number",
+          description:
+            "Graph traversal depth from the matched nodes (default: 2)",
         },
       },
       required: ["selector"],
@@ -428,8 +452,21 @@ export async function handleToolCall(
     }
 
     case "context_query": {
-      const result = await queryEngine.query(args.query, { hops: 2 });
-      const nodes = result.documents;
+      // hops mirrors REST POST /context — caller-controlled traversal depth.
+      // External LLM callers set this directly, so normalize junk values
+      // (negative, fractional, NaN) to a sane non-negative integer.
+      const result = await queryEngine.query(args.query, {
+        hops: normalizeHops(args.hops),
+      });
+      // Hide nodes the caller can't see (approved-only under stewardship) so the
+      // listing doesn't leak restricted titles — same gate as context_search.
+      const visibility = await Promise.all(
+        result.documents.map(async (n) => ({
+          node: n,
+          visible: (await resolveLlmBody(ctx, n)) !== null,
+        })),
+      );
+      const nodes = visibility.filter((e) => e.visible).map((e) => e.node);
       if (!nodes.length) return `No nodes matched: ${args.query}`;
       const list = nodes
         .map(
@@ -484,13 +521,25 @@ export async function handleToolCall(
     }
 
     case "context_resolve": {
-      const result = await queryEngine.query(args.selector, { hops: 2 });
+      const result = await queryEngine.query(args.selector, {
+        hops: normalizeHops(args.hops),
+      });
       const maxTokens = args.max_tokens || 8000;
       const approxChars = maxTokens * 4;
+      // Gate bodies the same way context_get/search/export do — approved-only
+      // under stewardship. Raw `n.body` here would leak draft/unapproved text,
+      // and caller-set hops now widens the neighborhood pulled through this path.
+      const resolvedBodies = await Promise.all(
+        result.documents.map(async (n) => ({
+          node: n,
+          body: await resolveLlmBody(ctx, n),
+        })),
+      );
       let total = 0;
       const resolved: string[] = [];
-      for (const n of result.documents) {
-        const entry = `## ${n.frontmatter.title}\n\n${n.body || ""}`;
+      for (const { node: n, body } of resolvedBodies) {
+        if (body === null) continue; // not visible / no approved version yet
+        const entry = `## ${n.frontmatter.title}\n\n${body}`;
         if (total + entry.length > approxChars) break;
         resolved.push(entry);
         total += entry.length;
