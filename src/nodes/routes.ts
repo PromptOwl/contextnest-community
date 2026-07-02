@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
 import { ValidationError, NotFoundError, LockedError } from "../shared/errors.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
@@ -105,7 +106,11 @@ nodeRoutes.post("/", async (c) => {
 // GET /nests/:nestId/nodes/:nodeId/stewards
 nodeRoutes.get("/:nodeId{.+?}/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
+  // SECURITY: node ids become filesystem paths in the engine's storage layer
+  // (join(nestRoot, id + ".md"), no containment) — reject `../` traversal so a
+  // caller with access to one nest can't read/write/delete another tenant's
+  // files by tuning the id. (src/shared/node-id.ts)
+  const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
 
   const { resolveStewardsWithFallback } = await import("../governance/stewardship-service.js");
   const { stewards, fallbackToOwner, ownerEmail } = await resolveStewardsWithFallback(
@@ -129,7 +134,11 @@ nodeRoutes.get("/:nodeId{.+?}/stewards", async (c) => {
 // GET /nests/:nestId/nodes/:nodeId/versions
 nodeRoutes.get("/:nodeId{.+?}/versions", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
+  // SECURITY: node ids become filesystem paths in the engine's storage layer
+  // (join(nestRoot, id + ".md"), no containment) — reject `../` traversal so a
+  // caller with access to one nest can't read/write/delete another tenant's
+  // files by tuning the id. (src/shared/node-id.ts)
+  const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
 
   const { getVersions, getApprovedVersion } = await import("../governance/version-service.js");
   const allVersions = await getVersions(nestId, nodeId);
@@ -175,7 +184,11 @@ nodeRoutes.get("/:nodeId{.+?}/versions", async (c) => {
 // GET /nests/:nestId/nodes/:nodeId/reviews
 nodeRoutes.get("/:nodeId{.+?}/reviews", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
+  // SECURITY: node ids become filesystem paths in the engine's storage layer
+  // (join(nestRoot, id + ".md"), no containment) — reject `../` traversal so a
+  // caller with access to one nest can't read/write/delete another tenant's
+  // files by tuning the id. (src/shared/node-id.ts)
+  const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
 
   const { getReviewHistory } = await import("../governance/review-service.js");
   const history = await getReviewHistory(nestId, nodeId);
@@ -189,7 +202,11 @@ nodeRoutes.get("/:nodeId{.+?}/reviews", async (c) => {
 // POST catch-all to swallow it.
 nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
+  // SECURITY: node ids become filesystem paths in the engine's storage layer
+  // (join(nestRoot, id + ".md"), no containment) — reject `../` traversal so a
+  // caller with access to one nest can't read/write/delete another tenant's
+  // files by tuning the id. (src/shared/node-id.ts)
+  const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
   const { versions: versionManager } = await engineCache.get(nestId);
 
   const userId = c.get("userId");
@@ -230,7 +247,11 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
 
 nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
+  // SECURITY: node ids become filesystem paths in the engine's storage layer
+  // (join(nestRoot, id + ".md"), no containment) — reject `../` traversal so a
+  // caller with access to one nest can't read/write/delete another tenant's
+  // files by tuning the id. (src/shared/node-id.ts)
+  const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
   const userId = c.get("userId");
@@ -330,7 +351,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
 // PATCH /nests/:nestId/nodes/:nodeId{.+}
 nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
+  // SECURITY: node ids become filesystem paths in the engine's storage layer
+  // (join(nestRoot, id + ".md"), no containment) — reject `../` traversal so a
+  // caller with access to one nest can't read/write/delete another tenant's
+  // files by tuning the id. (src/shared/node-id.ts)
+  const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
   const body = await c.req.json<{
     content?: string;
     append?: string;
@@ -381,7 +406,11 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
 // DELETE /nests/:nestId/nodes/:nodeId{.+}
 nodeRoutes.delete("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
+  // SECURITY: node ids become filesystem paths in the engine's storage layer
+  // (join(nestRoot, id + ".md"), no containment) — reject `../` traversal so a
+  // caller with access to one nest can't read/write/delete another tenant's
+  // files by tuning the id. (src/shared/node-id.ts)
+  const nodeId = assertSafeNodeId(c.req.param("nodeId")!);
   const { storage } = await engineCache.get(nestId);
 
   // Stewardship lock: a node under open review can't be deleted out from
