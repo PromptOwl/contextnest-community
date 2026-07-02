@@ -214,12 +214,15 @@ export function ConnectModal({
       mcpServers: {
         [slugify(nestName)]: {
           command: "npx",
+          // Open mode needs no credential — omit the auth header so the copied
+          // config connects as-is.
           args: [
             "-y",
             "mcp-remote",
             mcpUrl,
-            "--header",
-            `Authorization: Bearer ${KEY_PLACEHOLDER}`,
+            ...(authMode === "open"
+              ? []
+              : ["--header", `Authorization: Bearer ${KEY_PLACEHOLDER}`]),
           ],
         },
       },
@@ -230,7 +233,11 @@ export function ConnectModal({
 
   // Only `ctx push` talks to a remote server; the other ctx commands operate on
   // a local vault. Push uploads the local vault into this nest.
-  const ctxCommand = `ctx push --server ${serverUrl} --nest ${nestId} --key ${KEY_PLACEHOLDER}`;
+  // Open mode needs no credential — drop --key so the copied command runs as-is.
+  const ctxCommand =
+    authMode === "open"
+      ? `ctx push --server ${serverUrl} --nest ${nestId}`
+      : `ctx push --server ${serverUrl} --nest ${nestId} --key ${KEY_PLACEHOLDER}`;
 
   const showOpenModeBanner = authMode === "open";
   const showLoginBanner = !authenticated && authMode === "key";
@@ -702,7 +709,9 @@ function Snippet({
         className={`${
           multiline ? "p-3" : "px-3 py-2"
         } bg-muted rounded text-xs font-mono min-w-0 ${
-          multiline ? "whitespace-pre overflow-x-auto" : "truncate"
+          multiline
+            ? "whitespace-pre overflow-x-auto"
+            : "whitespace-pre-wrap break-all"
         }`}
       >
         {value}
