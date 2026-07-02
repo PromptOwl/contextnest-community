@@ -860,7 +860,9 @@ export function mergeCaseCollidingUsers(db: Database.Database): {
       ).run(w, w);
 
       // email-keyed attribution — match case-insensitively, write the canonical
-      // lowercased winner email.
+      // lowercased winner email. loserLower === le here, so this overwrites the
+      // whole email group (winner + loser rows) to `le`; that's intentional and
+      // idempotent — a plain overwrite, never a delete.
       for (const [table, col] of emailCols) {
         db.prepare(
           `UPDATE ${table} SET ${col} = ? WHERE LOWER(${col}) = ?`,
@@ -868,22 +870,34 @@ export function mergeCaseCollidingUsers(db: Database.Database): {
       }
 
       // stewards.user_email has partial unique indexes per (nest, scope,
-      // target, email) while is_active=1. Drop loser rows that would collide
-      // with an active winner row, then repoint the rest.
+      // target, email) while is_active=1. Once every row in this email group is
+      // canonicalized to `le`, rows that previously differed only in email case
+      // would collide on those indexes. De-dup the active set down to ONE row
+      // per (nest, scope, target) — keeping the lexically-first id — then
+      // repoint the survivors (and any inactive rows) to the winner + canonical
+      // email.
+      //
+      // NOTE: winner- and loser-owned rows are indistinguishable at this point
+      // (user_id was already repointed to the winner above, and both carry the
+      // same lowercased email), so this deliberately operates on the WHOLE email
+      // group keyed by `le` rather than on "the loser's rows". Keeping exactly
+      // one active row per target — instead of the previous self-satisfying
+      // EXISTS, which deleted every active grant for the email — preserves the
+      // person's steward assignments across the merge. Idempotent across losers.
       db.prepare(
         `DELETE FROM stewards
-           WHERE LOWER(user_email) = ? AND is_active = 1
-             AND EXISTS (
-               SELECT 1 FROM stewards w
-                WHERE LOWER(w.user_email) = ? AND w.is_active = 1
-                  AND w.nest_id = stewards.nest_id AND w.scope = stewards.scope
-                  AND IFNULL(w.node_pattern, '') = IFNULL(stewards.node_pattern, '')
-                  AND IFNULL(w.tag_name, '') = IFNULL(stewards.tag_name, '')
+           WHERE is_active = 1
+             AND LOWER(user_email) = ?
+             AND id NOT IN (
+               SELECT MIN(id) FROM stewards
+                WHERE is_active = 1 AND LOWER(user_email) = ?
+                GROUP BY nest_id, scope,
+                         IFNULL(node_pattern, ''), IFNULL(tag_name, '')
              )`,
-      ).run(loserLower, le);
+      ).run(le, le);
       db.prepare(
         "UPDATE stewards SET user_email = ?, user_id = ? WHERE LOWER(user_email) = ?",
-      ).run(le, w, loserLower);
+      ).run(le, w, le);
 
       db.prepare("DELETE FROM users WHERE id = ?").run(l);
       merged++;

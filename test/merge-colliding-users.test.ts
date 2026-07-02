@@ -126,4 +126,145 @@ describe("mergeCaseCollidingUsers", () => {
       db.prepare("SELECT COUNT(*) AS c FROM users").get(),
     ).toEqual({ c: 1 });
   });
+
+  // ─── stewards (governance) — the trickiest table in the merge ───
+
+  const insNest = (db: Database.Database, id: string, owner: string) =>
+    db
+      .prepare("INSERT INTO nests (id, user_id, name, slug) VALUES (?,?,?,?)")
+      .run(id, owner, id, id);
+
+  const insSteward = (
+    db: Database.Database,
+    id: string,
+    nestId: string,
+    email: string,
+    userId: string,
+    isActive = 1,
+    scope = "nest",
+  ) =>
+    db
+      .prepare(
+        `INSERT INTO stewards
+           (id, nest_id, scope, user_email, user_id, assigned_by, is_active)
+         VALUES (?,?,?,?,?,?,?)`,
+      )
+      .run(id, nestId, scope, email, userId, "admin@x.com", isActive);
+
+  it("keeps the winner's solitary (non-duplicate) steward grant", () => {
+    // Regression guard: the old self-satisfying EXISTS deleted EVERY active
+    // steward row for the email, wiping a grant that had no duplicate at all.
+    const db = seededDb();
+    insUser(db, "winner", "bob@x.com", 0);
+    insUser(db, "loser", "Bob@x.com", 1);
+    insNest(db, "nestA", "winner");
+    insSteward(db, "s1", "nestA", "bob@x.com", "winner"); // only grant, no dup
+
+    mergeCaseCollidingUsers(db);
+
+    const active = db
+      .prepare(
+        "SELECT id, user_id, user_email FROM stewards WHERE is_active = 1",
+      )
+      .all();
+    expect(active).toEqual([
+      { id: "s1", user_id: "winner", user_email: "bob@x.com" },
+    ]);
+  });
+
+  it("dedups colliding steward rows on the same (nest, scope, target) to one", () => {
+    const db = seededDb();
+    insUser(db, "winner", "bob@x.com", 0);
+    insUser(db, "loser", "Bob@x.com", 1);
+    insNest(db, "nestB", "winner");
+    // Both sides hold a nest-scope grant on the SAME nest — a genuine collision.
+    insSteward(db, "s_w", "nestB", "bob@x.com", "winner");
+    insSteward(db, "s_l", "nestB", "Bob@x.com", "loser");
+    // Winner also has a grant on a DIFFERENT nest — must survive untouched.
+    insNest(db, "nestC", "winner");
+    insSteward(db, "s_c", "nestC", "bob@x.com", "winner");
+
+    mergeCaseCollidingUsers(db);
+
+    const active = db
+      .prepare(
+        "SELECT nest_id, user_id, user_email FROM stewards WHERE is_active = 1 ORDER BY nest_id",
+      )
+      .all();
+    // Exactly one active grant per nest, all repointed to winner + canonical email.
+    expect(active).toEqual([
+      { nest_id: "nestB", user_id: "winner", user_email: "bob@x.com" },
+      { nest_id: "nestC", user_id: "winner", user_email: "bob@x.com" },
+    ]);
+    // No active grant collides with the partial unique index (build proves it).
+    expect(() =>
+      db.exec(
+        "CREATE UNIQUE INDEX tmp_uniq ON stewards(nest_id, user_email) WHERE scope='nest' AND is_active=1",
+      ),
+    ).not.toThrow();
+  });
+
+  it("merges a 3-way collision group (N losers), repointing steward grants", () => {
+    const db = seededDb();
+    insUser(db, "u_claimed", "dan@x.com", 0);
+    insUser(db, "u_mid", "Dan@x.com", 1);
+    insUser(db, "u_upper", "DAN@X.COM", 1);
+    insNest(db, "n1", "u_claimed");
+    insNest(db, "n2", "u_mid");
+    insSteward(db, "sa", "n1", "dan@x.com", "u_claimed");
+    insSteward(db, "sb", "n2", "Dan@x.com", "u_mid");
+
+    const res = mergeCaseCollidingUsers(db);
+    expect(res).toEqual({ groups: 1, merged: 2 });
+
+    // One surviving user, everything owned/attributed to it.
+    const users = db
+      .prepare("SELECT id, email FROM users WHERE LOWER(email)='dan@x.com'")
+      .all();
+    expect(users).toEqual([{ id: "u_claimed", email: "dan@x.com" }]);
+    const nestOwners = db
+      .prepare("SELECT DISTINCT user_id FROM nests ORDER BY user_id")
+      .all();
+    expect(nestOwners).toEqual([{ user_id: "u_claimed" }]);
+    const stewards = db
+      .prepare(
+        "SELECT DISTINCT user_id, user_email FROM stewards WHERE is_active=1",
+      )
+      .all();
+    expect(stewards).toEqual([
+      { user_id: "u_claimed", user_email: "dan@x.com" },
+    ]);
+  });
+
+  it("dedups nest_collaborators and drops self-collaboration on owned nests", () => {
+    const db = seededDb();
+    insUser(db, "winner", "eve@x.com", 0);
+    insUser(db, "loser", "Eve@x.com", 1);
+    insUser(db, "owner3", "owner3@x.com", 0);
+    // A nest owned by a third party where BOTH winner and loser collaborate.
+    insNest(db, "shared", "owner3");
+    const insCollab = (id: string, nestId: string, uid: string) =>
+      db
+        .prepare(
+          `INSERT INTO nest_collaborators
+             (id, nest_id, user_id, permission, granted_by)
+           VALUES (?,?,?,?,?)`,
+        )
+        .run(id, nestId, uid, "write", "owner3");
+    insCollab("cw", "shared", "winner");
+    insCollab("cl", "shared", "loser");
+    // Winner OWNS a nest that the loser collaborates on → self-collab, must drop.
+    insNest(db, "wnest", "winner");
+    insCollab("cself", "wnest", "loser");
+
+    mergeCaseCollidingUsers(db);
+
+    const collab = db
+      .prepare(
+        "SELECT nest_id, user_id FROM nest_collaborators ORDER BY nest_id",
+      )
+      .all();
+    // Only one row on the shared nest (deduped), none on the winner-owned nest.
+    expect(collab).toEqual([{ nest_id: "shared", user_id: "winner" }]);
+  });
 });
