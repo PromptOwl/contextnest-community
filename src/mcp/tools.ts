@@ -496,11 +496,16 @@ export async function handleToolCall(
       // token budget; include in discovery order until it's reached.
       const docs = await storage.discoverDocuments();
       const approxChars = args.max_tokens ? args.max_tokens * 4 : Infinity;
+      // Resolve every approved body up front (concurrent), matching
+      // context_search, then apply the token budget over the resolved list in
+      // discovery order.
+      const resolved = await Promise.all(
+        docs.map(async (n) => ({ node: n, body: await resolveLlmBody(ctx, n) })),
+      );
       let total = 0;
       let budgetHit = false;
       const parts: string[] = [];
-      for (const n of docs) {
-        const body = await resolveLlmBody(ctx, n);
+      for (const { node: n, body } of resolved) {
         if (body === null) continue; // not visible / no approved version yet
         const meta = [
           `**Title:** ${n.frontmatter.title}`,
@@ -544,6 +549,13 @@ export async function handleToolCall(
         node = docs.find((n) => n.id === args.id);
       }
       if (!node) return `Node not found: ${args.title || args.id}`;
+      // Gate the same way context_get/context_export do: under stewardship a
+      // node with no approved version is invisible to AI. Its threads embed
+      // draft body text (anchor.quote) and paraphrases in comment bodies, so
+      // serving them would leak unapproved content through the side door.
+      if ((await resolveLlmBody(ctx, node)) === null) {
+        return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;
+      }
       const threads = listThreads(nestId, node.id);
       if (!threads.length)
         return `No comments on "${node.frontmatter.title}".`;
