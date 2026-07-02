@@ -109,6 +109,26 @@ d("PostgresAdapter conformance", () => {
     const row = await adapter.get("SELECT id FROM users WHERE id = ?", ["u4"]);
     expect((row as any)?.id).toBe("u4");
   });
+
+  it("seeds historical SQLite migration ids through 012 (bookkeeping parity)", async () => {
+    // The Postgres DDL is the consolidated end-state, but schema_migrations must
+    // still record every SQLite migration id so future incremental Postgres
+    // migrations gate correctly. 012 (case-collision merge) is a no-op on
+    // greenfield Postgres — the lower(email) unique index prevents collisions —
+    // but its id must be present.
+    for (const id of [
+      "002_steward_parity",
+      "009_lowercase_emails",
+      "011_comments",
+      "012_merge_case_colliding_users",
+    ]) {
+      const row = await adapter.get(
+        "SELECT id FROM schema_migrations WHERE id = ?",
+        [id],
+      );
+      expect((row as any)?.id).toBe(id);
+    }
+  });
 });
 
 function hashStr(s: string): number {
