@@ -556,7 +556,7 @@ export async function handleToolCall(
       if ((await resolveLlmBody(ctx, node)) === null) {
         return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;
       }
-      const threads = listThreads(nestId, node.id);
+      const threads = await listThreads(nestId, node.id);
       if (!threads.length)
         return `No comments on "${node.frontmatter.title}".`;
       const openCount = threads.filter((t) => t.status === "open").length;

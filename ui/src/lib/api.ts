@@ -407,6 +407,13 @@ export async function listNodes(nestId: string) {
   return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
 }
 
+/** Per-node comment (annotation thread) counts for sorting the document list. */
+export async function getCommentCounts(nestId: string) {
+  return request<{
+    counts: Record<string, { count: number; lastAt: string | null }>;
+  }>(`/nests/${nestId}/comment-counts`);
+}
+
 export async function getNode(nestId: string, nodeId: string) {
   return request<{ node: any }>(`/nests/${nestId}/nodes/${nodeId}`);
 }

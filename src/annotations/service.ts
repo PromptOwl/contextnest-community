@@ -91,6 +91,26 @@ export async function getThread(threadId: string): Promise<AnnotationThread | nu
   return row ? await rowToThread(row) : null;
 }
 
+/**
+ * Per-node comment counts for a whole nest — used to sort document lists by
+ * "most comments" without N per-node queries. Counts annotation THREADS (each
+ * a distinct comment discussion) and the most recent thread time.
+ */
+export async function countThreadsByNode(
+  nestId: string,
+): Promise<Record<string, { count: number; lastAt: string | null }>> {
+  const rows = (await getDb().all(
+    `SELECT node_id, CAST(COUNT(*) AS INTEGER) AS count, MAX(created_at) AS last_at
+         FROM annotation_threads
+        WHERE nest_id = ?
+        GROUP BY node_id`,
+    [nestId],
+  )) as Array<{ node_id: string; count: number; last_at: string | null }>;
+  const out: Record<string, { count: number; lastAt: string | null }> = {};
+  for (const r of rows) out[r.node_id] = { count: r.count, lastAt: r.last_at };
+  return out;
+}
+
 export async function listThreads(nestId: string, nodeId: string): Promise<AnnotationThread[]> {
   const rows = await getDb()
     .all(
