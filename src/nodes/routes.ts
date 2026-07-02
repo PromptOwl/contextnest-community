@@ -20,6 +20,7 @@ import {
   getPendingChange,
   loadLatestApprovedNode,
 } from "../governance/external-edit-service.js";
+import { derivedAnnotationsId } from "../annotations/service.js";
 import {
   createNode,
   updateNode,
@@ -404,6 +405,19 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
 
   await removeNodeFromTagIndex(nestId, nodeId);
 
+  // A node's review comments and its derived annotations node are tied to the
+  // node id, not FK'd to it — so deleting the node would otherwise orphan both.
+  // Remove the derived `— Annotations` node's storage doc (best-effort: plain
+  // documents and never-commented artifacts have none) here; its DB rows and
+  // the annotation threads themselves are purged in the transaction below.
+  const derivedId = derivedAnnotationsId(nodeId);
+  try {
+    await storage.deleteDocument(derivedId);
+    await removeNodeFromTagIndex(nestId, derivedId);
+  } catch {
+    /* no derived annotations node — nothing to remove */
+  }
+
   // Purge governance rows tied to this node id. Without this, recreating
   // a doc with the same title (→ same slug → same node id) hits a UNIQUE
   // constraint on node_versions(nest_id, node_id, version) because the
@@ -432,6 +446,29 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
       `DELETE FROM stewards
        WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
       [nestId, nodeId],
+    );
+    // Annotation threads for this node — comments cascade via the thread FK.
+    await tx.run(
+      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
+      [nestId, nodeId],
+    );
+    // The derived annotations node's own rows (version history it accrued, plus
+    // any stray threads if someone commented on it before this cleanup existed).
+    await tx.run(
+      "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
+    );
+    await tx.run(
+      "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
+    );
+    await tx.run(
+      "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
+    );
+    await tx.run(
+      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
     );
   });
 

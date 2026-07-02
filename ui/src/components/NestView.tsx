@@ -195,6 +195,14 @@ export function NestView({
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [authorFilter, setAuthorFilter] = useState<string>("all");
   const [dateFilter, setDateFilter] = useState<DatePreset>("any");
+  // Document list sort: by title, last edited, or comment (annotation) count.
+  const [sortMode, setSortMode] = useState<"name" | "edited" | "comments">(
+    "name",
+  );
+  // Per-node comment (annotation thread) counts, for the "Most comments" sort.
+  const [commentCounts, setCommentCounts] = useState<
+    Record<string, { count: number; lastAt: string | null }>
+  >({});
   // List vs cards, persisted per-browser (not per-nest — it's a reading pref).
   const [viewMode, setViewMode] = useState<"list" | "cards">(() => {
     try {
@@ -275,7 +283,7 @@ export function NestView({
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta] =
+    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta, countsData] =
       await Promise.all([
         api.listNodes(nestId).catch((e) => {
           console.error("[NestView] listNodes failed", nestId, e);
@@ -302,7 +310,12 @@ export function NestView({
           console.error("[NestView] getNest failed", nestId, e);
           return null;
         }),
+        api.getCommentCounts(nestId).catch((e) => {
+          console.error("[NestView] getCommentCounts failed", nestId, e);
+          return { counts: {} };
+        }),
       ]);
+    setCommentCounts(countsData.counts);
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
@@ -386,6 +399,30 @@ export function NestView({
     if (!search) return true;
     return matchesFilters(n, { search }) || contentHits.has(n.id);
   });
+
+  // Sort the filtered list. "name" = title A–Z; "edited" = most-recently
+  // edited first (updated_at already on each node); "comments" = most comment
+  // threads first, tie-broken by most recent comment then title.
+  const sorted = [...filtered];
+  if (sortMode === "edited") {
+    sorted.sort((a, b) =>
+      String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
+    );
+  } else if (sortMode === "comments") {
+    sorted.sort((a, b) => {
+      const cb = commentCounts[b.id]?.count || 0;
+      const ca = commentCounts[a.id]?.count || 0;
+      if (cb !== ca) return cb - ca;
+      const lb = commentCounts[b.id]?.lastAt || "";
+      const la = commentCounts[a.id]?.lastAt || "";
+      if (lb !== la) return String(lb).localeCompare(String(la));
+      return String(a.title || "").localeCompare(String(b.title || ""));
+    });
+  } else {
+    sorted.sort((a, b) =>
+      String(a.title || "").localeCompare(String(b.title || "")),
+    );
+  }
 
   // Orphans + broken [[links]], client-side from the loaded list.
   const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
@@ -1451,6 +1488,21 @@ export function NestView({
                       <SelectItem value="1y">Last year</SelectItem>
                     </SelectContent>
                   </Select>
+                  <Select
+                    value={sortMode}
+                    onValueChange={(v) =>
+                      setSortMode(v as "name" | "edited" | "comments")
+                    }
+                  >
+                    <SelectTrigger className="w-[150px] h-8" title="Sort documents">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="name">Name (A–Z)</SelectItem>
+                      <SelectItem value="edited">Recently edited</SelectItem>
+                      <SelectItem value="comments">Most comments</SelectItem>
+                    </SelectContent>
+                  </Select>
                   {/* List vs cards density toggle. */}
                   <div className="flex items-center rounded-md border h-8">
                     <button
@@ -1669,7 +1721,7 @@ export function NestView({
                       : "space-y-2"
                   }
                 >
-                  {filtered.map((node) => {
+                  {sorted.map((node) => {
                     const cards = viewMode === "cards";
                     // Hosted HTML artifacts get a distinct icon + badge so they
                     // read differently from markdown documents in the list.
