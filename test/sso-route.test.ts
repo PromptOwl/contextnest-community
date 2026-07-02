@@ -131,9 +131,10 @@ describe("GET /auth/sso", () => {
     expect(res.headers.get("set-cookie") || "").toContain("cnst_session");
 
     const { getDb } = await import("../src/db/client.js");
-    const row = getDb()
-      .prepare("SELECT email FROM users WHERE LOWER(email) = ?")
-      .get("fresh@example.com") as { email: string } | undefined;
+    const row = (await getDb().get(
+      "SELECT email FROM users WHERE LOWER(email) = ?",
+      ["fresh@example.com"],
+    )) as { email: string } | undefined;
     expect(row?.email).toBe("fresh@example.com");
   });
 

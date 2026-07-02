@@ -18,6 +18,7 @@ import {
 } from "./markdown-export.js";
 import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel } from "../shared/access.js";
 import { buildNestGraph } from "./graph-service.js";
 
@@ -30,7 +31,7 @@ export const queryRoutes = new Hono<AuthEnv>();
 queryRoutes.get("/graph", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
+  const userEmail = await resolveCallerEmail(userId);
   // Steward emails are write+ only — same rule as the collaborators roster, so
   // a public/read tier can't enumerate member emails via the graph overlay.
   const canSeeIdentities =
@@ -73,7 +74,7 @@ queryRoutes.post("/context", async (c) => {
   }
 
   const nestId = c.req.param("nestId")!;
-  const { query: queryEngine, storage } = engineCache.get(nestId);
+  const { query: queryEngine, storage } = await engineCache.get(nestId);
   // Floor at 50 tokens — anything smaller returns nothing useful. Default
   // is 4000, a typical system-prompt budget.
   const maxTokens = Math.max(50, body.max_tokens ?? 4000);
@@ -82,13 +83,13 @@ queryRoutes.post("/context", async (c) => {
 
   // ── 1. Resolve selector + title-match list ──
   let selector: string | null = body.selector?.trim() || null;
-  let compileDetail: ReturnType<typeof compilePrompt> | null = null;
+  let compileDetail: Awaited<ReturnType<typeof compilePrompt>> | null = null;
   let titleMatches: ContextNode[] = [];
   const allDocs = await storage.discoverDocuments();
 
   if (!selector && body.prompt) {
     const titles = allDocs.map((d: ContextNode) => d.frontmatter.title);
-    compileDetail = compilePrompt(body.prompt, nestId, titles);
+    compileDetail = await compilePrompt(body.prompt, nestId, titles);
     selector = compileDetail.selector;
 
     // Title matches are fetched directly — the engine's selector grammar
@@ -135,9 +136,9 @@ queryRoutes.post("/context", async (c) => {
 
   // ── 3. Permission gate (no-op when stewardship is disabled) ──
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
+  const userEmail = await resolveCallerEmail(userId);
   const beforePermission = documents.length;
-  const accessible = filterAccessible(nestId, userId, userEmail, documents);
+  const accessible = await filterAccessible(nestId, userId, userEmail, documents);
   const permissionFiltered = beforePermission - accessible.length;
 
   // Public readers must see approved bodies only, never on-disk drafts.
@@ -211,14 +212,14 @@ queryRoutes.post("/query", async (c) => {
   }
 
   const nestId = c.req.param("nestId")!;
-  const { query: queryEngine } = engineCache.get(nestId);
+  const { query: queryEngine } = await engineCache.get(nestId);
   const result = await queryEngine.query(body.query, {
     hops: body.hops ?? 2,
   });
 
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  const accessible = filterAccessible(nestId, userId, userEmail, result.documents);
+  const userEmail = await resolveCallerEmail(userId);
+  const accessible = await filterAccessible(nestId, userId, userEmail, result.documents);
 
   return c.json({
     query: body.query,
@@ -241,7 +242,7 @@ queryRoutes.get("/search", async (c) => {
   }
 
   const nestId = c.req.param("nestId")!;
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const documents = await storage.discoverDocuments();
 
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
@@ -258,8 +259,8 @@ queryRoutes.get("/search", async (c) => {
   });
 
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  const accessible = filterAccessible(nestId, userId, userEmail, matches);
+  const userEmail = await resolveCallerEmail(userId);
+  const accessible = await filterAccessible(nestId, userId, userEmail, matches);
 
   return c.json({
     query: q,
@@ -276,7 +277,7 @@ queryRoutes.get("/search", async (c) => {
 
 // GET /nests/:nestId/overview
 queryRoutes.get("/overview", async (c) => {
-  const { storage } = engineCache.get(c.req.param("nestId")!);
+  const { storage } = await engineCache.get(c.req.param("nestId")!);
   const documents = await storage.discoverDocuments();
 
   const types: Record<string, number> = {};
@@ -304,9 +305,17 @@ queryRoutes.get("/overview", async (c) => {
   });
 });
 
+// GET /nests/:nestId/comment-counts
+// Per-node annotation (comment) counts for the whole nest, so the UI can sort
+// document lists by "most comments" in one call instead of N per-node fetches.
+queryRoutes.get("/comment-counts", async (c) => {
+  const counts = await countThreadsByNode(c.req.param("nestId")!);
+  return c.json({ counts });
+});
+
 // GET /nests/:nestId/context
 queryRoutes.get("/context", async (c) => {
-  const { storage } = engineCache.get(c.req.param("nestId")!);
+  const { storage } = await engineCache.get(c.req.param("nestId")!);
   const content = await storage.readContextMd();
   return c.json({ content: content || "" });
 });
@@ -322,7 +331,7 @@ queryRoutes.get("/export", async (c) => {
   }
 
   const nestId = c.req.param("nestId")!;
-  const { storage, query: queryEngine } = engineCache.get(nestId);
+  const { storage, query: queryEngine } = await engineCache.get(nestId);
   const selector = c.req.query("selector")?.trim() || null;
 
   let documents: ContextNode[];
@@ -334,14 +343,14 @@ queryRoutes.get("/export", async (c) => {
   }
 
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  const accessible = filterAccessible(nestId, userId, userEmail, documents);
+  const userEmail = await resolveCallerEmail(userId);
+  const accessible = await filterAccessible(nestId, userId, userEmail, documents);
 
   // Export is APPROVED-ONLY for every caller — drafts never export. On a
   // governed nest, nodes with no approved version are dropped; the body is the
   // approved version's bytes. On an ungoverned nest the working copy is the
   // published state.
-  const governed = isStewardshipEnabled(nestId);
+  const governed = await isStewardshipEnabled(nestId);
   const resolved = await Promise.all(
     accessible.map(async (n) => {
       const body = await resolveExportBody(nestId, n.id, n.body || "");
@@ -406,7 +415,7 @@ queryRoutes.post("/publish", async (c) => {
   }
 
   const nestId = c.req.param("nestId")!;
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const created: string[] = [];
 
   if (body.context_md) {
@@ -447,7 +456,7 @@ queryRoutes.post("/publish", async (c) => {
 
     const serialized = serializeDocument(node);
     await storage.writeDocument(id, serialized);
-    syncNodeTags(nestId, id, tags);
+    await syncNodeTags(nestId, id, tags);
     created.push(id);
   }
 

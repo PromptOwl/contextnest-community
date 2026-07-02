@@ -130,9 +130,9 @@ describe("governance: org super-admin over nest visibility + collaborators", () 
       { visibility: "public" },
       owner.apiKey,
     );
-    expect(isPublicReader(nestId, admin.userId)).toBe(false);
+    expect(await isPublicReader(nestId, admin.userId)).toBe(false);
     // Sanity: a random user (no grant, not super-admin) still IS a public reader.
-    expect(isPublicReader(nestId, nobody.userId)).toBe(true);
+    expect(await isPublicReader(nestId, nobody.userId)).toBe(true);
   });
 });
 
@@ -209,6 +209,6 @@ describe("governance: license admin over nest visibility + collaborators", () =>
   it("license admin is not classified as a public reader on a public other-owned nest", async () => {
     const { isPublicReader } = await import("../src/shared/access.js");
     // Already public from the visibility test above.
-    expect(isPublicReader(nestId, admin.userId)).toBe(false);
+    expect(await isPublicReader(nestId, admin.userId)).toBe(false);
   });
 });

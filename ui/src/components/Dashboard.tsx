@@ -176,7 +176,7 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
             <ClientHint
               icon={<Terminal className="h-4 w-4" />}
               title="CLI"
-              desc={`ctx --server ${serverUrl}`}
+              desc={`ctx push --server ${serverUrl}`}
               mono
             />
           </div>
