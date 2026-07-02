@@ -156,4 +156,87 @@ describe("server-level /mcp — one connection, all nests", () => {
       unknown.replace("no-such-nest", "X"),
     );
   });
+
+  it("resolves a colliding nest NAME to the caller's own nest", async () => {
+    // Bob creates a nest with the SAME name as Alice's. Name/slug are unique
+    // only per-owner, so a global lookup would now be ambiguous — Alice's
+    // name-based resolution must still land on HER "Deal Brain", and Bob must
+    // never reach Alice's content through the shared name.
+    await jsonRequest(app, "POST", "/nests", { name: "Deal Brain" }, bob.apiKey);
+
+    const aliceView = await callTool(alice.apiKey, "context_get", {
+      nest: "Deal Brain",
+      title: "Win Loss Log",
+    });
+    expect(aliceView).toContain("Why we win.");
+
+    const bobView = await callTool(bob.apiKey, "context_get", {
+      nest: "Deal Brain",
+      title: "Win Loss Log",
+    });
+    // Bob's same-named nest is empty; he must not see Alice's node.
+    expect(bobView).not.toContain("Why we win.");
+  });
+});
+
+describe("nest-scoped API key — index and cross-nest calls stay scoped", () => {
+  let carol: { apiKey: string; userId: string; email: string };
+  let scopedKey: string;
+  let scopedNestId: string;
+  let otherNestId: string;
+
+  beforeAll(async () => {
+    carol = await registerUser(app, "carol@acme.com", "Carol");
+    const a = await jsonRequest(app, "POST", "/nests", { name: "Carol Scoped" }, carol.apiKey);
+    scopedNestId = a.data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${scopedNestId}/nodes`,
+      { title: "Scoped Doc", content: "# Scoped\n\nInside scope." },
+      carol.apiKey,
+    );
+    const b = await jsonRequest(app, "POST", "/nests", { name: "Carol Other" }, carol.apiKey);
+    otherNestId = b.data.nest.id;
+
+    // Rotate Carol's key so it is scoped to the first nest only.
+    const rot = await jsonRequest(
+      app,
+      "POST",
+      "/auth/keys/rotate",
+      { nest_id: scopedNestId },
+      carol.apiKey,
+    );
+    scopedKey = rot.data.api_key;
+  });
+
+  it("GET /index shows only the scoped nest", async () => {
+    const res = await jsonRequest(app, "GET", "/index?format=json", undefined, scopedKey);
+    expect(res.status).toBe(200);
+    const ids = res.data.nests.map((n: any) => n.id);
+    expect(ids).toContain(scopedNestId);
+    expect(ids).not.toContain(otherNestId);
+  });
+
+  it("nest_index lists only the scoped nest", async () => {
+    const text = await callTool(scopedKey, "nest_index");
+    expect(text).toContain("Carol Scoped");
+    expect(text).not.toContain("Carol Other");
+  });
+
+  it("can read the scoped nest but not another of its owner's nests", async () => {
+    const inside = await callTool(scopedKey, "context_get", {
+      nest: scopedNestId,
+      title: "Scoped Doc",
+    });
+    expect(inside).toContain("Inside scope.");
+
+    // Owned by the same user, but outside the key's scope — indistinguishable
+    // from a missing nest, same as the cross-user denial.
+    const outside = await callTool(scopedKey, "context_get", {
+      nest: otherNestId,
+      title: "Scoped Doc",
+    });
+    expect(outside).toMatch(/not found or not accessible/i);
+  });
 });

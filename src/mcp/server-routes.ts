@@ -48,8 +48,20 @@ async function canRead(nestId: string, userId: string): Promise<boolean> {
   return permissionLevel(perm) >= permissionLevel("read");
 }
 
-/** Resolve a `nest` argument — id first, then case-insensitive name/slug. */
-async function resolveNestRef(ref: string): Promise<Nest | null> {
+/**
+ * Resolve a `nest` argument — id first, then case-insensitive name/slug.
+ *
+ * Name/slug are unique only per-owner (UNIQUE(user_id, slug)), so a global
+ * name lookup can return several rows once two owners pick the same name.
+ * When that happens, disambiguate to the nests THIS caller can actually read:
+ * otherwise one user creating a same-named nest would silently break another
+ * user's name-based resolution ("Deal Brain" suddenly stops resolving). The
+ * final canRead gate in handleServerToolCall still governs the read itself.
+ */
+async function resolveNestRef(
+  ref: string,
+  userId: string,
+): Promise<Nest | null> {
   const db = getDb();
   const byId = (await db.get("SELECT * FROM nests WHERE id = ?", [ref])) as
     | Nest
@@ -59,8 +71,15 @@ async function resolveNestRef(ref: string): Promise<Nest | null> {
     "SELECT * FROM nests WHERE LOWER(name) = LOWER(?) OR LOWER(slug) = LOWER(?)",
     [ref, ref],
   )) as Nest[];
-  // Ambiguous names resolve to nothing — the caller should use the id.
-  return byName.length === 1 ? byName[0] : null;
+  if (byName.length <= 1) return byName[0] ?? null;
+  // Collision across owners — keep only what the caller can read and require
+  // an unambiguous single match among those.
+  const readable = (
+    await Promise.all(
+      byName.map(async (n) => ((await canRead(n.id, userId)) ? n : null)),
+    )
+  ).filter((n): n is Nest => n !== null);
+  return readable.length === 1 ? readable[0] : null;
 }
 
 export interface IndexedNest {
@@ -281,7 +300,7 @@ async function handleServerToolCall(
   // and "no read grant" — otherwise the tool becomes an existence oracle
   // for other users' private nests (probe by name, compare messages).
   const inaccessible = `Nest not found or not accessible: "${args.nest}". Use nest_index to see what these credentials can read.`;
-  const nest = await resolveNestRef(String(args.nest ?? ""));
+  const nest = await resolveNestRef(String(args.nest ?? ""), userId);
   if (!nest) return inaccessible;
   if (nestScope && nest.id !== nestScope) return inaccessible;
   if (!(await canRead(nest.id, userId))) return inaccessible;
