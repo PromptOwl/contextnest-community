@@ -27,7 +27,8 @@ export function setupTestEnv() {
   // Clear rate-limiter state so auth-endpoint tests don't trip each other
   resetRateLimits();
 
-  const testDir = join(process.cwd(), "data", `test-${randomUUID()}`);
+  // Under data/test/ so the whole test corpus wipes with one `rm -rf data/test`.
+  const testDir = join(process.cwd(), "data", "test", randomUUID());
   mkdirSync(testDir, { recursive: true });
 
   process.env.DATA_ROOT = testDir;

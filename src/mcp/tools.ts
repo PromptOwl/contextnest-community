@@ -22,6 +22,7 @@ import {
   updateNode,
   listNodesForCallerByEmail,
 } from "../nodes/service.js";
+import { listThreads } from "../annotations/service.js";
 
 export interface McpToolContext {
   storage: NestStorage;
@@ -110,6 +111,33 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ["selector"],
+    },
+  },
+  {
+    name: "context_export",
+    description:
+      "Export the ENTIRE nest as one markdown bundle — every accessible document's FULL content. Use when you need the whole nest as context rather than a targeted query. Respects an optional token budget.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        max_tokens: {
+          type: "number",
+          description:
+            "Approximate token budget; documents are included until it's reached (omit for no cap).",
+        },
+      },
+    },
+  },
+  {
+    name: "context_comments",
+    description:
+      "Get the review comments/annotations on a document — anchored quotes, threaded replies, and open/resolved status — by title or ID. Use to pull human feedback into context.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node" },
+        id: { type: "string", description: "ID of the node" },
+      },
     },
   },
   {
@@ -460,6 +488,93 @@ export async function handleToolCall(
         total += entry.length;
       }
       return resolved.join("\n\n---\n\n") || "No nodes resolved.";
+    }
+
+    case "context_export": {
+      // Whole-nest bundle: every accessible document's full body, gated the
+      // same way context_get is (approved-only under stewardship). Optional
+      // token budget; include in discovery order until it's reached.
+      const docs = await storage.discoverDocuments();
+      const approxChars = args.max_tokens ? args.max_tokens * 4 : Infinity;
+      // Resolve every approved body up front (concurrent), matching
+      // context_search, then apply the token budget over the resolved list in
+      // discovery order.
+      const resolved = await Promise.all(
+        docs.map(async (n) => ({ node: n, body: await resolveLlmBody(ctx, n) })),
+      );
+      let total = 0;
+      let budgetHit = false;
+      const parts: string[] = [];
+      for (const { node: n, body } of resolved) {
+        if (body === null) continue; // not visible / no approved version yet
+        const meta = [
+          `**Title:** ${n.frontmatter.title}`,
+          `**Type:** ${n.frontmatter.type || "document"}`,
+          n.frontmatter.tags?.length
+            ? `**Tags:** ${n.frontmatter.tags.join(" ")}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const entry = `${meta}\n\n${body || "(no content)"}`;
+        if (total + entry.length > approxChars) {
+          budgetHit = true;
+          break;
+        }
+        parts.push(entry);
+        total += entry.length;
+      }
+      if (!parts.length) {
+        return budgetHit
+          ? "Token budget reached before any document fit — raise max_tokens, or use context_query/context_resolve to target."
+          : "No documents available to export.";
+      }
+      const note = budgetHit
+        ? `\n\n_(Token budget reached — ${parts.length} of ${docs.length} documents included. Raise max_tokens, or use context_query/context_resolve to target.)_`
+        : "";
+      return `# Nest export — ${parts.length} document(s)\n\n${parts.join(
+        "\n\n---\n\n",
+      )}${note}`;
+    }
+
+    case "context_comments": {
+      const docs = await storage.discoverDocuments();
+      let node: ContextNode | undefined;
+      if (args.title) {
+        node = docs.find(
+          (n) =>
+            n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+        );
+      } else if (args.id) {
+        node = docs.find((n) => n.id === args.id);
+      }
+      if (!node) return `Node not found: ${args.title || args.id}`;
+      // Gate the same way context_get/context_export do: under stewardship a
+      // node with no approved version is invisible to AI. Its threads embed
+      // draft body text (anchor.quote) and paraphrases in comment bodies, so
+      // serving them would leak unapproved content through the side door.
+      if ((await resolveLlmBody(ctx, node)) === null) {
+        return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;
+      }
+      const threads = listThreads(nestId, node.id);
+      if (!threads.length)
+        return `No comments on "${node.frontmatter.title}".`;
+      const openCount = threads.filter((t) => t.status === "open").length;
+      const sections = threads
+        .map((t, i) => {
+          const quote = t.anchor?.quote
+            ? `> ${t.anchor.quote.replace(/\n/g, " ")}\n\n`
+            : "";
+          const head = `### ${i + 1}. [${t.status}]${
+            t.anchor?.quote ? "" : " (whole-document)"
+          }`;
+          const comments = t.comments
+            .map((c) => `- **${c.author}** (${c.createdAt}): ${c.body}`)
+            .join("\n");
+          return `${head}\n${quote}${comments}`;
+        })
+        .join("\n\n");
+      return `# Comments on "${node.frontmatter.title}" — ${threads.length} thread(s), ${openCount} open\n\n${sections}`;
     }
 
     case "context_create": {
