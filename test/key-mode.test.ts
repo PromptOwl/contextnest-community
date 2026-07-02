@@ -59,6 +59,22 @@ describe("key mode (auth required)", () => {
     expect(loginRes.headers.get("set-cookie") || "").toMatch(/cnst_session=/);
   });
 
+  it("logs in when the email has surrounding whitespace", async () => {
+    // Register a fresh user, then log in with the same email padded with
+    // spaces (common from mobile autofill/paste). Login normalizes with
+    // trim+lowercase like registration does, so this must succeed — it
+    // returned 401 before the normalization fix.
+    await registerUser(app, "spacey@test.com", "Spacey");
+    const res = await app.request("/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "  SpAcEy@test.com  ", password: "testpass" }),
+    });
+    const data = await res.json();
+    expect(res.status).toBe(200);
+    expect(data.user?.email).toBe("spacey@test.com");
+  });
+
   it("rejects login with wrong password", async () => {
     const res = await app.request("/auth/login", {
       method: "POST",

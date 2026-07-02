@@ -73,6 +73,12 @@ function prettyFolder(name: string) {
     .join(" ");
 }
 
+/** "nodes/gtm/deals" → "Nodes / Gtm / Deals" for nested group headers. */
+function prettyFolderPath(path: string) {
+  if (path === "Root") return "Root";
+  return path.split("/").map(prettyFolder).join(" / ");
+}
+
 interface NestViewProps {
   nestId: string;
   nestName: string;
@@ -197,6 +203,14 @@ export function NestView({
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [authorFilter, setAuthorFilter] = useState<string>("all");
   const [dateFilter, setDateFilter] = useState<DatePreset>("any");
+  // Document list sort: by title, last edited, or comment (annotation) count.
+  const [sortMode, setSortMode] = useState<"name" | "edited" | "comments">(
+    "name",
+  );
+  // Per-node comment (annotation thread) counts, for the "Most comments" sort.
+  const [commentCounts, setCommentCounts] = useState<
+    Record<string, { count: number; lastAt: string | null }>
+  >({});
   // List vs cards, persisted per-browser (not per-nest — it's a reading pref).
   const [viewMode, setViewMode] = useState<"list" | "cards">(() => {
     try {
@@ -277,7 +291,7 @@ export function NestView({
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta] =
+    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta, countsData] =
       await Promise.all([
         api.listNodes(nestId).catch((e) => {
           console.error("[NestView] listNodes failed", nestId, e);
@@ -304,7 +318,12 @@ export function NestView({
           console.error("[NestView] getNest failed", nestId, e);
           return null;
         }),
+        api.getCommentCounts(nestId).catch((e) => {
+          console.error("[NestView] getCommentCounts failed", nestId, e);
+          return { counts: {} };
+        }),
       ]);
+    setCommentCounts(countsData.counts);
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
@@ -388,6 +407,30 @@ export function NestView({
     if (!search) return true;
     return matchesFilters(n, { search }) || contentHits.has(n.id);
   });
+
+  // Sort the filtered list. "name" = title A–Z; "edited" = most-recently
+  // edited first (updated_at already on each node); "comments" = most comment
+  // threads first, tie-broken by most recent comment then title.
+  const sorted = [...filtered];
+  if (sortMode === "edited") {
+    sorted.sort((a, b) =>
+      String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
+    );
+  } else if (sortMode === "comments") {
+    sorted.sort((a, b) => {
+      const cb = commentCounts[b.id]?.count || 0;
+      const ca = commentCounts[a.id]?.count || 0;
+      if (cb !== ca) return cb - ca;
+      const lb = commentCounts[b.id]?.lastAt || "";
+      const la = commentCounts[a.id]?.lastAt || "";
+      if (lb !== la) return String(lb).localeCompare(String(la));
+      return String(a.title || "").localeCompare(String(b.title || ""));
+    });
+  } else {
+    sorted.sort((a, b) =>
+      String(a.title || "").localeCompare(String(b.title || "")),
+    );
+  }
 
   // Orphans + broken [[links]], client-side from the loaded list.
   const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
@@ -621,17 +664,37 @@ export function NestView({
   // (excluded from the node list as a meta-file); surfacing that engine-built
   // index is a deeper follow-up — this is the lightweight UI overview.
   const tocGroups = (() => {
+    // Group by the FULL folder path (everything before the leaf), not just
+    // the first segment, so nested folders like nodes/gtm/deals each get
+    // their own group. Sorting by path keeps children right under parents;
+    // depth drives the header indent.
     const groups = new Map<string, any[]>();
     for (const n of nodes) {
       const id: string = n.id || "";
-      const slash = id.indexOf("/");
-      const folder = slash > 0 ? id.slice(0, slash) : "Root";
+      // Strip the "nodes/" storage root — it's not a user folder. What's left
+      // is the real folder path; a doc directly under nodes/ has none → Root.
+      const rel = id.startsWith("nodes/") ? id.slice(6) : id;
+      const slash = rel.lastIndexOf("/");
+      const folder = slash > 0 ? rel.slice(0, slash) : "Root";
       if (!groups.has(folder)) groups.set(folder, []);
       groups.get(folder)!.push(n);
     }
+    // Compare paths segment-by-segment (not as flat strings) so children
+    // always sort directly under their parent — a sibling like "nodes-extra"
+    // would otherwise wedge between "nodes" and "nodes/a".
+    const byPathSegments = (a: string, b: string) => {
+      const as = a.split("/");
+      const bs = b.split("/");
+      for (let i = 0; i < Math.min(as.length, bs.length); i++) {
+        const cmp = as[i].localeCompare(bs[i]);
+        if (cmp !== 0) return cmp;
+      }
+      return as.length - bs.length;
+    };
     return [...groups.entries()]
       .map(([folder, items]) => ({
         folder,
+        depth: folder === "Root" ? 0 : folder.split("/").length,
         items: [...items].sort((a, b) =>
           String(a.title || a.id).localeCompare(String(b.title || b.id)),
         ),
@@ -641,7 +704,7 @@ export function NestView({
           ? -1
           : b.folder === "Root"
             ? 1
-            : a.folder.localeCompare(b.folder),
+            : byPathSegments(a.folder, b.folder),
       );
   })();
 
@@ -1330,19 +1393,25 @@ export function NestView({
               ) : (
                 <div className="space-y-5">
                   {tocGroups.map((g) => (
-                    <div key={g.folder}>
-                      <div className="flex items-center gap-2 mb-2">
-                        <FolderOpen className="h-4 w-4 text-muted-foreground" />
-                        <h4 className="text-sm font-medium">
-                          {prettyFolder(g.folder)}
-                        </h4>
-                        <Badge
-                          variant="secondary"
-                          className="text-[10px] px-1.5 py-0 h-5"
-                        >
-                          {g.items.length}
-                        </Badge>
-                      </div>
+                    <div
+                      key={g.folder}
+                      style={{ marginLeft: `${g.depth * 1.25}rem` }}
+                    >
+                      {/* Root = docs directly under nodes/; no folder header. */}
+                      {g.folder !== "Root" && (
+                        <div className="flex items-center gap-2 mb-2">
+                          <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                          <h4 className="text-sm font-medium">
+                            {prettyFolderPath(g.folder)}
+                          </h4>
+                          <Badge
+                            variant="secondary"
+                            className="text-[10px] px-1.5 py-0 h-5"
+                          >
+                            {g.items.length}
+                          </Badge>
+                        </div>
+                      )}
                       <div className="grid gap-1 sm:grid-cols-2">
                         {g.items.map((n) => (
                           <button
@@ -1431,6 +1500,21 @@ export function NestView({
                       <SelectItem value="30d">Last 30 days</SelectItem>
                       <SelectItem value="90d">Last 90 days</SelectItem>
                       <SelectItem value="1y">Last year</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select
+                    value={sortMode}
+                    onValueChange={(v) =>
+                      setSortMode(v as "name" | "edited" | "comments")
+                    }
+                  >
+                    <SelectTrigger className="w-[150px] h-8" title="Sort documents">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="name">Name (A–Z)</SelectItem>
+                      <SelectItem value="edited">Recently edited</SelectItem>
+                      <SelectItem value="comments">Most comments</SelectItem>
                     </SelectContent>
                   </Select>
                   {/* List vs cards density toggle. */}
@@ -1651,7 +1735,7 @@ export function NestView({
                       : "space-y-2"
                   }
                 >
-                  {filtered.map((node) => {
+                  {sorted.map((node) => {
                     const cards = viewMode === "cards";
                     // Hosted HTML artifacts get a distinct icon + badge so they
                     // read differently from markdown documents in the list.

@@ -25,8 +25,9 @@ async function mcpCall(
   method: string,
   params: Record<string, unknown> = {},
   id = 1,
+  targetNest: string = nestId,
 ): Promise<any> {
-  const res = await app.request(`/nests/${nestId}/mcp`, {
+  const res = await app.request(`/nests/${targetNest}/mcp`, {
     method: "POST",
     headers: MCP_HEADERS,
     body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
@@ -49,11 +50,13 @@ async function callTool(
   name: string,
   args: Record<string, unknown> = {},
   id = 100,
+  targetNest: string = nestId,
 ): Promise<string> {
   const res = await mcpCall(
     "tools/call",
     { name, arguments: args },
     id,
+    targetNest,
   );
   expect(res.error).toBeUndefined();
   // result.content is an array of {type, text} per the MCP spec
@@ -200,6 +203,105 @@ describe("MCP tools/call — basic vault tools", () => {
     expect(typeof text).toBe("string");
     expect(text.length).toBeGreaterThan(0);
     expect(text).toMatch(/(API Reference|No nodes matched)/);
+  });
+});
+
+describe("MCP tools/call — context_export (whole nest)", () => {
+  it("tools/list includes context_export and context_comments", async () => {
+    const res = await mcpCall("tools/list", {});
+    const names = res.result.tools.map((t: any) => t.name);
+    expect(names).toContain("context_export");
+    expect(names).toContain("context_comments");
+  });
+
+  it("exports every document's full content in one call", async () => {
+    const text = await callTool("context_export");
+    expect(text).toMatch(/Nest export/);
+    // Full bodies of all three seeded docs, not just titles/snippets.
+    expect(text).toContain("Documentation for the public API");
+    expect(text).toContain("System-level design notes");
+    expect(text).toContain("Logo, colors, voice");
+  });
+
+  it("respects the token budget and notes truncation", async () => {
+    // Tiny budget → only the first doc(s) fit, with a truncation note.
+    const text = await callTool("context_export", { max_tokens: 20 });
+    expect(text).toMatch(/Token budget reached/);
+  });
+});
+
+describe("MCP tools/call — context_comments", () => {
+  it("returns a document's anchored comment threads", async () => {
+    // Seed an annotation on the API Reference node via REST.
+    const anno = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/api-reference/annotations`,
+      {
+        body: "Please clarify the auth section.",
+        anchor: { quote: "public API", before: "", after: "" },
+      },
+    );
+    expect([200, 201]).toContain(anno.status);
+
+    const text = await callTool("context_comments", {
+      id: "nodes/api-reference",
+    });
+    expect(text).toContain("Comments on \"API Reference\"");
+    expect(text).toContain("Please clarify the auth section.");
+    expect(text).toContain("public API"); // the anchored quote
+  });
+
+  it("reports when a document has no comments", async () => {
+    const text = await callTool("context_comments", { title: "Brand Guide" });
+    expect(text).toMatch(/No comments on/);
+  });
+
+  it("refuses comments on an unapproved draft node — no leak via anchor.quote", async () => {
+    // Fresh nest with stewardship ON, so a newly created doc has no approved
+    // version and is invisible to AI (same gate as context_get/context_export).
+    const created = await jsonRequest(app, "POST", "/nests", {
+      name: "Gated Nest",
+    });
+    const sid = created.data.nest.id;
+    await jsonRequest(app, "PATCH", `/nests/${sid}/settings`, {
+      stewardship_enabled: true,
+    });
+    await jsonRequest(app, "POST", `/nests/${sid}/nodes`, {
+      title: "Secret Draft",
+      content: "# Secret\n\nUnreleased pricing: 4242.",
+    });
+    // Anchor the comment on the draft body text — this is what must NOT leak.
+    const anno = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${sid}/nodes/nodes/secret-draft/annotations`,
+      {
+        body: "verify this figure",
+        anchor: { quote: "Unreleased pricing: 4242.", before: "", after: "" },
+      },
+    );
+    expect([200, 201]).toContain(anno.status);
+
+    // Sanity: context_get already refuses this node.
+    const got = await callTool(
+      "context_get",
+      { id: "nodes/secret-draft" },
+      501,
+      sid,
+    );
+    expect(got).toMatch(/no approved version yet/i);
+
+    // The fix: context_comments must refuse identically and leak nothing.
+    const text = await callTool(
+      "context_comments",
+      { id: "nodes/secret-draft" },
+      502,
+      sid,
+    );
+    expect(text).toMatch(/no approved version yet/i);
+    expect(text).not.toContain("4242"); // draft excerpt must not leak
+    expect(text).not.toContain("verify this figure"); // comment body must not leak
   });
 });
 
