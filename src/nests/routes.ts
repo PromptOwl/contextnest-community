@@ -17,7 +17,6 @@ import {
   setAllowSelfApprove,
 } from "./service.js";
 import { registerImportedDocuments } from "../nodes/service.js";
-import { engineCache } from "../nodes/engine.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -111,43 +110,28 @@ nestRoutes.get("/", async (c) => {
   }
 
   // Tile metadata: per-nest document count + people (collaborators + active
-  // stewards). Counts are grouped queries; the doc count comes from the same
-  // storage.discoverDocuments() the rest of the app uses.
-  const collabByNest = new Map(
-    (
-      db
-        .prepare(
-          "SELECT nest_id, COUNT(*) AS c FROM nest_collaborators GROUP BY nest_id",
-        )
-        .all() as Array<{ nest_id: string; c: number }>
-    ).map((r) => [r.nest_id, r.c]),
-  );
-  const stewardByNest = new Map(
-    (
-      db
-        .prepare(
-          "SELECT nest_id, COUNT(DISTINCT user_email) AS c FROM stewards WHERE is_active = 1 GROUP BY nest_id",
-        )
-        .all() as Array<{ nest_id: string; c: number }>
-    ).map((r) => [r.nest_id, r.c]),
-  );
-  const withMeta = await Promise.all(
-    out.map(async (n) => {
-      let document_count = 0;
-      try {
-        const { storage } = engineCache.get(n.id);
-        document_count = (await storage.discoverDocuments()).length;
-      } catch {
-        document_count = 0;
-      }
-      return {
-        ...n,
-        document_count,
-        collaborator_count: collabByNest.get(n.id) ?? 0,
-        steward_count: stewardByNest.get(n.id) ?? 0,
-      };
-    }),
-  );
+  // stewards). All three are single grouped queries rather than per-nest
+  // work — the doc count uses node_versions (every live doc, API-created or
+  // imported, is registered there; deletes remove its rows) so listing stays
+  // one round-trip instead of a filesystem scan per card on every load.
+  const docRows = (await db.all(
+    "SELECT nest_id, COUNT(DISTINCT node_id) AS c FROM node_versions GROUP BY nest_id",
+  )) as Array<{ nest_id: string; c: number }>;
+  const docByNest = new Map(docRows.map((r) => [r.nest_id, r.c]));
+  const collabRows = (await db.all(
+    "SELECT nest_id, COUNT(*) AS c FROM nest_collaborators GROUP BY nest_id",
+  )) as Array<{ nest_id: string; c: number }>;
+  const collabByNest = new Map(collabRows.map((r) => [r.nest_id, r.c]));
+  const stewardRows = (await db.all(
+    "SELECT nest_id, COUNT(DISTINCT user_email) AS c FROM stewards WHERE is_active = 1 GROUP BY nest_id",
+  )) as Array<{ nest_id: string; c: number }>;
+  const stewardByNest = new Map(stewardRows.map((r) => [r.nest_id, r.c]));
+  const withMeta = out.map((n) => ({
+    ...n,
+    document_count: docByNest.get(n.id) ?? 0,
+    collaborator_count: collabByNest.get(n.id) ?? 0,
+    steward_count: stewardByNest.get(n.id) ?? 0,
+  }));
   return c.json({ nests: withMeta });
 });
 
