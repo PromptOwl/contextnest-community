@@ -107,11 +107,6 @@ export function NestView({
   //   - anon-owned + key mode → license-admin caretaker only
   const canDeleteNest =
     isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
-  // Stewardship is governance of the commons / one's own nests, not a tool
-  // server admins impose on other users' nests. So the steward roster,
-  // assign-steward UI, and Settings modal are hidden when an admin views a
-  // real user's nest.
-  const canManageGovernance = isAdmin && (isOwner || isAnonOwned);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
 
   // Local mirror of the nest name so inline rename feels instant while the
@@ -174,6 +169,22 @@ export function NestView({
   const [isImported, setIsImported] = useState(false);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
+  // Stewardship is governance of the commons / one's own nests, not a tool
+  // server admins impose on other users' nests. So the steward roster,
+  // assign-steward UI, and Settings modal are hidden when an admin views a
+  // real user's nest. Delegation (mirrors server canManageStewards): the
+  // nest owner or an admin collaborator also manages governance, so owners
+  // can hand people-management to other admins.
+  // Server admins resolve to "admin" on EVERY nest (resolveNestPermission),
+  // so gate the delegated branch on !isAdmin — otherwise the roster/settings
+  // UI would reappear for admins viewing other users' nests, which the rule
+  // above deliberately hides.
+  // `isOwner` is known synchronously (prop); include it so a non-admin owner
+  // sees the governance UI on first render instead of flickering until the
+  // async `permission` from GET /nests/:id resolves.
+  const canManageGovernance =
+    (isAdmin && (isOwner || isAnonOwned)) ||
+    (!isAdmin && (isOwner || permission === "owner" || permission === "admin"));
   // Caller's merged effective roles (collaborator + steward), nest-wide.
   const [roles, setRoles] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
@@ -1101,7 +1112,11 @@ export function NestView({
                 icon: Users,
                 onSelect: () => setShowShare(true),
               });
-            if (!isReadOnly && stewardshipEnabled && isAdmin)
+            // Gate on canManageGovernance (owner/admin on THIS nest), not the
+            // server-admin flag — otherwise a license admin who is only an
+            // editor collaborator here sees "Assign Steward" in the menu while
+            // the Steward tab (also canManageGovernance-gated) stays hidden.
+            if (!isReadOnly && stewardshipEnabled && canManageGovernance)
               actions.push({
                 label: "Assign Steward",
                 icon: Shield,

@@ -8,7 +8,10 @@ import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
-import { canManageWith } from "../governance/roles.js";
+import {
+  resolveNestPermission,
+  permissionLevel,
+} from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import {
@@ -657,8 +660,8 @@ export async function handleToolCall(
       // Listing the full roster is admin-only (same as REST GET /stewards).
       // Resolving stewards for a specific node above stays open so callers
       // can see who'd review their work.
-      if (!stewardship.canManageStewards(ctx.userEmail)) {
-        return "You don't have permission to list stewards. Only the super admin can do this.";
+      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userId))) {
+        return "You don't have permission to list stewards. Only a nest admin, the nest owner, or the server admin can do this.";
       }
 
       // List all stewards for the nest
@@ -830,11 +833,11 @@ export async function handleToolCall(
         return `Invalid scope "${args.scope}". Use: nest, tag, or document.`;
       }
 
-      // Same authority as REST/UI — only the server admin manages stewards.
-      // MCP calls don't pass through the /stewards HTTP middleware, so gate
-      // here with the shared helper.
-      if (!stewardship.canManageStewards(ctx.userEmail)) {
-        return "You don't have permission to manage stewards. Only the super admin can do this.";
+      // Same authority as REST/UI — server admin or nest owner/admin manages
+      // stewards. MCP calls don't pass through the /stewards HTTP middleware,
+      // so gate here with the shared helper.
+      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userId))) {
+        return "You don't have permission to manage stewards. Only a nest admin, the nest owner, or the server admin can do this.";
       }
 
       try {
@@ -861,14 +864,16 @@ export async function handleToolCall(
     }
 
     case "context_share_nest": {
-      // NOTE: this gate is intentionally stricter than REST/UI for now. REST
-      // POST /collaborators allows write+ collaborators to invite (escalation-
-      // capped in addCollaborator); this MCP tool still requires nest admin.
-      // TODO(CU-wdqcpzudw5 follow-up): bring MCP to parity — accept write+ and
-      // pass callerPermission into addCollaborator so the cap applies here too.
-      const roles = await stewardship.resolveUserRoles(ctx.nestId, ctx.userEmail);
-      if (!canManageWith(roles)) {
-        return "You don't have permission to share this nest via this tool (admin only). You can still invite from the UI with write access, or ask a nest admin.";
+      // Parity with REST POST /collaborators (CU-wdqcpzudw5 follow-up):
+      // write+ may invite; the escalation cap in addCollaborator stops
+      // anyone granting above their own level, so only admin/owner can
+      // hand out admin.
+      const callerPermission =
+        config.AUTH_MODE === "open"
+          ? ("owner" as const)
+          : await resolveNestPermission(ctx.nestId, ctx.userId);
+      if (permissionLevel(callerPermission) < permissionLevel("write")) {
+        return "You don't have permission to share this nest. Sharing needs write access — ask a nest admin or the owner.";
       }
       const permission = (args.permission as string) || "read";
       try {
@@ -877,6 +882,7 @@ export async function handleToolCall(
           email: args.email,
           permission,
           grantedByEmail: ctx.userEmail,
+          callerPermission,
         });
         const label =
           permission === "admin"
