@@ -46,7 +46,7 @@ async function loadComments(threadId: string): Promise<AnnotationComment[]> {
   const db = getDb();
   const rows = await db
     .all(
-      "SELECT id, author, body, created_at FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC",
+      "SELECT id, author, body, created_at FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
       [threadId],
     ) as Array<Omit<CommentRow, "thread_id">>;
   return rows.map((r) => ({
@@ -91,10 +91,30 @@ export async function getThread(threadId: string): Promise<AnnotationThread | nu
   return row ? await rowToThread(row) : null;
 }
 
+/**
+ * Per-node comment counts for a whole nest — used to sort document lists by
+ * "most comments" without N per-node queries. Counts annotation THREADS (each
+ * a distinct comment discussion) and the most recent thread time.
+ */
+export async function countThreadsByNode(
+  nestId: string,
+): Promise<Record<string, { count: number; lastAt: string | null }>> {
+  const rows = (await getDb().all(
+    `SELECT node_id, CAST(COUNT(*) AS INTEGER) AS count, MAX(created_at) AS last_at
+         FROM annotation_threads
+        WHERE nest_id = ?
+        GROUP BY node_id`,
+    [nestId],
+  )) as Array<{ node_id: string; count: number; last_at: string | null }>;
+  const out: Record<string, { count: number; lastAt: string | null }> = {};
+  for (const r of rows) out[r.node_id] = { count: r.count, lastAt: r.last_at };
+  return out;
+}
+
 export async function listThreads(nestId: string, nodeId: string): Promise<AnnotationThread[]> {
   const rows = await getDb()
     .all(
-      "SELECT * FROM annotation_threads WHERE nest_id = ? AND node_id = ? ORDER BY created_at ASC, rowid ASC",
+      "SELECT * FROM annotation_threads WHERE nest_id = ? AND node_id = ? ORDER BY created_at ASC, id ASC",
       [nestId, nodeId],
     ) as ThreadRow[];
   return Promise.all(rows.map(rowToThread));
@@ -274,7 +294,7 @@ export async function readArtifact(
  * title→slug algorithm ever changes. Passed as an explicit id to createNode so
  * create and update agree on the same id forever.
  */
-function derivedAnnotationsId(sourceNodeId: string): string {
+export function derivedAnnotationsId(sourceNodeId: string): string {
   const base = sourceNodeId.replace(/^nodes\//, "");
   return `nodes/${base}--annotations`;
 }
@@ -293,13 +313,23 @@ export async function syncAnnotationsNode(
 ): Promise<void> {
   try {
     let title = nodeId;
+    let type: string | null = null;
     try {
       const { storage } = await engineCache.get(nestId);
       const node = await storage.readDocument(nodeId);
       title = node.frontmatter?.title || nodeId;
+      type = (node.frontmatter?.type as string) || "document";
     } catch {
       /* artifact gone — still project an empty/placeholder doc */
     }
+
+    // Only artifacts feed the regen/MCP loop through a derived node — an agent
+    // regenerates the artifact from this feedback. Plain documents keep their
+    // comments in SQLite only: no derived `— Annotations` node (which would
+    // itself be annotatable → recursion, and clutter the nest). A failed read
+    // (type === null) is a deleted node — fall through so any existing derived
+    // node still gets its placeholder refresh.
+    if (type !== null && type !== "artifact") return;
 
     const threads = await listThreads(nestId, nodeId);
     const derivedTitle = `${title} — Annotations`;
