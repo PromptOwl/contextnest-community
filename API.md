@@ -8,7 +8,7 @@ Default port: `3838` (override via `PORT` env)
 Two methods, evaluated in order:
 
 1. **Cookie session** — `cnst_session=<id>` (set by `/auth/login` and `/auth/register`). Browser default.
-2. **Bearer API key** — `Authorization: Bearer cnst_<token>` (issued by `/auth/keys` or `/auth/invite`). Use for Postman / external tools.
+2. **Bearer API key** — `Authorization: Bearer cnst_<token>` (issued by `/auth/keys`). Use for Postman / external tools.
 
 Anonymous open mode (`AUTH_MODE=open`) bypasses auth on most read endpoints.
 
@@ -74,19 +74,22 @@ Revoke a key.
 ```
 
 ### POST `/auth/invite` (admin only)
-Creates an invited user + fresh API key, returns the plaintext key for the admin to hand off.
+Creates an invited user and returns a **temporary password** (once) for the admin to hand off. No API key is minted — teammates sign in with the temp password, then mint their own key from the Connect modal.
 ```json
-{ "email": "teammate@x.com", "label": "designer" }
+{ "email": "teammate@x.com" }
 ```
-- New email → user row with `is_invited = 1` and a random placeholder password (claimable by the teammate via `/auth/register`).
-- Existing email → reuses user, replaces api_key.
+- New email → user row with `is_invited = 1` and a temporary password.
+- Existing, not-yet-claimed email (`is_invited = 1`, hasn't logged in) → refreshes the temp password.
+- Existing, claimed email (has logged in or set their own password, `is_invited = 0`) → `409`; use Reset password instead.
+
+`is_invited` clears to `0` on the teammate's first successful login (or when they set their own password).
 
 Response (201):
 ```json
 {
-  "api_key": "cnst_...",
+  "temporary_password": "...",
   "user": { "id": "...", "email": "..." },
-  "message": "Copy this key and share it securely — it won't be shown again."
+  "message": "Share this temporary password securely — it won't be shown again."
 }
 ```
 
@@ -115,7 +118,7 @@ In-platform password reset — **no email server**. Provide a password, or omit 
 ```json
 { "password": "optional, min 8 chars" }
 ```
-Response: `{ "ok": true, "email": "...", "keys_revoked": true, "temporary_password": "<only when generated>" }`. Also revokes the user's API keys + sessions (covers the compromised-account case). The hash is never returned.
+Response: `{ "ok": true, "email": "...", "keys_revoked": false, "temporary_password": "<only when generated>" }`. Invalidates the user's sessions but **keeps their API keys** (a reset shouldn't break a teammate's CLI/MCP). Revoke a key separately (`DELETE /auth/keys/:keyId`) if it may be compromised. The hash is never returned.
 
 ### DELETE `/auth/users/:userId` (admin only)
 Removes a user — revokes api_keys, sessions, steward rows, and collaborator grants, then deletes the account. `400` if you target yourself; `409` if the user still owns nests (transfer/delete them first). Authored docs on disk are unaffected.

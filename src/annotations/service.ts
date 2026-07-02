@@ -46,7 +46,7 @@ async function loadComments(threadId: string): Promise<AnnotationComment[]> {
   const db = getDb();
   const rows = await db
     .all(
-      "SELECT id, author, body, created_at FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC",
+      "SELECT id, author, body, created_at FROM annotation_comments WHERE thread_id = ? ORDER BY created_at ASC, id ASC",
       [threadId],
     ) as Array<Omit<CommentRow, "thread_id">>;
   return rows.map((r) => ({
@@ -94,7 +94,7 @@ export async function getThread(threadId: string): Promise<AnnotationThread | nu
 export async function listThreads(nestId: string, nodeId: string): Promise<AnnotationThread[]> {
   const rows = await getDb()
     .all(
-      "SELECT * FROM annotation_threads WHERE nest_id = ? AND node_id = ? ORDER BY created_at ASC, rowid ASC",
+      "SELECT * FROM annotation_threads WHERE nest_id = ? AND node_id = ? ORDER BY created_at ASC, id ASC",
       [nestId, nodeId],
     ) as ThreadRow[];
   return Promise.all(rows.map(rowToThread));
