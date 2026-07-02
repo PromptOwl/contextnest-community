@@ -212,14 +212,14 @@ export async function listTeammates() {
   }>("/auth/teammates");
 }
 
-export async function inviteTeammate(email: string, label?: string) {
+export async function inviteTeammate(email: string) {
   return request<{
-    api_key: string;
+    temporary_password: string;
     user: { id: string; email: string };
     message: string;
   }>("/auth/invite", {
     method: "POST",
-    body: JSON.stringify({ email, label }),
+    body: JSON.stringify({ email }),
   });
 }
 

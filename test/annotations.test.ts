@@ -11,6 +11,7 @@ import {
   MAX_CONTEXT_CHARS,
   MAX_QUOTE_CHARS,
 } from "../src/annotations/projection.js";
+import { listThreads } from "../src/annotations/service.js";
 import type { AnnotationThread } from "../src/annotations/types.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -270,6 +271,106 @@ describe("annotations: hosted artifact + threaded comments", () => {
     // context assembly pulls them into the next iteration for free).
     expect(derived.content).toContain("Should be ARR not MRR.");
     expect(derived.content).toContain('quote "MRR of $400K"');
+  });
+
+  it("does NOT create a derived node when annotating a plain document", async () => {
+    // Comments on a hand-written document live in SQLite only — no derived
+    // `— Annotations` node (which would itself be annotatable → recursion).
+    const doc = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Plain Doc", content: "# hello world", type: "document" },
+      alice.apiKey,
+    );
+    const docId = doc.data.node.id;
+
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${docId}/annotations`,
+      { body: "a note on the doc" },
+      alice.apiKey,
+    );
+    expect(created.status).toBe(201);
+
+    // The thread persists and is listable…
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${docId}/annotations`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(list.data.threads).toHaveLength(1);
+
+    // …but no derived annotations node was minted for the document.
+    const nodes = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    const derived = nodes.data.nodes.find(
+      (n: any) => n.title === "Plain Doc — Annotations",
+    );
+    expect(derived).toBeUndefined();
+  });
+
+  it("purges threads + derived node when the source node is deleted", async () => {
+    // Fresh artifact so we don't disturb the shared fixture.
+    const art = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Temp Deck", content: HTML, type: "artifact" },
+      alice.apiKey,
+    );
+    const tempId = art.data.node.id;
+
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${tempId}/annotations`,
+      { body: "please clean me up" },
+      alice.apiKey,
+    );
+
+    // Pre-delete: a thread exists in SQLite and the derived node was minted.
+    expect(await listThreads(nestId, tempId)).toHaveLength(1);
+    let nodes = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(
+      nodes.data.nodes.some((n: any) => n.title === "Temp Deck — Annotations"),
+    ).toBe(true);
+
+    const del = await jsonRequest(
+      app,
+      "DELETE",
+      `/nests/${nestId}/nodes/${tempId}`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(del.status).toBe(200);
+
+    // Post-delete: threads purged (no orphan rows) and derived node gone.
+    expect(await listThreads(nestId, tempId)).toHaveLength(0);
+    nodes = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(
+      nodes.data.nodes.some((n: any) => n.title === "Temp Deck — Annotations"),
+    ).toBe(false);
   });
 });
 

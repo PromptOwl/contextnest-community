@@ -14,25 +14,37 @@ export async function resetAuthRateLimit() {
   rl._reset();
 }
 
-/** Set up an isolated data directory for each test suite */
+/** Set up an isolated data directory for each test suite.
+ *
+ * The actual DB connection is opened lazily by createTestApp (which calls
+ * initDb after vi.resetModules so the post-reset module graph the app uses is
+ * the one that gets initialised). Here we just point env at a fresh dir and
+ * best-effort close any connection left over on this module graph. */
 export function setupTestEnv() {
-  // Reset the cached DB connection so each suite gets its own
-  resetDb();
+  // Reset the cached DB connection so each suite gets its own (best-effort —
+  // adapter.close() is async; we don't block the sync setup on it).
+  void resetDb();
   // Clear rate-limiter state so auth-endpoint tests don't trip each other
   resetRateLimits();
 
-  const testDir = join(process.cwd(), "data", `test-${randomUUID()}`);
+  // Under data/test/ so the whole test corpus wipes with one `rm -rf data/test`.
+  const testDir = join(process.cwd(), "data", "test", randomUUID());
   mkdirSync(testDir, { recursive: true });
 
   process.env.DATA_ROOT = testDir;
   process.env.DATABASE_PATH = join(testDir, "test.db");
   process.env.PROMPTOWL_KEY = ""; // no license in tests
   process.env.TELEMETRY_ENABLED = "false";
+  // Default tests to SQLite regardless of any DB_DRIVER/DATABASE_URL set in
+  // the developer's shell (the gated Postgres suite sets these itself).
+  process.env.DB_DRIVER = "sqlite";
+  delete process.env.DATABASE_URL;
+  delete process.env.CLOUD_SQL_CONNECTION_NAME;
 
   return {
     dataDir: testDir,
-    cleanup() {
-      resetDb();
+    async cleanup() {
+      await resetDb();
       try {
         rmSync(testDir, { recursive: true, force: true });
       } catch {}
@@ -84,13 +96,14 @@ export async function createTestApp(
       // isLicenseAdminEmail directly, so the mock above doesn't reach it.
       // Override here too so resolveNestPermission/listSharedNests see the
       // test user as license admin.
-      isLicenseAdminUserId: (userId?: string | null) => {
+      isLicenseAdminUserId: async (userId?: string | null) => {
         if (!opts.ownerEmail || !userId) return false;
         try {
-          const row = dbClient
+          const row = (await dbClient
             .getDb()
-            .prepare("SELECT email FROM users WHERE id = ?")
-            .get(userId) as { email?: string } | undefined;
+            .get("SELECT email FROM users WHERE id = ?", [userId])) as
+            | { email?: string }
+            | undefined;
           return (
             !!row?.email &&
             row.email.toLowerCase() === opts.ownerEmail.toLowerCase()
@@ -101,6 +114,12 @@ export async function createTestApp(
       },
     };
   });
+  // Open the DB on the freshly-reset module graph the app will use.
+  {
+    const dbClient = await import("../src/db/client.js");
+    await dbClient.resetDb();
+    await dbClient.initDb();
+  }
   const { createApp } = await import("../src/app.js");
 
   // Managing the steward roster (sync/list/assign) is server-admin only.

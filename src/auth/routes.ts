@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { nowExpr } from "../db/sql.js";
 import {
   generateApiKey,
   hashApiKey,
@@ -84,18 +85,19 @@ function clientIp(c: any): string {
  * endpoints that need optional auth (e.g. /admin-status) and by manual
  * admin checks below that pre-date the middleware factor-out.
  */
-function resolveCallerUserId(c: any): string | null {
+async function resolveCallerUserId(c: any): Promise<string | null> {
   const sessionId = getSessionIdFromRequest(c);
   if (sessionId) {
-    const uid = resolveSession(sessionId);
+    const uid = await resolveSession(sessionId);
     if (uid) return uid;
   }
   const key = parseBearerToken(c.req.header("Authorization"));
   if (key) {
     const db = getDb();
-    const row = db
-      .prepare("SELECT user_id FROM api_keys WHERE key_hash = ?")
-      .get(hashApiKey(key)) as { user_id: string } | undefined;
+    const row = await db.get(
+      "SELECT user_id FROM api_keys WHERE key_hash = ?",
+      [hashApiKey(key)],
+    ) as { user_id: string } | undefined;
     if (row) return row.user_id;
   }
   return null;
@@ -109,15 +111,15 @@ function resolveCallerUserId(c: any): string | null {
 //   - admin-only → block an authenticated non-admin up front; an anonymous
 //     caller is allowed through and the owner-email check at /auth/promptowl
 //     is the real gate (the caller's email isn't known until then).
-function deviceGateBlocked(c: any): { error: string; gate: string } | null {
+async function deviceGateBlocked(c: any): Promise<{ error: string; gate: string } | null> {
   const gate = config.PROMPTOWL_SIGN_IN_GATE;
   if (gate === "open") return null;
   const error =
     "PromptOwl sign-in is restricted on this server. Use email and password, or contact your admin.";
   if (gate === "disabled") return { error, gate };
   // admin-only
-  const callerId = resolveCallerUserId(c);
-  if (callerId && !isLicenseAdminUserId(callerId)) return { error, gate };
+  const callerId = await resolveCallerUserId(c);
+  if (callerId && !(await isLicenseAdminUserId(callerId))) return { error, gate };
   return null;
 }
 
@@ -184,18 +186,20 @@ async function provisionPromptowlUser(
   const db = getDb();
   const meEmail = normalizeEmail(rawEmail);
 
-  let user = db
-    .prepare("SELECT id, email, name FROM users WHERE LOWER(email) = ?")
-    .get(meEmail) as
+  let user = await db.get(
+    "SELECT id, email, name FROM users WHERE LOWER(email) = ?",
+    [meEmail],
+  ) as
     | { id: string; email: string; name: string | null }
     | undefined;
 
   if (!user) {
     const userId = uuid();
     const placeholderHash = await hashPassword(uuid());
-    db.prepare(
+    await db.run(
       "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
-    ).run(userId, meEmail, rawName || null, placeholderHash);
+      [userId, meEmail, rawName || null, placeholderHash],
+    );
     user = { id: userId, email: meEmail, name: rawName || null };
 
     trackEvent("user.register", {
@@ -229,7 +233,7 @@ async function provisionPromptowlUser(
     };
   }
 
-  const sessionId = createSession(user.id, c.req.header("User-Agent"));
+  const sessionId = await createSession(user.id, c.req.header("User-Agent"));
   setSessionCookie(c, sessionId);
 
   return { ok: true, user, isAdmin, claimBlocked };
@@ -257,9 +261,10 @@ authRoutes.post("/register", async (c) => {
   }
 
   const db = getDb();
-  const existing = db
-    .prepare("SELECT id, is_invited FROM users WHERE LOWER(email) = ?")
-    .get(email) as { id: string; is_invited: number } | undefined;
+  const existing = await db.get(
+    "SELECT id, is_invited FROM users WHERE LOWER(email) = ?",
+    [email],
+  ) as { id: string; is_invited: number } | undefined;
 
   let userId: string;
   const passwordHash = await hashPassword(body.password);
@@ -271,24 +276,26 @@ authRoutes.post("/register", async (c) => {
     // working — just swap in the user-chosen password and clear the
     // pending flag.
     userId = existing.id;
-    db.prepare(
+    await db.run(
       "UPDATE users SET password_hash = ?, name = COALESCE(?, name), is_invited = 0 WHERE id = ?",
-    ).run(passwordHash, body.name || null, userId);
+      [passwordHash, body.name || null, userId],
+    );
     trackEvent("user.register", { userId, email, claimed: true });
   } else if (existing) {
     throw new ValidationError("Email already registered");
   } else {
     userId = uuid();
-    db.prepare(
+    await db.run(
       "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
-    ).run(userId, email, body.name || null, passwordHash);
+      [userId, email, body.name || null, passwordHash],
+    );
     trackEvent("user.register", { userId, email });
   }
 
   // Web session — browser auth lives in an httpOnly cookie. We do NOT
   // mint an external api_key here. The user can mint one on demand from
   // the Connect modal via /auth/keys.
-  const sessionId = createSession(userId, c.req.header("User-Agent"));
+  const sessionId = await createSession(userId, c.req.header("User-Agent"));
   setSessionCookie(c, sessionId);
 
   return c.json(
@@ -326,7 +333,10 @@ authRoutes.post("/login", async (c) => {
   // rely on the per-email key. Deploy behind a proxy that sets
   // x-forwarded-for to get real per-IP protection.
   const ip = clientIp(c);
-  const emailLower = body.email.toLowerCase();
+  // Normalize like every other path (register/invite/sso) — trim + lowercase.
+  // Login previously only lowercased, so a leading/trailing space from mobile
+  // autofill missed the LOWER(email) lookup → spurious "invalid credentials".
+  const emailLower = normalizeEmail(body.email);
   const hasIp = ip !== "unknown";
   const ipKey = `login:ip:${ip}`;
   const emailKey = `login:email:${emailLower}`;
@@ -335,17 +345,17 @@ authRoutes.post("/login", async (c) => {
   }
 
   const db = getDb();
-  const user = db
-    .prepare(
-      "SELECT id, email, name, password_hash, is_admin FROM users WHERE LOWER(email) = ?",
-    )
-    .get(emailLower) as
+  const user = await db.get(
+    "SELECT id, email, name, password_hash, is_admin, is_invited FROM users WHERE LOWER(email) = ?",
+    [emailLower],
+  ) as
     | {
       id: string;
       email: string;
       name: string | null;
       password_hash: string;
       is_admin: number;
+      is_invited: number;
     }
     | undefined;
 
@@ -364,15 +374,29 @@ authRoutes.post("/login", async (c) => {
   if (hasIp) clear(ipKey);
   clear(emailKey);
 
+  // A first successful login is a real "claim" too — an invited teammate has
+  // now accessed the account, so clear is_invited. This clears the "Invited"
+  // badge and makes a later /auth/invite on this email return 409 instead of
+  // silently overwriting a working login (re-invite only refreshes the temp
+  // password of someone who has NOT logged in yet). Use Reset password to
+  // re-issue a credential for an already-active teammate.
+  if (user.is_invited === 1) {
+    try {
+      await db.run("UPDATE users SET is_invited = 0 WHERE id = ?", [user.id]);
+    } catch {
+      // best-effort; never block a valid login on this bookkeeping update
+    }
+  }
+
   // Legacy SHA-256 password? Silently upgrade to bcrypt on this successful
   // login so the DB migrates itself over time without forcing a reset.
   if (check.needsRehash) {
     try {
       const newHash = await hashPassword(body.password);
-      db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
+      await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [
         newHash,
         user.id,
-      );
+      ]);
     } catch {
       // best-effort; never block login on the migration path
     }
@@ -380,7 +404,7 @@ authRoutes.post("/login", async (c) => {
 
   trackEvent("user.login", { userId: user.id });
 
-  const sessionId = createSession(user.id, c.req.header("User-Agent"));
+  const sessionId = await createSession(user.id, c.req.header("User-Agent"));
   setSessionCookie(c, sessionId);
 
   return c.json({
@@ -396,7 +420,7 @@ authRoutes.post("/login", async (c) => {
 // POST /auth/logout — clear the current browser session
 authRoutes.post("/logout", async (c) => {
   const sessionId = getSessionIdFromRequest(c);
-  if (sessionId) deleteSession(sessionId);
+  if (sessionId) await deleteSession(sessionId);
   clearSessionCookie(c);
   return c.json({ ok: true });
 });
@@ -415,9 +439,10 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
   const db = getDb();
   const userId = c.get("userId");
 
-  const existing = db
-    .prepare("SELECT key_prefix FROM api_keys WHERE user_id = ?")
-    .get(userId) as { key_prefix: string } | undefined;
+  const existing = await db.get(
+    "SELECT key_prefix FROM api_keys WHERE user_id = ?",
+    [userId],
+  ) as { key_prefix: string } | undefined;
 
   if (existing) {
     return c.json(
@@ -431,15 +456,16 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
 
   const apiKey = generateApiKey();
   const keyId = uuid();
-  db.prepare(
+  await db.run(
     "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, nest_id, label) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(
-    keyId,
-    userId,
-    hashApiKey(apiKey),
-    getKeyPrefix(apiKey),
-    body.nest_id || null,
-    body.label || null,
+    [
+      keyId,
+      userId,
+      hashApiKey(apiKey),
+      getKeyPrefix(apiKey),
+      body.nest_id || null,
+      body.label || null,
+    ],
   );
 
   return c.json(
@@ -462,23 +488,25 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
   const apiKey = generateApiKey();
   const keyId = uuid();
 
-  const prior = db
-    .prepare("SELECT label, nest_id FROM api_keys WHERE user_id = ?")
-    .get(userId) as { label: string | null; nest_id: string | null } | undefined;
+  const prior = await db.get(
+    "SELECT label, nest_id FROM api_keys WHERE user_id = ?",
+    [userId],
+  ) as { label: string | null; nest_id: string | null } | undefined;
 
-  db.transaction(() => {
-    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(userId);
-    db.prepare(
+  await db.transaction(async (tx) => {
+    await tx.run("DELETE FROM api_keys WHERE user_id = ?", [userId]);
+    await tx.run(
       "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, nest_id, label) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(
-      keyId,
-      userId,
-      hashApiKey(apiKey),
-      getKeyPrefix(apiKey),
-      body.nest_id ?? prior?.nest_id ?? null,
-      body.label ?? prior?.label ?? null,
+      [
+        keyId,
+        userId,
+        hashApiKey(apiKey),
+        getKeyPrefix(apiKey),
+        body.nest_id ?? prior?.nest_id ?? null,
+        body.label ?? prior?.label ?? null,
+      ],
     );
-  })();
+  });
 
   return c.json({ api_key: apiKey, key_prefix: getKeyPrefix(apiKey) });
 });
@@ -486,20 +514,20 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
 // GET /auth/keys — return the caller's key metadata (no plaintext).
 authRoutes.get("/keys", authMiddleware, async (c) => {
   const db = getDb();
-  const keys = db
-    .prepare(
-      "SELECT id, key_prefix, nest_id, label, created_at, last_used_at FROM api_keys WHERE user_id = ?",
-    )
-    .all(c.get("userId"));
+  const keys = await db.all(
+    "SELECT id, key_prefix, nest_id, label, created_at, last_used_at FROM api_keys WHERE user_id = ?",
+    [c.get("userId")],
+  );
   return c.json({ keys });
 });
 
 // DELETE /auth/keys/:keyId — revoke the caller's external key.
 authRoutes.delete("/keys/:keyId", authMiddleware, async (c) => {
   const db = getDb();
-  const result = db
-    .prepare("DELETE FROM api_keys WHERE id = ? AND user_id = ?")
-    .run(c.req.param("keyId"), c.get("userId"));
+  const result = await db.run(
+    "DELETE FROM api_keys WHERE id = ? AND user_id = ?",
+    [c.req.param("keyId"), c.get("userId")],
+  );
 
   if (result.changes === 0) {
     return c.json({ error: "Key not found" }, 404);
@@ -511,7 +539,7 @@ authRoutes.delete("/keys/:keyId", authMiddleware, async (c) => {
 
 // POST /auth/device — initiate PromptOwl device auth
 authRoutes.post("/device", async (c) => {
-  const blocked = deviceGateBlocked(c);
+  const blocked = await deviceGateBlocked(c);
   if (blocked) return c.json(blocked, 403);
   if (!tryConsume(`device:ip:${clientIp(c)}`, DEVICE_LIMIT)) {
     return c.json({ error: "Too many device auth attempts, try again later" }, 429);
@@ -543,7 +571,7 @@ authRoutes.post("/device", async (c) => {
 
 // GET /auth/device/poll — poll for device approval
 authRoutes.get("/device/poll", async (c) => {
-  const blocked = deviceGateBlocked(c);
+  const blocked = await deviceGateBlocked(c);
   if (blocked) return c.json(blocked, 403);
   const code = c.req.query("code");
   const clientSecret = c.req.query("client_secret");
@@ -677,12 +705,13 @@ authRoutes.get("/sso", async (c) => {
   // atomic replay guard.
   if (!claims.jti) return ssoError("invalid_ticket");
   const db = getDb();
-  db.prepare("DELETE FROM sso_used_jti WHERE expires_at < datetime('now')").run();
+  await db.run(`DELETE FROM sso_used_jti WHERE expires_at < ${nowExpr(db)}`);
   const expiresAtIso = new Date((claims.exp ?? 0) * 1000).toISOString();
   try {
-    db.prepare(
+    await db.run(
       "INSERT INTO sso_used_jti (jti, expires_at) VALUES (?, ?)",
-    ).run(claims.jti, expiresAtIso);
+      [claims.jti, expiresAtIso],
+    );
   } catch (err: any) {
     // PRIMARY KEY conflict = ticket already redeemed (replay). Any other DB
     // fault (missing table, disk full, corruption) must NOT masquerade as
@@ -703,7 +732,7 @@ authRoutes.get("/sso", async (c) => {
   try {
     result = await provisionPromptowlUser(c, sub, claims.name);
   } catch (err) {
-    db.prepare("DELETE FROM sso_used_jti WHERE jti = ?").run(claims.jti);
+    await db.run("DELETE FROM sso_used_jti WHERE jti = ?", [claims.jti]);
     console.error("[sso] provisioning failed; released jti for retry:", err);
     return ssoError("service_error");
   }
@@ -723,24 +752,26 @@ authRoutes.get("/admin-status", async (c) => {
   const ownerEmail = lic?.valid ? lic.ownerEmail : null;
   let admin: { email: string; name: string | null } | null = null;
   if (ownerEmail) {
-    const ownerRow = db
-      .prepare("SELECT name FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1")
-      .get(ownerEmail) as { name: string | null } | undefined;
+    const ownerRow = await db.get(
+      "SELECT name FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1",
+      [ownerEmail],
+    ) as { name: string | null } | undefined;
     admin = { email: ownerEmail, name: ownerRow?.name ?? null };
   }
 
   // Optional auth — surface the caller's identity if a session cookie
   // or Bearer key is present; tolerate anonymous callers.
-  const callerId = resolveCallerUserId(c);
+  const callerId = await resolveCallerUserId(c);
   let me: {
     email: string;
     name: string | null;
     is_admin: boolean;
   } | null = null;
   if (callerId) {
-    const row = db
-      .prepare("SELECT email, name FROM users WHERE id = ?")
-      .get(callerId) as
+    const row = await db.get(
+      "SELECT email, name FROM users WHERE id = ?",
+      [callerId],
+    ) as
       | { email: string; name: string | null }
       | undefined;
     if (row) {
@@ -769,9 +800,10 @@ authRoutes.post("/password", authMiddleware, async (c) => {
 
   const db = getDb();
   const userId = c.get("userId");
-  const user = db
-    .prepare("SELECT password_hash FROM users WHERE id = ?")
-    .get(userId) as { password_hash: string } | undefined;
+  const user = await db.get(
+    "SELECT password_hash FROM users WHERE id = ?",
+    [userId],
+  ) as { password_hash: string } | undefined;
   if (!user) throw new ValidationError("User not found");
 
   const check = await verifyPassword(body.current, user.password_hash);
@@ -795,13 +827,18 @@ authRoutes.post("/password", authMiddleware, async (c) => {
   }
 
   const newHash = await hashPassword(body.next);
-  db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
+  // Clear is_invited: choosing your own password is the real "claim" moment for
+  // an invited teammate (invite no longer routes through /auth/register). This
+  // is what makes the /auth/invite 409 guard fire on a re-invite — otherwise a
+  // teammate who claimed via temp-password→change-password stays is_invited=1
+  // forever and a later re-invite would silently clobber their chosen password.
+  await db.run("UPDATE users SET password_hash = ?, is_invited = 0 WHERE id = ?", [
     newHash,
     userId,
-  );
+  ]);
   // Force logout everywhere so a stolen session cookie from a prior
   // compromise is immediately invalidated by the password change.
-  deleteAllSessionsForUser(userId);
+  await deleteAllSessionsForUser(userId);
   clearSessionCookie(c);
 
   return c.json({ ok: true });
@@ -813,11 +850,11 @@ authRoutes.post("/password", authMiddleware, async (c) => {
 // the admin to copy and hand over. The target's sessions are invalidated so a
 // prior login/cookie stops working. The hash is never returned.
 authRoutes.post("/admin/reset-password/:userId", async (c) => {
-  const callerId = resolveCallerUserId(c);
+  const callerId = await resolveCallerUserId(c);
   if (!callerId) {
     return c.json({ error: "Authentication required." }, 401);
   }
-  if (!isLicenseAdminUserId(callerId)) {
+  if (!(await isLicenseAdminUserId(callerId))) {
     return c.json(
       { error: "Only the license-admin user can reset passwords." },
       403,
@@ -826,9 +863,10 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
 
   const targetId = c.req.param("userId");
   const db = getDb();
-  const target = db
-    .prepare("SELECT id, email FROM users WHERE id = ?")
-    .get(targetId) as { id: string; email: string } | undefined;
+  const target = await db.get(
+    "SELECT id, email FROM users WHERE id = ?",
+    [targetId],
+  ) as { id: string; email: string } | undefined;
   if (!target) return c.json({ error: "User not found" }, 404);
 
   let supplied: string | undefined;
@@ -849,21 +887,20 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   // covers the compromised-account case, so a stolen key must stop working
   // too (the user re-issues a key after signing in). Sessions are cleared
   // separately below.
-  db.transaction(() => {
-    db.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(
+  await db.transaction(async (tx) => {
+    await tx.run("UPDATE users SET password_hash = ? WHERE id = ?", [
       newHash,
       target.id,
-    );
-    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(target.id);
-  })();
-  deleteAllSessionsForUser(target.id);
+    ]);
+  });
+  await deleteAllSessionsForUser(target.id);
 
   trackEvent("admin.reset_password", { adminId: callerId, userId: target.id });
 
   return c.json({
     ok: true,
     email: target.email,
-    keys_revoked: true,
+    keys_revoked: false,
     // Plaintext returned ONCE, only when the server generated it.
     temporary_password: generated ?? undefined,
   });
@@ -876,11 +913,11 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
 // orphaning nest data. Authored docs live on disk under the nest and are
 // unaffected.
 authRoutes.delete("/users/:userId", async (c) => {
-  const callerId = resolveCallerUserId(c);
+  const callerId = await resolveCallerUserId(c);
   if (!callerId) {
     return c.json({ error: "Authentication required." }, 401);
   }
-  if (!isLicenseAdminUserId(callerId)) {
+  if (!(await isLicenseAdminUserId(callerId))) {
     return c.json(
       { error: "Only the license-admin user can remove users." },
       403,
@@ -892,15 +929,17 @@ authRoutes.delete("/users/:userId", async (c) => {
   }
 
   const db = getDb();
-  const target = db
-    .prepare("SELECT id, email FROM users WHERE id = ?")
-    .get(targetId) as { id: string; email: string } | undefined;
+  const target = await db.get(
+    "SELECT id, email FROM users WHERE id = ?",
+    [targetId],
+  ) as { id: string; email: string } | undefined;
   if (!target) return c.json({ error: "User not found" }, 404);
 
   const ownedNests = (
-    db
-      .prepare("SELECT COUNT(*) AS c FROM nests WHERE user_id = ?")
-      .get(target.id) as { c: number }
+    await db.get(
+      "SELECT COUNT(*) AS c FROM nests WHERE user_id = ?",
+      [target.id],
+    ) as { c: number }
   ).c;
   if (ownedNests > 0) {
     return c.json(
@@ -912,17 +951,18 @@ authRoutes.delete("/users/:userId", async (c) => {
     );
   }
 
-  db.transaction(() => {
-    db.prepare(
+  await db.transaction(async (tx) => {
+    await tx.run(
       "DELETE FROM stewards WHERE user_id = ? OR lower(user_email) = lower(?)",
-    ).run(target.id, target.email);
-    db.prepare("DELETE FROM nest_collaborators WHERE user_id = ?").run(
-      target.id,
+      [target.id, target.email],
     );
-    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(target.id);
-    db.prepare("DELETE FROM users WHERE id = ?").run(target.id);
-  })();
-  deleteAllSessionsForUser(target.id);
+    await tx.run("DELETE FROM nest_collaborators WHERE user_id = ?", [
+      target.id,
+    ]);
+    await tx.run("DELETE FROM api_keys WHERE user_id = ?", [target.id]);
+    await tx.run("DELETE FROM users WHERE id = ?", [target.id]);
+  });
+  await deleteAllSessionsForUser(target.id);
 
   trackEvent("admin.remove_user", { adminId: callerId, userId: target.id });
 
@@ -935,7 +975,7 @@ authRoutes.post("/invite", async (c) => {
   if (!body.email) throw new ValidationError("email is required");
   const email = normalizeEmail(body.email);
 
-  const callerId = resolveCallerUserId(c);
+  const callerId = await resolveCallerUserId(c);
   if (!callerId) {
     return c.json(
       {
@@ -946,7 +986,7 @@ authRoutes.post("/invite", async (c) => {
     );
   }
   const db = getDb();
-  if (!isLicenseAdminUserId(callerId)) {
+  if (!(await isLicenseAdminUserId(callerId))) {
     return c.json(
       {
         error:
@@ -956,45 +996,56 @@ authRoutes.post("/invite", async (c) => {
     );
   }
 
-  // Find or create user by email
-  let user = db
-    .prepare("SELECT id, email FROM users WHERE LOWER(email) = ?")
-    .get(email) as { id: string; email: string } | undefined;
+  // Find user by email (case-insensitive).
+  const existing = await db.get(
+    "SELECT id, email, is_invited FROM users WHERE LOWER(email) = ?",
+    [email],
+  ) as { id: string; email: string; is_invited: number } | undefined;
 
-  if (!user) {
-    const userId = uuid();
-    const placeholderHash = await hashPassword(uuid());
-    db.prepare(
-      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-    ).run(userId, email, null, placeholderHash);
-    user = { id: userId, email };
+  // A fully-established user (one who claimed their own password) already has a
+  // working login — don't silently clobber it from the invite flow. Point the
+  // admin at Reset password instead.
+  if (existing && existing.is_invited === 0) {
+    return c.json(
+      {
+        error:
+          "A user with this email already exists. Use Reset password to issue them a new password.",
+      },
+      409,
+    );
   }
 
-  // Single api_key per user — if invitee already has one, we replace it
-  // so the admin can hand a fresh plaintext to the teammate. The prior
-  // key is invalidated atomically.
-  const apiKey = generateApiKey();
-  const keyId = uuid();
-  db.transaction(() => {
-    db.prepare("DELETE FROM api_keys WHERE user_id = ?").run(user!.id);
-    db.prepare(
-      "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, label) VALUES (?, ?, ?, ?, ?)",
-    ).run(
-      keyId,
-      user!.id,
-      hashApiKey(apiKey),
-      getKeyPrefix(apiKey),
-      body.label || "teammate",
-    );
-  })();
+  // Issue a PASSWORD, not an API key. The admin adds teammates so they can log
+  // in; teammates mint their own API keys (for CLI/MCP/Hootie) after signing in.
+  // Readable 16-char temporary password, returned ONCE for the admin to hand
+  // over. Re-inviting a not-yet-claimed user refreshes it (so "delete + re-add"
+  // / re-invite now produces a working credential).
+  const tempPassword = uuid().replace(/-/g, "").slice(0, 16);
+  const passwordHash = await hashPassword(tempPassword);
 
-  trackEvent("admin.invite", { adminId: callerId, email: body.email });
+  let userId: string;
+  if (existing) {
+    userId = existing.id;
+    await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [
+      passwordHash,
+      userId,
+    ]);
+  } else {
+    userId = uuid();
+    await db.run(
+      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
+      [userId, email, null, passwordHash],
+    );
+  }
+
+  trackEvent("admin.invite", { adminId: callerId, email });
 
   return c.json(
     {
-      api_key: apiKey,
-      user: { id: user.id, email: user.email },
-      message: "Copy this key and share it securely — it won't be shown again.",
+      temporary_password: tempPassword,
+      user: { id: userId, email },
+      message:
+        "Share this temporary password securely. Your teammate signs in with their email + this password, then can change it and create their own API key.",
     },
     201,
   );
@@ -1002,7 +1053,7 @@ authRoutes.post("/invite", async (c) => {
 
 // GET /auth/teammates — admin-only, list all users + their keys
 authRoutes.get("/teammates", async (c) => {
-  const callerId = resolveCallerUserId(c);
+  const callerId = await resolveCallerUserId(c);
   if (!callerId) {
     return c.json(
       {
@@ -1014,7 +1065,7 @@ authRoutes.get("/teammates", async (c) => {
   }
 
   const db = getDb();
-  if (!isLicenseAdminUserId(callerId)) {
+  if (!(await isLicenseAdminUserId(callerId))) {
     return c.json(
       {
         error:
@@ -1024,16 +1075,15 @@ authRoutes.get("/teammates", async (c) => {
     );
   }
 
-  const teammates = db
-    .prepare(
-      `SELECT u.id, u.email, u.name, u.is_invited,
+  const teammates = await db.all(
+    `SELECT u.id, u.email, u.name, u.is_invited,
          (SELECT COUNT(*) FROM api_keys WHERE user_id = u.id) as key_count,
          (SELECT MAX(last_used_at) FROM api_keys WHERE user_id = u.id) as last_active
        FROM users u
        WHERE u.id != ?
        ORDER BY u.created_at DESC`,
-    )
-    .all(ANON_USER_ID) as Array<{
+    [ANON_USER_ID],
+  ) as Array<{
       id: string;
       email: string;
       name: string | null;
@@ -1047,9 +1097,8 @@ authRoutes.get("/teammates", async (c) => {
   // (is_invited = 0, password set via /auth/register) AND no api_key
   // (admin hasn't issued one via /auth/invite-teammate). If either
   // path exists, the steward can act and shouldn't be flagged.
-  const pendingStewards = db
-    .prepare(
-      `SELECT DISTINCT s.user_email AS email
+  const pendingStewards = await db.all(
+    `SELECT DISTINCT s.user_email AS email
          FROM stewards s
         WHERE s.is_active = 1
           AND NOT EXISTS (
@@ -1063,8 +1112,7 @@ authRoutes.get("/teammates", async (c) => {
                )
           )
         ORDER BY s.user_email`,
-    )
-    .all() as Array<{ email: string }>;
+  ) as Array<{ email: string }>;
 
   // Sort admins first; underlying SQL is_admin column is unreliable
   // (license-derived), so resolve in JS after the map.

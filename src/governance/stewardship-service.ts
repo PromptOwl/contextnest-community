@@ -32,36 +32,37 @@ import type {
 
 // ─── CRUD ───────────────────────────────────────────────────────────────
 
-export function assignSteward(data: Omit<Steward, "id">): Steward {
+export async function assignSteward(data: Omit<Steward, "id">): Promise<Steward> {
   const db = getDb();
   const id = uuid();
 
-  db.prepare(
+  await db.run(
     `INSERT INTO stewards
      (id, nest_id, scope, node_pattern, tag_name, user_email, user_id, role, assigned_by, is_active)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    id,
-    data.nestId,
-    data.scope,
-    data.nodePattern || null,
-    data.tagName || null,
-    data.userEmail,
-    data.userId || null,
-    data.role,
-    data.assignedBy,
-    data.isActive ? 1 : 0,
+    [
+      id,
+      data.nestId,
+      data.scope,
+      data.nodePattern || null,
+      data.tagName || null,
+      data.userEmail,
+      data.userId || null,
+      data.role,
+      data.assignedBy,
+      data.isActive ? 1 : 0,
+    ],
   );
 
   return { ...data, id };
 }
 
-export function removeSteward(id: string): void {
+export async function removeSteward(id: string): Promise<void> {
   const db = getDb();
   // Steward and collaborator grants are independent — removing a steward
   // only drops the steward row. Any nest_collaborators access the user has
   // is managed separately via the Share UI and is left untouched.
-  db.prepare("DELETE FROM stewards WHERE id = ?").run(id);
+  await db.run("DELETE FROM stewards WHERE id = ?", [id]);
 }
 
 const VALID_STEWARD_ROLES: StewardRole[] = ["editor", "reviewer", "viewer"];
@@ -81,11 +82,12 @@ export interface StewardUpdate {
  * columns). Re-scoping is guarded against duplicates: another active row for the
  * same (nest, scope, target, user) is rejected with a ConflictError.
  */
-export function updateSteward(id: string, update: StewardUpdate): Steward {
+export async function updateSteward(id: string, update: StewardUpdate): Promise<Steward> {
   const db = getDb();
-  const current = db
-    .prepare("SELECT * FROM stewards WHERE id = ? AND is_active = 1")
-    .get(id) as any;
+  const current = await db.get(
+    "SELECT * FROM stewards WHERE id = ? AND is_active = 1",
+    [id],
+  ) as any;
   if (!current) {
     throw new ValidationError("Steward not found");
   }
@@ -122,15 +124,14 @@ export function updateSteward(id: string, update: StewardUpdate): Steward {
     }
 
     // Block collision: same user can't hold two rows for the same scope+target.
-    const dup = db
-      .prepare(
-        `SELECT role FROM stewards
+    const dup = await db.get(
+      `SELECT role FROM stewards
          WHERE nest_id = ? AND is_active = 1 AND id != ? AND scope = ?
            AND user_email = ?
            AND COALESCE(node_pattern, '') = COALESCE(?, '')
            AND COALESCE(tag_name, '') = COALESCE(?, '')`,
-      )
-      .get(current.nest_id, id, scope, current.user_email, nodePattern, tagName) as
+      [current.nest_id, id, scope, current.user_email, nodePattern, tagName],
+    ) as
       | { role: string }
       | undefined;
     if (dup) {
@@ -146,38 +147,40 @@ export function updateSteward(id: string, update: StewardUpdate): Steward {
     }
   }
 
-  db.prepare(
+  await db.run(
     "UPDATE stewards SET role = ?, scope = ?, node_pattern = ?, tag_name = ? WHERE id = ?",
-  ).run(role, scope, nodePattern, tagName, id);
+    [role, scope, nodePattern, tagName, id],
+  );
 
-  const row = db.prepare("SELECT * FROM stewards WHERE id = ?").get(id) as any;
+  const row = await db.get("SELECT * FROM stewards WHERE id = ?", [id]) as any;
   return rowToSteward(row);
 }
 
 /** Back-compat thin wrapper — role-only update. */
-export function updateStewardRole(id: string, role: StewardRole): Steward {
+export async function updateStewardRole(id: string, role: StewardRole): Promise<Steward> {
   return updateSteward(id, { role });
 }
 
-export function getSteward(id: string): Steward | null {
+export async function getSteward(id: string): Promise<Steward | null> {
   const db = getDb();
-  const row = db.prepare("SELECT * FROM stewards WHERE id = ?").get(id) as any;
+  const row = await db.get("SELECT * FROM stewards WHERE id = ?", [id]) as any;
   return row ? rowToSteward(row) : null;
 }
 
 export async function getStewardsForNest(nestId: string): Promise<Steward[]> {
   const db = getDb();
-  const rows = db
-    .prepare("SELECT * FROM stewards WHERE nest_id = ? AND is_active = 1")
-    .all(nestId) as any[];
+  const rows = await db.all(
+    "SELECT * FROM stewards WHERE nest_id = ? AND is_active = 1",
+    [nestId],
+  ) as any[];
   return enrichWithTitles(nestId, rows.map(rowToSteward));
 }
 
-export function getStewardsForScope(params: {
+export async function getStewardsForScope(params: {
   nestId: string;
   scope?: StewardshipScope;
   scopeTarget?: string;
-}): Steward[] {
+}): Promise<Steward[]> {
   const db = getDb();
   let sql = "SELECT * FROM stewards WHERE nest_id = ? AND is_active = 1";
   const args: any[] = [params.nestId];
@@ -191,7 +194,7 @@ export function getStewardsForScope(params: {
     args.push(params.scopeTarget, params.scopeTarget);
   }
 
-  return (db.prepare(sql).all(...args) as any[]).map(rowToSteward);
+  return (await db.all(sql, args) as any[]).map(rowToSteward);
 }
 
 /**
@@ -216,7 +219,7 @@ export async function listStewards(params: {
     args.push(like, like, like);
   }
   sql += " ORDER BY scope, COALESCE(node_pattern, tag_name, ''), user_email";
-  const stewards = (db.prepare(sql).all(...args) as any[]).map(rowToSteward);
+  const stewards = (await db.all(sql, args) as any[]).map(rowToSteward);
 
   return enrichWithTitles(params.nestId, stewards);
 }
@@ -290,7 +293,7 @@ export async function createStewardRecord(params: {
   // on the same doc). Likewise, whoever manages the roster can't grant a steward
   // role to themselves. Block both so the roster only holds delegated users.
   const actor = (params.assignedBy || "").trim().toLowerCase();
-  const ownerEmail = (getNestOwnerEmail(params.nestId) || "").toLowerCase();
+  const ownerEmail = (await getNestOwnerEmail(params.nestId) || "").toLowerCase();
 
   for (const user of params.users) {
     const email = user.email.trim().toLowerCase();
@@ -308,20 +311,19 @@ export async function createStewardRecord(params: {
     }
 
     // Check for existing active row (idempotent).
-    const existing = db
-      .prepare(
-        `SELECT * FROM stewards
+    const existing = await db.get(
+      `SELECT * FROM stewards
          WHERE nest_id = ? AND is_active = 1 AND scope = ? AND user_email = ?
            AND COALESCE(node_pattern, '') = COALESCE(?, '')
            AND COALESCE(tag_name, '') = COALESCE(?, '')`,
-      )
-      .get(
+      [
         params.nestId,
         params.scope,
         email,
         nodePattern ?? null,
         tagName ?? null,
-      ) as any;
+      ],
+    ) as any;
 
     if (existing) {
       const scopeLabel =
@@ -335,11 +337,12 @@ export async function createStewardRecord(params: {
       );
     }
 
-    const userRow = db
-      .prepare("SELECT id FROM users WHERE email = ?")
-      .get(email) as { id: string } | undefined;
+    const userRow = await db.get(
+      "SELECT id FROM users WHERE email = ?",
+      [email],
+    ) as { id: string } | undefined;
 
-    const created = assignSteward({
+    const created = await assignSteward({
       nestId: params.nestId,
       scope: params.scope,
       nodePattern,
@@ -355,9 +358,10 @@ export async function createStewardRecord(params: {
   }
 
   // If adding any stewards, ensure governed mode is on.
-  db.prepare(
+  await db.run(
     "UPDATE nests SET stewardship_enabled = 1 WHERE id = ? AND stewardship_enabled = 0",
-  ).run(params.nestId);
+    [params.nestId],
+  );
 
   return results;
 }
@@ -377,21 +381,21 @@ export interface ResolveResult {
   ownerEmail?: string;
 }
 
-export function resolveStewardsForNode(
+export async function resolveStewardsForNode(
   nestId: string,
   nodeId: string,
-): ResolvedSteward[] {
-  return resolve(nestId, nodeId).stewards;
+): Promise<ResolvedSteward[]> {
+  return (await resolve(nestId, nodeId)).stewards;
 }
 
-export function resolveStewardsWithFallback(
+export async function resolveStewardsWithFallback(
   nestId: string,
   nodeId: string,
-): ResolveResult {
+): Promise<ResolveResult> {
   return resolve(nestId, nodeId);
 }
 
-function resolve(nestId: string, nodeId: string): ResolveResult {
+async function resolve(nestId: string, nodeId: string): Promise<ResolveResult> {
   const db = getDb();
 
   type Row = {
@@ -413,9 +417,8 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
   // Document: exact match on node_pattern (no globs — keep SQL simple).
   // Tag: JOIN on node_tag_index for fast tag lookup.
   // Nest: unconditional.
-  const rows = db
-    .prepare(
-      `
+  const rows = await db.all(
+    `
       SELECT s.*, 1 AS priority, ('document: ' || s.node_pattern) AS match_source
         FROM stewards s
         WHERE s.nest_id = ? AND s.is_active = 1 AND s.scope = 'document'
@@ -434,12 +437,12 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
         WHERE s.nest_id = ? AND s.is_active = 1 AND s.scope = 'nest'
       ORDER BY priority ASC, user_email ASC
       `,
-    )
-    .all(
+    [
       nestId, nodeId,                  // document branch
       nestId, nodeId,                  // tag branch
       nestId,                          // nest branch
-    ) as Row[];
+    ],
+  ) as Row[];
 
   const resolved: ResolvedSteward[] = rows.map((row) => ({
     steward: rowToSteward(row),
@@ -452,13 +455,12 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
   }
 
   // Fallback: nest owner is the implicit steward when nothing resolves.
-  const owner = db
-    .prepare(
-      `SELECT u.email FROM nests n
+  const owner = await db.get(
+    `SELECT u.email FROM nests n
        JOIN users u ON u.id = n.user_id
        WHERE n.id = ?`,
-    )
-    .get(nestId) as { email: string } | undefined;
+    [nestId],
+  ) as { email: string } | undefined;
 
   return {
     stewards: [],
@@ -471,25 +473,25 @@ function resolve(nestId: string, nodeId: string): ResolveResult {
 // Merge collaborator perms (nest_collaborators) + steward rows into one
 // effective-role array. See roles.ts for the vocabulary and capability map.
 
-function userIdForEmail(email: string): string | undefined {
+async function userIdForEmail(email: string): Promise<string | undefined> {
   const db = getDb();
-  const row = db
-    .prepare("SELECT id FROM users WHERE LOWER(email) = LOWER(?)")
-    .get(email) as { id: string } | undefined;
+  const row = await db.get(
+    "SELECT id FROM users WHERE LOWER(email) = LOWER(?)",
+    [email],
+  ) as { id: string } | undefined;
   return row?.id;
 }
 
 /** Distinct active steward roles a user holds anywhere on the nest. */
-export function getStewardRolesForUser(
+export async function getStewardRolesForUser(
   nestId: string,
   userEmail: string,
-): StewardRole[] {
+): Promise<StewardRole[]> {
   const db = getDb();
-  const rows = db
-    .prepare(
-      "SELECT DISTINCT role FROM stewards WHERE nest_id = ? AND is_active = 1 AND LOWER(user_email) = LOWER(?)",
-    )
-    .all(nestId, userEmail) as { role: StewardRole }[];
+  const rows = await db.all(
+    "SELECT DISTINCT role FROM stewards WHERE nest_id = ? AND is_active = 1 AND LOWER(user_email) = LOWER(?)",
+    [nestId, userEmail],
+  ) as { role: StewardRole }[];
   return rows.map((r) => r.role);
 }
 
@@ -498,32 +500,30 @@ export function getStewardRolesForUser(
  * The full roster is admin-only, but a reviewer/editor still needs their own
  * scoped rows to drive per-node affordances — this exposes just those.
  */
-export function getStewardsForUser(
+export async function getStewardsForUser(
   nestId: string,
   userEmail: string,
-): Steward[] {
+): Promise<Steward[]> {
   const db = getDb();
-  const rows = db
-    .prepare(
-      "SELECT * FROM stewards WHERE nest_id = ? AND is_active = 1 AND LOWER(user_email) = LOWER(?)",
-    )
-    .all(nestId, userEmail) as any[];
+  const rows = await db.all(
+    "SELECT * FROM stewards WHERE nest_id = ? AND is_active = 1 AND LOWER(user_email) = LOWER(?)",
+    [nestId, userEmail],
+  ) as any[];
   return rows.map(rowToSteward);
 }
 
 /** A user's nest_collaborators.permission, or null if not a collaborator. */
-export function getCollaboratorRole(
+export async function getCollaboratorRole(
   nestId: string,
   userEmail: string,
-): string | null {
-  const userId = userIdForEmail(userEmail);
+): Promise<string | null> {
+  const userId = await userIdForEmail(userEmail);
   if (!userId) return null;
   const db = getDb();
-  const row = db
-    .prepare(
-      "SELECT permission FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
-    )
-    .get(nestId, userId) as { permission: string } | undefined;
+  const row = await db.get(
+    "SELECT permission FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
+    [nestId, userId],
+  ) as { permission: string } | undefined;
   return row?.permission ?? null;
 }
 
@@ -533,36 +533,36 @@ export function getCollaboratorRole(
  * that node (document > tag > nest); otherwise every active steward row on
  * the nest counts (used for list display and coarse nest-wide gating).
  */
-export function resolveUserRoles(
+export async function resolveUserRoles(
   nestId: string,
   userEmail: string,
   opts?: { nodeId?: string },
-): EffectiveRole[] {
+): Promise<EffectiveRole[]> {
   const roles = new Set<EffectiveRole>();
 
   if (isSuperAdmin(userEmail)) roles.add("admin");
 
-  const owner = getNestOwnerEmail(nestId);
+  const owner = await getNestOwnerEmail(nestId);
   if (owner && owner.toLowerCase() === userEmail.toLowerCase()) {
     roles.add("owner");
   }
 
   // Collaborator access (nest-wide). resolveNestPermission also yields the
   // public-visibility 'read' fallback, so public readers resolve to viewer.
-  const userId = userIdForEmail(userEmail);
+  const userId = await userIdForEmail(userEmail);
   if (userId) {
-    const collabRole = collabPermToRole(resolveNestPermission(nestId, userId));
+    const collabRole = collabPermToRole(await resolveNestPermission(nestId, userId));
     if (collabRole) roles.add(collabRole);
   }
 
   // Steward assignments — scoped to the node when one is given.
   const stewardRoles = opts?.nodeId
-    ? resolveStewardsForNode(nestId, opts.nodeId)
+    ? (await resolveStewardsForNode(nestId, opts.nodeId))
         .filter(
           (r) => r.steward.userEmail.toLowerCase() === userEmail.toLowerCase(),
         )
         .map((r) => r.steward.role)
-    : getStewardRolesForUser(nestId, userEmail);
+    : await getStewardRolesForUser(nestId, userEmail);
   for (const role of stewardRoles) roles.add(role);
 
   return [...roles];
@@ -618,36 +618,35 @@ export function canManageStewards(userEmail: string): boolean {
  * or a nest-scope editor steward. Used by callers that don't run through
  * that middleware (MCP) so the write gate doesn't depend on it alone.
  */
-export function canCreateInNest(nestId: string, userEmail: string): boolean {
+export async function canCreateInNest(nestId: string, userEmail: string): Promise<boolean> {
   if (config.AUTH_MODE === "open" || isSuperAdmin(userEmail)) return true;
-  const userId = userIdForEmail(userEmail);
+  const userId = await userIdForEmail(userEmail);
   if (userId) {
-    const perm = resolveNestPermission(nestId, userId);
+    const perm = await resolveNestPermission(nestId, userId);
     if (perm === "owner" || perm === "admin" || perm === "write") return true;
   }
-  return getStewardsForUser(nestId, userEmail).some(
+  return (await getStewardsForUser(nestId, userEmail)).some(
     (s) => s.role === "editor" && s.scope === "nest",
   );
 }
 
-function getNestOwnerEmail(nestId: string): string | null {
+async function getNestOwnerEmail(nestId: string): Promise<string | null> {
   const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT u.email FROM nests n
+  const row = await db.get(
+    `SELECT u.email FROM nests n
        JOIN users u ON u.id = n.user_id
        WHERE n.id = ?`,
-    )
-    .get(nestId) as { email: string } | undefined;
+    [nestId],
+  ) as { email: string } | undefined;
   return row?.email ?? null;
 }
 
-export function canUserEdit(
+export async function canUserEdit(
   nestId: string,
   nodeId: string,
   userEmail: string,
-): PermissionResult {
-  const roles = resolveUserRoles(nestId, userEmail, { nodeId });
+): Promise<PermissionResult> {
+  const roles = await resolveUserRoles(nestId, userEmail, { nodeId });
   if (roles.includes("owner")) {
     return { allowed: true, reason: "nest owner", role: "owner" };
   }
@@ -664,18 +663,17 @@ export function canUserEdit(
   return { allowed: false, reason: "no editor role on this node", role: null };
 }
 
-function getCurrentVersionAuthor(
+async function getCurrentVersionAuthor(
   nestId: string,
   nodeId: string,
-): string | null {
+): Promise<string | null> {
   const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT author FROM node_versions
+  const row = await db.get(
+    `SELECT author FROM node_versions
        WHERE nest_id = ? AND node_id = ?
        ORDER BY version DESC LIMIT 1`,
-    )
-    .get(nestId, nodeId) as { author: string } | undefined;
+    [nestId, nodeId],
+  ) as { author: string } | undefined;
   return row?.author ?? null;
 }
 
@@ -685,30 +683,29 @@ function getCurrentVersionAuthor(
  * asking for approval, so SoD should block them — not whoever happened
  * to write an earlier edit. Returns null when no pending review exists.
  */
-function getPendingReviewRequester(
+async function getPendingReviewRequester(
   nestId: string,
   nodeId: string,
-): string | null {
+): Promise<string | null> {
   const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT requested_by FROM review_requests
+  const row = await db.get(
+    `SELECT requested_by FROM review_requests
        WHERE nest_id = ? AND node_id = ? AND status = 'pending'
        ORDER BY requested_at DESC LIMIT 1`,
-    )
-    .get(nestId, nodeId) as { requested_by: string } | undefined;
+    [nestId, nodeId],
+  ) as { requested_by: string } | undefined;
   return row?.requested_by ?? null;
 }
 
-export function canUserApprove(
+export async function canUserApprove(
   nestId: string,
   nodeId: string,
   userEmail: string,
-): PermissionResult {
-  const roles = resolveUserRoles(nestId, userEmail, { nodeId });
+): Promise<PermissionResult> {
+  const roles = await resolveUserRoles(nestId, userEmail, { nodeId });
   const isOwner = roles.includes("owner");
   const isSuper = isSuperAdmin(userEmail);
-  const allowSelf = nestAllowsSelfApprove(nestId);
+  const allowSelf = await nestAllowsSelfApprove(nestId);
   // Explicit approve-capable steward role (admin or reviewer), NOT the
   // ownership-derived right. Owner-only callers resolve to ["owner"] and
   // fall through to the ownership branch below; an owner who is ALSO an
@@ -721,8 +718,8 @@ export function canUserApprove(
   // that when a teammate submits someone else's earlier edit, the original
   // author can still approve.
   const actor =
-    getPendingReviewRequester(nestId, nodeId) ??
-    getCurrentVersionAuthor(nestId, nodeId);
+    (await getPendingReviewRequester(nestId, nodeId)) ??
+    (await getCurrentVersionAuthor(nestId, nodeId));
   const isOwnSubmission =
     !!actor && actor.toLowerCase() === userEmail.toLowerCase();
 
@@ -775,12 +772,12 @@ export function canUserApprove(
   };
 }
 
-export function canUserAccess(
+export async function canUserAccess(
   nestId: string,
   nodeId: string,
   userEmail: string,
-): PermissionResult {
-  const roles = resolveUserRoles(nestId, userEmail, { nodeId });
+): Promise<PermissionResult> {
+  const roles = await resolveUserRoles(nestId, userEmail, { nodeId });
   if (roles.includes("owner")) {
     return { allowed: true, reason: "nest owner", role: "owner" };
   }
@@ -799,33 +796,36 @@ export function canUserAccess(
 
 // ─── SYNC FROM stewards.yaml ────────────────────────────────────────────
 
-export function syncFromConfig(
+export async function syncFromConfig(
   nestId: string,
   config: StewardsConfig,
-): number {
+): Promise<number> {
   const db = getDb();
   let count = 0;
 
   // Deactivate existing stewards for this nest (will re-create from config)
-  db.prepare(
+  await db.run(
     "UPDATE stewards SET is_active = 0 WHERE nest_id = ?",
-  ).run(nestId);
+    [nestId],
+  );
 
   // Declaring stewards via config implies governed mode — flip the flag.
-  db.prepare(
+  await db.run(
     "UPDATE nests SET stewardship_enabled = 1 WHERE id = ?",
-  ).run(nestId);
+    [nestId],
+  );
 
-  const addEntries = (
+  const addEntries = async (
     scope: StewardshipScope,
     entries: StewardEntry[],
     target?: { nodePattern?: string; tagName?: string },
   ) => {
     for (const entry of entries) {
       // Look up user by email
-      const user = db
-        .prepare("SELECT id FROM users WHERE email = ?")
-        .get(entry.email) as { id: string } | undefined;
+      const user = await db.get(
+        "SELECT id FROM users WHERE email = ?",
+        [entry.email],
+      ) as { id: string } | undefined;
 
       // Legacy 'admin' role maps to 'reviewer' — matches migration 002 behavior.
       const rawRole = entry.role || "reviewer";
@@ -834,7 +834,7 @@ export function syncFromConfig(
           ? "reviewer"
           : (rawRole as StewardRole);
 
-      assignSteward({
+      await assignSteward({
         nestId,
         scope,
         nodePattern: target?.nodePattern,
@@ -854,20 +854,20 @@ export function syncFromConfig(
 
   // Nest-level stewards
   if (config.nest) {
-    addEntries("nest", config.nest);
+    await addEntries("nest", config.nest);
   }
 
   // Tag-level stewards
   if (config.tags) {
     for (const [tagName, entries] of Object.entries(config.tags)) {
-      addEntries("tag", entries, { tagName });
+      await addEntries("tag", entries, { tagName });
     }
   }
 
   // Document-level stewards
   if (config.documents) {
     for (const [docPattern, entries] of Object.entries(config.documents)) {
-      addEntries("document", entries, { nodePattern: docPattern });
+      await addEntries("document", entries, { nodePattern: docPattern });
     }
   }
 
