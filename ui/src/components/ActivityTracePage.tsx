@@ -3,8 +3,15 @@
  * simple newest-first table. Operator audit surface: who, what, where,
  * outcome, how long. Server-admin only (the endpoint enforces it too).
  */
-import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Loader2, RefreshCw, Search } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
+  RefreshCw,
+  Search,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -29,32 +36,66 @@ interface TraceRow {
   duration_ms: number | null;
 }
 
+const PAGE_SIZE = 25;
+
 export function ActivityTracePage({ onBack }: { onBack: () => void }) {
   const [rows, setRows] = useState<TraceRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0); // 0-based
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [kind, setKind] = useState<"all" | "api" | "mcp">("all");
   const [user, setUser] = useState("");
+  const [debouncedUser, setDebouncedUser] = useState("");
+
+  // Monotonic request id — only the newest in-flight response is applied, so a
+  // slow narrow query (e.g. "a") can't overwrite a later, more specific one
+  // (e.g. "alice") that resolved first.
+  const reqSeq = useRef(0);
+
+  // Debounce the user filter into a single fetch 300ms after typing stops,
+  // instead of one request per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedUser(user), 300);
+    return () => clearTimeout(t);
+  }, [user]);
+
+  // Any filter change resets to the first page (offset would otherwise point
+  // past the end of a smaller filtered result set).
+  useEffect(() => {
+    setPage(0);
+  }, [kind, debouncedUser]);
 
   const load = useCallback(async () => {
+    const seq = ++reqSeq.current;
     setLoading(true);
     setError(null);
     try {
-      const { events } = await api.getAdminTrace({
+      const res = await api.getAdminTrace({
         kind: kind === "all" ? undefined : kind,
-        user: user.trim() || undefined,
+        user: debouncedUser.trim() || undefined,
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
       });
-      setRows(events);
+      if (seq !== reqSeq.current) return; // superseded by a newer request
+      setRows(res.events);
+      setTotal(res.total);
     } catch (e: any) {
+      if (seq !== reqSeq.current) return;
       setError(e?.message || "Failed to load trace");
     } finally {
-      setLoading(false);
+      if (seq === reqSeq.current) setLoading(false);
     }
-  }, [kind, user]);
+  }, [kind, debouncedUser, page]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  const from = total === 0 ? 0 : page * PAGE_SIZE + 1;
+  const to = Math.min((page + 1) * PAGE_SIZE, total);
+  const hasPrev = page > 0;
+  const hasNext = (page + 1) * PAGE_SIZE < total;
 
   return (
     <div className="space-y-4">
@@ -81,7 +122,7 @@ export function ActivityTracePage({ onBack }: { onBack: () => void }) {
             <Input
               value={user}
               onChange={(e) => setUser(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && load()}
+              onKeyDown={(e) => e.key === "Enter" && setDebouncedUser(user)}
               placeholder="Filter by user…"
               className="h-8 pl-8 w-48"
             />
@@ -161,9 +202,32 @@ export function ActivityTracePage({ onBack }: { onBack: () => void }) {
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-muted-foreground">
-        Rolling 14-day window, newest first, up to 200 rows per load.
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+        <span>Rolling 14-day window, newest first.</span>
+        <div className="flex items-center gap-2">
+          <span>
+            {from}–{to} of {total}
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 px-2"
+            disabled={!hasPrev || loading}
+            onClick={() => setPage((p) => Math.max(p - 1, 0))}
+          >
+            <ChevronLeft className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 px-2"
+            disabled={!hasNext || loading}
+            onClick={() => setPage((p) => p + 1)}
+          >
+            <ChevronRight className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -61,18 +61,33 @@ export async function logTraceEvent(e: TraceEvent): Promise<void> {
 
 export interface TraceFilters {
   limit?: number;
+  offset?: number;
   kind?: "api" | "mcp";
   nestId?: string;
   user?: string;
 }
 
-export async function listTraceEvents(filters: TraceFilters = {}) {
+export interface TracePage {
+  events: any[];
+  total: number;
+}
+
+export async function listTraceEvents(
+  filters: TraceFilters = {},
+): Promise<TracePage> {
   const db = getDb();
-  const limit = Math.min(Math.max(filters.limit ?? 200, 1), 1000);
+  // Guard NaN/Infinity from a malformed ?limit/?offset — Math.min/max would
+  // propagate NaN into the bound param and throw at the driver. Fall back to a
+  // 25-row page from offset 0.
+  const limit = Number.isFinite(filters.limit)
+    ? Math.min(Math.max(filters.limit as number, 1), 1000)
+    : 25;
+  const offset = Number.isFinite(filters.offset)
+    ? Math.max(filters.offset as number, 0)
+    : 0;
   // Email is resolved at read time (join) so the hot write path stays one
   // insert; mcp rows carry user_email directly (their caller is email-keyed).
-  let sql = `SELECT e.*, COALESCE(e.user_email, u.email) AS caller
-               FROM api_events e LEFT JOIN users u ON u.id = e.user_id`;
+  const from = "FROM api_events e LEFT JOIN users u ON u.id = e.user_id";
   const where: string[] = [];
   const args: any[] = [];
   if (filters.kind) {
@@ -87,8 +102,25 @@ export async function listTraceEvents(filters: TraceFilters = {}) {
     where.push("(COALESCE(e.user_email, u.email) LIKE ? OR e.user_id = ?)");
     args.push(`%${filters.user}%`, filters.user);
   }
-  if (where.length) sql += ` WHERE ${where.join(" AND ")}`;
-  sql += " ORDER BY e.id DESC LIMIT ?";
-  args.push(limit);
-  return db.all(sql, args);
+  const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
+  try {
+    // total (filtered) drives the pager; the page itself is a windowed slice.
+    const totalRow = await db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n ${from}${whereSql}`,
+      args,
+    );
+    const total = Number(totalRow?.n ?? 0);
+    const events = await db.all(
+      `SELECT e.*, COALESCE(e.user_email, u.email) AS caller
+         ${from}${whereSql}
+        ORDER BY e.id DESC
+        LIMIT ? OFFSET ?`,
+      [...args, limit, offset],
+    );
+    return { events, total };
+  } catch {
+    // Missing table (e.g. a Postgres DB provisioned before migration 014) or
+    // any read error degrades to empty rather than 500-ing the admin page.
+    return { events: [], total: 0 };
+  }
 }

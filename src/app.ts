@@ -379,13 +379,20 @@ export function createApp(): Hono<AuthEnv> {
   app.get("/admin/trace", async (c) => {
     if (!(await traceAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
-    const events = await listTraceEvents({
-      limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+    const limitRaw = Number(c.req.query("limit"));
+    const offsetRaw = Number(c.req.query("offset"));
+    const limit = Number.isFinite(limitRaw) ? limitRaw : 25;
+    const offset = Number.isFinite(offsetRaw) ? offsetRaw : 0;
+    const { events, total } = await listTraceEvents({
+      limit,
+      offset,
       kind: c.req.query("kind") as any,
       nestId: c.req.query("nest") || undefined,
       user: c.req.query("user") || undefined,
     });
-    return c.json({ count: (events as any[]).length, events });
+    // `count` = rows on this page (back-compat); `total` = full filtered count
+    // for the pager. limit/offset echo the applied window.
+    return c.json({ count: events.length, total, limit, offset, events });
   });
 
   // GET /stats — dashboard summary counts: nests visible to caller,
