@@ -212,14 +212,14 @@ export async function listTeammates() {
   }>("/auth/teammates");
 }
 
-export async function inviteTeammate(email: string, label?: string) {
+export async function inviteTeammate(email: string) {
   return request<{
-    api_key: string;
+    temporary_password: string;
     user: { id: string; email: string };
     message: string;
   }>("/auth/invite", {
     method: "POST",
-    body: JSON.stringify({ email, label }),
+    body: JSON.stringify({ email }),
   });
 }
 
@@ -423,13 +423,28 @@ export async function listNodes(nestId: string) {
   return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
 }
 
+/** Per-node comment (annotation thread) counts for sorting the document list. */
+export async function getCommentCounts(nestId: string) {
+  return request<{
+    counts: Record<string, { count: number; lastAt: string | null }>;
+  }>(`/nests/${nestId}/comment-counts`);
+}
+
 export async function getNode(nestId: string, nodeId: string) {
   return request<{ node: any }>(`/nests/${nestId}/nodes/${nodeId}`);
 }
 
 export async function createNode(
   nestId: string,
-  data: { title: string; content: string; tags?: string[]; type?: string },
+  data: {
+    title: string;
+    content: string;
+    tags?: string[];
+    type?: string;
+    folder?: string;
+    /** Orchestrator schedule — runnable types (agent/skill) only. */
+    schedule?: string;
+  },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
     method: "POST",
@@ -440,7 +455,14 @@ export async function createNode(
 export async function updateNode(
   nestId: string,
   nodeId: string,
-  data: { content?: string; tags?: string[]; title?: string; changeNote?: string },
+  data: {
+    content?: string;
+    tags?: string[];
+    title?: string;
+    changeNote?: string;
+    /** Runnable types (agent/skill) only; "" clears it. */
+    schedule?: string;
+  },
   baseVersion?: number,
 ) {
   const headers: Record<string, string> = {};
