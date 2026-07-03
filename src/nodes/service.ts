@@ -57,6 +57,15 @@ export interface NodeResponse {
   updated_at?: string;
   content: string;
   pendingChange?: any;
+  /** Orchestrator hint for runnable nodes (type agent/skill) — free-form
+   *  cron/interval string, opaque to the server. */
+  schedule?: string;
+}
+
+/** Node types an orchestrator can fetch and run; only these carry schedule. */
+export const RUNNABLE_NODE_TYPES = ["agent", "skill"] as const;
+export function isRunnableType(type: string | undefined): boolean {
+  return (RUNNABLE_NODE_TYPES as readonly string[]).includes(type || "");
 }
 
 export function toNodeResponse(node: ContextNode): NodeResponse {
@@ -81,11 +90,18 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
     updated_at: fm.updated_at,
     content: node.body || "",
     pendingChange: node.pendingChange ?? undefined,
+    // Same YAML-coercion rule as title above: `schedule: 123` parses as a
+    // number — normalize to string at the API boundary.
+    schedule:
+      (fm.metadata as any)?.schedule != null
+        ? String((fm.metadata as any).schedule)
+        : undefined,
   };
 }
 
 export interface ListNodesFilters {
-  type?: string;
+  /** One type, or several (e.g. runnable types) to keep. */
+  type?: string | readonly string[];
   tag?: string;
   limit?: number;
 }
@@ -103,9 +119,13 @@ export async function listNodesForCaller(
   const { storage, versions: versionManager } = await engineCache.get(nestId);
   let documents = await storage.discoverDocuments();
 
-  // Cheap on-frontmatter filters first — narrows what we enrich below.
+  // Cheap on-frontmatter filters first — narrows what we enrich below, so the
+  // per-node governance/version work never runs on docs we'd discard anyway.
   if (filters.type) {
-    documents = documents.filter((n) => n.frontmatter.type === filters.type);
+    const wanted = new Set(
+      Array.isArray(filters.type) ? filters.type : [filters.type],
+    );
+    documents = documents.filter((n) => wanted.has(n.frontmatter.type));
   }
   if (filters.tag) {
     const tag = normalizeTag(filters.tag);
@@ -177,6 +197,9 @@ export interface CreateNodeInput {
    *  the title slug. Used by derived/system nodes that need a deterministic,
    *  collision-free id independent of the human-readable title. */
   id?: string;
+  /** Orchestrator schedule (cron/interval string, opaque to the server).
+   *  Only valid for runnable types (agent/skill). */
+  schedule?: string;
   /** Folder path under nodes/ (e.g. "gtm/deals"). Each segment is slugified;
    *  storage and read/update/delete already handle nested ids, only creation
    *  was flat. Ignored when an explicit id is given. */
@@ -190,6 +213,8 @@ export interface UpdateNodePatch {
   title?: string;
   status?: string;
   changeNote?: string;
+  /** Orchestrator schedule — runnable types only; empty string clears it. */
+  schedule?: string;
 }
 
 export interface NodeMutationResult {
@@ -237,6 +262,12 @@ export async function createNode(
   const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
 
+  if (input.schedule !== undefined && !isRunnableType(input.type)) {
+    throw new ValidationError(
+      `schedule is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(", ")})`,
+    );
+  }
+
   const hasStewards = await isStewardshipEnabled(nestId);
   const initialStatus = hasStewards ? "draft" : "published";
   // Ungoverned starts at v=0 so engine publish bump lands at v=1.
@@ -253,7 +284,11 @@ export async function createNode(
       version: initialVersion,
       created_at: now,
       updated_at: now,
-      metadata: { owners: ["*"], scope: input.scope || "team" },
+      metadata: {
+        owners: ["*"],
+        scope: input.scope || "team",
+        ...(input.schedule ? { schedule: input.schedule } : {}),
+      } as any,
     },
     body: input.content,
     rawContent: "",
@@ -424,6 +459,17 @@ export async function updateNode(
   }
   if (patch.title) {
     node = { ...node, frontmatter: { ...node.frontmatter, title: patch.title } };
+  }
+  if (patch.schedule !== undefined) {
+    if (!isRunnableType(node.frontmatter.type)) {
+      throw new ValidationError(
+        `schedule is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(", ")})`,
+      );
+    }
+    const metadata = { ...(node.frontmatter.metadata as any) };
+    if (patch.schedule === "") delete metadata.schedule;
+    else metadata.schedule = patch.schedule;
+    node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
   }
 
   const hasStewards = await isStewardshipEnabled(nestId);

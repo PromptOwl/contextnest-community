@@ -62,6 +62,7 @@ nodeRoutes.post("/", async (c) => {
     tags?: string[];
     scope?: string;
     status?: string;
+    schedule?: string;
     folder?: string;
   }>();
 
@@ -83,6 +84,7 @@ nodeRoutes.post("/", async (c) => {
       tags: body.tags,
       scope: body.scope,
       status: body.status,
+      schedule: body.schedule,
       folder: body.folder,
     },
     authorEmail,
@@ -343,6 +345,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     status?: string;
     title?: string;
     changeNote?: string;
+    schedule?: string;
   }>();
 
   // Conflict detection via X-Base-Version header — REST-only contract.
@@ -376,6 +379,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       title: body.title,
       status: body.status,
       changeNote: body.changeNote,
+      schedule: body.schedule,
     },
     authorEmail,
   );

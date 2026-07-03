@@ -21,8 +21,37 @@ import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel } from "../shared/access.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
+import { listNodesForCaller, RUNNABLE_NODE_TYPES } from "./service.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
+
+// GET /nests/:nestId/runnables
+// Orchestrator surface: every runnable node (type agent/skill) with its
+// schedule and content, so an external scheduler can connect, discover
+// what to run and when, and pull the prompt/skill body in one call.
+// Reuses listNodesForCaller, so stewardship gating and the public-reader
+// approved-only rule apply — an orchestrator with a read key never sees
+// unapproved agent definitions.
+queryRoutes.get("/runnables", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const userId = c.get("userId");
+  // Push the type filter down so only agent/skill docs pay the per-node
+  // governance/version enrichment — not every plain document in the nest.
+  const all = await listNodesForCaller(nestId, userId, {
+    type: RUNNABLE_NODE_TYPES,
+  });
+  const runnables = all.map((n) => ({
+    id: n.id,
+    title: n.title,
+    type: n.type,
+    schedule: n.schedule ?? null,
+    status: n.status,
+    tags: n.tags,
+    updated_at: n.updated_at,
+    content: n.content,
+  }));
+  return c.json({ count: runnables.length, runnables });
+});
 
 // GET /nests/:nestId/graph
 // Ontology graph: nodes, resolved [[wikilink]] edges, tag/category counts, and

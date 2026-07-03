@@ -278,10 +278,12 @@ Lists all readable docs.
     "author": "...",
     "created_at": "...",
     "updated_at": "...",
-    "content": "# md body"
+    "content": "# md body",
+    "schedule": "0 6 * * *"
   }]
 }
 ```
+- `schedule` is present only on runnable nodes (`type` `agent`/`skill`); omitted otherwise.
 
 ### POST `/nests/:nestId/nodes`
 ```json
@@ -292,11 +294,13 @@ Lists all readable docs.
   "type": "document",
   "scope": "team",
   "status": "draft",
-  "folder": "gtm/deals"
+  "folder": "gtm/deals",
+  "schedule": "0 6 * * *"
 }
 ```
 - Slug derived from title → `nodes/<slug>`.
 - Optional `folder` (string) nests the doc → `nodes/<folder>/<slug>`. Each `/`-separated segment is slugified independently (so `../` or absolute paths can't escape the vault); empty segments drop. Max 8 levels deep; each segment (and the title slug) max 100 chars — otherwise `400`.
+- Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Auto-syncs tag index for steward resolution.
 
@@ -321,10 +325,12 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
   "title": "...",
   "content": "...",
   "tags": ["..."],
-  "changeNote": "fixed typo"
+  "changeNote": "fixed typo",
+  "schedule": "0 7 * * *"
 }
 ```
 Requires nest write permission.
+- `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
@@ -712,6 +718,33 @@ Notes:
 - **Draw cap** — `nodes`/`links` are capped at 150 (highest-degree kept) with
   `truncated: true` and `totalNodes` set; `signals` are still computed over the
   full set so the gap numbers stay accurate.
+
+### GET `/nests/:nestId/runnables` (read+)
+Orchestrator surface: every **runnable** node (`type` `agent` or `skill`) with its
+`schedule` and body in one call, so an external scheduler can connect, discover
+what to run and when, and pull the prompt/skill content. Reuses the same
+per-caller gating as the node list (`listNodesForCaller`), so stewardship and the
+public-reader approved-only rule apply — a read-tier orchestrator key only ever
+sees **approved** agent/skill definitions; unapproved drafts are omitted.
+
+```json
+{
+  "count": 1,
+  "runnables": [{
+    "id": "nodes/nightly-digest-agent",
+    "title": "Nightly Digest Agent",
+    "type": "agent",
+    "schedule": "0 6 * * *",
+    "status": "published",
+    "tags": ["#ops"],
+    "updated_at": "...",
+    "content": "# Agent\n\n..."
+  }]
+}
+```
+- `schedule` is `null` when the node carries no schedule.
+- Filtering to runnable types happens before the per-node governance/version
+  enrichment, so cost scales with the number of runnables, not total nest size.
 
 ### POST `/nests/:nestId/publish`
 Publishes the nest (snapshots + index).
