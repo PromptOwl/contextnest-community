@@ -206,15 +206,24 @@ export function ConnectModal({
     setRevealKind(null);
   };
 
+  // Claude Desktop only speaks stdio in claude_desktop_config.json — it has no
+  // native http/url/headers transport (that shape is for Claude Code / Cursor,
+  // see the MCP tab). Bridge to our Streamable-HTTP endpoint with mcp-remote.
   const claudeConfig = JSON.stringify(
     {
       mcpServers: {
         [slugify(nestName)]: {
-          type: "http",
-          url: mcpUrl,
-          headers: {
-            Authorization: `Bearer ${KEY_PLACEHOLDER}`,
-          },
+          command: "npx",
+          // Open mode needs no credential — omit the auth header so the copied
+          // config connects as-is.
+          args: [
+            "-y",
+            "mcp-remote",
+            mcpUrl,
+            ...(authMode === "open"
+              ? []
+              : ["--header", `Authorization: Bearer ${KEY_PLACEHOLDER}`]),
+          ],
         },
       },
     },
@@ -222,10 +231,25 @@ export function ConnectModal({
     2,
   );
 
-  const ctxCommand = `ctx --server ${serverUrl} --nest ${nestId} --key ${KEY_PLACEHOLDER} query "type:document"`;
+  // Only `ctx push` talks to a remote server; the other ctx commands operate on
+  // a local vault. Push uploads the local vault into this nest.
+  // Open mode needs no credential — drop --key so the copied command runs as-is.
+  const ctxCommand =
+    authMode === "open"
+      ? `ctx push --server ${serverUrl} --nest ${nestId}`
+      : `ctx push --server ${serverUrl} --nest ${nestId} --key ${KEY_PLACEHOLDER}`;
 
   const showOpenModeBanner = authMode === "open";
   const showLoginBanner = !authenticated && authMode === "key";
+
+  const authHeaderFlag = showOpenModeBanner
+    ? ""
+    : ` \\\n  -H "Authorization: Bearer ${KEY_PLACEHOLDER}"`;
+  // Deterministic retrieval: same selector + hops → same context, every time.
+  // POST /context assembles matched nodes + their N-hop graph neighborhood
+  // into one markdown payload with a trace (hops_used, nodes_traversed).
+  const curlContext = `curl -X POST ${serverUrl}/nests/${nestId}/context \\\n  -H "Content-Type: application/json"${authHeaderFlag} \\\n  -d '{"selector": "#gtm", "hops": 2, "max_tokens": 4000}'`;
+  const curlNode = `curl "${serverUrl}/nests/${nestId}/nodes/nodes/<slug>?format=markdown"${authHeaderFlag}`;
 
   return (
     <>
@@ -347,7 +371,7 @@ export function ConnectModal({
 
           <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0">
             <Tabs defaultValue="hootie" className="w-full min-w-0">
-              <TabsList className="grid w-full grid-cols-4">
+              <TabsList className="grid w-full grid-cols-5">
                 <TabsTrigger value="hootie">
                   <Bot className="h-3.5 w-3.5 mr-1" />
                   Hootie
@@ -357,6 +381,7 @@ export function ConnectModal({
                   Claude
                 </TabsTrigger>
                 <TabsTrigger value="mcp">MCP</TabsTrigger>
+                <TabsTrigger value="api">API</TabsTrigger>
                 <TabsTrigger value="cli">
                   <Terminal className="h-3.5 w-3.5 mr-1" />
                   CLI
@@ -427,8 +452,20 @@ export function ConnectModal({
                   </p>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Restart Claude Desktop after editing. The nest's 16 context
-                  tools will appear in the tools panel.
+                  Claude Desktop config runs a local command, so this uses{" "}
+                  <code className="text-[10px]">mcp-remote</code> to bridge to the
+                  server's HTTP endpoint — you need{" "}
+                  <a
+                    href="https://nodejs.org"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline"
+                  >
+                    Node.js
+                  </a>{" "}
+                  installed (it provides <code className="text-[10px]">npx</code>).
+                  Restart Claude Desktop after editing; the nest's context tools
+                  then appear in the tools panel.
                 </p>
               </TabsContent>
 
@@ -436,8 +473,10 @@ export function ConnectModal({
               <TabsContent value="mcp" className="space-y-4 pt-4">
                 <div>
                   <p className="text-sm mb-3">
-                    Streamable HTTP MCP endpoint with 16 tools (9 content + 7
-                    governance).
+                    Streamable HTTP MCP endpoint with 21 tools (11 content + 7
+                    governance + 3 admin/sync). Works with native HTTP MCP
+                    clients (Claude Code, Cursor, VS Code); for Claude Desktop
+                    use the Claude Desktop tab.
                     {!showOpenModeBanner && (
                       <>
                         {" "}
@@ -460,23 +499,97 @@ export function ConnectModal({
                 <div className="text-xs text-muted-foreground space-y-2">
                   <p className="font-medium">Available tools:</p>
                   <div className="grid grid-cols-2 gap-x-4 font-mono text-[11px]">
+                    {/* content (11) */}
                     <span>context_init</span>
-                    <span>context_stewards</span>
-                    <span>context_overview</span>
-                    <span>context_review_queue</span>
-                    <span>context_search</span>
-                    <span>context_submit_review</span>
-                    <span>context_query</span>
-                    <span>context_approve</span>
-                    <span>context_get</span>
-                    <span>context_reject</span>
-                    <span>context_list</span>
-                    <span>context_versions</span>
                     <span>context_resolve</span>
-                    <span>context_assign_steward</span>
+                    <span>context_overview</span>
                     <span>context_create</span>
+                    <span>context_search</span>
                     <span>context_update</span>
+                    <span>context_query</span>
+                    <span>context_export</span>
+                    <span>context_get</span>
+                    <span>context_comments</span>
+                    <span>context_list</span>
+                    {/* governance (7) */}
+                    <span>context_stewards</span>
+                    <span>context_review_queue</span>
+                    <span>context_submit_review</span>
+                    <span>context_approve</span>
+                    <span>context_reject</span>
+                    <span>context_versions</span>
+                    <span>context_assign_steward</span>
+                    {/* admin / sync (3) */}
+                    <span>context_share_nest</span>
+                    <span>context_unsynced_list</span>
+                    <span>context_sync_folder</span>
                   </div>
+                </div>
+              </TabsContent>
+
+              {/* Direct REST API — deterministic retrieval */}
+              <TabsContent value="api" className="space-y-4 pt-4">
+                <div>
+                  <p className="text-sm mb-3">
+                    Deterministic retrieval over plain HTTP — the same selector
+                    and <code className="text-[11px] bg-muted px-1 rounded">hops</code>{" "}
+                    always assemble the same context. One call returns the
+                    matched nodes plus their graph neighborhood as ready-to-use
+                    markdown, with a trace (
+                    <code className="text-[11px]">hops_used</code>,{" "}
+                    <code className="text-[11px]">nodes_traversed</code>) so you
+                    can audit exactly what was pulled.
+                  </p>
+                  <Snippet
+                    label="Query + N-hop graph context (POST /context)"
+                    value={curlContext}
+                    multiline
+                  />
+                  <Snippet
+                    label="Single document (GET, deterministic by id)"
+                    value={curlNode}
+                    multiline
+                  />
+                </div>
+                <div className="text-xs text-muted-foreground space-y-2">
+                  <p className="font-medium">Selector grammar:</p>
+                  <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 font-mono text-[11px]">
+                    <span>#tag</span>
+                    <span className="font-sans">nodes carrying a tag</span>
+                    <span>type:document</span>
+                    <span className="font-sans">nodes of a type</span>
+                    <span>[[Title]]</span>
+                    <span className="font-sans">a node by title</span>
+                    <span>scope:team</span>
+                    <span className="font-sans">nodes by visibility scope</span>
+                    <span>+AND · |OR · -NOT</span>
+                    <span className="font-sans">combine selectors</span>
+                  </div>
+                  <p className="pt-1">
+                    <span className="font-medium">Hops</span> controls graph
+                    traversal from the matches:{" "}
+                    <code className="text-[11px]">1</code> = matches + directly
+                    linked nodes (single hop),{" "}
+                    <code className="text-[11px]">2</code> (default) and up
+                    follow wiki-links further out for multi-hop context.{" "}
+                    <code className="text-[11px]">max_tokens</code> caps the
+                    payload; the response reports what was truncated.
+                  </p>
+                  <p>
+                    Also useful:{" "}
+                    <code className="text-[11px] bg-muted px-1 rounded">
+                      POST /query
+                    </code>{" "}
+                    (matches + snippets, no bodies),{" "}
+                    <code className="text-[11px] bg-muted px-1 rounded">
+                      GET /overview
+                    </code>{" "}
+                    (types/tags map), and the export URL below for the whole
+                    nest. All under{" "}
+                    <code className="text-[11px] bg-muted px-1 rounded">
+                      /nests/{"<nest-id>"}/…
+                    </code>
+                  </p>
                 </div>
               </TabsContent>
 
@@ -484,34 +597,36 @@ export function ConnectModal({
               <TabsContent value="cli" className="space-y-4 pt-4">
                 <div>
                   <p className="text-sm mb-3">
-                    Use{" "}
+                    Push a local{" "}
                     <code className="text-xs bg-muted px-1 py-0.5 rounded">
                       ctx
                     </code>{" "}
-                    pointed at this server:
+                    vault into this nest:
                   </p>
-                  <Snippet label="Example query" value={ctxCommand} />
+                  <Snippet label="Push to this nest" value={ctxCommand} />
                 </div>
                 <div className="text-xs text-muted-foreground space-y-2">
-                  <p className="font-medium">Common commands:</p>
-                  <div className="space-y-1 font-mono text-[11px]">
-                    <div>
-                      ctx --server {serverUrl} --nest {nestId}
-                      {!showOpenModeBanner && ` --key ${KEY_PLACEHOLDER}`}{" "}
-                      query "#architecture"
-                    </div>
-                    <div>
-                      ctx --server {serverUrl} --nest {nestId}
-                      {!showOpenModeBanner && ` --key ${KEY_PLACEHOLDER}`} add
-                      "My Doc" content.md
-                    </div>
-                    <div>
-                      ctx --server {serverUrl} --nest {nestId}
-                      {!showOpenModeBanner && ` --key ${KEY_PLACEHOLDER}`}{" "}
-                      publish
-                    </div>
-                  </div>
-                  <p className="pt-2">
+                  <p>
+                    Add{" "}
+                    <code className="text-[11px] bg-muted px-1 rounded">
+                      --include-drafts
+                    </code>{" "}
+                    to also push unpublished nodes.
+                  </p>
+                  <p>
+                    <span className="font-medium">Note:</span> only{" "}
+                    <code className="text-[11px] bg-muted px-1 rounded">
+                      ctx push
+                    </code>{" "}
+                    talks to a remote server. Other ctx commands (
+                    <code className="text-[11px]">query</code>,{" "}
+                    <code className="text-[11px]">add</code>,{" "}
+                    <code className="text-[11px]">search</code>) operate on your
+                    local vault — to read this nest remotely use the MCP endpoint
+                    or the REST API (see the API tab for deterministic{" "}
+                    <code className="text-[11px]">curl</code> retrieval).
+                  </p>
+                  <p className="pt-1">
                     Install:{" "}
                     <code className="text-[11px] bg-muted px-1 py-0.5 rounded">
                       npm i -g @promptowl/contextnest-cli
@@ -677,7 +792,9 @@ function Snippet({
         className={`${
           multiline ? "p-3" : "px-3 py-2"
         } bg-muted rounded text-xs font-mono min-w-0 ${
-          multiline ? "whitespace-pre overflow-x-auto" : "truncate"
+          multiline
+            ? "whitespace-pre overflow-x-auto"
+            : "whitespace-pre-wrap break-all"
         }`}
       >
         {value}

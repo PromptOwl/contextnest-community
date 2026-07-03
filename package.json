@@ -1,7 +1,7 @@
 {
   "name": "@promptowl/contextnest-community",
-  "version": "1.5.0",
-  "description": "ContextNest Community Edition \u2014 self-hosted context governance server for AI workflows. Commercial software by Promptowl LLC.",
+  "version": "1.8.0",
+  "description": "ContextNest Community Edition — self-hosted context governance server for AI workflows. Commercial software by Promptowl LLC.",
   "private": false,
   "type": "module",
   "license": "SEE LICENSE IN LICENSE.md",
@@ -104,6 +104,7 @@
     "@tiptap/extension-details": "^3.23.2",
     "@tiptap/extension-drag-handle-react": "^3.23.2",
     "@tiptap/extension-highlight": "^3.23.2",
+    "@tiptap/extension-image": "3.23.2",
     "@tiptap/extension-link": "^3.23.2",
     "@tiptap/extension-node-range": "^3.23.2",
     "@tiptap/extension-placeholder": "^3.23.2",
