@@ -81,7 +81,7 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
           <Loader2 className="h-4 w-4 animate-spin" /> Loading settings…
         </div>
       ) : (
-        <div className="space-y-4 max-w-2xl">
+        <div className="space-y-4">
           {/* PromptOwl sign-in gate */}
           <Card>
             <CardHeader>

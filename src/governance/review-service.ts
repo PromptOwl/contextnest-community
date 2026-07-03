@@ -13,7 +13,7 @@ import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
 import * as versions from "./version-service.js";
-import { buildTitleMap } from "./title-resolver.js";
+import { buildTitleMap, describeNode } from "./title-resolver.js";
 import type {
   ReviewRequest,
   ReviewRequestPriority,
@@ -68,7 +68,7 @@ export async function submitForReview(params: {
 
   void notifySlackForNest(
     params.nestId,
-    `:memo: Review requested on \`${params.nodeId}\` (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
+    `:memo: Review requested on *${await describeNode(params.nestId, params.nodeId)}* (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
   );
 
   return (await getReviewRequest(id))!;
@@ -188,7 +188,7 @@ export async function approve(params: {
 
   void notifySlackForNest(
     params.nestId,
-    `:white_check_mark: \`${params.nodeId}\` v${params.version} approved by ${params.approvedBy}`,
+    `:white_check_mark: *${await describeNode(params.nestId, params.nodeId)}* v${params.version} approved by ${params.approvedBy}`,
   );
 
   return (await getReviewRequest(pending.id))!;
@@ -238,7 +238,7 @@ export async function reject(params: {
 
   void notifySlackForNest(
     params.nestId,
-    `:x: \`${params.nodeId}\` v${params.version} rejected by ${params.rejectedBy} — "${params.note}"`,
+    `:x: *${await describeNode(params.nestId, params.nodeId)}* v${params.version} rejected by ${params.rejectedBy} — "${params.note}"`,
   );
 
   return (await getReviewRequest(pending.id))!;
