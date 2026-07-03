@@ -81,7 +81,7 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
           <Loader2 className="h-4 w-4 animate-spin" /> Loading settings…
         </div>
       ) : (
-        <div className="space-y-4 max-w-2xl">
+        <div className="space-y-4">
           {/* PromptOwl sign-in gate */}
           <Card>
             <CardHeader>
@@ -175,6 +175,27 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                 value={settings.public_base_url ?? ""}
                 placeholder="https://nest.yourcompany.com"
                 onSave={(v) => onUpdate({ public_base_url: v })}
+              />
+            </CardContent>
+          </Card>
+
+          {/* Slack connector */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Slack notifications</CardTitle>
+              <CardDescription>
+                Post governance events (review requested, approved, rejected,
+                nest shared) to a Slack channel via an incoming-webhook URL.
+                Leave empty to turn the connector off. The URL contains a
+                secret — treat it like a password.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <TextSetting
+                type="password"
+                value={settings.slack_webhook_url ?? ""}
+                placeholder="https://hooks.slack.com/services/…"
+                onSave={(v) => onUpdate({ slack_webhook_url: v })}
               />
             </CardContent>
           </Card>

@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { LinearRouter } from "hono/router/linear-router";
 import { createMiddleware } from "hono/factory";
 import { cors } from "hono/cors";
 import { authRoutes } from "./auth/routes.js";
@@ -12,8 +13,16 @@ import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
+import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
+import { isSuperAdmin } from "./governance/access-service.js";
+import {
+  llmsTxtRoutes,
+  nestIndexRoutes,
+  serverMcpRoutes,
+} from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
+import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -102,7 +111,16 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 });
 
 export function createApp(): Hono<AuthEnv> {
-  const app = new Hono<AuthEnv>();
+  // LinearRouter, not the default RegExpRouter. Node ids are multi-segment
+  // paths ("nodes/<folder>/<slug>") captured by greedy `/:nodeId{.+}` params.
+  // RegExpRouter merges all same-method routes into one automaton and, for a
+  // node id spanning >1 segment, lets the bare `/:nodeId{.+}` catch-all win
+  // over suffix routes like `/:nodeId{.+}/hosted` or `/versions` — so opening
+  // a foldered artifact 404s ("Node not found: …/hosted"). LinearRouter matches
+  // in registration order with correct per-route backtracking, so the suffix
+  // routes (mounted first) match regardless of id depth. Route count is small
+  // and QPS low, so the linear scan cost is negligible here.
+  const app = new Hono<AuthEnv>({ router: new LinearRouter() });
 
   // Hono request logger disabled — keep terminal clean. Re-enable by
   // restoring `app.use("*", logger())` if request tracing is needed.
@@ -135,6 +153,30 @@ export function createApp(): Hono<AuthEnv> {
       }
     }
     return next();
+  });
+
+  // Activity trace — one row per API request (MCP tool calls log separately
+  // in mcp/routes.ts with the tool name). Registered before the routes so it
+  // wraps everything; userId is read AFTER next() because the per-group auth
+  // middleware sets it downstream. Static assets, the SPA shell, and /health
+  // are noise, not activity — skipped.
+  app.use("*", async (c, next) => {
+    const path = c.req.path;
+    const traced =
+      /^\/(nests|auth|admin|stats|license|index|mcp)(\/|$)/.test(path) &&
+      !path.endsWith("/mcp"); // MCP transport rows come from the tool logger
+    const started = Date.now();
+    await next();
+    if (!traced) return;
+    void logTraceEvent({
+      kind: "api",
+      method: c.req.method,
+      path,
+      nestId: /^\/nests\/([^/]+)/.exec(path)?.[1] ?? null,
+      userId: c.get("userId") ?? null,
+      status: c.res.status,
+      durationMs: Date.now() - started,
+    });
   });
 
   // Health check (public)
@@ -261,6 +303,7 @@ export function createApp(): Hono<AuthEnv> {
     telemetry_enabled: config.TELEMETRY_ENABLED,
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
+    slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
   });
 
   app.get("/admin/settings", async (c) => {
@@ -302,6 +345,14 @@ export function createApp(): Hono<AuthEnv> {
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
     }
+    if ("slack_webhook_url" in body) {
+      const v = String(body.slack_webhook_url ?? "").trim();
+      // Empty clears (connector off). A webhook URL carries an implicit
+      // secret in its path — https only.
+      if (v && !/^https:\/\//i.test(v))
+        errors.push("slack_webhook_url must be an https:// URL (or empty to disable)");
+      else pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
+    }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);
       if (!Number.isFinite(n) || n < 1024 * 1024 || n > 500 * 1024 * 1024)
@@ -333,6 +384,35 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     return c.json({ settings: currentServerSettings() });
+  });
+
+  // GET /admin/trace — the operator audit surface: newest-first activity
+  // rows (API + MCP), optional kind/nest/user/limit filters. Server admin
+  // only (license admin OR access.yaml super_admin) — cross-tenant data.
+  app.use("/admin/trace", flexAuthMiddleware);
+  const traceAllowed = async (c: any) => {
+    if (config.AUTH_MODE === "open") return true;
+    const userId = c.get("userId");
+    if (await isLicenseAdminUserId(userId)) return true;
+    return isSuperAdmin(await resolveCallerEmail(userId));
+  };
+  app.get("/admin/trace", async (c) => {
+    if (!(await traceAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const limitRaw = Number(c.req.query("limit"));
+    const offsetRaw = Number(c.req.query("offset"));
+    const limit = Number.isFinite(limitRaw) ? limitRaw : 25;
+    const offset = Number.isFinite(offsetRaw) ? offsetRaw : 0;
+    const { events, total } = await listTraceEvents({
+      limit,
+      offset,
+      kind: c.req.query("kind") as any,
+      nestId: c.req.query("nest") || undefined,
+      user: c.req.query("user") || undefined,
+    });
+    // `count` = rows on this page (back-compat); `total` = full filtered count
+    // for the pager. limit/offset echo the applied window.
+    return c.json({ count: events.length, total, limit, offset, events });
   });
 
   // GET /stats — dashboard summary counts: nests visible to caller,
@@ -373,6 +453,14 @@ export function createApp(): Hono<AuthEnv> {
       users: usersRow.c,
     });
   });
+
+  // === Agent entry point: /llms.txt (public manual), /index (person nest
+  // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
+  app.route("/llms.txt", llmsTxtRoutes);
+  app.use("/index", flexAuthMiddleware);
+  app.route("/index", nestIndexRoutes);
+  app.use("/mcp", flexAuthMiddleware);
+  app.route("/mcp", serverMcpRoutes);
 
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
@@ -616,20 +704,40 @@ export function createApp(): Hono<AuthEnv> {
     return next();
   });
 
+  // SECURITY: single containment chokepoint for every node-id-bearing route
+  // across the three routers mounted below (governance node ops, annotations,
+  // node CRUD). Node ids become filesystem paths in the engine's storage layer
+  // (join(nestRoot, id + ".md"), no containment of its own), so a `../` id must
+  // be rejected before ANY handler turns it into a read/write/delete — otherwise
+  // a caller scoped to one nest reaches another tenant's files. Centralized here
+  // (not per-route) so a newly added node route can't silently forget the guard.
+  // The greedy {.+} captures the whole remainder incl. any suffix (/versions,
+  // /annotations/:id/comments, …); assertSafeNodeId trips on a `..` segment
+  // anywhere in it. Non-node routes (create/list POST|GET /nodes) don't match.
+  nestsApp.use("/:nestId/nodes/:nodeId{.+}", async (c, next) => {
+    assertSafeNodeId(c.req.param("nodeId")!);
+    return next();
+  });
+
   // Nest list/CRUD
   nestsApp.route("/", nestRoutes);
 
   // Nest-scoped sub-routes
   // Governance nest-level routes (stewards, review-queue)
   nestsApp.route("/:nestId", governanceRoutes);
-  // Governance node-level routes (approve, reject, submit-review, versions, etc.)
-  // Must be mounted BEFORE nodeRoutes because nodeRoutes has a greedy /:nodeId{.+} catch-all.
-  // POST routes work fine (Hono matches method+path), but GET routes clash.
-  // Solution: mount governance node routes and node CRUD on the same Hono instance.
-  nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
-  // Annotations + sandboxed artifact serving — must precede the greedy
-  // nodeRoutes catch-all so /:nodeId/annotations and /:nodeId/hosted match.
+  // Node-level sub-routers all share the /:nestId/nodes base and rely on a
+  // greedy /:nodeId{.+} param (node ids are multi-segment paths). Under the
+  // LinearRouter (see createApp) the FIRST registered match wins, so mount
+  // order = specificity order, longest/most-specific first:
+  //   1. annotationRoutes  — /:nodeId/annotations/:threadId/comments, /hosted.
+  //      Must precede governanceNodeRoutes: its greedy POST /:nodeId/comments
+  //      would otherwise swallow the annotation reply URL (…/annotations/:id/
+  //      comments), capturing "…/annotations/:id" as the node id.
+  //   2. governanceNodeRoutes — /:nodeId/{approve,reject,submit-review,comments,…}
+  //   3. nodeRoutes — CRUD incl. the bare /:nodeId{.+} catch-all, mounted last
+  //      so it only matches when no suffix route did.
   nestsApp.route("/:nestId/nodes", annotationRoutes);
+  nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);

@@ -719,6 +719,56 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("012_merge_case_colliding_users");
   }
+
+  // 013: deletion tombstones (CU-wdqcpzv219). DELETE /nodes purges every
+  //   governance row for the node (so slug reuse works), which left external
+  //   sync consumers (GitHub/GitBook mirrors) no way to learn a doc was
+  //   removed. One tombstone row per (nest, node); re-deletion after a
+  //   recreate updates it in place. GET /nests/:id/changes reads these.
+  //   (Numbered 013 — 012 is reserved by the case-colliding-users merge on
+  //   its own branch; ids are strings, arrival order doesn't matter.)
+  if (!hasMigration("013_node_deletion_tombstones")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS node_deletions (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          deleted_by TEXT,
+          deleted_at TEXT NOT NULL,
+          PRIMARY KEY (nest_id, node_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_node_deletions_time
+          ON node_deletions(nest_id, deleted_at);
+      `);
+    })();
+    recordMigration("013_node_deletion_tombstones");
+  }
+
+  // 014: activity trace (CU-wdqcpzv21h). One row per API request and per MCP
+  //   tool invocation so the server admin has a single place to audit what
+  //   every client and agent did. Simple form by design: who, what, where,
+  //   outcome, duration. Pruned on a rolling window (see trace-log.ts).
+  if (!hasMigration("014_api_events")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS api_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('api', 'mcp')),
+          method TEXT,                 -- HTTP method (api rows)
+          path TEXT,                   -- request path (api rows)
+          tool TEXT,                   -- tool name (mcp rows)
+          nest_id TEXT,
+          user_id TEXT,
+          user_email TEXT,
+          status INTEGER,              -- HTTP status (api rows)
+          duration_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_events_ts ON api_events(ts);
+      `);
+    })();
+    recordMigration("014_api_events");
+  }
 }
 
 /**

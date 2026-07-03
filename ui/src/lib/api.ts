@@ -141,6 +141,7 @@ export interface AdminSettings {
   telemetry_enabled: boolean;
   public_base_url: string;
   max_body_bytes: number;
+  slack_webhook_url: string;
 }
 
 export async function getAdminSettings() {
@@ -230,6 +231,30 @@ export async function changePassword(current: string, next: string) {
     method: "POST",
     body: JSON.stringify({ current, next }),
   });
+}
+
+// Superadmin activity trace — API + MCP call rows, newest first, paginated.
+export async function getAdminTrace(params: {
+  kind?: "api" | "mcp";
+  user?: string;
+  nest?: string;
+  limit?: number;
+  offset?: number;
+} = {}) {
+  const qs = new URLSearchParams();
+  if (params.kind) qs.set("kind", params.kind);
+  if (params.user) qs.set("user", params.user);
+  if (params.nest) qs.set("nest", params.nest);
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return request<{
+    count: number;
+    total: number;
+    limit: number;
+    offset: number;
+    events: any[];
+  }>(`/admin/trace${suffix}`);
 }
 
 // Admin removes a user entirely — revokes all access and deletes them.
@@ -426,6 +451,8 @@ export async function createNode(
     tags?: string[];
     type?: string;
     folder?: string;
+    /** Orchestrator schedule — runnable types (agent/skill) only. */
+    schedule?: string;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -437,7 +464,14 @@ export async function createNode(
 export async function updateNode(
   nestId: string,
   nodeId: string,
-  data: { content?: string; tags?: string[]; title?: string; changeNote?: string },
+  data: {
+    content?: string;
+    tags?: string[];
+    title?: string;
+    changeNote?: string;
+    /** Runnable types (agent/skill) only; "" clears it. */
+    schedule?: string;
+  },
   baseVersion?: number,
 ) {
   const headers: Record<string, string> = {};

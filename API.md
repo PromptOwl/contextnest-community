@@ -278,10 +278,12 @@ Lists all readable docs.
     "author": "...",
     "created_at": "...",
     "updated_at": "...",
-    "content": "# md body"
+    "content": "# md body",
+    "schedule": "0 6 * * *"
   }]
 }
 ```
+- `schedule` is present only on runnable nodes (`type` `agent`/`skill`); omitted otherwise.
 
 ### POST `/nests/:nestId/nodes`
 ```json
@@ -292,11 +294,13 @@ Lists all readable docs.
   "type": "document",
   "scope": "team",
   "status": "draft",
-  "folder": "gtm/deals"
+  "folder": "gtm/deals",
+  "schedule": "0 6 * * *"
 }
 ```
 - Slug derived from title → `nodes/<slug>`.
 - Optional `folder` (string) nests the doc → `nodes/<folder>/<slug>`. Each `/`-separated segment is slugified independently (so `../` or absolute paths can't escape the vault); empty segments drop. Max 8 levels deep; each segment (and the title slug) max 100 chars — otherwise `400`.
+- Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Auto-syncs tag index for steward resolution.
 
@@ -321,10 +325,12 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
   "title": "...",
   "content": "...",
   "tags": ["..."],
-  "changeNote": "fixed typo"
+  "changeNote": "fixed typo",
+  "schedule": "0 7 * * *"
 }
 ```
 Requires nest write permission.
+- `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
@@ -713,6 +719,33 @@ Notes:
   `truncated: true` and `totalNodes` set; `signals` are still computed over the
   full set so the gap numbers stay accurate.
 
+### GET `/nests/:nestId/runnables` (read+)
+Orchestrator surface: every **runnable** node (`type` `agent` or `skill`) with its
+`schedule` and body in one call, so an external scheduler can connect, discover
+what to run and when, and pull the prompt/skill content. Reuses the same
+per-caller gating as the node list (`listNodesForCaller`), so stewardship and the
+public-reader approved-only rule apply — a read-tier orchestrator key only ever
+sees **approved** agent/skill definitions; unapproved drafts are omitted.
+
+```json
+{
+  "count": 1,
+  "runnables": [{
+    "id": "nodes/nightly-digest-agent",
+    "title": "Nightly Digest Agent",
+    "type": "agent",
+    "schedule": "0 6 * * *",
+    "status": "published",
+    "tags": ["#ops"],
+    "updated_at": "...",
+    "content": "# Agent\n\n..."
+  }]
+}
+```
+- `schedule` is `null` when the node carries no schedule.
+- Filtering to runnable types happens before the per-node governance/version
+  enrichment, so cost scales with the number of runnables, not total nest size.
+
 ### POST `/nests/:nestId/publish`
 Publishes the nest (snapshots + index).
 
@@ -728,6 +761,70 @@ Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same 
 - `context_sync_folder` — mirrors `POST /nests/unsynced/sync`. Args: `name` (folder path relative to `DATA_ROOT`).
 
 Both reuse the same `listUnsyncedFolders` / `syncUnsyncedFolder` service functions the REST routes call, so a single fix lands in both surfaces.
+
+---
+
+## 10. Admin / operator
+
+### GET `/admin/trace` (server-admin only)
+Operator activity trail — one newest-first row per API request and per MCP tool call, so the server admin has a single place to audit what every client and agent did. Server-admin only: the license admin, or a `super_admin` in `access.yaml` (open mode: always allowed). Everyone else gets `403`. Cross-tenant data; not scoped to a nest.
+
+Rows are best-effort fire-and-forget writes to the `api_events` table (a broken trace table never fails a real request) on a rolling **14-day** retention window. API rows come from a global request-logging middleware; MCP rows are logged inside `handleToolCall`, so both per-nest and server-level tool calls — including ones that throw — are captured.
+
+Query params (all optional):
+- `kind` — `api` or `mcp`. Omit for both.
+- `user` — substring match on caller email, or exact user id.
+- `nest` — filter to a single nest id.
+- `limit` — page size, clamped to `1..1000` (default `25`). Non-numeric values fall back to the default rather than erroring.
+- `offset` — rows to skip for pagination (default `0`). The UI pages in blocks of 25 (`offset = page * 25`).
+
+`total` is the full filtered row count (independent of `limit`/`offset`), so the client can render a pager. `count` is the number of rows on the current page.
+
+Response (200):
+```json
+{
+  "count": 2,
+  "total": 137,
+  "limit": 25,
+  "offset": 0,
+  "events": [
+    {
+      "id": 412,
+      "ts": "2026-07-03T13:58:44.812Z",
+      "kind": "mcp",
+      "method": null,
+      "path": null,
+      "tool": "context_overview",
+      "nest_id": "nest_abc",
+      "user_id": "usr_123",
+      "caller": "alice@acme.com",
+      "status": 200,
+      "duration_ms": 14
+    },
+    {
+      "id": 411,
+      "ts": "2026-07-03T13:58:44.790Z",
+      "kind": "api",
+      "method": "POST",
+      "path": "/nests/nest_abc/nodes",
+      "tool": null,
+      "nest_id": "nest_abc",
+      "user_id": "usr_123",
+      "caller": "alice@acme.com",
+      "status": 201,
+      "duration_ms": 23
+    }
+  ]
+}
+```
+- `kind` — `api` (HTTP request) or `mcp` (tool call).
+- `method` / `path` — set on `api` rows; `null` on `mcp` rows.
+- `tool` — set on `mcp` rows; `null` on `api` rows.
+- `caller` — resolved caller email (from the row's stored email or a join on `user_id`).
+- `status` — HTTP status for `api` rows; `200` (success) / `500` (threw) for `mcp` rows.
+- `duration_ms` — wall-clock duration of the call.
+
+Surfaced in the UI under the user menu → **Activity trace** (`ActivityTracePage`), with kind/user filters, 25-per-page pagination, and a refresh button.
 
 ---
 
