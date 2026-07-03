@@ -46,6 +46,7 @@ const HISTORICAL_MIGRATIONS = [
   // Seed the id so bookkeeping matches SQLite and future incremental Postgres
   // migrations gate correctly.
   "012_merge_case_colliding_users",
+  "013_node_deletion_tombstones",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -283,6 +284,20 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON comments(nest_id, node_id, status);
     CREATE INDEX IF NOT EXISTS idx_comments_thread
       ON comments(parent_id);
+
+    -- node_deletions tombstones (migration 013). DELETE /nodes purges all other
+    -- governance rows for the node; this is the only record that a doc was
+    -- removed, read by GET /nests/:id/changes. One row per (nest, node); a
+    -- re-delete after recreate upserts in place. deleted_at written explicitly.
+    CREATE TABLE IF NOT EXISTS node_deletions (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      deleted_by TEXT,
+      deleted_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, node_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_deletions_time
+      ON node_deletions(nest_id, deleted_at);
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,
