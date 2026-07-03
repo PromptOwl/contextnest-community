@@ -10,8 +10,9 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
+import { AgentDocsPage } from "./components/AgentDocsPage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -71,6 +72,7 @@ type View =
     }
   | { page: "teammates" }
   | { page: "settings" }
+  | { page: "docs" }
   | {
       page: "ontology-graph";
       nestId: string;
@@ -469,6 +471,18 @@ export default function App() {
               </span>
             )}
 
+            {view.page !== "docs" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setView({ page: "docs" })}
+                title="API, MCP & CLI docs for agents"
+              >
+                <BookOpen className="h-3.5 w-3.5 mr-1" />
+                Docs
+              </Button>
+            )}
+
             {view.page === "nest" && (
               <Button
                 variant="outline"
@@ -696,6 +710,9 @@ export default function App() {
             settings={serverSettings}
             onUpdate={updateServerSettings}
           />
+        )}
+        {view.page === "docs" && (
+          <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}
         {view.page === "ontology-graph" && (
           <OntologyGraphView

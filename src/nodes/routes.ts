@@ -67,10 +67,15 @@ nodeRoutes.post("/", async (c) => {
     tags?: string[];
     scope?: string;
     status?: string;
+    schedule?: string;
+    folder?: string;
   }>();
 
   if (!body.title || !body.content) {
     throw new ValidationError("title and content are required");
+  }
+  if (body.folder !== undefined && typeof body.folder !== "string") {
+    throw new ValidationError("folder must be a string path like \"gtm/deals\"");
   }
 
   const nestId = c.req.param("nestId")!;
@@ -84,6 +89,8 @@ nodeRoutes.post("/", async (c) => {
       tags: body.tags,
       scope: body.scope,
       status: body.status,
+      schedule: body.schedule,
+      folder: body.folder,
     },
     authorEmail,
   );
@@ -343,6 +350,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     status?: string;
     title?: string;
     changeNote?: string;
+    schedule?: string;
   }>();
 
   // Conflict detection via X-Base-Version header — REST-only contract.
@@ -376,6 +384,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       title: body.title,
       status: body.status,
       changeNote: body.changeNote,
+      schedule: body.schedule,
     },
     authorEmail,
   );
