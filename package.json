@@ -104,6 +104,7 @@
     "@tiptap/extension-details": "^3.23.2",
     "@tiptap/extension-drag-handle-react": "^3.23.2",
     "@tiptap/extension-highlight": "^3.23.2",
+    "@tiptap/extension-image": "3.23.2",
     "@tiptap/extension-link": "^3.23.2",
     "@tiptap/extension-node-range": "^3.23.2",
     "@tiptap/extension-placeholder": "^3.23.2",
