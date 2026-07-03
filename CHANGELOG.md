@@ -1,5 +1,26 @@
 # @promptowl/contextnest-community
 
+## 1.6.0
+
+### Minor Changes
+
+- v1.6.0 — configurable nest storage and a PostgreSQL/Cloud SQL backend for durable Cloud Run deployments.
+
+  ### Storage
+
+  - **Configurable `NEST_STORAGE_ROOT`** — nest vault files (markdown + version history) can now live outside `DATA_ROOT`, e.g. on a GCS volume mount on Cloud Run, while the DB stays on `DATA_ROOT`. Path resolution is centralised so the root is set in one place (`src/config.ts`, `src/shared/paths.ts`, `src/nests/service.ts`). Defaults to `<DATA_ROOT>/nests`, so existing deployments are unchanged.
+
+  ### Database
+
+  - **PostgreSQL / Cloud SQL backend** — an async DB adapter lets the server run on PostgreSQL alongside the existing SQLite backend, with Cloud SQL Auth Proxy (unix socket) and TCP+TLS connection support for durable Cloud Run deployments (`src/db/adapter.ts`, `src/db/adapter.postgres.ts`, `src/db/adapter.sqlite.ts`, `src/db/migrations.postgres.ts`, `src/db/sql.ts`, `src/db/client.ts`). New `DB_*` env vars: `DB_DRIVER`, `DATABASE_URL`, `CLOUD_SQL_CONNECTION_NAME`, `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_POOL_MAX`, `DB_SSL`, `DB_SSL_CA`. SQLite stays the default when no connection is configured, so existing deployments keep working untouched (`CONFIGURATION.md`, `.env.example`).
+
+  ### Fixes
+
+  - **Security** — the admin guard on `/admin/settings` is now correctly awaited, closing a window where the async check did not gate the request (`src/app.ts`).
+  - **AdminLoginModal** — now respects `PROMPTOWL_SIGN_IN_GATE` (`ui/src/components/AdminLoginModal.tsx`).
+  - **Drift scanner toggle** — `DRIFT_SCAN_INTERVAL_MS=0` now disables the drift scanner (`src/index.ts`).
+  - **Nest-root seam** — the unsynced-service no longer risks deleting live nests when `NEST_STORAGE_ROOT` is nested under `DATA_ROOT` (`src/nests/unsynced-service.ts`, `src/nests/service.ts`).
+
 ## 1.5.0
 
 ### Minor Changes

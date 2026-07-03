@@ -7,16 +7,21 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { listNests, listSharedNests } from "./nests/service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
-import {
-  resolveStewardsForNode,
-  canManageStewards,
-} from "./governance/stewardship-service.js";
+import { resolveStewardsForNode } from "./governance/stewardship-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
+import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
+import { isSuperAdmin } from "./governance/access-service.js";
+import {
+  llmsTxtRoutes,
+  nestIndexRoutes,
+  serverMcpRoutes,
+} from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
+import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -69,6 +74,14 @@ const openModeMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 function isPublicReadEligiblePath(method: string, path: string): boolean {
   if (method !== "GET") return false;
   if (!/^\/nests\/[^/]+(\/.*)?$/.test(path)) return false;
+  // The nest steward roster (/nests/:id/stewards) is admin-gated, never
+  // public — keep it behind real auth. Without this, an anonymous caller on
+  // an anon-owned nest (nests.user_id === ANON_USER_ID, e.g. created under a
+  // previous AUTH_MODE=open run) is treated as the anon owner, so the
+  // roster gate below resolves "owner" and leaks emails/roles. The
+  // node-level resolve (/nests/:id/nodes/:nid/stewards) stays public so the
+  // editor UI can still resolve a caller's per-node role.
+  if (/^\/nests\/[^/]+\/stewards/.test(path)) return false;
   return !/\/(collaborators|visibility|settings|mcp)/.test(path);
 }
 
@@ -130,6 +143,30 @@ export function createApp(): Hono<AuthEnv> {
       }
     }
     return next();
+  });
+
+  // Activity trace — one row per API request (MCP tool calls log separately
+  // in mcp/routes.ts with the tool name). Registered before the routes so it
+  // wraps everything; userId is read AFTER next() because the per-group auth
+  // middleware sets it downstream. Static assets, the SPA shell, and /health
+  // are noise, not activity — skipped.
+  app.use("*", async (c, next) => {
+    const path = c.req.path;
+    const traced =
+      /^\/(nests|auth|admin|stats|license|index|mcp)(\/|$)/.test(path) &&
+      !path.endsWith("/mcp"); // MCP transport rows come from the tool logger
+    const started = Date.now();
+    await next();
+    if (!traced) return;
+    void logTraceEvent({
+      kind: "api",
+      method: c.req.method,
+      path,
+      nestId: /^\/nests\/([^/]+)/.exec(path)?.[1] ?? null,
+      userId: c.get("userId") ?? null,
+      status: c.res.status,
+      durationMs: Date.now() - started,
+    });
   });
 
   // Health check (public)
@@ -363,6 +400,35 @@ export function createApp(): Hono<AuthEnv> {
     return c.json({ settings: currentServerSettings() });
   });
 
+  // GET /admin/trace — the operator audit surface: newest-first activity
+  // rows (API + MCP), optional kind/nest/user/limit filters. Server admin
+  // only (license admin OR access.yaml super_admin) — cross-tenant data.
+  app.use("/admin/trace", flexAuthMiddleware);
+  const traceAllowed = async (c: any) => {
+    if (config.AUTH_MODE === "open") return true;
+    const userId = c.get("userId");
+    if (await isLicenseAdminUserId(userId)) return true;
+    return isSuperAdmin(await resolveCallerEmail(userId));
+  };
+  app.get("/admin/trace", async (c) => {
+    if (!(await traceAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const limitRaw = Number(c.req.query("limit"));
+    const offsetRaw = Number(c.req.query("offset"));
+    const limit = Number.isFinite(limitRaw) ? limitRaw : 25;
+    const offset = Number.isFinite(offsetRaw) ? offsetRaw : 0;
+    const { events, total } = await listTraceEvents({
+      limit,
+      offset,
+      kind: c.req.query("kind") as any,
+      nestId: c.req.query("nest") || undefined,
+      user: c.req.query("user") || undefined,
+    });
+    // `count` = rows on this page (back-compat); `total` = full filtered count
+    // for the pager. limit/offset echo the applied window.
+    return c.json({ count: events.length, total, limit, offset, events });
+  });
+
   // GET /stats — dashboard summary counts: nests visible to caller,
   // documents across those nests, total users on the server. Uses
   // flexAuthMiddleware so it works without auth in open mode and with
@@ -401,6 +467,14 @@ export function createApp(): Hono<AuthEnv> {
       users: usersRow.c,
     });
   });
+
+  // === Agent entry point: /llms.txt (public manual), /index (person nest
+  // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
+  app.route("/llms.txt", llmsTxtRoutes);
+  app.use("/index", flexAuthMiddleware);
+  app.route("/index", nestIndexRoutes);
+  app.use("/mcp", flexAuthMiddleware);
+  app.route("/mcp", serverMcpRoutes);
 
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
@@ -536,17 +610,22 @@ export function createApp(): Hono<AuthEnv> {
       /\/comments$/.test(path) ||
       /\/comments\/[^/]+\/resolve$/.test(path);
     // The steward roster — list, assign, remove, sync — is restricted to the
-    // server (license) admin: not nest owners or collaborators. All methods
-    // on /nests/:id/stewards are locked. The node-level resolve route
+    // server (license) admin plus the nest owner/admin collaborators, so an
+    // owner can delegate vault people-management by granting admin. All
+    // methods on /nests/:id/stewards are gated. The node-level resolve route
     // (/nodes/:id/stewards) stays readable so the editor UI can resolve a
     // caller's per-node role.
     const isStewardRoster =
       path.includes("/stewards") && !path.includes("/nodes/");
-    if (isStewardRoster && !canManageStewards(await resolveCallerEmail(userId))) {
+    // Reuse the permission already resolved above — resolveNestPermission
+    // folds the license/super admin into "admin", so owner/admin covers
+    // server admin, nest owner, and admin collaborators (same rule as the
+    // shared canManageStewards used by MCP).
+    if (isStewardRoster && permission !== "owner" && permission !== "admin") {
       return c.json(
         {
           error:
-            "You don't have permission to manage stewards. Only the super admin can do this.",
+            "You don't have permission to manage stewards. Only a nest admin, the nest owner, or the server admin can do this.",
         },
         403,
       );
@@ -636,6 +715,21 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     c.set("nestPermission", permission);
+    return next();
+  });
+
+  // SECURITY: single containment chokepoint for every node-id-bearing route
+  // across the three routers mounted below (governance node ops, annotations,
+  // node CRUD). Node ids become filesystem paths in the engine's storage layer
+  // (join(nestRoot, id + ".md"), no containment of its own), so a `../` id must
+  // be rejected before ANY handler turns it into a read/write/delete — otherwise
+  // a caller scoped to one nest reaches another tenant's files. Centralized here
+  // (not per-route) so a newly added node route can't silently forget the guard.
+  // The greedy {.+} captures the whole remainder incl. any suffix (/versions,
+  // /annotations/:id/comments, …); assertSafeNodeId trips on a `..` segment
+  // anywhere in it. Non-node routes (create/list POST|GET /nodes) don't match.
+  nestsApp.use("/:nestId/nodes/:nodeId{.+}", async (c, next) => {
+    assertSafeNodeId(c.req.param("nodeId")!);
     return next();
   });
 

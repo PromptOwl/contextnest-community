@@ -42,7 +42,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
   const [error, setError] = useState<string | null>(null);
   const [showInvite, setShowInvite] = useState(false);
   const [inviteSeedEmail, setInviteSeedEmail] = useState<string>("");
-  const [newKey, setNewKey] = useState<{ email: string; key: string } | null>(null);
+  const [newKey, setNewKey] = useState<{ email: string; password: string } | null>(null);
   // Temp password to reveal after an admin reset (no email — shown once).
   // password === null means we're still generating (shows a loader).
   const [resetPw, setResetPw] = useState<{ email: string; password: string | null } | null>(null);
@@ -86,7 +86,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
         <div className="flex-1">
           <h2 className="text-2xl font-semibold">Teammates</h2>
           <p className="text-sm text-muted-foreground">
-            Invite teammates and manage their access keys
+            Add teammates and manage their access
           </p>
         </div>
         <Button onClick={() => setShowInvite(true)}>
@@ -151,7 +151,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                         <Badge
                           variant="outline"
                           className="border-amber-200 bg-amber-50 text-amber-700"
-                          title="Invited but not yet registered. They must complete registration with this email to claim the account."
+                          title="Added with a temporary password. They can sign in with their email + that password (use Reset password to re-issue one), then change it."
                         >
                           Invited
                         </Badge>
@@ -268,10 +268,10 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
             setShowInvite(false);
             setInviteSeedEmail("");
           }}
-          onCreated={(email, key) => {
+          onCreated={(email, password) => {
             setShowInvite(false);
             setInviteSeedEmail("");
-            setNewKey({ email, key });
+            setNewKey({ email, password });
             fetchTeammates();
           }}
         />
@@ -280,7 +280,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
       {newKey && (
         <NewKeyModal
           email={newKey.email}
-          apiKey={newKey.key}
+          password={newKey.password}
           onClose={() => setNewKey(null)}
         />
       )}
@@ -309,8 +309,8 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                 <p className="text-xs text-muted-foreground mb-3">
                   Share this with <strong>{resetPw.email}</strong> directly — no
                   email is sent. They sign in with it, then change it from their
-                  account. It won't be shown again. Their existing API keys were
-                  revoked — they'll generate a new one after signing in.
+                  account. It won't be shown again. Their existing API keys keep
+                  working; revoke a key separately if it may be compromised.
                 </p>
                 <div className="flex items-center gap-2">
                   <code className="flex-1 bg-muted border rounded px-2 py-1.5 text-sm font-mono break-all">
@@ -395,10 +395,9 @@ function InviteTeammateModal({
 }: {
   seedEmail?: string;
   onClose: () => void;
-  onCreated: (email: string, key: string) => void;
+  onCreated: (email: string, password: string) => void;
 }) {
   const [email, setEmail] = useState(seedEmail || "");
-  const [label, setLabel] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -408,8 +407,8 @@ function InviteTeammateModal({
     setLoading(true);
     setError(null);
     try {
-      const result = await api.inviteTeammate(email, label || undefined);
-      onCreated(email, result.api_key);
+      const result = await api.inviteTeammate(email);
+      onCreated(email, result.temporary_password);
     } catch (err: any) {
       setError(err.message);
       setLoading(false);
@@ -420,10 +419,10 @@ function InviteTeammateModal({
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[420px]">
         <DialogHeader>
-          <DialogTitle>Invite Teammate</DialogTitle>
+          <DialogTitle>Add Teammate</DialogTitle>
           <DialogDescription>
-            Create an API key for a teammate. They'll use it to authenticate
-            from Hootie, Claude Desktop, or the CLI.
+            Create a login for a teammate. They get a temporary password to sign
+            in with, then can change it and create their own API key.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleInvite} className="space-y-3">
@@ -444,14 +443,6 @@ function InviteTeammateModal({
               autoFocus
             />
           </div>
-          <div className="space-y-1">
-            <Label>Key label (optional)</Label>
-            <Input
-              placeholder="Jane's laptop"
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-            />
-          </div>
           <DialogFooter>
             <Button variant="outline" type="button" onClick={onClose}>
               Cancel
@@ -460,7 +451,7 @@ function InviteTeammateModal({
               {loading ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
-                "Generate Key"
+                "Add teammate"
               )}
             </Button>
           </DialogFooter>
@@ -472,16 +463,16 @@ function InviteTeammateModal({
 
 function NewKeyModal({
   email,
-  apiKey,
+  password,
   onClose,
 }: {
   email: string;
-  apiKey: string;
+  password: string;
   onClose: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    await navigator.clipboard.writeText(apiKey);
+    await navigator.clipboard.writeText(password);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -490,18 +481,20 @@ function NewKeyModal({
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[520px]">
         <DialogHeader>
-          <DialogTitle>Key created for {email}</DialogTitle>
+          <DialogTitle>Teammate added: {email}</DialogTitle>
           <DialogDescription>
-            Copy this key and send it to them via Slack, email, or another
+            Send them this temporary password via Slack, email, or another
             secure channel. <strong>It won't be shown again.</strong>
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-2">
-          <Label className="text-xs text-muted-foreground">API Key</Label>
+          <Label className="text-xs text-muted-foreground">
+            Temporary password
+          </Label>
           <div className="flex items-center gap-2">
             <code className="flex-1 bg-muted px-3 py-2 rounded text-xs font-mono break-all">
-              {apiKey}
+              {password}
             </code>
             <Button size="sm" variant="outline" onClick={copy}>
               {copied ? (
@@ -512,19 +505,10 @@ function NewKeyModal({
             </Button>
           </div>
           <p className="text-xs text-muted-foreground pt-2">
-            They'll paste this into:
+            They sign in at this server with their email + this password, then
+            can change it under their account and create their own API key for
+            Hootie, Claude Desktop, or the CLI.
           </p>
-          <ul className="text-xs text-muted-foreground list-disc list-inside space-y-0.5">
-            <li>Hootie → Settings → Vault → Remote Server → API Key</li>
-            <li>
-              Claude Desktop → add as{" "}
-              <code className="text-[10px]">Authorization: Bearer ...</code>{" "}
-              in MCP config
-            </li>
-            <li>
-              CLI → <code className="text-[10px]">--key ...</code> flag
-            </li>
-          </ul>
         </div>
 
         <DialogFooter>
