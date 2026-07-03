@@ -764,6 +764,70 @@ Both reuse the same `listUnsyncedFolders` / `syncUnsyncedFolder` service functio
 
 ---
 
+## 10. Admin / operator
+
+### GET `/admin/trace` (server-admin only)
+Operator activity trail — one newest-first row per API request and per MCP tool call, so the server admin has a single place to audit what every client and agent did. Server-admin only: the license admin, or a `super_admin` in `access.yaml` (open mode: always allowed). Everyone else gets `403`. Cross-tenant data; not scoped to a nest.
+
+Rows are best-effort fire-and-forget writes to the `api_events` table (a broken trace table never fails a real request) on a rolling **14-day** retention window. API rows come from a global request-logging middleware; MCP rows are logged inside `handleToolCall`, so both per-nest and server-level tool calls — including ones that throw — are captured.
+
+Query params (all optional):
+- `kind` — `api` or `mcp`. Omit for both.
+- `user` — substring match on caller email, or exact user id.
+- `nest` — filter to a single nest id.
+- `limit` — page size, clamped to `1..1000` (default `25`). Non-numeric values fall back to the default rather than erroring.
+- `offset` — rows to skip for pagination (default `0`). The UI pages in blocks of 25 (`offset = page * 25`).
+
+`total` is the full filtered row count (independent of `limit`/`offset`), so the client can render a pager. `count` is the number of rows on the current page.
+
+Response (200):
+```json
+{
+  "count": 2,
+  "total": 137,
+  "limit": 25,
+  "offset": 0,
+  "events": [
+    {
+      "id": 412,
+      "ts": "2026-07-03T13:58:44.812Z",
+      "kind": "mcp",
+      "method": null,
+      "path": null,
+      "tool": "context_overview",
+      "nest_id": "nest_abc",
+      "user_id": "usr_123",
+      "caller": "alice@acme.com",
+      "status": 200,
+      "duration_ms": 14
+    },
+    {
+      "id": 411,
+      "ts": "2026-07-03T13:58:44.790Z",
+      "kind": "api",
+      "method": "POST",
+      "path": "/nests/nest_abc/nodes",
+      "tool": null,
+      "nest_id": "nest_abc",
+      "user_id": "usr_123",
+      "caller": "alice@acme.com",
+      "status": 201,
+      "duration_ms": 23
+    }
+  ]
+}
+```
+- `kind` — `api` (HTTP request) or `mcp` (tool call).
+- `method` / `path` — set on `api` rows; `null` on `mcp` rows.
+- `tool` — set on `mcp` rows; `null` on `api` rows.
+- `caller` — resolved caller email (from the row's stored email or a join on `user_id`).
+- `status` — HTTP status for `api` rows; `200` (success) / `500` (threw) for `mcp` rows.
+- `duration_ms` — wall-clock duration of the call.
+
+Surfaced in the UI under the user menu → **Activity trace** (`ActivityTracePage`), with kind/user filters, 25-per-page pagination, and a refresh button.
+
+---
+
 ## Permission middleware quick-ref
 
 For any `/nests/:nestId/...` request, the middleware computes:

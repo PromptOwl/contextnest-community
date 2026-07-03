@@ -47,6 +47,7 @@ const HISTORICAL_MIGRATIONS = [
   // migrations gate correctly.
   "012_merge_case_colliding_users",
   "013_node_deletion_tombstones",
+  "014_api_events",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -298,6 +299,24 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_node_deletions_time
       ON node_deletions(nest_id, deleted_at);
+
+    -- activity trace (migration 014). One row per API request / MCP tool call
+    -- so the server admin has a single place to audit everything. Pruned on a
+    -- rolling window in trace-log.ts.
+    CREATE TABLE IF NOT EXISTS api_events (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      ts TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('api', 'mcp')),
+      method TEXT,                 -- HTTP method (api rows)
+      path TEXT,                   -- request path (api rows)
+      tool TEXT,                   -- tool name (mcp rows)
+      nest_id TEXT,
+      user_id TEXT,
+      user_email TEXT,
+      status INTEGER,              -- HTTP status (api + mcp rows)
+      duration_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_events_ts ON api_events(ts);
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

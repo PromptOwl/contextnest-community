@@ -26,6 +26,7 @@ import {
   listNodesForCallerByEmail,
 } from "../nodes/service.js";
 import { listThreads } from "../annotations/service.js";
+import { logTraceEvent } from "../telemetry/trace-log.js";
 
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
@@ -385,7 +386,38 @@ async function resolveLlmBody(
   }
 }
 
+/**
+ * Public entry for every MCP tool call. Logging lives HERE (not in the route
+ * wrapper) so it covers per-nest AND server-level MCP, and so a tool that
+ * throws still produces an audit row (status 500). Best-effort:
+ * `logTraceEvent` swallows its own errors and never alters tool behavior.
+ */
 export async function handleToolCall(
+  toolName: string,
+  args: Record<string, any>,
+  ctx: McpToolContext,
+): Promise<string> {
+  const started = Date.now();
+  let status = 200;
+  try {
+    return await runTool(toolName, args, ctx);
+  } catch (err) {
+    status = 500;
+    throw err;
+  } finally {
+    void logTraceEvent({
+      kind: "mcp",
+      tool: toolName,
+      nestId: ctx.nestId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      status,
+      durationMs: Date.now() - started,
+    });
+  }
+}
+
+async function runTool(
   toolName: string,
   args: Record<string, any>,
   ctx: McpToolContext,

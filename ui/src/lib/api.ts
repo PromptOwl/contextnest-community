@@ -232,6 +232,30 @@ export async function changePassword(current: string, next: string) {
   });
 }
 
+// Superadmin activity trace — API + MCP call rows, newest first, paginated.
+export async function getAdminTrace(params: {
+  kind?: "api" | "mcp";
+  user?: string;
+  nest?: string;
+  limit?: number;
+  offset?: number;
+} = {}) {
+  const qs = new URLSearchParams();
+  if (params.kind) qs.set("kind", params.kind);
+  if (params.user) qs.set("user", params.user);
+  if (params.nest) qs.set("nest", params.nest);
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return request<{
+    count: number;
+    total: number;
+    limit: number;
+    offset: number;
+    events: any[];
+  }>(`/admin/trace${suffix}`);
+}
+
 // Admin removes a user entirely — revokes all access and deletes them.
 // Blocked server-side if they own nests or are the caller.
 export async function removeUser(userId: string) {

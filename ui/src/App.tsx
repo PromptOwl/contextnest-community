@@ -10,9 +10,10 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen, ScrollText } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
+import { ActivityTracePage } from "./components/ActivityTracePage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -72,6 +73,7 @@ type View =
     }
   | { page: "teammates" }
   | { page: "settings" }
+  | { page: "trace" }
   | { page: "docs" }
   | {
       page: "ontology-graph";
@@ -508,6 +510,7 @@ export default function App() {
                 isAdmin={isAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
                 onSettings={() => setView({ page: "settings" })}
+                onTrace={() => setView({ page: "trace" })}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
               />
@@ -711,6 +714,9 @@ export default function App() {
             onUpdate={updateServerSettings}
           />
         )}
+        {view.page === "trace" && (
+          <ActivityTracePage onBack={() => setView({ page: "dashboard" })} />
+        )}
         {view.page === "docs" && (
           <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}
@@ -747,6 +753,7 @@ interface UserMenuProps {
   isAdmin: boolean;
   onTeammates: () => void;
   onSettings: () => void;
+  onTrace: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
 }
@@ -756,6 +763,7 @@ function UserMenu({
   isAdmin,
   onTeammates,
   onSettings,
+  onTrace,
   onChangePassword,
   onLogout,
 }: UserMenuProps) {
@@ -813,6 +821,10 @@ function UserMenu({
             <DropdownMenuItem onSelect={onSettings} className="cursor-pointer">
               <Shield className="h-3.5 w-3.5 mr-2" />
               Server settings
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onTrace} className="cursor-pointer">
+              <ScrollText className="h-3.5 w-3.5 mr-2" />
+              Activity trace
             </DropdownMenuItem>
           </>
         )}

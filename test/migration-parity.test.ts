@@ -69,6 +69,14 @@ describe("SQLite/Postgres migration parity", () => {
     expect(tableNames(pgSrc).has("node_deletions")).toBe(true);
   });
 
+  it("api_events (activity trace) is present in both drivers and seeded (CU-wdqcpzv21h)", () => {
+    expect(tableNames(sqliteSrc).has("api_events")).toBe(true);
+    expect(tableNames(pgSrc).has("api_events")).toBe(true);
+    // The 014 migration id must be seeded in Postgres HISTORICAL_MIGRATIONS so
+    // a PG deployment doesn't re-run it (and bookkeeping matches SQLite).
+    expect(historicalMigrationIds(pgSrc).has("014_api_events")).toBe(true);
+  });
+
   it("every recorded SQLite migration id (002+) is seeded in Postgres HISTORICAL_MIGRATIONS", () => {
     const recorded = recordedMigrationIds(sqliteSrc);
     const historical = historicalMigrationIds(pgSrc);

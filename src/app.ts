@@ -12,6 +12,8 @@ import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
+import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
+import { isSuperAdmin } from "./governance/access-service.js";
 import {
   llmsTxtRoutes,
   nestIndexRoutes,
@@ -140,6 +142,30 @@ export function createApp(): Hono<AuthEnv> {
       }
     }
     return next();
+  });
+
+  // Activity trace — one row per API request (MCP tool calls log separately
+  // in mcp/routes.ts with the tool name). Registered before the routes so it
+  // wraps everything; userId is read AFTER next() because the per-group auth
+  // middleware sets it downstream. Static assets, the SPA shell, and /health
+  // are noise, not activity — skipped.
+  app.use("*", async (c, next) => {
+    const path = c.req.path;
+    const traced =
+      /^\/(nests|auth|admin|stats|license|index|mcp)(\/|$)/.test(path) &&
+      !path.endsWith("/mcp"); // MCP transport rows come from the tool logger
+    const started = Date.now();
+    await next();
+    if (!traced) return;
+    void logTraceEvent({
+      kind: "api",
+      method: c.req.method,
+      path,
+      nestId: /^\/nests\/([^/]+)/.exec(path)?.[1] ?? null,
+      userId: c.get("userId") ?? null,
+      status: c.res.status,
+      durationMs: Date.now() - started,
+    });
   });
 
   // Health check (public)
@@ -338,6 +364,35 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     return c.json({ settings: currentServerSettings() });
+  });
+
+  // GET /admin/trace — the operator audit surface: newest-first activity
+  // rows (API + MCP), optional kind/nest/user/limit filters. Server admin
+  // only (license admin OR access.yaml super_admin) — cross-tenant data.
+  app.use("/admin/trace", flexAuthMiddleware);
+  const traceAllowed = async (c: any) => {
+    if (config.AUTH_MODE === "open") return true;
+    const userId = c.get("userId");
+    if (await isLicenseAdminUserId(userId)) return true;
+    return isSuperAdmin(await resolveCallerEmail(userId));
+  };
+  app.get("/admin/trace", async (c) => {
+    if (!(await traceAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const limitRaw = Number(c.req.query("limit"));
+    const offsetRaw = Number(c.req.query("offset"));
+    const limit = Number.isFinite(limitRaw) ? limitRaw : 25;
+    const offset = Number.isFinite(offsetRaw) ? offsetRaw : 0;
+    const { events, total } = await listTraceEvents({
+      limit,
+      offset,
+      kind: c.req.query("kind") as any,
+      nestId: c.req.query("nest") || undefined,
+      user: c.req.query("user") || undefined,
+    });
+    // `count` = rows on this page (back-compat); `total` = full filtered count
+    // for the pager. limit/offset echo the applied window.
+    return c.json({ count: events.length, total, limit, offset, events });
   });
 
   // GET /stats — dashboard summary counts: nests visible to caller,
