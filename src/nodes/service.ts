@@ -17,7 +17,8 @@ import {
   resolveCallerEmail,
   filterAccessible,
 } from "../governance/access-guard.js";
-import { isPublicReader } from "../shared/access.js";
+import { isPublicReader, resolveNestPermission } from "../shared/access.js";
+import { listUserGrants, grantCoversNode } from "../governance/grants-service.js";
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import { ANON_USER_ID } from "../shared/constants.js";
@@ -115,7 +116,18 @@ export async function listNodesForCaller(
   }
 
   const userEmail = await resolveCallerEmail(userId);
-  const accessible = await filterAccessible(nestId, userId, userEmail, documents);
+  let accessible = await filterAccessible(nestId, userId, userEmail, documents);
+
+  // Share grants: a caller with NO nest-wide permission sees exactly the
+  // documents their grants cover (one shared doc, or a shared folder's
+  // contents) — never the whole list. Overrides filterAccessible's
+  // "stewardship off → return everything" default for grant-only callers.
+  if ((await resolveNestPermission(nestId, userId)) === "none") {
+    const grants = await listUserGrants(nestId, userId);
+    accessible = grants.length
+      ? accessible.filter((d) => grantCoversNode(grants, d.id))
+      : accessible;
+  }
   const publicReader = await isPublicReader(nestId, userId);
 
   const enriched = await Promise.all(
