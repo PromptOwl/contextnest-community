@@ -46,6 +46,8 @@ function createMcpServerForNest(
 
     server.tool(tool.name, tool.description, shape, async (args) => {
       const engine = await engineCache.get(nestId);
+      // Audit logging happens inside handleToolCall (covers per-nest +
+      // server-level MCP, and thrown calls).
       const text = await handleToolCall(tool.name, args, {
         storage: engine.storage,
         queryEngine: engine.query,
