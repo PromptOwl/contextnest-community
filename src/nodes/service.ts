@@ -195,6 +195,10 @@ export interface CreateNodeInput {
   /** Orchestrator schedule (cron/interval string, opaque to the server).
    *  Only valid for runnable types (agent/skill). */
   schedule?: string;
+  /** Folder path under nodes/ (e.g. "gtm/deals"). Each segment is slugified;
+   *  storage and read/update/delete already handle nested ids, only creation
+   *  was flat. Ignored when an explicit id is given. */
+  folder?: string;
 }
 
 export interface UpdateNodePatch {
@@ -220,11 +224,36 @@ export async function createNode(
 ): Promise<NodeMutationResult> {
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
-  const slug = input.title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-  const id = input.id ?? `nodes/${slug}`;
+  const slugify = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+  const slug = slugify(input.title);
+  // Slugifying per segment means "../x" or absolute paths can never escape
+  // the vault — traversal characters collapse to "-" and empty segments drop.
+  // An explicit id wins outright: folder is documented as ignored then, so
+  // it isn't derived or validated either.
+  let id = input.id;
+  if (!id) {
+    const folderSegments = (input.folder ?? "")
+      .split("/")
+      .map(slugify)
+      .filter(Boolean);
+    if (folderSegments.length > 8) {
+      throw new ValidationError("folder may nest at most 8 levels deep");
+    }
+    // Bound each slug so an overlong segment (folder or title) fails as a
+    // clean 400 instead of an ENAMETOOLONG surfacing as an unhandled 500 at
+    // storage.writeDocument.
+    if ([...folderSegments, slug].some((seg) => seg.length > 100)) {
+      throw new ValidationError("each folder or title segment must be at most 100 characters");
+    }
+    id =
+      folderSegments.length > 0
+        ? `nodes/${folderSegments.join("/")}/${slug}`
+        : `nodes/${slug}`;
+  }
   const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
 

@@ -63,10 +63,14 @@ nodeRoutes.post("/", async (c) => {
     scope?: string;
     status?: string;
     schedule?: string;
+    folder?: string;
   }>();
 
   if (!body.title || !body.content) {
     throw new ValidationError("title and content are required");
+  }
+  if (body.folder !== undefined && typeof body.folder !== "string") {
+    throw new ValidationError("folder must be a string path like \"gtm/deals\"");
   }
 
   const nestId = c.req.param("nestId")!;
@@ -81,6 +85,7 @@ nodeRoutes.post("/", async (c) => {
       scope: body.scope,
       status: body.status,
       schedule: body.schedule,
+      folder: body.folder,
     },
     authorEmail,
   );
