@@ -141,6 +141,7 @@ export interface AdminSettings {
   telemetry_enabled: boolean;
   public_base_url: string;
   max_body_bytes: number;
+  slack_webhook_url: string;
 }
 
 export async function getAdminSettings() {
