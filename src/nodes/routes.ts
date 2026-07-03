@@ -474,6 +474,16 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
       "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
       [nestId, derivedId],
     );
+    // Deletion tombstone — the one record that survives the purge above, so
+    // GET /changes can tell external mirrors a doc was removed. Upsert:
+    // delete → recreate → delete again just refreshes the timestamp.
+    await tx.run(
+      `INSERT INTO node_deletions (nest_id, node_id, deleted_by, deleted_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(nest_id, node_id) DO UPDATE
+         SET deleted_by = excluded.deleted_by, deleted_at = excluded.deleted_at`,
+      [nestId, nodeId, await getUserEmail(c), new Date().toISOString()],
+    );
   });
 
   await trackEvent("node.delete", { nestId, nodeId });
