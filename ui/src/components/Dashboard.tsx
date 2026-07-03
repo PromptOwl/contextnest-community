@@ -176,7 +176,7 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
             <ClientHint
               icon={<Terminal className="h-4 w-4" />}
               title="CLI"
-              desc={`ctx --server ${serverUrl}`}
+              desc={`ctx push --server ${serverUrl}`}
               mono
             />
           </div>
@@ -472,6 +472,35 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                         </p>
                       )}
                       <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground flex-wrap">
+                        <span
+                          className="inline-flex items-center gap-1"
+                          title="Documents"
+                        >
+                          <FileText className="h-3 w-3" />
+                          {nest.document_count ?? 0}
+                        </span>
+                        {(nest.collaborator_count ?? 0) > 0 && (
+                          <span
+                            className="inline-flex items-center gap-1"
+                            title={`${nest.collaborator_count} collaborator${
+                              nest.collaborator_count === 1 ? "" : "s"
+                            }`}
+                          >
+                            <Users className="h-3 w-3" />
+                            {nest.collaborator_count}
+                          </span>
+                        )}
+                        {(nest.steward_count ?? 0) > 0 && (
+                          <span
+                            className="inline-flex items-center gap-1"
+                            title={`${nest.steward_count} steward${
+                              nest.steward_count === 1 ? "" : "s"
+                            }`}
+                          >
+                            <Shield className="h-3 w-3" />
+                            {nest.steward_count}
+                          </span>
+                        )}
                         {isAnonymous && (
                           <span
                             className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200"
