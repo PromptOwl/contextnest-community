@@ -29,6 +29,11 @@ if (envFileLoaded && !isTestRun) {
 // loaded above (dev) to avoid a redundant pass.
 const canonicalEnvFile = process.env.ENV_FILE_PATH || join(dataRoot(), ".env");
 let canonicalEnvLoaded: string | null = null;
+// Warn at most once when SLACK_WEBHOOK_URL is set to a non-https value. The
+// getter is read once per governance event, so without this a misconfigured
+// env value (set directly, bypassing the /admin/settings validator) would
+// spam the log on every submit/approve/reject/add-collaborator.
+let slackUrlWarned = false;
 if (
   !isTestRun &&
   canonicalEnvFile !== envFileLoaded &&
@@ -250,9 +255,12 @@ export const config = {
     const raw = process.env.SLACK_WEBHOOK_URL?.trim();
     if (!raw) return null;
     if (!/^https:\/\//i.test(raw)) {
-      console.warn(
-        "[config] SLACK_WEBHOOK_URL rejected: must be an https:// URL. Slack notifications disabled.",
-      );
+      if (!slackUrlWarned) {
+        slackUrlWarned = true;
+        console.warn(
+          "[config] SLACK_WEBHOOK_URL rejected: must be an https:// URL. Slack notifications disabled.",
+        );
+      }
       return null;
     }
     return raw;

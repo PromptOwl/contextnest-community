@@ -109,6 +109,58 @@ d("PostgresAdapter conformance", () => {
     const row = await adapter.get("SELECT id FROM users WHERE id = ?", ["u4"]);
     expect((row as any)?.id).toBe("u4");
   });
+
+  it("seeds historical SQLite migration ids through 012 (bookkeeping parity)", async () => {
+    // The Postgres DDL is the consolidated end-state, but schema_migrations must
+    // still record every SQLite migration id so future incremental Postgres
+    // migrations gate correctly. 012 (case-collision merge) is a no-op on
+    // greenfield Postgres — the lower(email) unique index prevents collisions —
+    // but its id must be present.
+    for (const id of [
+      "002_steward_parity",
+      "009_lowercase_emails",
+      "011_comments",
+      "012_merge_case_colliding_users",
+      "013_node_deletion_tombstones",
+    ]) {
+      const row = await adapter.get(
+        "SELECT id FROM schema_migrations WHERE id = ?",
+        [id],
+      );
+      expect((row as any)?.id).toBe(id);
+    }
+  });
+
+  it("node_deletions exists and upserts on (nest_id, node_id)", async () => {
+    // Guards CU-wdqcpzv219 blocker: table was SQLite-only. Without it on
+    // Postgres, DELETE /nodes and GET /changes throw. Also exercise the
+    // ON CONFLICT DO UPDATE upsert (delete → recreate → delete refreshes).
+    await adapter.run(
+      "INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)",
+      ["n-del", "u1", "N", "n-del"],
+    );
+    await adapter.run(
+      `INSERT INTO node_deletions (nest_id, node_id, deleted_by, deleted_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(nest_id, node_id) DO UPDATE
+         SET deleted_by = excluded.deleted_by, deleted_at = excluded.deleted_at`,
+      ["n-del", "doc-1", "a@example.com", "2026-01-01 00:00:00"],
+    );
+    await adapter.run(
+      `INSERT INTO node_deletions (nest_id, node_id, deleted_by, deleted_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(nest_id, node_id) DO UPDATE
+         SET deleted_by = excluded.deleted_by, deleted_at = excluded.deleted_at`,
+      ["n-del", "doc-1", "b@example.com", "2026-02-02 00:00:00"],
+    );
+    const rows = await adapter.all(
+      "SELECT deleted_by, deleted_at FROM node_deletions WHERE nest_id = ?",
+      ["n-del"],
+    );
+    expect(rows.length).toBe(1);
+    expect((rows[0] as any).deleted_by).toBe("b@example.com");
+    expect((rows[0] as any).deleted_at).toBe("2026-02-02 00:00:00");
+  });
 });
 
 function hashStr(s: string): number {

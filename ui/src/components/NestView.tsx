@@ -73,6 +73,12 @@ function prettyFolder(name: string) {
     .join(" ");
 }
 
+/** "nodes/gtm/deals" → "Nodes / Gtm / Deals" for nested group headers. */
+function prettyFolderPath(path: string) {
+  if (path === "Root") return "Root";
+  return path.split("/").map(prettyFolder).join(" / ");
+}
+
 interface NestViewProps {
   nestId: string;
   nestName: string;
@@ -101,11 +107,6 @@ export function NestView({
   //   - anon-owned + key mode → license-admin caretaker only
   const canDeleteNest =
     isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
-  // Stewardship is governance of the commons / one's own nests, not a tool
-  // server admins impose on other users' nests. So the steward roster,
-  // assign-steward UI, and Settings modal are hidden when an admin views a
-  // real user's nest.
-  const canManageGovernance = isAdmin && (isOwner || isAnonOwned);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
 
   // Local mirror of the nest name so inline rename feels instant while the
@@ -168,6 +169,22 @@ export function NestView({
   const [isImported, setIsImported] = useState(false);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
+  // Stewardship is governance of the commons / one's own nests, not a tool
+  // server admins impose on other users' nests. So the steward roster,
+  // assign-steward UI, and Settings modal are hidden when an admin views a
+  // real user's nest. Delegation (mirrors server canManageStewards): the
+  // nest owner or an admin collaborator also manages governance, so owners
+  // can hand people-management to other admins.
+  // Server admins resolve to "admin" on EVERY nest (resolveNestPermission),
+  // so gate the delegated branch on !isAdmin — otherwise the roster/settings
+  // UI would reappear for admins viewing other users' nests, which the rule
+  // above deliberately hides.
+  // `isOwner` is known synchronously (prop); include it so a non-admin owner
+  // sees the governance UI on first render instead of flickering until the
+  // async `permission` from GET /nests/:id resolves.
+  const canManageGovernance =
+    (isAdmin && (isOwner || isAnonOwned)) ||
+    (!isAdmin && (isOwner || permission === "owner" || permission === "admin"));
   // Caller's merged effective roles (collaborator + steward), nest-wide.
   const [roles, setRoles] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
@@ -187,8 +204,17 @@ export function NestView({
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
     );
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [typeFilter, setTypeFilter] = useState<string>("all");
   const [authorFilter, setAuthorFilter] = useState<string>("all");
   const [dateFilter, setDateFilter] = useState<DatePreset>("any");
+  // Document list sort: by title, last edited, or comment (annotation) count.
+  const [sortMode, setSortMode] = useState<"name" | "edited" | "comments">(
+    "name",
+  );
+  // Per-node comment (annotation thread) counts, for the "Most comments" sort.
+  const [commentCounts, setCommentCounts] = useState<
+    Record<string, { count: number; lastAt: string | null }>
+  >({});
   // List vs cards, persisted per-browser (not per-nest — it's a reading pref).
   const [viewMode, setViewMode] = useState<"list" | "cards">(() => {
     try {
@@ -237,6 +263,7 @@ export function NestView({
         tags: tagFilters.length ? tagFilters : undefined,
         author: authorFilter !== "all" ? authorFilter : undefined,
         datePreset: dateFilter !== "any" ? dateFilter : undefined,
+        type: typeFilter !== "all" ? typeFilter : undefined,
       }),
     );
     setSaveFilterName("");
@@ -248,6 +275,7 @@ export function NestView({
     setTagFilters(f.tags ?? []);
     setAuthorFilter(f.author ?? "all");
     setDateFilter(f.datePreset ?? "any");
+    setTypeFilter(f.type ?? "all");
   };
   const [reviewNode, setReviewNode] = useState<any | null>(null);
   const [submitNode, setSubmitNode] = useState<any | null>(null);
@@ -269,7 +297,7 @@ export function NestView({
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta] =
+    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta, countsData] =
       await Promise.all([
         api.listNodes(nestId).catch((e) => {
           console.error("[NestView] listNodes failed", nestId, e);
@@ -296,7 +324,12 @@ export function NestView({
           console.error("[NestView] getNest failed", nestId, e);
           return null;
         }),
+        api.getCommentCounts(nestId).catch((e) => {
+          console.error("[NestView] getCommentCounts failed", nestId, e);
+          return { counts: {} };
+        }),
       ]);
+    setCommentCounts(countsData.counts);
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
@@ -374,12 +407,37 @@ export function NestView({
         tags: tagFilters,
         author: authorFilter,
         updatedAfter,
+        type: typeFilter,
       })
     )
       return false;
     if (!search) return true;
     return matchesFilters(n, { search }) || contentHits.has(n.id);
   });
+
+  // Sort the filtered list. "name" = title A–Z; "edited" = most-recently
+  // edited first (updated_at already on each node); "comments" = most comment
+  // threads first, tie-broken by most recent comment then title.
+  const sorted = [...filtered];
+  if (sortMode === "edited") {
+    sorted.sort((a, b) =>
+      String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
+    );
+  } else if (sortMode === "comments") {
+    sorted.sort((a, b) => {
+      const cb = commentCounts[b.id]?.count || 0;
+      const ca = commentCounts[a.id]?.count || 0;
+      if (cb !== ca) return cb - ca;
+      const lb = commentCounts[b.id]?.lastAt || "";
+      const la = commentCounts[a.id]?.lastAt || "";
+      if (lb !== la) return String(lb).localeCompare(String(la));
+      return String(a.title || "").localeCompare(String(b.title || ""));
+    });
+  } else {
+    sorted.sort((a, b) =>
+      String(a.title || "").localeCompare(String(b.title || "")),
+    );
+  }
 
   // Orphans + broken [[links]], client-side from the loaded list.
   const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
@@ -391,15 +449,25 @@ export function NestView({
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [nodes]);
 
+  // Distinct node types present (missing type = "document"), for the type
+  // filter dropdown. Only offered when the nest actually mixes types.
+  const typesPresent = useMemo(() => {
+    const set = new Set<string>();
+    for (const n of nodes) set.add(n.type || "document");
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [nodes]);
+
   const hasActiveFilters =
     !!search ||
     statusFilter !== "all" ||
+    typeFilter !== "all" ||
     tagFilters.length > 0 ||
     authorFilter !== "all" ||
     dateFilter !== "any";
   const clearAllFilters = () => {
     setSearch("");
     setStatusFilter("all");
+    setTypeFilter("all");
     setTagFilters([]);
     setAuthorFilter("all");
     setDateFilter("any");
@@ -420,6 +488,40 @@ export function NestView({
     "90d": "Last 90 days",
     "1y": "Last year",
   };
+  const TYPE_LABELS: Record<string, string> = {
+    document: "Document",
+    artifact: "Artifact",
+    agent: "Agent",
+    skill: "Skill",
+  };
+  // Colored pill for a non-document node type, shown on each list/card row so
+  // the kind is scannable. `document` returns null (the default — no pill).
+  const typePill = (
+    t: string,
+  ): { label: string; cls: string; title: string } | null => {
+    switch (t) {
+      case "artifact":
+        return {
+          label: "HTML",
+          title: "Hosted HTML artifact",
+          cls: "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300",
+        };
+      case "agent":
+        return {
+          label: "Agent",
+          title: "Runnable agent node",
+          cls: "bg-violet-100 text-violet-800 dark:bg-violet-950/40 dark:text-violet-300",
+        };
+      case "skill":
+        return {
+          label: "Skill",
+          title: "Runnable skill node",
+          cls: "bg-sky-100 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300",
+        };
+      default:
+        return null;
+    }
+  };
   const activeFilterChips: Array<{ label: string; clear: () => void }> = [];
   if (search)
     activeFilterChips.push({ label: `Search: ${search}`, clear: () => setSearch("") });
@@ -427,6 +529,11 @@ export function NestView({
     activeFilterChips.push({
       label: `Status: ${STATUS_LABELS[statusFilter] ?? statusFilter}`,
       clear: () => setStatusFilter("all"),
+    });
+  if (typeFilter !== "all")
+    activeFilterChips.push({
+      label: `Type: ${TYPE_LABELS[typeFilter] ?? typeFilter}`,
+      clear: () => setTypeFilter("all"),
     });
   if (authorFilter !== "all")
     activeFilterChips.push({
@@ -613,17 +720,37 @@ export function NestView({
   // (excluded from the node list as a meta-file); surfacing that engine-built
   // index is a deeper follow-up — this is the lightweight UI overview.
   const tocGroups = (() => {
+    // Group by the FULL folder path (everything before the leaf), not just
+    // the first segment, so nested folders like nodes/gtm/deals each get
+    // their own group. Sorting by path keeps children right under parents;
+    // depth drives the header indent.
     const groups = new Map<string, any[]>();
     for (const n of nodes) {
       const id: string = n.id || "";
-      const slash = id.indexOf("/");
-      const folder = slash > 0 ? id.slice(0, slash) : "Root";
+      // Strip the "nodes/" storage root — it's not a user folder. What's left
+      // is the real folder path; a doc directly under nodes/ has none → Root.
+      const rel = id.startsWith("nodes/") ? id.slice(6) : id;
+      const slash = rel.lastIndexOf("/");
+      const folder = slash > 0 ? rel.slice(0, slash) : "Root";
       if (!groups.has(folder)) groups.set(folder, []);
       groups.get(folder)!.push(n);
     }
+    // Compare paths segment-by-segment (not as flat strings) so children
+    // always sort directly under their parent — a sibling like "nodes-extra"
+    // would otherwise wedge between "nodes" and "nodes/a".
+    const byPathSegments = (a: string, b: string) => {
+      const as = a.split("/");
+      const bs = b.split("/");
+      for (let i = 0; i < Math.min(as.length, bs.length); i++) {
+        const cmp = as[i].localeCompare(bs[i]);
+        if (cmp !== 0) return cmp;
+      }
+      return as.length - bs.length;
+    };
     return [...groups.entries()]
       .map(([folder, items]) => ({
         folder,
+        depth: folder === "Root" ? 0 : folder.split("/").length,
         items: [...items].sort((a, b) =>
           String(a.title || a.id).localeCompare(String(b.title || b.id)),
         ),
@@ -633,7 +760,7 @@ export function NestView({
           ? -1
           : b.folder === "Root"
             ? 1
-            : a.folder.localeCompare(b.folder),
+            : byPathSegments(a.folder, b.folder),
       );
   })();
 
@@ -1038,7 +1165,11 @@ export function NestView({
                 icon: Users,
                 onSelect: () => setShowShare(true),
               });
-            if (!isReadOnly && stewardshipEnabled && isAdmin)
+            // Gate on canManageGovernance (owner/admin on THIS nest), not the
+            // server-admin flag — otherwise a license admin who is only an
+            // editor collaborator here sees "Assign Steward" in the menu while
+            // the Steward tab (also canManageGovernance-gated) stays hidden.
+            if (!isReadOnly && stewardshipEnabled && canManageGovernance)
               actions.push({
                 label: "Assign Steward",
                 icon: Shield,
@@ -1272,20 +1403,25 @@ export function NestView({
                       >
                         {n.type === "artifact" ? (
                           <FileCode2 className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                        ) : n.type === "agent" || n.type === "skill" ? (
+                          <Sparkles className="h-4 w-4 text-violet-600 dark:text-violet-400 shrink-0" />
                         ) : (
                           <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
                         )}
                         <span className="text-sm truncate flex-1">
                           {n.title || n.id}
                         </span>
-                        {n.type === "artifact" && (
-                          <span
-                            className="shrink-0 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide"
-                            title="Hosted HTML artifact"
-                          >
-                            HTML
-                          </span>
-                        )}
+                        {(() => {
+                          const p = typePill(n.type || "document");
+                          return p ? (
+                            <span
+                              className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${p.cls}`}
+                              title={p.title}
+                            >
+                              {p.label}
+                            </span>
+                          ) : null;
+                        })()}
                         {n.updated_at && (
                           <span className="text-xs text-muted-foreground shrink-0">
                             {timeAgo(n.updated_at)}
@@ -1322,19 +1458,25 @@ export function NestView({
               ) : (
                 <div className="space-y-5">
                   {tocGroups.map((g) => (
-                    <div key={g.folder}>
-                      <div className="flex items-center gap-2 mb-2">
-                        <FolderOpen className="h-4 w-4 text-muted-foreground" />
-                        <h4 className="text-sm font-medium">
-                          {prettyFolder(g.folder)}
-                        </h4>
-                        <Badge
-                          variant="secondary"
-                          className="text-[10px] px-1.5 py-0 h-5"
-                        >
-                          {g.items.length}
-                        </Badge>
-                      </div>
+                    <div
+                      key={g.folder}
+                      style={{ marginLeft: `${g.depth * 1.25}rem` }}
+                    >
+                      {/* Root = docs directly under nodes/; no folder header. */}
+                      {g.folder !== "Root" && (
+                        <div className="flex items-center gap-2 mb-2">
+                          <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                          <h4 className="text-sm font-medium">
+                            {prettyFolderPath(g.folder)}
+                          </h4>
+                          <Badge
+                            variant="secondary"
+                            className="text-[10px] px-1.5 py-0 h-5"
+                          >
+                            {g.items.length}
+                          </Badge>
+                        </div>
+                      )}
                       <div className="grid gap-1 sm:grid-cols-2">
                         {g.items.map((n) => (
                           <button
@@ -1343,10 +1485,27 @@ export function NestView({
                             className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 text-left group min-w-0"
                             title={n.title || n.id}
                           >
-                            <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            {n.type === "artifact" ? (
+                              <FileCode2 className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                            ) : n.type === "agent" || n.type === "skill" ? (
+                              <Sparkles className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400 shrink-0" />
+                            ) : (
+                              <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            )}
                             <span className="text-sm truncate flex-1">
                               {n.title || n.id}
                             </span>
+                            {(() => {
+                              const p = typePill(n.type || "document");
+                              return p ? (
+                                <span
+                                  className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${p.cls}`}
+                                  title={p.title}
+                                >
+                                  {p.label}
+                                </span>
+                              ) : null;
+                            })()}
                             <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
                           </button>
                         ))}
@@ -1362,9 +1521,9 @@ export function NestView({
         <TabsContent value="documents" className="space-y-4">
           <Card>
             <CardHeader>
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div className="flex flex-col gap-3">
                 <CardTitle className="text-lg">Documents</CardTitle>
-                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                <div className="flex flex-wrap items-center gap-2 w-full">
                   <div className="relative flex-1 min-w-[12rem] sm:flex-none sm:w-80">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
                     <Input
@@ -1392,6 +1551,21 @@ export function NestView({
                         <SelectItem value="approved">Approved</SelectItem>
                         <SelectItem value="published">Published</SelectItem>
                         <SelectItem value="rejected">Rejected</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+                  {typesPresent.length > 1 && (
+                    <Select value={typeFilter} onValueChange={setTypeFilter}>
+                      <SelectTrigger className="w-[130px] h-8" title="Filter by type">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All types</SelectItem>
+                        {typesPresent.map((t) => (
+                          <SelectItem key={t} value={t}>
+                            {TYPE_LABELS[t] ?? t}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   )}
@@ -1423,6 +1597,21 @@ export function NestView({
                       <SelectItem value="30d">Last 30 days</SelectItem>
                       <SelectItem value="90d">Last 90 days</SelectItem>
                       <SelectItem value="1y">Last year</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select
+                    value={sortMode}
+                    onValueChange={(v) =>
+                      setSortMode(v as "name" | "edited" | "comments")
+                    }
+                  >
+                    <SelectTrigger className="w-[150px] h-8" title="Sort documents">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="name">Name (A–Z)</SelectItem>
+                      <SelectItem value="edited">Recently edited</SelectItem>
+                      <SelectItem value="comments">Most comments</SelectItem>
                     </SelectContent>
                   </Select>
                   {/* List vs cards density toggle. */}
@@ -1643,11 +1832,14 @@ export function NestView({
                       : "space-y-2"
                   }
                 >
-                  {filtered.map((node) => {
+                  {sorted.map((node) => {
                     const cards = viewMode === "cards";
                     // Hosted HTML artifacts get a distinct icon + badge so they
                     // read differently from markdown documents in the list.
-                    const isArtifact = node.type === "artifact";
+                    const nodeType = node.type || "document";
+                    const isArtifact = nodeType === "artifact";
+                    const isRunnable = nodeType === "agent" || nodeType === "skill";
+                    const nodePill = typePill(nodeType);
                     const canSubmit =
                       stewardshipEnabled &&
                       node.status === "draft" &&
@@ -1737,6 +1929,8 @@ export function NestView({
                         {!cards &&
                           (isArtifact ? (
                             <FileCode2 className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                          ) : isRunnable ? (
+                            <Sparkles className="h-5 w-5 text-violet-600 dark:text-violet-400 flex-shrink-0" />
                           ) : (
                             <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
                           ))}
@@ -1745,6 +1939,8 @@ export function NestView({
                             {cards &&
                               (isArtifact ? (
                                 <FileCode2 className="h-4 w-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                              ) : isRunnable ? (
+                                <Sparkles className="h-4 w-4 text-violet-600 dark:text-violet-400 flex-shrink-0" />
                               ) : (
                                 <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                               ))}
@@ -1754,12 +1950,12 @@ export function NestView({
                             >
                               {node.title}
                             </span>
-                            {isArtifact && (
+                            {nodePill && (
                               <span
-                                className="shrink-0 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide"
-                                title="Hosted HTML artifact"
+                                className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${nodePill.cls}`}
+                                title={nodePill.title}
                               >
-                                HTML
+                                {nodePill.label}
                               </span>
                             )}
                             <LifecycleStatusBadge

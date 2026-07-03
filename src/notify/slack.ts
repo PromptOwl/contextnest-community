@@ -41,7 +41,7 @@ function escapeMrkdwn(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-export async function notifySlack(text: string): Promise<void> {
+async function notifySlack(text: string): Promise<void> {
   const url = config.SLACK_WEBHOOK_URL;
   if (!url) return;
   try {
