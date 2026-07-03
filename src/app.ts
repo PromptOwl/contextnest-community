@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { LinearRouter } from "hono/router/linear-router";
 import { createMiddleware } from "hono/factory";
 import { cors } from "hono/cors";
 import { authRoutes } from "./auth/routes.js";
@@ -110,7 +111,16 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 });
 
 export function createApp(): Hono<AuthEnv> {
-  const app = new Hono<AuthEnv>();
+  // LinearRouter, not the default RegExpRouter. Node ids are multi-segment
+  // paths ("nodes/<folder>/<slug>") captured by greedy `/:nodeId{.+}` params.
+  // RegExpRouter merges all same-method routes into one automaton and, for a
+  // node id spanning >1 segment, lets the bare `/:nodeId{.+}` catch-all win
+  // over suffix routes like `/:nodeId{.+}/hosted` or `/versions` — so opening
+  // a foldered artifact 404s ("Node not found: …/hosted"). LinearRouter matches
+  // in registration order with correct per-route backtracking, so the suffix
+  // routes (mounted first) match regardless of id depth. Route count is small
+  // and QPS low, so the linear scan cost is negligible here.
+  const app = new Hono<AuthEnv>({ router: new LinearRouter() });
 
   // Hono request logger disabled — keep terminal clean. Re-enable by
   // restoring `app.use("*", logger())` if request tracing is needed.
@@ -739,14 +749,19 @@ export function createApp(): Hono<AuthEnv> {
   // Nest-scoped sub-routes
   // Governance nest-level routes (stewards, review-queue)
   nestsApp.route("/:nestId", governanceRoutes);
-  // Governance node-level routes (approve, reject, submit-review, versions, etc.)
-  // Must be mounted BEFORE nodeRoutes because nodeRoutes has a greedy /:nodeId{.+} catch-all.
-  // POST routes work fine (Hono matches method+path), but GET routes clash.
-  // Solution: mount governance node routes and node CRUD on the same Hono instance.
-  nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
-  // Annotations + sandboxed artifact serving — must precede the greedy
-  // nodeRoutes catch-all so /:nodeId/annotations and /:nodeId/hosted match.
+  // Node-level sub-routers all share the /:nestId/nodes base and rely on a
+  // greedy /:nodeId{.+} param (node ids are multi-segment paths). Under the
+  // LinearRouter (see createApp) the FIRST registered match wins, so mount
+  // order = specificity order, longest/most-specific first:
+  //   1. annotationRoutes  — /:nodeId/annotations/:threadId/comments, /hosted.
+  //      Must precede governanceNodeRoutes: its greedy POST /:nodeId/comments
+  //      would otherwise swallow the annotation reply URL (…/annotations/:id/
+  //      comments), capturing "…/annotations/:id" as the node id.
+  //   2. governanceNodeRoutes — /:nodeId/{approve,reject,submit-review,comments,…}
+  //   3. nodeRoutes — CRUD incl. the bare /:nodeId{.+} catch-all, mounted last
+  //      so it only matches when no suffix route did.
   nestsApp.route("/:nestId/nodes", annotationRoutes);
+  nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
