@@ -102,4 +102,23 @@ describe("node-id path traversal", () => {
     expect(res.status).toBe(200);
     expect(res.data.node.title).toBe("Normal Doc");
   });
+
+  // The guard is a single middleware chokepoint in app.ts, so the sibling
+  // routers mounted on the same /nests/:nestId/nodes base — annotations
+  // (readArtifact → storage.readDocument/reconstructVersion) and governance
+  // (versions → reconstructVersion) — are covered too, not just node CRUD.
+  it("sibling routers (annotations, governance) also reject traversal", async () => {
+    const target = `..%2F${bobNest}%2Fnodes%2Fsecret`;
+    for (const path of [
+      `/nests/${aliceNest}/nodes/${target}/hosted`, // annotations router
+      `/nests/${aliceNest}/nodes/${target}/annotations`, // annotations router
+      `/nests/${aliceNest}/nodes/${target}/versions`, // governance router
+    ]) {
+      const res = await app.request(path, {
+        headers: { Authorization: `Bearer ${alice.apiKey}` },
+      });
+      expect(res.status).toBe(400);
+      expect(await res.text()).not.toContain("TOP SECRET");
+    }
+  });
 });
