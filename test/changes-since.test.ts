@@ -154,4 +154,133 @@ describe("GET /nests/:id/changes", () => {
     const doc = res.data.created.find((n: any) => n.id === "nodes/new-doc");
     expect(doc.content).toContain("New content here");
   });
+
+  it("delete then recreate lands in created[], not deleted[]", async () => {
+    const since = new Date().toISOString();
+    await wait(20);
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Reborn Doc", content: "# First life" },
+      alice.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "DELETE",
+      `/nests/${nestId}/nodes/nodes/reborn-doc`,
+      undefined,
+      alice.apiKey,
+    );
+    // Same title → same id. The tombstone is upserted on delete, then the id is
+    // live again on recreate, so /changes must surface it as created, not deleted.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Reborn Doc", content: "# Second life" },
+      alice.apiKey,
+    );
+    const res = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/changes?since=${encodeURIComponent(since)}`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(res.data.created.map((n: any) => n.id)).toContain("nodes/reborn-doc");
+    expect(res.data.deleted.map((d: any) => d.id)).not.toContain("nodes/reborn-doc");
+  });
+});
+
+// Governed public nest: for a PUBLIC reader the change signal is the approval
+// time, not the raw frontmatter updated_at (which bumps on unapproved drafts the
+// public body never reflects). Guards the false-positive that mirrors the
+// approved-after-since false-negative already fixed on the main path.
+describe("GET /changes — public-reader approval signal", () => {
+  let gNest: string;
+  let sPub: string;
+
+  beforeAll(async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Public Mirror" }, alice.apiKey);
+    gNest = nest.data.nest.id;
+    // allow_self_approve so the owner (also the submitter) can approve directly
+    // — separation of duties would otherwise block self-approval.
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${gNest}/settings`,
+      { stewardship_enabled: true, allow_self_approve: true },
+      alice.apiKey,
+    );
+    await jsonRequest(app, "PATCH", `/nests/${gNest}/visibility`, { visibility: "public" }, alice.apiKey);
+
+    // Create + approve a doc so a public reader has an approved body to see.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${gNest}/nodes`,
+      { title: "Spec", content: "# APPROVED BODY" },
+      alice.apiKey,
+    );
+    // approve() requires a pending review request — submit, then approve.
+    await jsonRequest(app, "POST", `/nests/${gNest}/nodes/nodes/spec/submit-review`, { note: "r" }, alice.apiKey);
+    await jsonRequest(app, "POST", `/nests/${gNest}/nodes/nodes/spec/approve`, { note: "ok" }, alice.apiKey);
+
+    await wait(20);
+    sPub = new Date().toISOString();
+    await wait(20);
+
+    // Unapproved draft edit AFTER sPub: bumps frontmatter updated_at, but the
+    // approved (public-visible) body is unchanged.
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${gNest}/nodes/nodes/spec`,
+      { append: "\nDRAFT ONLY" },
+      alice.apiKey,
+    );
+  });
+
+  it("an unapproved draft edit does NOT appear in updated[] for a public reader", async () => {
+    // Anonymous = public reader (no Authorization).
+    const res = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${gNest}/changes?since=${encodeURIComponent(sPub)}&include_content=1`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.updated.map((n: any) => n.id)).not.toContain("nodes/spec");
+    expect(res.data.created.map((n: any) => n.id)).not.toContain("nodes/spec");
+  });
+
+  it("the owner (who sees drafts) still gets the draft edit in updated[]", async () => {
+    const res = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${gNest}/changes?since=${encodeURIComponent(sPub)}`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(res.data.updated.map((n: any) => n.id)).toContain("nodes/spec");
+  });
+
+  it("an approval after `since` surfaces for a public reader (approved_at signal)", async () => {
+    // approved_at is second-precision (SQLite datetime), so let the clock cross
+    // into a later second than sPub before approving — otherwise the truncated
+    // approved_at can floor below sPub's sub-second and the signal reads stale.
+    await wait(1100);
+    // Approve the pending draft edit → new approved_at > sPub.
+    await jsonRequest(app, "POST", `/nests/${gNest}/nodes/nodes/spec/submit-review`, { note: "r" }, alice.apiKey);
+    await jsonRequest(app, "POST", `/nests/${gNest}/nodes/nodes/spec/approve`, { note: "publish" }, alice.apiKey);
+    const res = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${gNest}/changes?since=${encodeURIComponent(sPub)}&include_content=1`,
+    );
+    const doc = res.data.updated.find((n: any) => n.id === "nodes/spec");
+    expect(doc).toBeDefined();
+    // Now approved, so the public reader sees the newly-published body.
+    expect(doc.content).toContain("DRAFT ONLY");
+  });
 });

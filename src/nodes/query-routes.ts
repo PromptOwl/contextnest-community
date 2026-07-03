@@ -19,9 +19,10 @@ import {
 import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
-import { permissionLevel } from "../shared/access.js";
+import { permissionLevel, isPublicReader } from "../shared/access.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
 import { listNodesForCaller, RUNNABLE_NODE_TYPES } from "./service.js";
+import { getDb } from "../db/client.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
@@ -45,10 +46,11 @@ queryRoutes.get("/changes", async (c) => {
     c.req.query("include_content") || "",
   );
 
-  const { listNodesForCaller } = await import("./service.js");
   const all = await listNodesForCaller(nestId, userId);
-  const { getDb } = await import("../db/client.js");
   const db = getDb();
+  // Public readers only ever see the approved version's body — their change
+  // signal must be approval time, not the raw frontmatter timestamps (see loop).
+  const publicReader = await isPublicReader(nestId, userId);
 
   // Governed nests: an APPROVAL changes what read-tier mirrors see even
   // when the frontmatter updated_at predates `since` (edit before, publish
@@ -61,25 +63,48 @@ queryRoutes.get("/changes", async (c) => {
   // approved_at may be sqlite's "YYYY-MM-DD HH:MM:SS" (UTC) — normalize.
   const parseDbTs = (t: string) =>
     Date.parse(t.includes("T") ? t : `${t.replace(" ", "T")}Z`);
+  const approvedAtMsByNode = new Map(
+    approvedRows.map((r) => [r.node_id, parseDbTs(r.approved_at)]),
+  );
   const publishedSince = new Set(
     approvedRows
       .filter((r) => parseDbTs(r.approved_at) > sinceMs)
       .map((r) => r.node_id),
   );
 
-  const summarize = (n: (typeof all)[number]) => ({
+  // `updatedOverride` lets the public-reader path report the approval time as
+  // updated_at (the only moment their visible content actually changed) instead
+  // of the raw frontmatter value.
+  const summarize = (n: (typeof all)[number], updatedOverride?: string) => ({
     id: n.id,
     title: n.title,
     type: n.type,
     status: n.status,
     tags: n.tags,
     created_at: n.created_at,
-    updated_at: n.updated_at,
+    updated_at: updatedOverride ?? n.updated_at,
     ...(includeContent ? { content: n.content } : {}),
   });
   const created = [] as ReturnType<typeof summarize>[];
   const updated = [] as ReturnType<typeof summarize>[];
   for (const n of all) {
+    if (publicReader) {
+      // Public readers see the approved body only. Bucket on approval time, not
+      // frontmatter updated_at — updateNode bumps updated_at on every governed
+      // edit, incl. unapproved drafts the public body doesn't reflect, so keying
+      // off it would flag a "change" that returns byte-identical approved
+      // content. A node with no approved version isn't visible to them; skip it.
+      const approvedMs = approvedAtMsByNode.get(n.id);
+      if (approvedMs === undefined) continue;
+      const approvedIso = new Date(approvedMs).toISOString();
+      const createdAt = Date.parse(n.created_at || "");
+      if (!Number.isNaN(createdAt) && createdAt > sinceMs) {
+        created.push(summarize(n, approvedIso));
+      } else if (approvedMs > sinceMs) {
+        updated.push(summarize(n, approvedIso));
+      }
+      continue;
+    }
     const createdAt = Date.parse(n.created_at || "");
     const updatedAt = Date.parse(n.updated_at || "");
     if (!Number.isNaN(createdAt) && createdAt > sinceMs) created.push(summarize(n));
