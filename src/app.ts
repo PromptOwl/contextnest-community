@@ -21,6 +21,7 @@ import {
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
+import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -681,6 +682,21 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     c.set("nestPermission", permission);
+    return next();
+  });
+
+  // SECURITY: single containment chokepoint for every node-id-bearing route
+  // across the three routers mounted below (governance node ops, annotations,
+  // node CRUD). Node ids become filesystem paths in the engine's storage layer
+  // (join(nestRoot, id + ".md"), no containment of its own), so a `../` id must
+  // be rejected before ANY handler turns it into a read/write/delete — otherwise
+  // a caller scoped to one nest reaches another tenant's files. Centralized here
+  // (not per-route) so a newly added node route can't silently forget the guard.
+  // The greedy {.+} captures the whole remainder incl. any suffix (/versions,
+  // /annotations/:id/comments, …); assertSafeNodeId trips on a `..` segment
+  // anywhere in it. Non-node routes (create/list POST|GET /nodes) don't match.
+  nestsApp.use("/:nestId/nodes/:nodeId{.+}", async (c, next) => {
+    assertSafeNodeId(c.req.param("nodeId")!);
     return next();
   });
 

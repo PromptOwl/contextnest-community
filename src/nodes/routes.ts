@@ -2,6 +2,11 @@ import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
 import { ValidationError, NotFoundError, LockedError } from "../shared/errors.js";
+// SECURITY: `:nodeId` params on these routes become filesystem paths in the
+// engine's storage layer (join(nestRoot, id + ".md"), no containment). A `../`
+// id is rejected up front by the assertSafeNodeId chokepoint mounted on
+// /nests/:nestId/nodes/:nodeId{.+} in app.ts — covers every node route across
+// this + the annotations + governance routers, so handlers here can trust nodeId.
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
