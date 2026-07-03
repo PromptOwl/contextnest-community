@@ -65,7 +65,7 @@ export interface NodeResponse {
 /** Node types an orchestrator can fetch and run; only these carry schedule. */
 export const RUNNABLE_NODE_TYPES = ["agent", "skill"] as const;
 export function isRunnableType(type: string | undefined): boolean {
-  return RUNNABLE_NODE_TYPES.includes((type || "") as any);
+  return (RUNNABLE_NODE_TYPES as readonly string[]).includes(type || "");
 }
 
 export function toNodeResponse(node: ContextNode): NodeResponse {
@@ -100,7 +100,8 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
 }
 
 export interface ListNodesFilters {
-  type?: string;
+  /** One type, or several (e.g. runnable types) to keep. */
+  type?: string | readonly string[];
   tag?: string;
   limit?: number;
 }
@@ -118,9 +119,13 @@ export async function listNodesForCaller(
   const { storage, versions: versionManager } = await engineCache.get(nestId);
   let documents = await storage.discoverDocuments();
 
-  // Cheap on-frontmatter filters first — narrows what we enrich below.
+  // Cheap on-frontmatter filters first — narrows what we enrich below, so the
+  // per-node governance/version work never runs on docs we'd discard anyway.
   if (filters.type) {
-    documents = documents.filter((n) => n.frontmatter.type === filters.type);
+    const wanted = new Set(
+      Array.isArray(filters.type) ? filters.type : [filters.type],
+    );
+    documents = documents.filter((n) => wanted.has(n.frontmatter.type));
   }
   if (filters.tag) {
     const tag = normalizeTag(filters.tag);

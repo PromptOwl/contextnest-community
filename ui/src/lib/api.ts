@@ -426,6 +426,8 @@ export async function createNode(
     tags?: string[];
     type?: string;
     folder?: string;
+    /** Orchestrator schedule — runnable types (agent/skill) only. */
+    schedule?: string;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -437,7 +439,14 @@ export async function createNode(
 export async function updateNode(
   nestId: string,
   nodeId: string,
-  data: { content?: string; tags?: string[]; title?: string; changeNote?: string },
+  data: {
+    content?: string;
+    tags?: string[];
+    title?: string;
+    changeNote?: string;
+    /** Runnable types (agent/skill) only; "" clears it. */
+    schedule?: string;
+  },
   baseVersion?: number,
 ) {
   const headers: Record<string, string> = {};

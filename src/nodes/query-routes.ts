@@ -21,6 +21,7 @@ import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel } from "../shared/access.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
+import { listNodesForCaller, RUNNABLE_NODE_TYPES } from "./service.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
@@ -34,22 +35,21 @@ export const queryRoutes = new Hono<AuthEnv>();
 queryRoutes.get("/runnables", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
-  const { listNodesForCaller, RUNNABLE_NODE_TYPES } = await import(
-    "./service.js"
-  );
-  const all = await listNodesForCaller(nestId, userId);
-  const runnables = all
-    .filter((n) => (RUNNABLE_NODE_TYPES as readonly string[]).includes(n.type))
-    .map((n) => ({
-      id: n.id,
-      title: n.title,
-      type: n.type,
-      schedule: n.schedule ?? null,
-      status: n.status,
-      tags: n.tags,
-      updated_at: n.updated_at,
-      content: n.content,
-    }));
+  // Push the type filter down so only agent/skill docs pay the per-node
+  // governance/version enrichment — not every plain document in the nest.
+  const all = await listNodesForCaller(nestId, userId, {
+    type: RUNNABLE_NODE_TYPES,
+  });
+  const runnables = all.map((n) => ({
+    id: n.id,
+    title: n.title,
+    type: n.type,
+    schedule: n.schedule ?? null,
+    status: n.status,
+    tags: n.tags,
+    updated_at: n.updated_at,
+    content: n.content,
+  }));
   return c.json({ count: runnables.length, runnables });
 });
 
