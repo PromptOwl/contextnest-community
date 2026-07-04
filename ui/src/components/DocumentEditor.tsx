@@ -24,6 +24,9 @@ import {
   X,
   FolderOpen,
   FolderPlus,
+  FileText,
+  Bot,
+  Zap,
   Pencil,
   Users,
   Link as LinkIcon,
@@ -1531,31 +1534,67 @@ export function DocumentEditor({
               Only offered while authoring a new node; existing artifacts open
               straight into the ArtifactViewer (handled above). */}
           {isNew && !isViewOnly && (
-            <div className="max-w-[240px]">
+            <div>
               <label className="block text-sm font-medium mb-1">Type</label>
-              <Select
-                value={newType}
-                onValueChange={(v) =>
-                  setNewType(v as "document" | "artifact" | "agent" | "skill")
-                }
+              {/* Icon segmented control, not a dropdown: all 2-4 choices are
+                  visible at once and carry the same type color language as
+                  the list icons (document slate / artifact amber / agent
+                  violet / skill blue). Runnable types only when the workflow
+                  plane is on. */}
+              <div
+                className="inline-flex rounded-md border overflow-hidden"
+                role="radiogroup"
+                data-testid="document-editor-type"
               >
-                <SelectTrigger data-testid="document-editor-type">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="document">Document (markdown)</SelectItem>
-                  <SelectItem value="artifact">Artifact (hosted HTML)</SelectItem>
-                  {/* Runnable node types — only offered when the workflow
-                      plane is on. Their body is the agent's instructions;
-                      flow edges out of them define what the runner walks. */}
-                  {workflowPlaneEnabled && (
-                    <>
-                      <SelectItem value="agent">Agent (runnable)</SelectItem>
-                      <SelectItem value="skill">Skill (runnable)</SelectItem>
-                    </>
-                  )}
-                </SelectContent>
-              </Select>
+                {(
+                  [
+                    { value: "document", label: "Document", Icon: FileText,
+                      on: "bg-slate-500/15 text-slate-700 dark:text-slate-300" },
+                    { value: "artifact", label: "Artifact", Icon: Code2,
+                      on: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },
+                    ...(workflowPlaneEnabled
+                      ? [
+                          { value: "agent", label: "Agent", Icon: Bot,
+                            on: "bg-violet-500/15 text-violet-700 dark:text-violet-300" },
+                          { value: "skill", label: "Skill", Icon: Zap,
+                            on: "bg-blue-500/15 text-blue-700 dark:text-blue-300" },
+                        ]
+                      : []),
+                  ] as const
+                ).map(({ value, label, Icon, on }, i) => {
+                  const active = newType === value;
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      title={
+                        value === "document"
+                          ? "Markdown document"
+                          : value === "artifact"
+                            ? "Hosted HTML artifact"
+                            : `${label} (runnable)`
+                      }
+                      onClick={() =>
+                        setNewType(value as "document" | "artifact" | "agent" | "skill")
+                      }
+                      className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${
+                        i > 0 ? "border-l" : ""
+                      } ${active ? `${on} font-medium` : "text-muted-foreground hover:bg-muted/60"}`}
+                      data-testid={`document-editor-type-${value}`}
+                    >
+                      <Icon className="h-4 w-4" />
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              {newType === "artifact" && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Hosted HTML — the body is served as a sandboxed page.
+                </p>
+              )}
               {(newType === "agent" || newType === "skill") && (
                 <p className="mt-1 text-[11px] text-muted-foreground">
                   The body is the instructions. Add flow edges from it in the
