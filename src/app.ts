@@ -166,6 +166,9 @@ export function createApp(): Hono<AuthEnv> {
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+      // Surfaced so the UI can show/hide the Workflows nav without an
+      // admin-only /admin/settings call. Public, matches logo_url/gate.
+      workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     }),
   );

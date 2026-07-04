@@ -237,6 +237,23 @@ runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
     parentRunId = body.parent_run_id;
   }
 
+  // Root-run flood cap: a single tree is bounded by the depth/fan-out caps,
+  // but nothing limited how many depth-0 trees a write-tier caller could start.
+  // Cap concurrently-running roots per nest. (Sub-agent runs are exempt — the
+  // parent-chain caps already bound them.)
+  if (parentRunId === null) {
+    const { n } = (await getDb().get(
+      `SELECT COUNT(*) AS n FROM runs
+        WHERE nest_id = ? AND parent_run_id IS NULL AND status = 'running'`,
+      [nestId],
+    )) as { n: number };
+    if (n >= config.RUN_MAX_CONCURRENT_ROOTS) {
+      throw new ConflictError(
+        `too many concurrent runs: ${n} already running (cap ${config.RUN_MAX_CONCURRENT_ROOTS}). Let some finish, or raise RUN_MAX_CONCURRENT_ROOTS.`,
+      );
+    }
+  }
+
   const edges = await flowSubgraph(nestId, agentNode);
   const definitions = await referencedDefinitions(nestId, edges);
   // Derived from auth, never client-supplied — this is the accountability

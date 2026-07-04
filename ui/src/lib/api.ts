@@ -129,6 +129,7 @@ export async function getHealth() {
     auth_mode: string;
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
+    workflow_plane_enabled?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
@@ -993,4 +994,111 @@ export interface NestGraph {
 
 export async function getNestGraph(nestId: string) {
   return request<NestGraph>(`/nests/${nestId}/graph`);
+}
+
+// ─── Workflow plane (typed edges + governed runs) ────────────────────────
+
+export interface EdgeType {
+  id: string;
+  name: string;
+  description: string;
+  direction: "directed" | "undirected";
+  is_flow: boolean;
+  color: string | null;
+}
+
+export interface WorkflowEdge {
+  id: string;
+  from_node: string;
+  to_node: string;
+  type: { id: string; name: string; color: string | null; is_flow: boolean };
+  condition_mode: "structured" | "nl" | "open" | null;
+  condition: string | null;
+}
+
+export interface RunSummary {
+  id: string;
+  agent_node: string;
+  triggered_by: string;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  started_at: string;
+  finished_at: string | null;
+  depth?: number;
+  parent_run_id?: string | null;
+}
+
+export interface RunStep {
+  seq: number;
+  node_id: string | null;
+  edge_id: string | null;
+  action: string;
+  detail: any;
+  at: string;
+}
+
+export interface RunDetail extends RunSummary {
+  nest_id: string;
+  inputs: any;
+  trace: any;
+  steps: RunStep[];
+}
+
+export async function listEdgeTypes(nestId: string) {
+  const r = await request<{ edge_types: EdgeType[] }>(
+    `/nests/${nestId}/edge-types`,
+  );
+  return r.edge_types;
+}
+
+export async function listEdges(nestId: string) {
+  const r = await request<{ edges: WorkflowEdge[] }>(`/nests/${nestId}/edges`);
+  return r.edges;
+}
+
+export async function createEdge(
+  nestId: string,
+  body: {
+    from_node: string;
+    to_node: string;
+    type: string;
+    condition_mode?: "structured" | "nl" | "open" | null;
+    condition?: string | null;
+  },
+) {
+  const r = await request<{ edge: WorkflowEdge }>(`/nests/${nestId}/edges`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return r.edge;
+}
+
+export async function deleteEdge(nestId: string, edgeId: string) {
+  return request(`/nests/${nestId}/edges/${edgeId}`, { method: "DELETE" });
+}
+
+export async function listRuns(nestId: string, agent?: string) {
+  const q = agent ? `?agent=${encodeURIComponent(agent)}` : "";
+  const r = await request<{ runs: RunSummary[] }>(
+    `/nests/${nestId}/runs${q}`,
+  );
+  return r.runs;
+}
+
+export async function getRun(runId: string) {
+  const r = await request<{ run: RunDetail; steps: RunStep[] }>(
+    `/runs/${runId}`,
+  );
+  return { ...r.run, steps: r.steps };
+}
+
+/** Trigger an agent — returns the run bundle (the runner's entry point). */
+export async function triggerRun(
+  nestId: string,
+  agentNode: string,
+  inputs?: Record<string, unknown>,
+) {
+  return request<{ run_id: string }>(
+    `/nests/${nestId}/run/${agentNode}`,
+    { method: "POST", body: JSON.stringify(inputs ?? {}) },
+  );
 }

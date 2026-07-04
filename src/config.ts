@@ -248,6 +248,13 @@ export const config = {
     const n = parseInt(process.env.RUN_MAX_STEPS || "10000", 10);
     return Number.isFinite(n) ? Math.min(100000, Math.max(10, n)) : 10000;
   },
+  /** Max concurrently-RUNNING root (depth-0) runs per nest. The subagent
+   *  depth/fan-out caps bound a single tree; this bounds how many trees a
+   *  caller can start at once, so root triggers can't flood the nest. */
+  get RUN_MAX_CONCURRENT_ROOTS(): number {
+    const n = parseInt(process.env.RUN_MAX_CONCURRENT_ROOTS || "50", 10);
+    return Number.isFinite(n) ? Math.min(1000, Math.max(1, n)) : 50;
+  },
   get AUTH_MODE(): "open" | "key" {
     // Default is "key" — requires an explicit AUTH_MODE=open to run
     // without authentication. Safer default for public deployments;
