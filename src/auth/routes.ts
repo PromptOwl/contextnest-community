@@ -29,6 +29,7 @@ import {
   isLicenseAdminEmail,
   isLicenseAdminUserId,
 } from "./license.js";
+import { isSuperAdmin } from "../governance/access-service.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { ANON_USER_ID } from "../shared/constants.js";
@@ -581,6 +582,7 @@ authRoutes.get("/admin-status", async (c) => {
     email: string;
     name: string | null;
     is_admin: boolean;
+    is_super_admin: boolean;
   } | null = null;
   if (callerId) {
     const row = db
@@ -593,6 +595,10 @@ authRoutes.get("/admin-status", async (c) => {
         email: row.email,
         name: row.name,
         is_admin: isLicenseAdminEmail(row.email),
+        // Server admin = license admin OR an access.yaml super_admin. Drives
+        // visibility of the branding panel and other server-wide controls.
+        is_super_admin:
+          isLicenseAdminEmail(row.email) || isSuperAdmin(row.email),
       };
     }
   }

@@ -15,6 +15,7 @@ import {
   ArrowLeft,
   Loader2,
   Save,
+  Check,
   AlertCircle,
   Send,
   X,
@@ -485,6 +486,19 @@ export function DocumentEditor({
 
   const handleSave = () => runSave((savedId) => onSaved?.(savedId));
 
+  // "Done" on an existing doc flushes the save and drops back to the
+  // rendered reading view *in place* — no bounce to the nest list. This
+  // makes the core loop read → edit → read instead of read → edit → exit.
+  // Skip the write when nothing changed (autosave usually already ran) so we
+  // don't churn a spurious version just from opening and closing the editor.
+  const handleDone = () => {
+    if (!isDirty) {
+      setMode("view");
+      return;
+    }
+    runSave(() => setMode("view"));
+  };
+
   // Silent debounced autosave — fires on a typing pause and on click-out
   // (editor blur). No spinner, no "saving…" so the always-editable surface
   // never flickers. Skips new docs (a silent create is surprising),
@@ -596,14 +610,10 @@ export function DocumentEditor({
   // NOT read-only — keep edit affordances open for them.
   const isReviewerOnly = !isOwner && myNodeRoles.length > 0 && !hasEditorRole;
 
-  // Always-editable surface ("buttery editor"): anyone who can edit drops
-  // straight into the live editor instead of view → click → edit, which
-  // remounts DocumentViewer→MarkdownEditor and loses the caret/reflows.
-  // Read-only sessions (view-only / locked / reviewer) keep the rendered view.
-  useEffect(() => {
-    if (loading || mode === "edit") return;
-    if (!isViewOnly && !isLocked && !isReviewerOnly) setMode("edit");
-  }, [loading, isViewOnly, isLocked, isReviewerOnly, mode]);
+  // Existing docs open in rendered (read) mode so they're legible at a
+  // glance; the reader double-clicks the body or hits "Start Editing" to
+  // drop into the live editor. New docs still start in edit mode (set in the
+  // initial `mode` state). Read-only sessions never expose the edit path.
 
   // A doc can become locked while already in edit mode (e.g. the user just
   // submitted it for review). Kick back to read-only view so the editor
@@ -738,19 +748,35 @@ export function DocumentEditor({
               onReject={handleReject}
             />
           )}
+          {!isViewOnly && !isReviewerOnly && !isLocked && mode === "edit" && !isNew && (
+            // Live autosave status so the page never feels like it might lose
+            // your work — the silent autosave is otherwise invisible.
+            <span
+              className="text-xs text-muted-foreground mr-1 select-none"
+              data-testid="document-editor-save-status"
+            >
+              {saving
+                ? "Saving…"
+                : isDirty
+                  ? "Unsaved — autosaves"
+                  : "All changes saved"}
+            </span>
+          )}
           {!isViewOnly && !isReviewerOnly && !isLocked && (
             mode === "edit" ? (
               <Button
-                onClick={handleSave}
+                onClick={isNew ? handleSave : handleDone}
                 disabled={!canSave}
                 data-testid="document-editor-save"
               >
                 {saving ? (
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
+                ) : isNew ? (
                   <Save className="h-4 w-4 mr-2" />
+                ) : (
+                  <Check className="h-4 w-4 mr-2" />
                 )}
-                {isNew ? "Create" : "Save"}
+                {isNew ? "Create" : "Done"}
               </Button>
             ) : (
               <Button
@@ -762,17 +788,18 @@ export function DocumentEditor({
               </Button>
             )
           )}
-          {/* Version history — opens modal w/ highlighted diffs (CU-wdqcpztgwn).
-              Icon-only; lives next to the overflow menu in the header. */}
+          {/* Version history — opens modal w/ highlighted diffs + "Diff vs
+              current" compare (CU-wdqcpztgwn). Labeled (not icon-only) so the
+              compare/restore flow is discoverable from the detail view. */}
           {!isNew && (
             <Button
               variant="outline"
-              size="icon"
               onClick={openVersions}
-              title="Version history"
+              title="Version history — view, compare, and restore past versions"
               data-testid="document-editor-history"
             >
-              <History className="h-4 w-4" />
+              <History className="h-4 w-4 mr-2" />
+              History
             </Button>
           )}
           {/* Write/review affordances hidden for public reader.
@@ -1032,9 +1059,11 @@ export function DocumentEditor({
               );
             })()}
 
-          {/* Dblclick → edit unless locked/reviewer/public-viewer. */}
+          {/* Dblclick → edit unless locked/reviewer/public-viewer. Single
+              click stays inert so the reader can select text without the
+              page reflowing into the editor. */}
           <div
-            onClick={() => {
+            onDoubleClick={() => {
               if (isViewOnly || isLocked) return;
               if (mode === "view" && !isReviewerOnly) {
                 setMode("edit");

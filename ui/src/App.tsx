@@ -8,8 +8,9 @@ import { TeammatesPage } from "./components/TeammatesPage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, type LicenseStatus } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
+import { BrandingSettingsModal } from "./components/BrandingSettingsModal";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Palette } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -73,9 +74,11 @@ export default function App() {
   const {
     authMode,
     logoUrl,
+    appName,
     adminStatus,
     authenticated,
     isAdmin,
+    isSuperAdmin,
     loading,
     error,
     logout,
@@ -105,6 +108,7 @@ export default function App() {
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
+  const [showBranding, setShowBranding] = useState(false);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
   const [showQuickOpen, setShowQuickOpen] = useState(false);
 
@@ -298,6 +302,10 @@ export default function App() {
         onClose={() => setShowChangePassword(false)}
       />
 
+      {showBranding && (
+        <BrandingSettingsModal onClose={() => setShowBranding(false)} />
+      )}
+
       {showQuickOpen &&
         (view.page === "nest" || view.page === "document") && (
           <QuickOpen
@@ -340,10 +348,10 @@ export default function App() {
           >
             <img
               src={logoUrl ?? hootieIcon}
-              alt="ContextNest"
+              alt={appName}
               className="h-7 w-7 object-contain"
             />
-            <span className="font-semibold">ContextNest</span>
+            <span className="font-semibold">{appName}</span>
             <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
               Community
             </Badge>
@@ -370,7 +378,9 @@ export default function App() {
               <UserMenu
                 me={adminStatus.me}
                 isAdmin={isAdmin}
+                isSuperAdmin={isSuperAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
+                onBranding={() => setShowBranding(true)}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
               />
@@ -582,7 +592,9 @@ export default function App() {
 interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
+  isSuperAdmin: boolean;
   onTeammates: () => void;
+  onBranding: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
 }
@@ -590,7 +602,9 @@ interface UserMenuProps {
 function UserMenu({
   me,
   isAdmin,
+  isSuperAdmin,
   onTeammates,
+  onBranding,
   onChangePassword,
   onLogout,
 }: UserMenuProps) {
@@ -638,13 +652,28 @@ function UserMenu({
             </div>
           </div>
         </div>
-        {isAdmin && (
+        {(isAdmin || isSuperAdmin) && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onTeammates} className="cursor-pointer">
-              <Users className="h-3.5 w-3.5 mr-2" />
-              Teammates
-            </DropdownMenuItem>
+            {isAdmin && (
+              <DropdownMenuItem
+                onSelect={onTeammates}
+                className="cursor-pointer"
+              >
+                <Users className="h-3.5 w-3.5 mr-2" />
+                Teammates
+              </DropdownMenuItem>
+            )}
+            {isSuperAdmin && (
+              <DropdownMenuItem
+                onSelect={onBranding}
+                className="cursor-pointer"
+                data-testid="user-menu-branding"
+              >
+                <Palette className="h-3.5 w-3.5 mr-2" />
+                Branding
+              </DropdownMenuItem>
+            )}
           </>
         )}
         <DropdownMenuSeparator />

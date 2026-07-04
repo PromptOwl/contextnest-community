@@ -24,6 +24,11 @@ import {
 import { AppError } from "./shared/errors.js";
 import { config } from "./config.js";
 import { getDb } from "./db/client.js";
+import {
+  getBranding,
+  setBranding,
+  BrandingValidationError,
+} from "./settings/branding.js";
 import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
   isSuspended,
@@ -136,7 +141,7 @@ export function createApp(): Hono<AuthEnv> {
       service: "contextnest-community",
       version: "0.1.0",
       auth_mode: config.AUTH_MODE,
-      logo_url: config.LOGO_URL,
+      ...getBranding(),
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     }),
@@ -236,6 +241,35 @@ export function createApp(): Hono<AuthEnv> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to install key";
       return c.json({ error: msg }, 500);
+    }
+  });
+
+  // ─── Branding (super-admin white-label) ───────────────────────────────
+  // The current values are public via /health (the login screen renders them
+  // pre-auth). Writing is restricted to the server admin — the same gate as
+  // steward management (license admin OR an access.yaml super_admin).
+  app.put("/admin/branding", flexAuthMiddleware, async (c) => {
+    const email = resolveCallerEmail(c.get("userId"));
+    if (!email || !canManageStewards(email)) {
+      return c.json({ error: "Only a super admin can change branding." }, 403);
+    }
+    let body: {
+      logo_url?: string;
+      app_name?: string;
+      sign_in_tagline?: string;
+    };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    try {
+      return c.json(setBranding(body, email));
+    } catch (err) {
+      if (err instanceof BrandingValidationError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
     }
   });
 

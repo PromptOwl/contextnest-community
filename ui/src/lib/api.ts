@@ -127,9 +127,30 @@ export async function getHealth() {
     status: string;
     auth_mode: string;
     logo_url?: string | null;
+    app_name?: string;
+    sign_in_tagline?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
     suspended_reason?: string;
   }>("/health");
+}
+
+export interface Branding {
+  logo_url: string | null;
+  app_name: string;
+  sign_in_tagline: string | null;
+}
+
+// Super-admin only (server 403s otherwise). Send only the fields you want to
+// change; an empty string clears that override back to the env/default.
+export async function updateBranding(patch: {
+  logo_url?: string;
+  app_name?: string;
+  sign_in_tagline?: string;
+}) {
+  return request<Branding>("/admin/branding", {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
 }
 
 // ─── License ───────────────────────────────────────────────────────────
@@ -171,7 +192,12 @@ export async function getAdminStatus() {
   return request<{
     claimed: boolean;
     admin: { email: string; name: string | null } | null;
-    me: { email: string; name: string | null; is_admin: boolean } | null;
+    me: {
+      email: string;
+      name: string | null;
+      is_admin: boolean;
+      is_super_admin?: boolean;
+    } | null;
   }>("/auth/admin-status");
 }
 

@@ -66,6 +66,15 @@ export function runMigrations(db: Database.Database): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       sent INTEGER NOT NULL DEFAULT 0
     );
+
+    -- Server-wide settings (key/value). Backs the super-admin branding
+    -- panel: logo, app name, sign-in tagline. DB overrides env defaults.
+    CREATE TABLE IF NOT EXISTS server_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_by TEXT
+    );
   `);
 
   // ─── Governance tables (ported from PromptOwl models) ───

@@ -27,6 +27,7 @@ type Me = {
   email: string;
   name: string | null;
   is_admin: boolean;
+  is_super_admin?: boolean;
 } | null;
 
 export interface AdminStatus {
@@ -44,12 +45,20 @@ export type LoginSuccessUser = {
 export interface AuthContextValue {
   authMode: AuthMode;
   logoUrl: string | null;
+  /** Product name (branding override or "ContextNest" default). */
+  appName: string;
+  /** Optional login-screen tagline under the logo. */
+  signInTagline: string | null;
   adminStatus: AdminStatus | null;
   authenticated: boolean;
   isAdmin: boolean;
+  /** Server admin (license admin or super_admin) — gates the branding panel. */
+  isSuperAdmin: boolean;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
+  /** Re-pull /health to pick up a just-saved branding change. */
+  refreshBranding: () => Promise<void>;
   loginSuccess: (user?: LoginSuccessUser) => void;
   logout: () => Promise<void>;
 }
@@ -59,6 +68,8 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: PropsWithChildren) {
   const [authMode, setAuthMode] = useState<AuthMode>(null);
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [appName, setAppName] = useState<string>("ContextNest");
+  const [signInTagline, setSignInTagline] = useState<string | null>(null);
   const [adminStatus, setAdminStatus] = useState<AdminStatus | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -91,6 +102,19 @@ export function AuthProvider({ children }: PropsWithChildren) {
     }
   }, [authMode]);
 
+  // Re-pull /health so a just-saved branding change reflects immediately
+  // without a full reload. Branding is public, so no auth dependency.
+  const refreshBranding = useCallback(async () => {
+    try {
+      const h = await api.getHealth();
+      setLogoUrl(h.logo_url ?? null);
+      setAppName(h.app_name || "ContextNest");
+      setSignInTagline(h.sign_in_tagline ?? null);
+    } catch {
+      /* silent — keep current branding on a transient failure */
+    }
+  }, []);
+
   useEffect(() => {
     // Clear any token left over from the localStorage era. Cookie-based
     // sessions replaced it; lingering localStorage is dead weight.
@@ -104,6 +128,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         const mode = h.auth_mode as AuthMode;
         setAuthMode(mode);
         setLogoUrl(h.logo_url ?? null);
+        setAppName(h.app_name || "ContextNest");
+        setSignInTagline(h.sign_in_tagline ?? null);
 
         const status = await api.getAdminStatus();
         if (cancelled) return;
@@ -230,18 +256,25 @@ export function AuthProvider({ children }: PropsWithChildren) {
   }, [authMode, broadcastAuthChange]);
 
   const isAdmin = !!adminStatus?.me?.is_admin;
+  const isSuperAdmin = !!(
+    adminStatus?.me?.is_super_admin || adminStatus?.me?.is_admin
+  );
 
   return (
     <AuthContext.Provider
       value={{
         authMode,
         logoUrl,
+        appName,
+        signInTagline,
         adminStatus,
         authenticated,
         isAdmin,
+        isSuperAdmin,
         loading,
         error,
         refresh,
+        refreshBranding,
         loginSuccess,
         logout,
       }}
