@@ -97,6 +97,7 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <TabsTrigger value="canvas">Canvas</TabsTrigger>
           <TabsTrigger value="edges">Flows</TabsTrigger>
           <TabsTrigger value="runs">Runs</TabsTrigger>
+          <TabsTrigger value="schedules">Schedules</TabsTrigger>
         </TabsList>
         <TabsContent value="canvas" className="mt-4">
           <CanvasPanel nestId={nestId} />
@@ -106,6 +107,9 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
         </TabsContent>
         <TabsContent value="runs" className="mt-4">
           <RunsPanel nestId={nestId} />
+        </TabsContent>
+        <TabsContent value="schedules" className="mt-4">
+          <SchedulesPanel nestId={nestId} />
         </TabsContent>
       </Tabs>
     </div>
@@ -584,22 +588,16 @@ function RunsPanel({ nestId }: { nestId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [triggerNode, setTriggerNode] = useState("");
   const [triggering, setTriggering] = useState(false);
-  // Schedules: the standing triggers that create these runs.
-  const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [nodes, setNodes] = useState<Array<{ id: string; title?: string; type?: string }>>([]);
-  const [newSchedAgent, setNewSchedAgent] = useState("");
-  const [newSchedEvery, setNewSchedEvery] = useState(60);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [r, s, n] = await Promise.all([
+      const [r, n] = await Promise.all([
         listRuns(nestId),
-        listSchedules(nestId).catch(() => []),
         listNodes(nestId).then((x) => x.nodes).catch(() => []),
       ]);
       setRuns(r);
-      setSchedules(s);
       setNodes(n);
       setError(null);
     } catch (err) {
@@ -609,8 +607,6 @@ function RunsPanel({ nestId }: { nestId: string }) {
     }
   }, [nestId]);
 
-  const labelOf = (id: string) =>
-    nodes.find((n) => n.id === id)?.title || id.replace(/^nodes\//, "");
   const runnables = nodes.filter((n) => n.type === "agent" || n.type === "skill");
 
   useEffect(() => {
@@ -643,12 +639,24 @@ function RunsPanel({ nestId }: { nestId: string }) {
     <div className="grid grid-cols-1 md:grid-cols-[minmax(0,320px)_1fr] gap-4">
       <div>
         <div className="flex items-center gap-2 mb-2">
-          <Input
-            placeholder="nodes/agent to run…"
+          {/* Agent lookup, not a raw node-id field — pick from the nest's
+              runnable nodes. */}
+          <select
             value={triggerNode}
             onChange={(e) => setTriggerNode(e.target.value)}
-            className="h-8 font-mono text-xs"
-          />
+            className="h-8 rounded-md border bg-background px-2 text-sm flex-1 min-w-0"
+            data-testid="run-agent-lookup"
+          >
+            <option value="">
+              {runnables.length ? "Choose an agent to run…" : "No runnable agents yet"}
+            </option>
+            {runnables.map((n) => (
+              <option key={n.id} value={n.id}>
+                {n.type === "agent" ? "🤖 " : "⚡ "}
+                {n.title || n.id}
+              </option>
+            ))}
+          </select>
           <Button
             size="sm"
             disabled={triggering || !triggerNode.trim()}
@@ -698,107 +706,6 @@ function RunsPanel({ nestId }: { nestId: string }) {
             {error}
           </div>
         )}
-
-        {/* Standing schedules — the server creates a run every N minutes;
-            a polling runner executes it. Same governed write-back path. */}
-        <div className="mb-3 rounded-lg border">
-          <div className="px-3 py-2 border-b text-xs font-medium flex items-center gap-2">
-            <Clock3 className="h-3.5 w-3.5 text-muted-foreground" />
-            Schedules
-          </div>
-          {schedules.length === 0 ? (
-            <p className="px-3 py-2 text-[11px] text-muted-foreground">
-              None yet — pick an agent below and it runs on the clock.
-            </p>
-          ) : (
-            <div className="divide-y">
-              {schedules.map((s) => (
-                <div key={s.id} className="px-3 py-2 text-xs flex items-center gap-2">
-                  <span className="truncate" title={s.agent_node}>
-                    {labelOf(s.agent_node)}
-                  </span>
-                  <Badge variant="secondary" className="text-[10px] shrink-0">
-                    every{" "}
-                    {s.every_minutes >= 60 ? `${s.every_minutes / 60}h` : `${s.every_minutes}m`}
-                  </Badge>
-                  {!s.enabled && (
-                    <Badge variant="outline" className="text-[10px] shrink-0">
-                      paused
-                    </Badge>
-                  )}
-                  <div className="flex-1" />
-                  <button
-                    type="button"
-                    className="text-primary hover:underline shrink-0"
-                    onClick={async () => {
-                      await updateSchedule(nestId, s.id, { enabled: !s.enabled });
-                      await load();
-                    }}
-                  >
-                    {s.enabled ? "Pause" : "Resume"}
-                  </button>
-                  <button
-                    type="button"
-                    className="text-destructive hover:underline shrink-0"
-                    onClick={async () => {
-                      await deleteSchedule(nestId, s.id);
-                      await load();
-                    }}
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          {runnables.length > 0 && (
-            <div className="px-3 py-2 border-t flex items-center gap-1.5">
-              <select
-                value={newSchedAgent}
-                onChange={(e) => setNewSchedAgent(e.target.value)}
-                className="h-7 rounded-md border bg-background px-1.5 text-xs flex-1 min-w-0"
-              >
-                <option value="">Schedule an agent…</option>
-                {runnables
-                  .filter((n) => !schedules.some((s) => s.agent_node === n.id))
-                  .map((n) => (
-                    <option key={n.id} value={n.id}>
-                      {n.title || n.id}
-                    </option>
-                  ))}
-              </select>
-              <select
-                value={newSchedEvery}
-                onChange={(e) => setNewSchedEvery(Number(e.target.value))}
-                className="h-7 rounded-md border bg-background px-1.5 text-xs"
-              >
-                <option value={15}>15m</option>
-                <option value={60}>1h</option>
-                <option value={360}>6h</option>
-                <option value={1440}>24h</option>
-              </select>
-              <Button
-                size="sm"
-                className="h-7 px-2"
-                disabled={!newSchedAgent}
-                onClick={async () => {
-                  try {
-                    await createSchedule(nestId, {
-                      agent_node: newSchedAgent,
-                      every_minutes: newSchedEvery,
-                    });
-                    setNewSchedAgent("");
-                    await load();
-                  } catch (err) {
-                    setError(err instanceof Error ? err.message : "Schedule failed");
-                  }
-                }}
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          )}
-        </div>
 
         <div className="rounded-lg border divide-y">
           {loading ? (
@@ -961,6 +868,8 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   const [runFeedback, setRunFeedback] = useState("");
   const [hops, setHops] = useState(1);
   const [copied, setCopied] = useState("");
+  // Shelf search: find a doc/artifact by name, then drag its port to wire it.
+  const [shelfSearch, setShelfSearch] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1042,10 +951,15 @@ function CanvasPanel({ nestId }: { nestId: string }) {
 
   // Shelf: every doc NOT yet wired into any edge, laid out as a grid below a
   // divider. Same cards, same out-ports — so the FIRST edge is a drag on the
-  // canvas too, no detour through the Flows tab.
+  // canvas too, no detour through the Flows tab. The search box narrows the
+  // shelf (find the artifact, then drag it onto a card).
+  const q = shelfSearch.trim().toLowerCase();
   const shelfIds = nodes
     .map((n) => n.id)
     .filter((id) => !placed.has(id))
+    .filter(
+      (id) => !q || labelOf(id).toLowerCase().includes(q) || id.toLowerCase().includes(q),
+    )
     .sort((a, b) => {
       const rank = (id: string) =>
         typeOf(id) === "agent" ? 0 : typeOf(id) === "skill" ? 1 : 2;
@@ -1164,11 +1078,18 @@ function CanvasPanel({ nestId }: { nestId: string }) {
     <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px] gap-4">
       <div className="rounded-lg border overflow-hidden bg-background">
         <div className="flex items-center gap-2 px-3 py-2 border-b text-xs text-muted-foreground">
-          <span>
+          <span className="hidden md:inline">
             Drag from a card's <b>right port</b> onto another card to connect.
             Click a wire or card to edit it.
           </span>
           <div className="flex-1" />
+          <Input
+            value={shelfSearch}
+            onChange={(e) => setShelfSearch(e.target.value)}
+            placeholder="Find a document to wire in…"
+            className="h-7 w-56 text-xs"
+            data-testid="canvas-shelf-search"
+          />
           <Button variant="outline" size="sm" className="h-7" onClick={() => void load()}>
             <RefreshCw className="h-3.5 w-3.5" />
           </Button>
@@ -1305,7 +1226,8 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                     y={shelfTop - 32}
                     style={{ font: "10px sans-serif", fill: "hsl(var(--muted-foreground))" }}
                   >
-                    NOT WIRED IN YET — drag a right port onto any card to connect
+                    NOT WIRED IN YET ({shelfIds.length}
+                    {q ? " matching" : ""}) — drag a right port onto any card to connect
                   </text>
                 </g>
               )}
@@ -1663,6 +1585,204 @@ function CanvasPanel({ nestId }: { nestId: string }) {
             </p>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Schedules: standing triggers, separated from run history ────────────
+//
+// A schedule is a standing decision ("this agent runs every hour"); a run is
+// one execution of it. They read differently and change at different rates,
+// so they get their own tab — Runs stays the log, this is the control panel.
+
+function SchedulesPanel({ nestId }: { nestId: string }) {
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [nodes, setNodes] = useState<Array<{ id: string; title?: string; type?: string }>>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [newAgent, setNewAgent] = useState("");
+  const [newEvery, setNewEvery] = useState(60);
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [s, n] = await Promise.all([
+        listSchedules(nestId),
+        listNodes(nestId).then((x) => x.nodes).catch(() => []),
+      ]);
+      setSchedules(s);
+      setNodes(n);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load schedules");
+    } finally {
+      setLoading(false);
+    }
+  }, [nestId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const labelOf = (id: string) =>
+    nodes.find((n) => n.id === id)?.title || id.replace(/^nodes\//, "");
+  const typeOf = (id: string) => nodes.find((n) => n.id === id)?.type;
+  const runnables = nodes.filter((n) => n.type === "agent" || n.type === "skill");
+  const unscheduled = runnables.filter(
+    (n) => !schedules.some((s) => s.agent_node === n.id),
+  );
+  const everyLabel = (m: number) => (m >= 1440 ? `${m / 1440}d` : m >= 60 ? `${m / 60}h` : `${m}m`);
+
+  return (
+    <div className="max-w-2xl space-y-4">
+      <p className="text-sm text-muted-foreground">
+        A schedule creates a run for its agent on the clock; a polling runner
+        executes it. Output still lands as a review request — scheduling
+        doesn't skip governance.
+      </p>
+
+      {error && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="py-8 text-center text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin inline" />
+        </div>
+      ) : schedules.length === 0 ? (
+        <div className="rounded-lg border border-dashed p-6 text-center">
+          <Clock3 className="h-6 w-6 text-muted-foreground/50 mx-auto mb-2" />
+          <p className="text-sm font-medium mb-1">Nothing on the clock yet</p>
+          <p className="text-xs text-muted-foreground">
+            Pick an agent below — every interval, the server files a run for
+            it.
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-lg border divide-y">
+          {schedules.map((s) => (
+            <div key={s.id} className="px-3 py-2.5 flex items-center gap-2 text-sm">
+              <TypeGlyph type={typeOf(s.agent_node)} />
+              <span className="truncate font-medium" title={s.agent_node}>
+                {labelOf(s.agent_node)}
+              </span>
+              <Badge variant="secondary" className="text-[10px] shrink-0">
+                every {everyLabel(s.every_minutes)}
+              </Badge>
+              {s.enabled ? (
+                s.next_due_at && (
+                  <span className="text-[11px] text-muted-foreground shrink-0">
+                    next ~{timeOf(s.next_due_at)}
+                  </span>
+                )
+              ) : (
+                <Badge variant="outline" className="text-[10px] shrink-0">
+                  paused
+                </Badge>
+              )}
+              <div className="flex-1" />
+              <select
+                value={s.every_minutes}
+                onChange={async (e) => {
+                  await updateSchedule(nestId, s.id, {
+                    every_minutes: Number(e.target.value),
+                  });
+                  await load();
+                }}
+                className="h-7 rounded-md border bg-background px-1.5 text-xs shrink-0"
+                title="Change the interval"
+              >
+                {[15, 60, 360, 1440].map((m) => (
+                  <option key={m} value={m}>{everyLabel(m)}</option>
+                ))}
+                {![15, 60, 360, 1440].includes(s.every_minutes) && (
+                  <option value={s.every_minutes}>{everyLabel(s.every_minutes)}</option>
+                )}
+              </select>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs shrink-0"
+                onClick={async () => {
+                  await updateSchedule(nestId, s.id, { enabled: !s.enabled });
+                  await load();
+                }}
+              >
+                {s.enabled ? "Pause" : "Resume"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
+                onClick={async () => {
+                  await deleteSchedule(nestId, s.id);
+                  await load();
+                }}
+                title="Remove schedule"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="rounded-lg border bg-muted/20 p-3">
+        <div className="text-xs font-medium mb-2">Put an agent on the clock</div>
+        <div className="flex items-center gap-2">
+          <select
+            value={newAgent}
+            onChange={(e) => setNewAgent(e.target.value)}
+            className="h-8 rounded-md border bg-background px-2 text-sm flex-1 min-w-0"
+            data-testid="schedule-agent-lookup"
+          >
+            <option value="">
+              {unscheduled.length ? "Choose an agent…" : "Every runnable agent is scheduled"}
+            </option>
+            {unscheduled.map((n) => (
+              <option key={n.id} value={n.id}>
+                {n.type === "agent" ? "🤖 " : "⚡ "}
+                {n.title || n.id}
+              </option>
+            ))}
+          </select>
+          <select
+            value={newEvery}
+            onChange={(e) => setNewEvery(Number(e.target.value))}
+            className="h-8 rounded-md border bg-background px-2 text-sm"
+          >
+            <option value={15}>every 15 minutes</option>
+            <option value={60}>every hour</option>
+            <option value={360}>every 6 hours</option>
+            <option value={1440}>every day</option>
+          </select>
+          <Button
+            size="sm"
+            className="h-8"
+            disabled={saving || !newAgent}
+            onClick={async () => {
+              setSaving(true);
+              try {
+                await createSchedule(nestId, {
+                  agent_node: newAgent,
+                  every_minutes: newEvery,
+                });
+                setNewAgent("");
+                await load();
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Schedule failed");
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            <Plus className="h-3.5 w-3.5 mr-1" /> Schedule
+          </Button>
+        </div>
       </div>
     </div>
   );
