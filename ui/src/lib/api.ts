@@ -996,6 +996,24 @@ export async function getNestGraph(nestId: string) {
   return request<NestGraph>(`/nests/${nestId}/graph`);
 }
 
+// ─── My Work — cross-nest inbox ──────────────────────────────────────────
+
+export interface WorkItem {
+  type: "review";
+  nest_id: string;
+  nest_name: string;
+  node_id: string;
+  title: string;
+  requested_by: string;
+  requested_at: string;
+  priority?: string;
+}
+
+export async function getMyWork() {
+  const r = await request<{ items: WorkItem[] }>("/me/work");
+  return r.items;
+}
+
 // ─── Workflow plane (typed edges + governed runs) ────────────────────────
 
 export interface EdgeType {

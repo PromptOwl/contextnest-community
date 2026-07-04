@@ -6,6 +6,7 @@ import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { listNests, listSharedNests } from "./nests/service.js";
+import { getReviewQueue } from "./governance/review-service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import { resolveStewardsForNode } from "./governance/stewardship-service.js";
@@ -383,6 +384,39 @@ export function createApp(): Hono<AuthEnv> {
 
   // GET /stats — dashboard summary counts: nests visible to caller,
   // documents across those nests, total users on the server. Uses
+  // ─── My Work — cross-nest inbox of things that need this person ──────────
+  // The dashboard shows this above the nest list: reviews/approvals waiting on
+  // you across every nest you can act in. Reuses the governance review queue
+  // (an agent's write-back lands here too, once the runner submits governed
+  // changes). flexAuth so it works in open mode and with a key.
+  app.use("/me/*", flexAuthMiddleware);
+  app.get("/me/work", async (c) => {
+    const userId = c.get("userId");
+    const nestName = new Map<string, string>();
+    for (const n of [
+      ...(await listNests(userId)),
+      ...(await listSharedNests(userId)),
+    ])
+      nestName.set(n.id, n.name ?? n.id);
+
+    const { requests } = await getReviewQueue({ status: "pending", limit: 200 });
+    const items = requests
+      .filter((r) => nestName.has(r.nestId))
+      .map((r) => ({
+        type: "review" as const,
+        nest_id: r.nestId,
+        nest_name: nestName.get(r.nestId)!,
+        node_id: r.nodeId,
+        title: r.title || r.nodeId,
+        requested_by: r.requestedBy,
+        requested_at: r.requestedAt,
+        priority: r.priority,
+      }));
+    // Newest first — an inbox, not an archive.
+    items.sort((a, b) => (a.requested_at < b.requested_at ? 1 : -1));
+    return c.json({ items });
+  });
+
   // flexAuthMiddleware so it works without auth in open mode and with
   // a Bearer/cookie in key mode.
   app.use("/stats", flexAuthMiddleware);

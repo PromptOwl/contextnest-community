@@ -553,6 +553,16 @@ export default function App() {
                 isAnonOwned,
               })
             }
+            onOpenReview={(nestId, nestName, nodeId) =>
+              setView({
+                page: "document",
+                nestId,
+                nestName,
+                nodeId,
+                isOwner: true,
+                isAnonOwned: true,
+              })
+            }
           />
         )}
         {view.page === "nest" && (

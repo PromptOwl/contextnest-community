@@ -5,7 +5,7 @@ import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import {
@@ -17,6 +17,18 @@ import { Label } from "@/components/ui/label";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
 
+function relTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (secs < 60) return "just now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
 interface DashboardProps {
   onSelectNest: (
     nestId: string,
@@ -24,6 +36,7 @@ interface DashboardProps {
     isOwner: boolean,
     isAnonOwned: boolean,
   ) => void;
+  onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
 }
 
 interface ServerStats {
@@ -32,9 +45,10 @@ interface ServerStats {
   users: number;
 }
 
-export function Dashboard({ onSelectNest }: DashboardProps) {
+export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
+  const [work, setWork] = useState<api.WorkItem[]>([]);
   const [nests, setNests] = useState<any[]>([]);
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
@@ -60,17 +74,19 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
       // /stats and /unsynced are best-effort. /stats can 503 on license-gated
       // servers; /unsynced is admin-gated, so non-admin callers get 403. In
       // both cases the dashboard still renders with the rest of the data.
-      const [nestsData, statsData, unsyncedData] = await Promise.all([
+      const [nestsData, statsData, unsyncedData, workData] = await Promise.all([
         api.listNests(),
         api.getServerStats().catch((e) => {
           console.error("[Dashboard] getServerStats failed", e);
           return null;
         }),
         api.listUnsyncedFolders().catch(() => ({ folders: [] })),
+        api.getMyWork().catch(() => [] as api.WorkItem[]),
       ]);
       setNests(nestsData.nests);
       setStats(statsData);
       setUnsynced(unsyncedData.folders);
+      setWork(workData);
     } catch (e) {
       console.error("[Dashboard] fetchNests failed", e);
     } finally {
@@ -182,6 +198,51 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
           </div>
         </CardContent>
       </Card>
+
+      {/* My Work — cross-nest inbox of what needs you. Slack/CRM-clean:
+          a tight table, every row clickable straight to the document. */}
+      <div>
+        <div className="flex items-center gap-2 mb-2">
+          <Inbox className="h-5 w-5 text-muted-foreground" />
+          <h2 className="text-xl font-semibold">My Work</h2>
+          {work.length > 0 && (
+            <span className="rounded-full bg-primary text-primary-foreground text-xs font-semibold px-2 py-0.5">
+              {work.length}
+            </span>
+          )}
+        </div>
+        {work.length === 0 ? (
+          <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
+            You're all caught up — no reviews or approvals waiting on you.
+          </div>
+        ) : (
+          <div className="rounded-lg border divide-y overflow-hidden">
+            {work.map((w) => (
+              <button
+                key={`${w.nest_id}:${w.node_id}`}
+                onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-muted/40 group"
+              >
+                <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0">
+                  Review
+                </span>
+                <span className="font-medium truncate">{w.title}</span>
+                <span className="text-xs text-muted-foreground shrink-0">
+                  in {w.nest_name}
+                </span>
+                <span className="flex-1" />
+                <span className="text-xs text-muted-foreground hidden sm:inline">
+                  {w.requested_by}
+                </span>
+                <span className="text-xs text-muted-foreground hidden md:inline">
+                  {relTime(w.requested_at)}
+                </span>
+                <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-0.5 transition-transform shrink-0" />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Nests header */}
       <div className="flex items-center justify-between">
