@@ -846,6 +846,31 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("019_grants");
   }
+
+  // 020: interval schedules for the workflow plane. One row = "create a run
+  //   for this agent every N minutes". The server loop (workflow/scheduler.ts)
+  //   only inserts run rows on the interval; an external runner in poll mode
+  //   executes them — the server itself never calls an LLM.
+  if (!hasMigration("020_schedules")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS schedules (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          agent_node TEXT NOT NULL,
+          every_minutes INTEGER NOT NULL CHECK(every_minutes >= 5),
+          enabled INTEGER NOT NULL DEFAULT 1,
+          last_run_at TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_agent
+          ON schedules(nest_id, agent_node);
+      `);
+    })();
+    recordMigration("020_schedules");
+  }
 }
 
 /**

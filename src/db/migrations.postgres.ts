@@ -50,6 +50,7 @@ const HISTORICAL_MIGRATIONS = [
   "017_workflow_runs",
   "018_subagent_runs",
   "019_grants",
+  "020_schedules",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -302,6 +303,20 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_unique
       ON grants(nest_id, target_type, target, user_id);
     CREATE INDEX IF NOT EXISTS idx_grants_user ON grants(nest_id, user_id);
+
+    CREATE TABLE IF NOT EXISTS schedules (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      agent_node TEXT NOT NULL,
+      every_minutes INTEGER NOT NULL CHECK(every_minutes >= 5),
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_run_at TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_agent
+      ON schedules(nest_id, agent_node);
 
     CREATE TABLE IF NOT EXISTS edge_types (
       id TEXT PRIMARY KEY,

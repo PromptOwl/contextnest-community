@@ -23,6 +23,7 @@ import {
   runListRoutes,
   runDetailRoutes,
 } from "./workflow/run-routes.js";
+import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import {
@@ -789,6 +790,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
+  nestsApp.route("/:nestId/schedules", scheduleRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);

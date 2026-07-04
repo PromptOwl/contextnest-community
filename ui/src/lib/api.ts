@@ -1132,6 +1132,49 @@ export async function deleteEdge(nestId: string, edgeId: string) {
   return request(`/nests/${nestId}/edges/${edgeId}`, { method: "DELETE" });
 }
 
+export interface Schedule {
+  id: string;
+  agent_node: string;
+  every_minutes: number;
+  enabled: boolean;
+  last_run_at: string | null;
+  next_due_at: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+export async function listSchedules(nestId: string) {
+  const r = await request<{ schedules: Schedule[] }>(`/nests/${nestId}/schedules`);
+  return r.schedules;
+}
+
+export async function createSchedule(
+  nestId: string,
+  body: { agent_node: string; every_minutes: number; enabled?: boolean },
+) {
+  const r = await request<{ schedule: Schedule }>(`/nests/${nestId}/schedules`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return r.schedule;
+}
+
+export async function updateSchedule(
+  nestId: string,
+  id: string,
+  body: { every_minutes?: number; enabled?: boolean },
+) {
+  const r = await request<{ schedule: Schedule }>(
+    `/nests/${nestId}/schedules/${id}`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  );
+  return r.schedule;
+}
+
+export async function deleteSchedule(nestId: string, id: string) {
+  return request(`/nests/${nestId}/schedules/${id}`, { method: "DELETE" });
+}
+
 export async function listRuns(nestId: string, agent?: string) {
   const q = agent ? `?agent=${encodeURIComponent(agent)}` : "";
   const r = await request<{ runs: RunSummary[] }>(

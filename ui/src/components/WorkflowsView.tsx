@@ -16,6 +16,7 @@ import {
   FileText,
   FileCode2,
   CornerDownRight,
+  Clock3,
 } from "lucide-react";
 import {
   listEdges,
@@ -27,11 +28,16 @@ import {
   getRun,
   triggerRun,
   listNodes,
+  listSchedules,
+  createSchedule,
+  updateSchedule,
+  deleteSchedule,
   type WorkflowEdge,
   type EdgeType,
   type RunSummary,
   type RunDetail,
   type RunStep,
+  type Schedule,
 } from "../lib/api";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
@@ -578,11 +584,23 @@ function RunsPanel({ nestId }: { nestId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [triggerNode, setTriggerNode] = useState("");
   const [triggering, setTriggering] = useState(false);
+  // Schedules: the standing triggers that create these runs.
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [nodes, setNodes] = useState<Array<{ id: string; title?: string; type?: string }>>([]);
+  const [newSchedAgent, setNewSchedAgent] = useState("");
+  const [newSchedEvery, setNewSchedEvery] = useState(60);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setRuns(await listRuns(nestId));
+      const [r, s, n] = await Promise.all([
+        listRuns(nestId),
+        listSchedules(nestId).catch(() => []),
+        listNodes(nestId).then((x) => x.nodes).catch(() => []),
+      ]);
+      setRuns(r);
+      setSchedules(s);
+      setNodes(n);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load runs");
@@ -590,6 +608,10 @@ function RunsPanel({ nestId }: { nestId: string }) {
       setLoading(false);
     }
   }, [nestId]);
+
+  const labelOf = (id: string) =>
+    nodes.find((n) => n.id === id)?.title || id.replace(/^nodes\//, "");
+  const runnables = nodes.filter((n) => n.type === "agent" || n.type === "skill");
 
   useEffect(() => {
     void load();
@@ -676,6 +698,107 @@ function RunsPanel({ nestId }: { nestId: string }) {
             {error}
           </div>
         )}
+
+        {/* Standing schedules — the server creates a run every N minutes;
+            a polling runner executes it. Same governed write-back path. */}
+        <div className="mb-3 rounded-lg border">
+          <div className="px-3 py-2 border-b text-xs font-medium flex items-center gap-2">
+            <Clock3 className="h-3.5 w-3.5 text-muted-foreground" />
+            Schedules
+          </div>
+          {schedules.length === 0 ? (
+            <p className="px-3 py-2 text-[11px] text-muted-foreground">
+              None yet — pick an agent below and it runs on the clock.
+            </p>
+          ) : (
+            <div className="divide-y">
+              {schedules.map((s) => (
+                <div key={s.id} className="px-3 py-2 text-xs flex items-center gap-2">
+                  <span className="truncate" title={s.agent_node}>
+                    {labelOf(s.agent_node)}
+                  </span>
+                  <Badge variant="secondary" className="text-[10px] shrink-0">
+                    every{" "}
+                    {s.every_minutes >= 60 ? `${s.every_minutes / 60}h` : `${s.every_minutes}m`}
+                  </Badge>
+                  {!s.enabled && (
+                    <Badge variant="outline" className="text-[10px] shrink-0">
+                      paused
+                    </Badge>
+                  )}
+                  <div className="flex-1" />
+                  <button
+                    type="button"
+                    className="text-primary hover:underline shrink-0"
+                    onClick={async () => {
+                      await updateSchedule(nestId, s.id, { enabled: !s.enabled });
+                      await load();
+                    }}
+                  >
+                    {s.enabled ? "Pause" : "Resume"}
+                  </button>
+                  <button
+                    type="button"
+                    className="text-destructive hover:underline shrink-0"
+                    onClick={async () => {
+                      await deleteSchedule(nestId, s.id);
+                      await load();
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {runnables.length > 0 && (
+            <div className="px-3 py-2 border-t flex items-center gap-1.5">
+              <select
+                value={newSchedAgent}
+                onChange={(e) => setNewSchedAgent(e.target.value)}
+                className="h-7 rounded-md border bg-background px-1.5 text-xs flex-1 min-w-0"
+              >
+                <option value="">Schedule an agent…</option>
+                {runnables
+                  .filter((n) => !schedules.some((s) => s.agent_node === n.id))
+                  .map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {n.title || n.id}
+                    </option>
+                  ))}
+              </select>
+              <select
+                value={newSchedEvery}
+                onChange={(e) => setNewSchedEvery(Number(e.target.value))}
+                className="h-7 rounded-md border bg-background px-1.5 text-xs"
+              >
+                <option value={15}>15m</option>
+                <option value={60}>1h</option>
+                <option value={360}>6h</option>
+                <option value={1440}>24h</option>
+              </select>
+              <Button
+                size="sm"
+                className="h-7 px-2"
+                disabled={!newSchedAgent}
+                onClick={async () => {
+                  try {
+                    await createSchedule(nestId, {
+                      agent_node: newSchedAgent,
+                      every_minutes: newSchedEvery,
+                    });
+                    setNewSchedAgent("");
+                    await load();
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : "Schedule failed");
+                  }
+                }}
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          )}
+        </div>
 
         <div className="rounded-lg border divide-y">
           {loading ? (
@@ -832,18 +955,26 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   const [saving, setSaving] = useState(false);
   // Add-step target (node panel).
   const [stepTo, setStepTo] = useState("");
+  // Node-panel extras: schedules, run-now feedback, ctx-command copy state.
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [schedEvery, setSchedEvery] = useState(60);
+  const [runFeedback, setRunFeedback] = useState("");
+  const [hops, setHops] = useState(1);
+  const [copied, setCopied] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [e, t, n] = await Promise.all([
+      const [e, t, n, s] = await Promise.all([
         listEdges(nestId),
         listEdgeTypes(nestId),
         listNodes(nestId).then((r) => r.nodes).catch(() => []),
+        listSchedules(nestId).catch(() => []),
       ]);
       setEdges(e);
       setTypes(t);
       setNodes(n);
+      setSchedules(s);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load canvas");
@@ -851,6 +982,13 @@ function CanvasPanel({ nestId }: { nestId: string }) {
       setLoading(false);
     }
   }, [nestId]);
+
+  const copy = (key: string, text: string) => {
+    void navigator.clipboard?.writeText(text).then(() => {
+      setCopied(key);
+      setTimeout(() => setCopied(""), 1500);
+    });
+  };
 
   useEffect(() => {
     void load();
@@ -899,8 +1037,33 @@ function CanvasPanel({ nestId }: { nestId: string }) {
       });
     }
   }
-  const width = Math.max(760, PAD_X * 2 + (Math.max(0, ...[...placed.values()].map((p) => p.x)) + CARD_W + 60));
-  const height = Math.max(420, PAD_Y + (Math.max(0, ...[...placed.values()].map((p) => p.y)) + CARD_H + 60));
+  const flowWidth = Math.max(920, PAD_X * 2 + (Math.max(0, ...[...placed.values()].map((p) => p.x)) + CARD_W + 60));
+  const flowHeight = Math.max(300, PAD_Y + (Math.max(-PAD_Y + 40, ...[...placed.values()].map((p) => p.y)) + CARD_H + 40));
+
+  // Shelf: every doc NOT yet wired into any edge, laid out as a grid below a
+  // divider. Same cards, same out-ports — so the FIRST edge is a drag on the
+  // canvas too, no detour through the Flows tab.
+  const shelfIds = nodes
+    .map((n) => n.id)
+    .filter((id) => !placed.has(id))
+    .sort((a, b) => {
+      const rank = (id: string) =>
+        typeOf(id) === "agent" ? 0 : typeOf(id) === "skill" ? 1 : 2;
+      return rank(a) - rank(b) || labelOf(a).localeCompare(labelOf(b));
+    });
+  const shelfTop = flowHeight + 46;
+  const perRow = Math.max(2, Math.floor((flowWidth - PAD_X * 2) / (CARD_W + 46)));
+  shelfIds.forEach((id, i) => {
+    placed.set(id, {
+      id,
+      x: PAD_X + (i % perRow) * (CARD_W + 46),
+      y: shelfTop + Math.floor(i / perRow) * (CARD_H + 28),
+    });
+  });
+  const width = flowWidth;
+  const height = shelfIds.length
+    ? shelfTop + Math.ceil(shelfIds.length / perRow) * (CARD_H + 28) + 30
+    : flowHeight + 20;
 
   const portOf = (id: string, side: "out" | "in") => {
     const p = placed.get(id);
@@ -1021,8 +1184,8 @@ function CanvasPanel({ nestId }: { nestId: string }) {
           </div>
         ) : placed.size === 0 ? (
           <div className="py-16 text-center text-sm text-muted-foreground">
-            Nothing on the canvas yet — connect two documents from the Flows
-            tab and they'll appear here.
+            No documents in this nest yet — create one from the Documents tab
+            and it appears here, ready to wire up.
           </div>
         ) : (
           <div className="overflow-auto">
@@ -1124,6 +1287,27 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                   strokeWidth={2}
                   strokeDasharray="5 4"
                 />
+              )}
+
+              {/* Shelf divider — everything below is not wired in yet. */}
+              {shelfIds.length > 0 && (
+                <g>
+                  <line
+                    x1={PAD_X}
+                    y1={shelfTop - 26}
+                    x2={width - PAD_X}
+                    y2={shelfTop - 26}
+                    stroke="hsl(var(--border))"
+                    strokeDasharray="3 3"
+                  />
+                  <text
+                    x={PAD_X}
+                    y={shelfTop - 32}
+                    style={{ font: "10px sans-serif", fill: "hsl(var(--muted-foreground))" }}
+                  >
+                    NOT WIRED IN YET — drag a right port onto any card to connect
+                  </text>
+                </g>
               )}
 
               {[...placed.values()].map((p) => {
@@ -1270,47 +1454,205 @@ function CanvasPanel({ nestId }: { nestId: string }) {
             </div>
           </div>
         ) : selNode ? (
-          <div>
-            <div className="flex items-center gap-2">
-              <TypeGlyph type={typeOf(selNode)} />
-              <h3 className="text-sm font-semibold truncate">{labelOf(selNode)}</h3>
-            </div>
-            <p className="text-xs text-muted-foreground mb-3 font-mono truncate">{selNode}</p>
+          (() => {
+            const runnable = ["agent", "skill"].includes(typeOf(selNode) ?? "");
+            const mySchedule = schedules.find((s) => s.agent_node === selNode);
+            const origin = window.location.origin;
+            const selector = `[[${labelOf(selNode)}]]`;
+            const readCmd = `curl -s -X POST ${origin}/nests/${nestId}/context -H 'Content-Type: application/json' -d '{"selector":"${selector}","hops":${hops},"max_tokens":4000}'`;
+            const writeCmd = `curl -s -X PATCH ${origin}/nests/${nestId}/nodes/${selNode} -H 'Content-Type: application/json' -d '{"append":"<your update>","changeNote":"via ctx"}'`;
+            return (
+              <div className="space-y-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <TypeGlyph type={typeOf(selNode)} />
+                    <h3 className="text-sm font-semibold truncate">{labelOf(selNode)}</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground font-mono truncate">{selNode}</p>
+                </div>
 
-            <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
-              Add a step after this
-            </label>
-            <div className="flex items-center gap-1.5">
-              <select
-                value={stepTo}
-                onChange={(e) => setStepTo(e.target.value)}
-                className="h-8 rounded-md border bg-background px-2 text-sm flex-1 min-w-0"
-              >
-                <option value="">Choose a document…</option>
-                {nodes
-                  .filter((n) => n.id !== selNode)
-                  .map((n) => (
-                    <option key={n.id} value={n.id}>
-                      {n.title || n.id}
-                    </option>
-                  ))}
-              </select>
-              <Button
-                size="sm"
-                className="h-8"
-                disabled={!stepTo}
-                onClick={() => {
-                  void connectNodes(selNode, stepTo);
-                  setStepTo("");
-                }}
-              >
-                <Plus className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-            <p className="text-[11px] text-muted-foreground mt-3">
-              Or drag from the node's right port straight onto another card.
-            </p>
-          </div>
+                {runnable && (
+                  <div className="space-y-2">
+                    <Button
+                      size="sm"
+                      className="w-full"
+                      onClick={async () => {
+                        try {
+                          await triggerRun(nestId, selNode);
+                          setRunFeedback("Run created — a polling runner will pick it up");
+                          setTimeout(() => setRunFeedback(""), 3000);
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : "Trigger failed");
+                        }
+                      }}
+                    >
+                      <Play className="h-3.5 w-3.5 mr-1.5" /> Run now
+                    </Button>
+                    {runFeedback && (
+                      <p className="text-[11px] text-emerald-600">{runFeedback}</p>
+                    )}
+                    <label className="block text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Schedule
+                    </label>
+                    {mySchedule ? (
+                      <div className="rounded-md border px-2.5 py-2 text-xs space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <span>
+                            every{" "}
+                            <b>
+                              {mySchedule.every_minutes >= 60
+                                ? `${mySchedule.every_minutes / 60}h`
+                                : `${mySchedule.every_minutes}m`}
+                            </b>
+                            {mySchedule.enabled ? "" : " · paused"}
+                          </span>
+                          <div className="flex-1" />
+                          <button
+                            type="button"
+                            className="text-primary hover:underline"
+                            onClick={async () => {
+                              await updateSchedule(nestId, mySchedule.id, {
+                                enabled: !mySchedule.enabled,
+                              });
+                              await load();
+                            }}
+                          >
+                            {mySchedule.enabled ? "Pause" : "Resume"}
+                          </button>
+                          <button
+                            type="button"
+                            className="text-destructive hover:underline"
+                            onClick={async () => {
+                              await deleteSchedule(nestId, mySchedule.id);
+                              await load();
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        {mySchedule.enabled && mySchedule.next_due_at && (
+                          <div className="text-muted-foreground">
+                            next fire ~{timeOf(mySchedule.next_due_at)}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <select
+                          value={schedEvery}
+                          onChange={(e) => setSchedEvery(Number(e.target.value))}
+                          className="h-8 rounded-md border bg-background px-2 text-sm flex-1"
+                        >
+                          <option value={15}>every 15 minutes</option>
+                          <option value={60}>every hour</option>
+                          <option value={360}>every 6 hours</option>
+                          <option value={1440}>every day</option>
+                        </select>
+                        <Button
+                          size="sm"
+                          className="h-8"
+                          onClick={async () => {
+                            try {
+                              await createSchedule(nestId, {
+                                agent_node: selNode,
+                                every_minutes: schedEvery,
+                              });
+                              await load();
+                            } catch (err) {
+                              setError(err instanceof Error ? err.message : "Schedule failed");
+                            }
+                          }}
+                        >
+                          Schedule
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+                    Add a step after this
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <select
+                      value={stepTo}
+                      onChange={(e) => setStepTo(e.target.value)}
+                      className="h-8 rounded-md border bg-background px-2 text-sm flex-1 min-w-0"
+                    >
+                      <option value="">Choose a document…</option>
+                      {nodes
+                        .filter((n) => n.id !== selNode)
+                        .map((n) => (
+                          <option key={n.id} value={n.id}>
+                            {n.title || n.id}
+                          </option>
+                        ))}
+                    </select>
+                    <Button
+                      size="sm"
+                      className="h-8"
+                      disabled={!stepTo}
+                      onClick={() => {
+                        void connectNodes(selNode, stepTo);
+                        setStepTo("");
+                      }}
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground mt-1.5">
+                    Or drag from the node's right port straight onto another card.
+                  </p>
+                </div>
+
+                {/* Grab this node as a ctx command — reader (deterministic
+                    /context assembly) and writer (governed append). */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <label className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Use from CLI / agent
+                    </label>
+                    <div className="flex-1" />
+                    <select
+                      value={hops}
+                      onChange={(e) => setHops(Number(e.target.value))}
+                      className="h-6 rounded border bg-background px-1 text-[11px]"
+                      title="How many hops of linked context to pull with it"
+                    >
+                      {[0, 1, 2, 3].map((h) => (
+                        <option key={h} value={h}>{h} hop{h === 1 ? "" : "s"}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <button
+                    type="button"
+                    className="w-full text-left rounded-md border bg-muted/40 px-2 py-1.5 text-[10.5px] font-mono break-all hover:border-primary"
+                    onClick={() => copy("sel", selector)}
+                    title="Copy the selector"
+                  >
+                    {copied === "sel" ? "✓ copied" : selector}
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full text-left rounded-md border bg-muted/40 px-2 py-1.5 text-[10.5px] font-mono break-all hover:border-primary"
+                    onClick={() => copy("read", readCmd)}
+                    title="Copy — deterministic read: this node + linked context"
+                  >
+                    {copied === "read" ? "✓ copied" : `read → ${readCmd.slice(0, 64)}…`}
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full text-left rounded-md border bg-muted/40 px-2 py-1.5 text-[10.5px] font-mono break-all hover:border-primary"
+                    onClick={() => copy("write", writeCmd)}
+                    title="Copy — governed write: append to this node (lands as a new version / review request)"
+                  >
+                    {copied === "write" ? "✓ copied" : `write → ${writeCmd.slice(0, 64)}…`}
+                  </button>
+                </div>
+              </div>
+            );
+          })()
         ) : (
           <div className="text-sm text-muted-foreground">
             <p className="font-medium text-foreground mb-1">Nothing selected</p>
