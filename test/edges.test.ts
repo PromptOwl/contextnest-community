@@ -192,6 +192,41 @@ describe("filters + graph payload", () => {
     expect(e.is_flow).toBe(true);
   });
 
+  it("PATCH retypes and reconditions an edge", async () => {
+    const created = await jsonRequest(
+      app, "POST", `/nests/${nestId}/edges`,
+      { from_node: "nodes/beta", to_node: "nodes/gamma", type: "next" },
+      owner.apiKey,
+    );
+    expect(created.status).toBe(201);
+    const id = created.data.edge.id;
+
+    const patched = await jsonRequest(
+      app, "PATCH", `/nests/${nestId}/edges/${id}`,
+      {
+        condition_mode: "structured",
+        condition: { term: "CAC", op: ">", value: 500 },
+      },
+      owner.apiKey,
+    );
+    expect(patched.status).toBe(200);
+    expect(patched.data.edge.condition_mode).toBe("structured");
+
+    const badType = await jsonRequest(
+      app, "PATCH", `/nests/${nestId}/edges/${id}`,
+      { type: "no-such-type" }, owner.apiKey,
+    );
+    expect(badType.status).toBe(400);
+
+    const missing = await jsonRequest(
+      app, "PATCH", `/nests/${nestId}/edges/does-not-exist`,
+      { condition_mode: null, condition: null }, owner.apiKey,
+    );
+    expect(missing.status).toBe(404);
+
+    await jsonRequest(app, "DELETE", `/nests/${nestId}/edges/${id}`, undefined, owner.apiKey);
+  });
+
   it("deletes an edge", async () => {
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/edges?type=owned-by`, undefined, owner.apiKey);
     const del = await jsonRequest(

@@ -21,6 +21,7 @@ import {
   listEdges,
   listEdgeTypes,
   createEdge,
+  updateEdge,
   deleteEdge,
   listRuns,
   getRun,
@@ -69,7 +70,7 @@ const timeOf = (iso: string) => {
 };
 
 export function WorkflowsView({ nestId, nestName, onBack }: Props) {
-  const [tab, setTab] = useState("edges");
+  const [tab, setTab] = useState("canvas");
 
   return (
     <div>
@@ -87,9 +88,13 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
-          <TabsTrigger value="edges">Edges</TabsTrigger>
+          <TabsTrigger value="canvas">Canvas</TabsTrigger>
+          <TabsTrigger value="edges">Flows</TabsTrigger>
           <TabsTrigger value="runs">Runs</TabsTrigger>
         </TabsList>
+        <TabsContent value="canvas" className="mt-4">
+          <CanvasPanel nestId={nestId} />
+        </TabsContent>
         <TabsContent value="edges" className="mt-4">
           <EdgesPanel nestId={nestId} />
         </TabsContent>
@@ -777,6 +782,544 @@ function RunTrace({ run }: { run: RunDetail }) {
               </div>
             </div>
           ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Canvas: the n8n-feel visual builder ─────────────────────────────────
+//
+// Ported from the workflow-canvas prototype: left→right auto-layout, node
+// cards, colored bezier wires with condition labels, and a config panel on
+// the right. The boxes are documents/agents, the wires are governed typed
+// edges — not an operation palette. Drag from a node's right port onto
+// another card to connect; click a wire or card to edit it in the panel.
+
+interface CanvasNode {
+  id: string;
+  x: number;
+  y: number;
+}
+
+const CARD_W = 168;
+const CARD_H = 56;
+const COL_GAP = 260;
+const ROW_GAP = 100;
+const PAD_X = 30;
+const PAD_Y = 70;
+
+function CanvasPanel({ nestId }: { nestId: string }) {
+  const [edges, setEdges] = useState<WorkflowEdge[]>([]);
+  const [types, setTypes] = useState<EdgeType[]>([]);
+  const [nodes, setNodes] = useState<Array<{ id: string; title?: string; type?: string }>>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [selEdge, setSelEdge] = useState<string | null>(null);
+  const [selNode, setSelNode] = useState<string | null>(null);
+  // Drag-to-connect ghost wire: source node + current pointer (svg coords).
+  const [connect, setConnect] = useState<{ from: string; x: number; y: number } | null>(null);
+  const svgRef = { current: null as SVGSVGElement | null };
+
+  // Edge editor draft (config panel).
+  const [eType, setEType] = useState("");
+  const [eWhen, setEWhen] = useState<"" | "nl" | "structured">("");
+  const [eIf, setEIf] = useState("");
+  const [eTerm, setETerm] = useState("");
+  const [eOp, setEOp] = useState(">");
+  const [eValue, setEValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  // Add-step target (node panel).
+  const [stepTo, setStepTo] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [e, t, n] = await Promise.all([
+        listEdges(nestId),
+        listEdgeTypes(nestId),
+        listNodes(nestId).then((r) => r.nodes).catch(() => []),
+      ]);
+      setEdges(e);
+      setTypes(t);
+      setNodes(n);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load canvas");
+    } finally {
+      setLoading(false);
+    }
+  }, [nestId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const labelOf = (id: string) => byId.get(id)?.title || id.replace(/^nodes\//, "");
+  const typeOf = (id: string) => byId.get(id)?.type;
+
+  // Layout: longest-path layering over flow edges (left→right), then stack
+  // each column. Reference-edge-only nodes sit in the column their neighbors
+  // suggest (fallback 0).
+  const flowEdges = edges.filter((e) => e.type.is_flow);
+  const placed = new Map<string, CanvasNode>();
+  {
+    const ids = new Set<string>();
+    for (const e of edges) {
+      ids.add(e.from_node);
+      ids.add(e.to_node);
+    }
+    const depth = new Map<string, number>();
+    const incoming = new Set(flowEdges.map((e) => e.to_node));
+    const queue: string[] = [...ids].filter((id) => !incoming.has(id)).sort();
+    for (const id of queue) depth.set(id, 0);
+    // Longest-path relaxation; flow graph is a DAG so this terminates.
+    for (let pass = 0; pass < ids.size; pass++) {
+      let changed = false;
+      for (const e of flowEdges) {
+        const d = (depth.get(e.from_node) ?? 0) + 1;
+        if (d > (depth.get(e.to_node) ?? 0)) {
+          depth.set(e.to_node, d);
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+    const cols = new Map<number, string[]>();
+    for (const id of [...ids].sort((a, b) => String(labelOf(a)).localeCompare(labelOf(b)))) {
+      const d = depth.get(id) ?? 0;
+      if (!cols.has(d)) cols.set(d, []);
+      cols.get(d)!.push(id);
+    }
+    for (const [d, colIds] of cols) {
+      colIds.forEach((id, i) => {
+        placed.set(id, { id, x: PAD_X + d * COL_GAP, y: PAD_Y + i * ROW_GAP });
+      });
+    }
+  }
+  const width = Math.max(760, PAD_X * 2 + (Math.max(0, ...[...placed.values()].map((p) => p.x)) + CARD_W + 60));
+  const height = Math.max(420, PAD_Y + (Math.max(0, ...[...placed.values()].map((p) => p.y)) + CARD_H + 60));
+
+  const portOf = (id: string, side: "out" | "in") => {
+    const p = placed.get(id);
+    if (!p) return { x: 0, y: 0 };
+    return { x: side === "out" ? p.x + CARD_W : p.x, y: p.y + CARD_H / 2 };
+  };
+
+  const wirePath = (from: string, to: string) => {
+    const a = portOf(from, "out");
+    const b = portOf(to, "in");
+    const dx = Math.max(40, (b.x - a.x) / 2);
+    return `M${a.x},${a.y} C${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`;
+  };
+
+  const edgeColor = (e: WorkflowEdge) =>
+    e.type.color || (e.type.is_flow ? "#34a853" : "#94a3b8");
+
+  const selectEdge = (e: WorkflowEdge) => {
+    setSelNode(null);
+    setSelEdge(e.id);
+    setEType(e.type.name);
+    setEWhen((e.condition_mode as "" | "nl" | "structured") || "");
+    if (e.condition_mode === "nl") {
+      setEIf(String(e.condition ?? ""));
+    } else if (e.condition_mode === "structured" && e.condition) {
+      try {
+        const c = typeof e.condition === "string" ? JSON.parse(e.condition) : e.condition;
+        setETerm(String(c.term ?? ""));
+        setEOp(String(c.op ?? ">"));
+        setEValue(String(c.value ?? ""));
+      } catch {
+        setETerm("");
+        setEValue("");
+      }
+    }
+  };
+
+  const saveEdge = async () => {
+    if (!selEdge) return;
+    setSaving(true);
+    try {
+      await updateEdge(nestId, selEdge, {
+        type: eType,
+        condition_mode: eWhen || null,
+        condition:
+          eWhen === "nl"
+            ? eIf.trim()
+            : eWhen === "structured"
+              ? { term: eTerm.trim(), op: eOp, value: isNaN(Number(eValue)) ? eValue.trim() : Number(eValue) }
+              : null,
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save edge");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeEdge = async (id: string) => {
+    try {
+      await deleteEdge(nestId, id);
+      setSelEdge(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete edge");
+    }
+  };
+
+  const connectNodes = async (from: string, to: string) => {
+    if (from === to) return;
+    const flowType = types.find((t) => t.is_flow)?.name ?? types[0]?.name;
+    if (!flowType) return;
+    try {
+      const created = await createEdge(nestId, {
+        from_node: from,
+        to_node: to,
+        type: flowType,
+        condition_mode: null,
+        condition: null,
+      });
+      await load();
+      selectEdge(created);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to connect");
+    }
+  };
+
+  const svgPoint = (ev: React.MouseEvent) => {
+    const rect = (ev.currentTarget as SVGSVGElement).closest("svg")!.getBoundingClientRect();
+    return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+  };
+
+  const selectedEdgeObj = edges.find((e) => e.id === selEdge) ?? null;
+  const distinctColors = [...new Set(edges.map(edgeColor))];
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px] gap-4">
+      <div className="rounded-lg border overflow-hidden bg-background">
+        <div className="flex items-center gap-2 px-3 py-2 border-b text-xs text-muted-foreground">
+          <span>
+            Drag from a card's <b>right port</b> onto another card to connect.
+            Click a wire or card to edit it.
+          </span>
+          <div className="flex-1" />
+          <Button variant="outline" size="sm" className="h-7" onClick={() => void load()}>
+            <RefreshCw className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+        {error && (
+          <div className="mx-3 mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {error}
+          </div>
+        )}
+        {loading ? (
+          <div className="py-16 text-center text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin inline" />
+          </div>
+        ) : placed.size === 0 ? (
+          <div className="py-16 text-center text-sm text-muted-foreground">
+            Nothing on the canvas yet — connect two documents from the Flows
+            tab and they'll appear here.
+          </div>
+        ) : (
+          <div className="overflow-auto">
+            <svg
+              width={width}
+              height={height}
+              ref={(el) => {
+                svgRef.current = el;
+              }}
+              style={{
+                background: "radial-gradient(circle, hsl(var(--muted-foreground) / 0.18) 1px, transparent 1px)",
+                backgroundSize: "20px 20px",
+              }}
+              onMouseMove={(ev) => {
+                if (!connect) return;
+                const rect = (ev.currentTarget as SVGSVGElement).getBoundingClientRect();
+                setConnect({ ...connect, x: ev.clientX - rect.left, y: ev.clientY - rect.top });
+              }}
+              onMouseUp={() => setConnect(null)}
+              onClick={() => {
+                setSelEdge(null);
+                setSelNode(null);
+              }}
+            >
+              <defs>
+                {distinctColors.map((c) => (
+                  <marker
+                    key={c}
+                    id={`ah-${c.replace(/[^a-z0-9]/gi, "")}`}
+                    markerWidth="9"
+                    markerHeight="9"
+                    refX="7"
+                    refY="3"
+                    orient="auto"
+                  >
+                    <path d="M0,0 L7,3 L0,6 z" fill={c} />
+                  </marker>
+                ))}
+              </defs>
+
+              {edges.map((e) => {
+                if (!placed.has(e.from_node) || !placed.has(e.to_node)) return null;
+                const d = wirePath(e.from_node, e.to_node);
+                const color = edgeColor(e);
+                const mid = {
+                  x: (portOf(e.from_node, "out").x + portOf(e.to_node, "in").x) / 2,
+                  y: (portOf(e.from_node, "out").y + portOf(e.to_node, "in").y) / 2 - 7,
+                };
+                let condText = "";
+                if (e.condition_mode === "nl" && e.condition) condText = `“${e.condition}”`;
+                else if (e.condition_mode === "structured" && e.condition) {
+                  try {
+                    const c = typeof e.condition === "string" ? JSON.parse(e.condition) : e.condition;
+                    condText = c?.term ? `${c.term} ${c.op ?? ""} ${c.value ?? ""}` : "";
+                  } catch { /* label stays type-only */ }
+                }
+                return (
+                  <g key={e.id}>
+                    <path
+                      d={d}
+                      fill="none"
+                      stroke={color}
+                      strokeWidth={selEdge === e.id ? 3 : 2}
+                      strokeDasharray={e.type.is_flow ? undefined : "4 4"}
+                      markerEnd={`url(#ah-${color.replace(/[^a-z0-9]/gi, "")})`}
+                      opacity={selEdge && selEdge !== e.id ? 0.45 : 1}
+                    />
+                    {/* fat invisible twin for clickability */}
+                    <path
+                      d={d}
+                      fill="none"
+                      stroke="transparent"
+                      strokeWidth={14}
+                      style={{ cursor: "pointer" }}
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        selectEdge(e);
+                      }}
+                    />
+                    <text
+                      x={mid.x}
+                      y={mid.y}
+                      textAnchor="middle"
+                      className="pointer-events-none"
+                      style={{ font: "10px ui-monospace, monospace", fill: "hsl(var(--muted-foreground))" }}
+                    >
+                      {e.type.name}
+                      {condText ? ` · ${condText.slice(0, 34)}` : ""}
+                    </text>
+                  </g>
+                );
+              })}
+
+              {connect && (
+                <path
+                  d={`M${portOf(connect.from, "out").x},${portOf(connect.from, "out").y} C${portOf(connect.from, "out").x + 60},${portOf(connect.from, "out").y} ${connect.x - 60},${connect.y} ${connect.x},${connect.y}`}
+                  fill="none"
+                  stroke="hsl(var(--primary))"
+                  strokeWidth={2}
+                  strokeDasharray="5 4"
+                />
+              )}
+
+              {[...placed.values()].map((p) => {
+                const t = typeOf(p.id);
+                const isSel = selNode === p.id;
+                return (
+                  <g key={p.id}>
+                    <foreignObject x={p.x} y={p.y} width={CARD_W} height={CARD_H + 6}>
+                      <div
+                        className={`rounded-lg border-2 bg-background px-2.5 py-1.5 shadow-sm cursor-pointer select-none ${
+                          isSel ? "border-primary ring-2 ring-primary/20" : "border-border"
+                        }`}
+                        style={{ width: CARD_W, height: CARD_H }}
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          setSelEdge(null);
+                          setSelNode(p.id);
+                        }}
+                        onMouseUp={() => {
+                          if (connect && connect.from !== p.id) {
+                            void connectNodes(connect.from, p.id);
+                            setConnect(null);
+                          }
+                        }}
+                        title={p.id}
+                      >
+                        <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                          <TypeGlyph type={t} />
+                          {t ?? "document"}
+                        </div>
+                        <div className="text-xs font-semibold truncate mt-0.5">
+                          {labelOf(p.id)}
+                        </div>
+                      </div>
+                    </foreignObject>
+                    {/* out-port: drag here to connect */}
+                    <circle
+                      cx={p.x + CARD_W}
+                      cy={p.y + CARD_H / 2}
+                      r={6}
+                      fill="hsl(var(--background))"
+                      stroke="hsl(var(--primary))"
+                      strokeWidth={1.5}
+                      style={{ cursor: "crosshair" }}
+                      onMouseDown={(ev) => {
+                        ev.stopPropagation();
+                        ev.preventDefault();
+                        const pt = svgPoint(ev);
+                        setConnect({ from: p.id, x: pt.x, y: pt.y });
+                      }}
+                    />
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+        )}
+      </div>
+
+      {/* Config panel — the n8n interaction: click a thing, edit it here. */}
+      <div className="rounded-lg border p-4 h-fit">
+        {selectedEdgeObj ? (
+          <div>
+            <h3 className="text-sm font-semibold">Edge · {selectedEdgeObj.type.name}</h3>
+            <p className="text-xs text-muted-foreground mb-3">
+              {labelOf(selectedEdgeObj.from_node)} → {labelOf(selectedEdgeObj.to_node)}
+            </p>
+
+            <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+              Type
+            </label>
+            <select
+              value={eType}
+              onChange={(e) => setEType(e.target.value)}
+              className="w-full h-8 rounded-md border bg-background px-2 text-sm mb-3"
+            >
+              {types.map((t) => (
+                <option key={t.id} value={t.name}>
+                  {t.is_flow ? "▶ " : ""}
+                  {t.name}
+                </option>
+              ))}
+            </select>
+
+            <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+              Fires
+            </label>
+            <div className="flex items-center rounded-md border h-8 text-xs overflow-hidden w-fit mb-2">
+              {(
+                [
+                  ["", "always"],
+                  ["nl", "if…"],
+                  ["structured", "metric"],
+                ] as const
+              ).map(([mode, lbl], i) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={`px-2.5 h-full ${i > 0 ? "border-l" : ""} ${
+                    eWhen === mode ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+                  }`}
+                  onClick={() => setEWhen(mode)}
+                >
+                  {lbl}
+                </button>
+              ))}
+            </div>
+            {eWhen === "nl" && (
+              <Input
+                value={eIf}
+                onChange={(e) => setEIf(e.target.value)}
+                placeholder='e.g. "lost on price, not product"'
+                className="h-8 text-sm italic mb-2"
+              />
+            )}
+            {eWhen === "structured" && (
+              <div className="grid grid-cols-[1fr_58px_1fr] gap-1.5 mb-2">
+                <Input value={eTerm} onChange={(e) => setETerm(e.target.value)} placeholder="CAC" className="h-8 text-sm font-mono" />
+                <select
+                  value={eOp}
+                  onChange={(e) => setEOp(e.target.value)}
+                  className="h-8 rounded-md border bg-background px-1 text-sm font-mono"
+                >
+                  {[">", "<", ">=", "<=", "=", "!="].map((op) => (
+                    <option key={op} value={op}>{op}</option>
+                  ))}
+                </select>
+                <Input value={eValue} onChange={(e) => setEValue(e.target.value)} placeholder="500" className="h-8 text-sm font-mono" />
+              </div>
+            )}
+
+            <div className="flex gap-2 mt-4">
+              <Button size="sm" className="flex-1" disabled={saving} onClick={() => void saveEdge()}>
+                {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Save"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="text-destructive"
+                onClick={() => void removeEdge(selectedEdgeObj.id)}
+              >
+                Delete
+              </Button>
+            </div>
+          </div>
+        ) : selNode ? (
+          <div>
+            <div className="flex items-center gap-2">
+              <TypeGlyph type={typeOf(selNode)} />
+              <h3 className="text-sm font-semibold truncate">{labelOf(selNode)}</h3>
+            </div>
+            <p className="text-xs text-muted-foreground mb-3 font-mono truncate">{selNode}</p>
+
+            <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+              Add a step after this
+            </label>
+            <div className="flex items-center gap-1.5">
+              <select
+                value={stepTo}
+                onChange={(e) => setStepTo(e.target.value)}
+                className="h-8 rounded-md border bg-background px-2 text-sm flex-1 min-w-0"
+              >
+                <option value="">Choose a document…</option>
+                {nodes
+                  .filter((n) => n.id !== selNode)
+                  .map((n) => (
+                    <option key={n.id} value={n.id}>
+                      {n.title || n.id}
+                    </option>
+                  ))}
+              </select>
+              <Button
+                size="sm"
+                className="h-8"
+                disabled={!stepTo}
+                onClick={() => {
+                  void connectNodes(selNode, stepTo);
+                  setStepTo("");
+                }}
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-3">
+              Or drag from the node's right port straight onto another card.
+            </p>
+          </div>
+        ) : (
+          <div className="text-sm text-muted-foreground">
+            <p className="font-medium text-foreground mb-1">Nothing selected</p>
+            <p className="text-xs">
+              Click a <b>wire</b> to change its type or condition, click a{" "}
+              <b>card</b> to add a next step, or drag from a card's right port
+              onto another card to connect them.
+            </p>
+          </div>
         )}
       </div>
     </div>

@@ -272,6 +272,63 @@ edgeRoutes.post("/", async (c) => {
   return c.json({ edge: toResponse(row, type) }, 201);
 });
 
+// PATCH /nests/:nestId/edges/:id — retype/recondition an existing edge (the
+// canvas config panel). Endpoints (from/to) are immutable: rewiring is
+// delete + create, which keeps the cycle check story simple.
+edgeRoutes.patch("/:id", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const id = c.req.param("id")!;
+  const body = await c.req.json<Record<string, unknown>>();
+
+  const db = getDb();
+  const row = (await db.get(
+    "SELECT * FROM edges WHERE id = ? AND nest_id = ?",
+    [id, nestId],
+  )) as EdgeRow | undefined;
+  if (!row) throw new NotFoundError("Edge not found");
+
+  let type = (await db.get(
+    "SELECT * FROM edge_types WHERE id = ?",
+    [row.type_id],
+  )) as EdgeTypeRow;
+  if (typeof body.type === "string" && body.type.trim()) {
+    const next = (await db.get(
+      "SELECT * FROM edge_types WHERE nest_id = ? AND (id = ? OR LOWER(name) = LOWER(?))",
+      [nestId, body.type.trim(), body.type.trim()],
+    )) as EdgeTypeRow | undefined;
+    if (!next) {
+      throw new ValidationError(
+        `unknown edge type "${body.type}" — define it in the registry first`,
+      );
+    }
+    // Becoming a flow edge can close a cycle the old type couldn't.
+    if (next.is_flow && !type.is_flow) {
+      await assertNoFlowCycle(nestId, row.from_node, row.to_node);
+    }
+    type = next;
+  }
+
+  let mode = row.condition_mode;
+  let stored = row.condition;
+  if (body.condition_mode !== undefined || body.condition !== undefined) {
+    const v = await validateCondition(
+      nestId,
+      (body.condition_mode ?? row.condition_mode) as string | undefined,
+      body.condition !== undefined ? body.condition : row.condition,
+    );
+    mode = v.mode as EdgeRow["condition_mode"];
+    stored = v.stored;
+  }
+
+  await db.run(
+    `UPDATE edges SET type_id = ?, condition_mode = ?, condition = ?, updated_at = ?
+      WHERE id = ?`,
+    [type.id, mode, stored, new Date().toISOString(), id],
+  );
+  const updated = (await db.get("SELECT * FROM edges WHERE id = ?", [id])) as EdgeRow;
+  return c.json({ edge: toResponse(updated, type) });
+});
+
 // DELETE /nests/:nestId/edges/:id
 edgeRoutes.delete("/:id", async (c) => {
   const nestId = c.req.param("nestId")!;

@@ -1112,6 +1112,22 @@ export async function createEdge(
   return r.edge;
 }
 
+export async function updateEdge(
+  nestId: string,
+  edgeId: string,
+  body: {
+    type?: string;
+    condition_mode?: "structured" | "nl" | "open" | null;
+    condition?: unknown;
+  },
+) {
+  const r = await request<{ edge: WorkflowEdge }>(
+    `/nests/${nestId}/edges/${edgeId}`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  );
+  return r.edge;
+}
+
 export async function deleteEdge(nestId: string, edgeId: string) {
   return request(`/nests/${nestId}/edges/${edgeId}`, { method: "DELETE" });
 }
