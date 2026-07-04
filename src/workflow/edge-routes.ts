@@ -172,10 +172,11 @@ async function assertNoFlowCycle(
 }
 
 export const edgeRoutes = new Hono<AuthEnv>();
-edgeRoutes.use("*", requireWorkflowPlane);
+// Per-route (not use("*")): under a param mount the wildcard middleware path
+// becomes /nests/:nestId/…/* — a label+star mix LinearRouter refuses.
 
 // GET /nests/:nestId/edges?type=<name|id>&node=<id>
-edgeRoutes.get("/", async (c) => {
+edgeRoutes.get("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const db = getDb();
   const typeFilter = c.req.query("type")?.trim();
@@ -209,7 +210,7 @@ edgeRoutes.get("/", async (c) => {
 });
 
 // POST /nests/:nestId/edges
-edgeRoutes.post("/", async (c) => {
+edgeRoutes.post("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const body = await c.req.json<Record<string, unknown>>();
   const fromRaw = typeof body.from_node === "string" ? body.from_node.trim() : "";
@@ -275,7 +276,7 @@ edgeRoutes.post("/", async (c) => {
 // PATCH /nests/:nestId/edges/:id — retype/recondition an existing edge (the
 // canvas config panel). Endpoints (from/to) are immutable: rewiring is
 // delete + create, which keeps the cycle check story simple.
-edgeRoutes.patch("/:id", async (c) => {
+edgeRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const id = c.req.param("id")!;
   const body = await c.req.json<Record<string, unknown>>();
@@ -330,7 +331,7 @@ edgeRoutes.patch("/:id", async (c) => {
 });
 
 // DELETE /nests/:nestId/edges/:id
-edgeRoutes.delete("/:id", async (c) => {
+edgeRoutes.delete("/:id", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const id = c.req.param("id")!;
   const db = getDb();

@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { LinearRouter } from "hono/router/linear-router";
 import { createMiddleware } from "hono/factory";
 import { cors } from "hono/cors";
 import { authRoutes } from "./auth/routes.js";
@@ -123,7 +124,15 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 });
 
 export function createApp(): Hono<AuthEnv> {
-  const app = new Hono<AuthEnv>();
+  // LinearRouter, not the default SmartRouter — parity with upstream
+  // development (bb96ca8), which hit the same bug class this branch fixed
+  // structurally: greedy `/:nodeId{.+}` params vs suffix routes. SmartRouter
+  // picks RegExpRouter (catch-all shadows suffix routes) or, when any route
+  // pattern is unsupported, silently falls back to TrieRouter (suffix routes
+  // dead for ids nested 3+ segments). LinearRouter matches in registration
+  // order with per-route backtracking, so mount order = specificity order and
+  // both failure modes disappear. Route count is small; the scan is cheap.
+  const app = new Hono<AuthEnv>({ router: new LinearRouter() });
 
   // Hono request logger disabled — keep terminal clean. Re-enable by
   // restoring `app.use("*", logger())` if request tracing is needed.

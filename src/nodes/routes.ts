@@ -262,27 +262,17 @@ nodeRoutes.post("/:nodeId{.+}/move", async (c) => {
   return c.json({ ok: true, node: toNodeResponse(node), previousId });
 });
 
-/** Node id for the greedy catch-alls below, derived from the raw path.
- *
- * They register as "/*" instead of "/:nodeId{.+}" deliberately: RegExpRouter
- * merges same-position params, so a greedy {.+} catch-all shadows every
- * suffix action route (/versions, /annotations, …) at any depth — and the
- * old escape hatch (the app silently falling back to TrieRouter because of
- * unrelated unsupported patterns) couldn't match those suffix routes for ids
- * nested 3+ folders deep. A plain wildcard coexists with the suffix routes
- * at every depth; suffix routes are registered first, so they win. */
-function nodeIdFromPath(c: any): string {
-  const raw = c.req.path.replace(/^\/nests\/[^/]+\/nodes\//, "");
-  try {
-    return decodeURIComponent(raw);
-  } catch {
-    return raw;
-  }
-}
-
-nodeRoutes.get("/*", async (c) => {
+// GET /nests/:nestId/nodes/:nodeId — the greedy catch-all. Safe ONLY because
+// createApp pins LinearRouter: it matches in registration order with
+// per-route backtracking, so the suffix action routes above (and the
+// governance/annotation sub-routers mounted before this one) win first at
+// any id depth. Under the default SmartRouter this same pattern either
+// shadows every suffix route (RegExpRouter) or breaks for ids nested 3+
+// segments (TrieRouter fallback) — don't change the router without
+// re-running test/nested-node-actions.test.ts.
+nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = nodeIdFromPath(c);
+  const nodeId = c.req.param("nodeId")!;
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
   const userId = c.get("userId");
@@ -379,11 +369,11 @@ nodeRoutes.get("/*", async (c) => {
   return c.json({ node: response });
 });
 
-// PATCH /nests/:nestId/nodes/:nodeId — "/*" for the router-compat reason on
-// nodeIdFromPath above.
-nodeRoutes.patch("/*", async (c) => {
+// PATCH /nests/:nestId/nodes/:nodeId — greedy catch-all; see the
+// LinearRouter note on the GET route above.
+nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = nodeIdFromPath(c);
+  const nodeId = c.req.param("nodeId")!;
   const body = await c.req.json<{
     content?: string;
     append?: string;
@@ -431,11 +421,11 @@ nodeRoutes.patch("/*", async (c) => {
   return c.json({ node: toNodeResponse(node), version: responseVersion });
 });
 
-// DELETE /nests/:nestId/nodes/:nodeId — "/*" for the router-compat reason on
-// nodeIdFromPath above.
-nodeRoutes.delete("/*", async (c) => {
+// DELETE /nests/:nestId/nodes/:nodeId — greedy catch-all; see the
+// LinearRouter note on the GET route above.
+nodeRoutes.delete("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = nodeIdFromPath(c);
+  const nodeId = c.req.param("nodeId")!;
   const { storage } = await engineCache.get(nestId);
 
   // Stewardship lock: a node under open review can't be deleted out from

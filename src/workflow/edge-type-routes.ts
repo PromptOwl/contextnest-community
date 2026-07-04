@@ -111,10 +111,11 @@ const toResponse = (r: EdgeTypeRow) => ({
 });
 
 export const edgeTypeRoutes = new Hono<AuthEnv>();
-edgeTypeRoutes.use("*", requireWorkflowPlane);
+// Per-route (not use("*")): under a param mount the wildcard middleware path
+// becomes /nests/:nestId/…/* — a label+star mix LinearRouter refuses.
 
 // GET /nests/:nestId/edge-types
-edgeTypeRoutes.get("/", async (c) => {
+edgeTypeRoutes.get("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   await seedDefaultEdgeTypes(nestId, await resolveCallerEmail(c.get("userId")));
   const rows = (await getDb().all(
@@ -126,7 +127,7 @@ edgeTypeRoutes.get("/", async (c) => {
 
 // POST /nests/:nestId/edge-types — upsert by name (case-insensitive), the
 // definitions pattern: one articulation per relation, no duplicates.
-edgeTypeRoutes.post("/", async (c) => {
+edgeTypeRoutes.post("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const body = await c.req.json<Record<string, unknown>>();
   if (typeof body.name !== "string" || !body.name.trim()) {
@@ -194,7 +195,7 @@ edgeTypeRoutes.post("/", async (c) => {
 
 // DELETE /nests/:nestId/edge-types/:id — refuses while edges reference it,
 // so a type can't be yanked out from under the graph.
-edgeTypeRoutes.delete("/:id", async (c) => {
+edgeTypeRoutes.delete("/:id", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const id = c.req.param("id")!;
   const db = getDb();
