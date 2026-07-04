@@ -2,7 +2,7 @@
  * NestView — governance dashboard for a single nest.
  * Uses ported PromptOwl components for the UI, wired to REST API.
  */
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
 import { matchesFilters } from "../lib/node-filter";
 import { linkHealth } from "../lib/link-health";
@@ -28,13 +28,24 @@ function NodeTypeIcon({
   type?: string;
   className?: string;
 }) {
-  if (type === "agent")
-    return <Bot className={`${className} text-violet-600 dark:text-violet-400 shrink-0`} />;
-  if (type === "skill")
-    return <Zap className={`${className} text-blue-600 dark:text-blue-400 shrink-0`} />;
-  if (type === "artifact")
-    return <FileCode2 className={`${className} text-amber-600 dark:text-amber-400 shrink-0`} />;
-  return <FileText className={`${className} text-muted-foreground shrink-0`} />;
+  // Tinted chip per node type so the type reads at a glance in dense lists —
+  // a bare gray glyph wasn't distinguishable when most rows are documents.
+  const spec =
+    type === "agent"
+      ? { Icon: Bot, cls: "text-violet-600 dark:text-violet-400 bg-violet-500/10", label: "Agent" }
+      : type === "skill"
+        ? { Icon: Zap, cls: "text-blue-600 dark:text-blue-400 bg-blue-500/10", label: "Skill" }
+        : type === "artifact"
+          ? { Icon: FileCode2, cls: "text-amber-600 dark:text-amber-400 bg-amber-500/10", label: "Artifact" }
+          : { Icon: FileText, cls: "text-slate-500 dark:text-slate-400 bg-slate-500/10", label: "Document" };
+  return (
+    <span
+      className={`inline-flex items-center justify-center rounded-md p-1 shrink-0 ${spec.cls}`}
+      title={spec.label}
+    >
+      <spec.Icon className={className} />
+    </span>
+  );
 }
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
@@ -88,6 +99,19 @@ function prettyFolder(name: string) {
     .split(/[-_]/)
     .map((s) => (s ? s[0].toUpperCase() + s.slice(1) : s))
     .join(" ");
+}
+
+/** Compare paths segment-by-segment (not as flat strings) so children always
+ *  sort directly under their parent — a sibling like "nodes-extra" would
+ *  otherwise wedge between "nodes" and "nodes/a". */
+function byPathSegments(a: string, b: string) {
+  const as = a.split("/");
+  const bs = b.split("/");
+  for (let i = 0; i < Math.min(as.length, bs.length); i++) {
+    const cmp = as[i].localeCompare(bs[i]);
+    if (cmp !== 0) return cmp;
+  }
+  return as.length - bs.length;
 }
 
 /** "nodes/gtm/deals" → "Nodes / Gtm / Deals" for nested group headers. */
@@ -330,6 +354,57 @@ export function NestView({
   const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
 
+  // Documents-as-a-repo state: controlled tab (Overview folder clicks jump to
+  // Documents), the folder the list is scoped to (null = whole nest, "" would
+  // mean root-only but we scope by subtree), collapsed folder paths, and
+  // drag-and-drop bookkeeping for moving docs between folders.
+  const [activeTab, setActiveTab] = useState("overview");
+  const [folderFilter, setFolderFilter] = useState<string | null>(null);
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
+  const [dragNodeId, setDragNodeId] = useState<string | null>(null);
+  const [dropFolder, setDropFolder] = useState<string | null>(null);
+
+  /** Folder path of a node id ("" for docs directly under nodes/). */
+  const folderOfNode = (id: string) => {
+    const rel = id.startsWith("nodes/") ? id.slice(6) : id;
+    const slash = rel.lastIndexOf("/");
+    return slash > 0 ? rel.slice(0, slash) : "";
+  };
+
+  const openFolderInDocuments = (folder: string) => {
+    setFolderFilter(folder);
+    setActiveTab("documents");
+  };
+
+  const toggleFolderCollapsed = (path: string) => {
+    setCollapsedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const handleDropOnFolder = async (targetFolder: string) => {
+    const nodeId = dragNodeId;
+    setDragNodeId(null);
+    setDropFolder(null);
+    if (!nodeId) return;
+    if (folderOfNode(nodeId) === targetFolder) return; // already there
+    try {
+      await api.moveNode(nestId, nodeId, targetFolder);
+      toast.success(
+        targetFolder
+          ? `Moved to ${prettyFolderPath(targetFolder)}`
+          : "Moved to nest root",
+      );
+      fetchData();
+    } catch (err: any) {
+      console.error("[NestView] moveNode failed", nestId, nodeId, targetFolder, err);
+      toast.error(err?.message || "Move failed");
+    }
+  };
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     // Each request is independently swallowed — if listNodes throws, we must
@@ -440,6 +515,11 @@ export function NestView({
   // the client match live in lib/node-filter (unit-tested).
   const updatedAfter = datePresetToEpoch(dateFilter, Date.now());
   const filtered = nodes.filter((n) => {
+    // Folder scope: the doc's folder must be the scoped folder or inside it.
+    if (folderFilter !== null) {
+      const f = folderOfNode(n.id || "");
+      if (f !== folderFilter && !f.startsWith(`${folderFilter}/`)) return false;
+    }
     if (
       !matchesFilters(n, {
         status: statusFilter,
@@ -476,6 +556,43 @@ export function NestView({
       String(a.title || "").localeCompare(String(b.title || "")),
     );
   }
+
+  // Folder tree for the Documents list: sorted docs grouped by their FULL
+  // folder path, groups ordered parent-before-child. depth drives indentation
+  // (relative to the scoped folder when one is set); rendering skips any
+  // group living under a collapsed ancestor.
+  const baseFolder = folderFilter ?? "";
+  const baseDepth = baseFolder ? baseFolder.split("/").length : 0;
+  const docGroups = (() => {
+    const groups = new Map<string, any[]>();
+    for (const n of sorted) {
+      const f = folderOfNode(n.id || "");
+      if (!groups.has(f)) groups.set(f, []);
+      groups.get(f)!.push(n);
+    }
+    return [...groups.entries()]
+      .map(([folder, items]) => ({
+        folder,
+        depth: folder ? folder.split("/").length - baseDepth : 0,
+        items,
+      }))
+      .sort((a, b) =>
+        a.folder === "" ? -1 : b.folder === "" ? 1 : byPathSegments(a.folder, b.folder),
+      );
+  })();
+  /** A group is hidden when any strict ancestor folder (inside the current
+   *  scope) is collapsed. The folder's own collapsed state only hides its
+   *  doc rows — the header stays visible as the expand handle. */
+  const isUnderCollapsed = (folder: string) => {
+    if (!folder) return false;
+    const segs = folder.split("/");
+    for (let i = 1; i < segs.length; i++) {
+      const prefix = segs.slice(0, i).join("/");
+      if (baseFolder === prefix || baseFolder.startsWith(`${prefix}/`)) continue;
+      if (collapsedFolders.has(prefix)) return true;
+    }
+    return false;
+  };
 
   // Orphans + broken [[links]], client-side from the loaded list.
   const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
@@ -724,18 +841,6 @@ export function NestView({
       if (!groups.has(folder)) groups.set(folder, []);
       groups.get(folder)!.push(n);
     }
-    // Compare paths segment-by-segment (not as flat strings) so children
-    // always sort directly under their parent — a sibling like "nodes-extra"
-    // would otherwise wedge between "nodes" and "nodes/a".
-    const byPathSegments = (a: string, b: string) => {
-      const as = a.split("/");
-      const bs = b.split("/");
-      for (let i = 0; i < Math.min(as.length, bs.length); i++) {
-        const cmp = as[i].localeCompare(bs[i]);
-        if (cmp !== 0) return cmp;
-      }
-      return as.length - bs.length;
-    };
     return [...groups.entries()]
       .map(([folder, items]) => ({
         folder,
@@ -1264,7 +1369,7 @@ export function NestView({
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because
           their data is empty by definition. */}
-      <Tabs defaultValue="overview" className="w-full">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="mb-4">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>
@@ -1450,11 +1555,18 @@ export function NestView({
                       key={g.folder}
                       style={{ marginLeft: `${g.depth * 1.25}rem` }}
                     >
-                      {/* Root = docs directly under nodes/; no folder header. */}
+                      {/* Root = docs directly under nodes/; no folder header.
+                          Folder headers open the Documents tab scoped to that
+                          folder — the Overview doubles as folder navigation. */}
                       {g.folder !== "Root" && (
-                        <div className="flex items-center gap-2 mb-2">
+                        <button
+                          type="button"
+                          onClick={() => openFolderInDocuments(g.folder)}
+                          className="flex items-center gap-2 mb-2 group/folder rounded px-1 -mx-1 hover:bg-muted/60"
+                          title={`Browse ${prettyFolderPath(g.folder)} in Documents`}
+                        >
                           <FolderOpen className="h-4 w-4 text-muted-foreground" />
-                          <h4 className="text-sm font-medium">
+                          <h4 className="text-sm font-medium group-hover/folder:underline">
                             {prettyFolderPath(g.folder)}
                           </h4>
                           <Badge
@@ -1463,7 +1575,8 @@ export function NestView({
                           >
                             {g.items.length}
                           </Badge>
-                        </div>
+                          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover/folder:text-muted-foreground" />
+                        </button>
                       )}
                       <div className="grid gap-1 sm:grid-cols-2">
                         {g.items.map((n) => (
@@ -1597,6 +1710,46 @@ export function NestView({
               </div>
             </CardHeader>
             <CardContent>
+              {/* Folder breadcrumb — shown when the list is scoped to a folder
+                  (via an Overview folder click). Each crumb re-scopes; the
+                  first crumb clears back to the whole nest. */}
+              {folderFilter !== null && (
+                <div className="flex items-center flex-wrap gap-1 mb-3 text-sm">
+                  <button
+                    type="button"
+                    className="text-primary hover:underline"
+                    onClick={() => setFolderFilter(null)}
+                  >
+                    All documents
+                  </button>
+                  {folderFilter.split("/").map((seg, i, arr) => {
+                    const path = arr.slice(0, i + 1).join("/");
+                    const isLast = i === arr.length - 1;
+                    return (
+                      <Fragment key={path}>
+                        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50" />
+                        {isLast ? (
+                          <span className="font-medium flex items-center gap-1">
+                            <FolderOpen className="h-4 w-4 text-blue-500" />
+                            {prettyFolder(seg)}
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="text-primary hover:underline"
+                            onClick={() => setFolderFilter(path)}
+                          >
+                            {prettyFolder(seg)}
+                          </button>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                  <Badge variant="secondary" className="ml-1 text-[10px] px-1.5 py-0 h-5">
+                    {filtered.length}
+                  </Badge>
+                </div>
+              )}
               {/* Saved filters — one-click apply of a named filter snapshot.
                   Persisted per nest in localStorage. */}
               {savedFilters.length > 0 && (
@@ -1780,15 +1933,10 @@ export function NestView({
                     </div>
                   </button>
                 )
-              ) : (
-                <div
-                  className={
-                    viewMode === "cards"
-                      ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2"
-                      : "space-y-2"
-                  }
-                >
-                  {sorted.map((node) => {
+              ) : (() => {
+                  // Shared row renderer: flat grid in cards mode, folder tree
+                  // (with drag-and-drop moves) in list mode.
+                  const renderDocRow = (node: any, indent = 0) => {
                     const cards = viewMode === "cards";
                     // Hosted HTML artifacts get a distinct icon + badge so they
                     // read differently from markdown documents in the list.
@@ -1876,7 +2024,20 @@ export function NestView({
                         className={`${cards
                             ? "flex flex-col gap-2"
                             : "flex items-center gap-3"
-                          } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer`}
+                          } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer ${
+                            dragNodeId === node.id ? "opacity-40" : ""
+                          }`}
+                        style={!cards && indent ? { marginLeft: `${indent * 1.25}rem` } : undefined}
+                        draggable={!cards && canEditNode(node)}
+                        onDragStart={(e) => {
+                          e.dataTransfer.setData("text/plain", node.id);
+                          e.dataTransfer.effectAllowed = "move";
+                          setDragNodeId(node.id);
+                        }}
+                        onDragEnd={() => {
+                          setDragNodeId(null);
+                          setDropFolder(null);
+                        }}
                         data-testid={`document-row-${node.id}`}
                       >
                         {!cards && <NodeTypeIcon type={node.type} className="h-5 w-5" />}
@@ -1985,9 +2146,107 @@ export function NestView({
                         )}
                       </div>
                     );
-                  })}
-                </div>
-              )}
+                  };
+
+                  if (viewMode === "cards") {
+                    return (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                        {sorted.map((n) => renderDocRow(n))}
+                      </div>
+                    );
+                  }
+
+                  // List mode: nested folder tree. Folder headers collapse and
+                  // accept drops; doc rows drag. Groups under a collapsed
+                  // ancestor are skipped wholesale.
+                  return (
+                    <div className="space-y-1">
+                      {dragNodeId && folderOfNode(dragNodeId) !== baseFolder && (
+                        <div
+                          className={`flex items-center gap-2 rounded-md border-2 border-dashed px-3 py-2 text-sm ${
+                            dropFolder === baseFolder
+                              ? "border-primary bg-primary/10 text-primary"
+                              : "border-border text-muted-foreground"
+                          }`}
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = "move";
+                          }}
+                          onDragEnter={() => setDropFolder(baseFolder)}
+                          onDragLeave={() =>
+                            setDropFolder((d) => (d === baseFolder ? null : d))
+                          }
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            handleDropOnFolder(baseFolder);
+                          }}
+                        >
+                          <FolderInput className="h-4 w-4" />
+                          Move to {baseFolder ? prettyFolderPath(baseFolder) : "nest root"}
+                        </div>
+                      )}
+                      {docGroups.map((g) => {
+                        if (g.folder && g.folder !== baseFolder && isUnderCollapsed(g.folder))
+                          return null;
+                        const showHeader = g.folder && g.folder !== baseFolder;
+                        const isCollapsed = collapsedFolders.has(g.folder);
+                        const isDropTarget = dropFolder === g.folder;
+                        return (
+                          <div key={g.folder || "__root"}>
+                            {showHeader && (
+                              <div
+                                className={`flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none cursor-pointer transition-colors ${
+                                  isDropTarget
+                                    ? "bg-primary/10 ring-1 ring-primary"
+                                    : "hover:bg-muted/50"
+                                }`}
+                                style={{
+                                  marginLeft: `${Math.max(0, g.depth - 1) * 1.25}rem`,
+                                }}
+                                onClick={() => toggleFolderCollapsed(g.folder)}
+                                onDragOver={(e) => {
+                                  if (!dragNodeId) return;
+                                  e.preventDefault();
+                                  e.dataTransfer.dropEffect = "move";
+                                }}
+                                onDragEnter={() => dragNodeId && setDropFolder(g.folder)}
+                                onDragLeave={() =>
+                                  setDropFolder((d) => (d === g.folder ? null : d))
+                                }
+                                onDrop={(e) => {
+                                  e.preventDefault();
+                                  handleDropOnFolder(g.folder);
+                                }}
+                                data-testid={`folder-header-${g.folder}`}
+                              >
+                                <ChevronRight
+                                  className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${
+                                    isCollapsed ? "" : "rotate-90"
+                                  }`}
+                                />
+                                <FolderOpen className="h-4 w-4 text-blue-500" />
+                                <span className="text-sm font-medium">
+                                  {prettyFolder(g.folder.split("/").pop()!)}
+                                </span>
+                                <Badge
+                                  variant="secondary"
+                                  className="text-[10px] px-1.5 py-0 h-5"
+                                >
+                                  {g.items.length}
+                                </Badge>
+                              </div>
+                            )}
+                            {!(showHeader && isCollapsed) && (
+                              <div className="space-y-1">
+                                {g.items.map((n) => renderDocRow(n, g.depth))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
 
               {/* Wiki link health — orphans + broken [[links]], computed
                   client-side. Collapsed by default; hidden when clean. */}

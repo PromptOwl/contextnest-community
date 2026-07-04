@@ -459,6 +459,15 @@ export async function deleteNode(nestId: string, nodeId: string) {
   return request(`/nests/${nestId}/nodes/${nodeId}`, { method: "DELETE" });
 }
 
+/** Move a document to another folder ("" = nest root). The node id changes;
+ *  history, review state, annotations, edges, and grants follow it. */
+export async function moveNode(nestId: string, nodeId: string, folder: string) {
+  return request<{ ok: boolean; node: any; previousId: string }>(
+    `/nests/${nestId}/nodes/${nodeId}/move`,
+    { method: "POST", body: JSON.stringify({ folder }) },
+  );
+}
+
 // ─── Search & Query ─────────────────────────────────────────────────────
 
 export async function searchNodes(nestId: string, query: string) {

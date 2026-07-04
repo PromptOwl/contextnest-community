@@ -22,6 +22,8 @@ import {
   AlertCircle,
   Send,
   X,
+  FolderOpen,
+  FolderPlus,
   Pencil,
   Users,
   Link as LinkIcon,
@@ -1345,26 +1347,80 @@ export function DocumentEditor({
             </Alert>
           )}
 
-          {/* Folder (create-only): files the doc under nodes/<path>/ */}
+          {/* Folder (create-only): files the doc under nodes/<path>/.
+              Breadcrumbed selector — walk into existing folders level by
+              level or add a new subfolder at the current level; no raw path
+              typing. */}
           {isNew && (
             <div>
               <label className="block mb-1 text-sm font-medium">Folder</label>
-              <Input
-                list="document-editor-folder-options"
-                value={folder}
-                onChange={(e) => {
-                  setFolder(e.target.value);
-                  setTouched(true);
-                }}
-                placeholder='Optional — e.g. "gtm/deals" to nest this document'
-                disabled={fieldsDisabled}
+              <div
+                className="flex items-center flex-wrap gap-1 rounded-md border px-2 py-1.5 min-h-9"
                 data-testid="document-editor-folder-input"
-              />
-              <datalist id="document-editor-folder-options">
-                {folderOptions.map((f) => (
-                  <option key={f} value={f} />
-                ))}
-              </datalist>
+              >
+                <button
+                  type="button"
+                  disabled={fieldsDisabled}
+                  onClick={() => {
+                    setFolder("");
+                    setTouched(true);
+                  }}
+                  className={`text-sm rounded px-1.5 py-0.5 ${
+                    folder ? "text-primary hover:bg-muted" : "font-medium bg-muted"
+                  }`}
+                  title="File directly under the nest root"
+                >
+                  Root
+                </button>
+                {folder.split("/").filter(Boolean).map((seg, i, arr) => {
+                  const path = arr.slice(0, i + 1).join("/");
+                  const isLast = i === arr.length - 1;
+                  return (
+                    <span key={path} className="flex items-center gap-1">
+                      <span className="text-muted-foreground/50 text-sm">/</span>
+                      <button
+                        type="button"
+                        disabled={fieldsDisabled}
+                        onClick={() => {
+                          setFolder(path);
+                          setTouched(true);
+                        }}
+                        className={`text-sm rounded px-1.5 py-0.5 ${
+                          isLast
+                            ? "font-medium bg-muted"
+                            : "text-primary hover:bg-muted"
+                        }`}
+                        title={`Scope to ${path}`}
+                      >
+                        {seg}
+                      </button>
+                    </span>
+                  );
+                })}
+                <FolderStepPicker
+                  folder={folder}
+                  folderOptions={folderOptions}
+                  disabled={fieldsDisabled}
+                  onPick={(next) => {
+                    setFolder(next);
+                    setTouched(true);
+                  }}
+                />
+                {folder && (
+                  <button
+                    type="button"
+                    disabled={fieldsDisabled}
+                    onClick={() => {
+                      setFolder("");
+                      setTouched(true);
+                    }}
+                    className="ml-auto text-muted-foreground hover:text-foreground"
+                    title="Clear folder (file under the nest root)"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -1967,5 +2023,100 @@ function StatusBadge({ status }: { status: string }) {
     >
       {info.label}
     </span>
+  );
+}
+
+/**
+ * Step-wise folder chooser for the create-form breadcrumb: lists existing
+ * subfolders of the current path (derived from sibling doc ids) and takes a
+ * new-subfolder name inline. Descending and creating both go through onPick
+ * with the full new path — the breadcrumb above renders the result.
+ */
+function FolderStepPicker({
+  folder,
+  folderOptions,
+  disabled,
+  onPick,
+}: {
+  folder: string;
+  folderOptions: string[];
+  disabled?: boolean;
+  onPick: (next: string) => void;
+}) {
+  const [newName, setNewName] = useState("");
+  const children = useMemo(() => {
+    const kids = new Set<string>();
+    for (const f of folderOptions) {
+      if (folder) {
+        if (f === folder || !f.startsWith(`${folder}/`)) continue;
+        kids.add(f.slice(folder.length + 1).split("/")[0]);
+      } else {
+        kids.add(f.split("/")[0]);
+      }
+    }
+    return [...kids].sort();
+  }, [folder, folderOptions]);
+
+  const commitNew = () => {
+    // Slashes would smuggle extra depth past the picker; fold them away.
+    const seg = newName.trim().replace(/\/+/g, "-");
+    if (!seg) return;
+    onPick(folder ? `${folder}/${seg}` : seg);
+    setNewName("");
+  };
+
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-6 px-1.5 text-muted-foreground"
+          disabled={disabled}
+          title="Open a subfolder or create a new one"
+          data-testid="folder-step-picker"
+        >
+          <ChevronDown className="h-3.5 w-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-56">
+        {children.length > 0 && (
+          <>
+            <DropdownMenuLabel>
+              {folder ? "Subfolders" : "Existing folders"}
+            </DropdownMenuLabel>
+            {children.map((k) => (
+              <DropdownMenuItem
+                key={k}
+                onSelect={() => onPick(folder ? `${folder}/${k}` : k)}
+              >
+                <FolderOpen className="h-3.5 w-3.5 mr-2 text-blue-500" />
+                {k}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+          </>
+        )}
+        <div
+          className="flex items-center gap-1.5 px-2 py-1.5"
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          <FolderPlus className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+          <Input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitNew();
+              }
+            }}
+            placeholder="New subfolder…"
+            className="h-7 text-sm"
+          />
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
