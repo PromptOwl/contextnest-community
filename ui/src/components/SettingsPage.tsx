@@ -200,6 +200,28 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   onCheckedChange={(v) => onUpdate({ workflow_plane_enabled: v })}
                 />
               </div>
+              {settings.workflow_plane_enabled && (
+                <div className="mt-3 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                  <div className="font-medium text-foreground mb-1">
+                    Where it shows up
+                  </div>
+                  <ul className="list-disc pl-4 space-y-0.5">
+                    <li>
+                      Open any nest → <b>Workflows</b> button in the header (next
+                      to Graph) → Edges + Runs.
+                    </li>
+                    <li>
+                      <b>New Document</b> → the Type dropdown now includes{" "}
+                      <b>Agent</b> and <b>Skill</b> (runnable) nodes.
+                    </li>
+                    <li>
+                      Runs are executed by the external{" "}
+                      <code>contextnest-runner</code> — the Runs tab shows the
+                      exact command.
+                    </li>
+                  </ul>
+                </div>
+              )}
             </CardContent>
           </Card>
 

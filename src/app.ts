@@ -741,8 +741,26 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/nests", nestsApp);
 
   // ─── Dashboard UI (static files served from the bundled dist/web3 dir) ──
-  app.use("/assets/*", serveStatic({ root: UI_DIR_REL }));
-  app.get("*", serveStatic({ root: UI_DIR_REL, path: "index.html" }));
+  // Hashed asset files are content-addressed — safe to cache forever.
+  app.use(
+    "/assets/*",
+    serveStatic({
+      root: UI_DIR_REL,
+      onFound: (_p, c) =>
+        c.header("Cache-Control", "public, max-age=31536000, immutable"),
+    }),
+  );
+  // index.html is NOT hashed and points at the current bundle — it must never
+  // be cached, or a browser keeps loading a stale bundle after every deploy
+  // (the workflow-plane UI "not showing up" bug). Always revalidate.
+  app.get(
+    "*",
+    serveStatic({
+      root: UI_DIR_REL,
+      path: "index.html",
+      onFound: (_p, c) => c.header("Cache-Control", "no-cache"),
+    }),
+  );
 
   // Error handler — translate common low-level errors into messages
   // the UI can show as-is so users don't see "Internal server error"

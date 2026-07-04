@@ -395,6 +395,32 @@ function RunsPanel({ nestId }: { nestId: string }) {
           contextnest-runner) walks it and posts each step back here.
         </p>
 
+        <details className="mb-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px]">
+          <summary className="cursor-pointer font-medium">
+            How do I run one? (the runner is a separate process)
+          </summary>
+          <div className="mt-2 space-y-1.5 text-muted-foreground">
+            <p>
+              The <b>trigger</b> button just records a run. The{" "}
+              <b>runner</b> is a small stateless container that actually walks
+              it and calls the LLM. Point it at this nest:
+            </p>
+            <pre className="overflow-x-auto rounded bg-background border p-2 font-mono text-[10.5px] leading-relaxed">
+{`docker run --rm --network host \\
+  -e CONTEXTNEST_SERVER=http://localhost:4040 \\
+  -e CONTEXTNEST_NEST=${nestId} \\
+  -e CONTEXTNEST_KEY=cnst_localdev \\
+  -e ANTHROPIC_API_KEY=sk-ant-... \\
+  contextnest-runner:local run <agent-node-id>`}
+            </pre>
+            <p>
+              Or run <code>schedule</code> instead of <code>run</code> to poll
+              this nest continuously. Steps stream back into the trace on the
+              right — refresh to watch.
+            </p>
+          </div>
+        </details>
+
         {error && (
           <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {error}
