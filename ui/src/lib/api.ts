@@ -1093,7 +1093,7 @@ export async function createEdge(
     to_node: string;
     type: string;
     condition_mode?: "structured" | "nl" | "open" | null;
-    condition?: string | null;
+    condition?: unknown;
   },
 ) {
   const r = await request<{ edge: WorkflowEdge }>(`/nests/${nestId}/edges`, {

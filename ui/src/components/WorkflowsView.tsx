@@ -19,6 +19,7 @@ import {
   listRuns,
   getRun,
   triggerRun,
+  listNodes,
   type WorkflowEdge,
   type EdgeType,
   type RunSummary,
@@ -103,21 +104,27 @@ function EdgesPanel({ nestId }: { nestId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
 
+  const [nodes, setNodes] = useState<Array<{ id: string; title?: string; type?: string }>>([]);
+
   // New-row draft.
   const [nFrom, setNFrom] = useState("");
   const [nTo, setNTo] = useState("");
   const [nType, setNType] = useState("");
+  const [nCondMode, setNCondMode] = useState<"" | "nl" | "structured">("");
+  const [nCond, setNCond] = useState("");
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [e, t] = await Promise.all([
+      const [e, t, n] = await Promise.all([
         listEdges(nestId),
         listEdgeTypes(nestId),
+        listNodes(nestId).then((r) => r.nodes).catch(() => []),
       ]);
       setEdges(e);
       setTypes(t);
+      setNodes(n);
       if (!nType && t.length) setNType(t.find((x) => x.is_flow)?.name ?? t[0].name);
       setError(null);
     } catch (err) {
@@ -135,13 +142,29 @@ function EdgesPanel({ nestId }: { nestId: string }) {
     if (!nFrom.trim() || !nTo.trim() || !nType) return;
     setSaving(true);
     try {
+      const condition =
+        nCondMode === "structured"
+          ? (() => {
+              try {
+                return JSON.parse(nCond);
+              } catch {
+                return nCond;
+              }
+            })()
+          : nCondMode === "nl"
+            ? nCond
+            : null;
       await createEdge(nestId, {
         from_node: nFrom.trim(),
         to_node: nTo.trim(),
         type: nType,
+        condition_mode: nCondMode || null,
+        condition: nCondMode ? condition : null,
       });
       setNFrom("");
       setNTo("");
+      setNCond("");
+      setNCondMode("");
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add edge");
@@ -260,13 +283,15 @@ function EdgesPanel({ nestId }: { nestId: string }) {
                 </tr>
               ))
             )}
-            {/* New-row: type a node to add an edge, spreadsheet-style. */}
+            {/* New-row: pick nodes (autocomplete), a type, and an optional
+                condition. The columns ARE the API. */}
             <tr className="border-t bg-muted/20">
               <td className="px-3 py-1.5">
                 <Input
+                  list="wf-node-list"
                   value={nFrom}
                   onChange={(e) => setNFrom(e.target.value)}
-                  placeholder="nodes/from…"
+                  placeholder="search nodes…"
                   className="h-7 font-mono text-xs"
                 />
               </td>
@@ -286,14 +311,38 @@ function EdgesPanel({ nestId }: { nestId: string }) {
               </td>
               <td className="px-3 py-1.5">
                 <Input
+                  list="wf-node-list"
                   value={nTo}
                   onChange={(e) => setNTo(e.target.value)}
-                  placeholder="nodes/to…"
+                  placeholder="search nodes…"
                   className="h-7 font-mono text-xs"
                 />
               </td>
-              <td className="px-3 py-1.5 text-xs text-muted-foreground">
-                (structured / nl conditions: coming to the formula bar)
+              <td className="px-3 py-1.5">
+                <div className="flex items-center gap-1">
+                  <select
+                    value={nCondMode}
+                    onChange={(e) => setNCondMode(e.target.value as typeof nCondMode)}
+                    className="h-7 rounded-md border bg-background px-1.5 text-xs shrink-0"
+                    title="When should this edge fire?"
+                  >
+                    <option value="">always</option>
+                    <option value="nl">if… (AI-judged)</option>
+                    <option value="structured">metric (term op value)</option>
+                  </select>
+                  {nCondMode && (
+                    <Input
+                      value={nCond}
+                      onChange={(e) => setNCond(e.target.value)}
+                      placeholder={
+                        nCondMode === "nl"
+                          ? "lost on price, not product"
+                          : '{"term":"CAC","op":">","value":500}'
+                      }
+                      className={`h-7 text-xs ${nCondMode === "structured" ? "font-mono" : "italic"}`}
+                    />
+                  )}
+                </div>
               </td>
               <td className="px-2">
                 <Button
@@ -315,6 +364,23 @@ function EdgesPanel({ nestId }: { nestId: string }) {
           </tbody>
         </table>
       </div>
+
+      {/* Shared autocomplete source for the from/to fields. */}
+      <datalist id="wf-node-list">
+        {nodes.map((n) => (
+          <option key={n.id} value={n.id}>
+            {n.title ? `${n.title} — ${n.type ?? "document"}` : n.id}
+          </option>
+        ))}
+      </datalist>
+
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        <b>Conditions:</b> <em>always</em> = the edge fires whenever the source
+        runs · <em>if…</em> = an AI judges a plain-English rule against the
+        context · <em>metric</em> = a deterministic check like{" "}
+        <code>CAC &gt; 500</code> (resolved from your terms). Only{" "}
+        <b>flow</b> types (▶) are walked by the runner.
+      </p>
     </div>
   );
 }

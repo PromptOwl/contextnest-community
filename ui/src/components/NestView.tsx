@@ -16,9 +16,26 @@ import {
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
-  FolderOpen, ChevronRight, FileStack,
+  FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
+
+/** One icon per node type — agent/skill/artifact/document each read distinctly. */
+function NodeTypeIcon({
+  type,
+  className = "h-4 w-4",
+}: {
+  type?: string;
+  className?: string;
+}) {
+  if (type === "agent")
+    return <Bot className={`${className} text-violet-600 dark:text-violet-400 shrink-0`} />;
+  if (type === "skill")
+    return <Zap className={`${className} text-blue-600 dark:text-blue-400 shrink-0`} />;
+  if (type === "artifact")
+    return <FileCode2 className={`${className} text-amber-600 dark:text-amber-400 shrink-0`} />;
+  return <FileText className={`${className} text-muted-foreground shrink-0`} />;
+}
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ShareNestDialog } from "./ShareNestDialog";
@@ -285,6 +302,31 @@ export function NestView({
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
+  const [showNewFolder, setShowNewFolder] = useState(false);
+  const [newFolderPath, setNewFolderPath] = useState("");
+  const [creatingFolder, setCreatingFolder] = useState(false);
+
+  const createFolder = async () => {
+    const folder = newFolderPath.trim().replace(/^\/+|\/+$/g, "");
+    if (!folder) return;
+    setCreatingFolder(true);
+    try {
+      // Folders are path-derived — seed one with a starter node so it appears
+      // and is immediately usable. Nesting works via "parent/child".
+      await api.createNode(nestId, {
+        title: "Overview",
+        content: `# ${folder.split("/").pop()}\n\nStart here.\n`,
+        folder,
+      });
+      setNewFolderPath("");
+      setShowNewFolder(false);
+      fetchData();
+    } catch (e) {
+      console.error("[NestView] createFolder failed", e);
+    } finally {
+      setCreatingFolder(false);
+    }
+  };
   const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
 
@@ -1086,6 +1128,14 @@ export function NestView({
                     <Sparkles className="h-4 w-4 mr-2" />
                     Add with AI
                   </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setShowNewFolder(true)}
+                    title="Create a folder (nest with parent/child)"
+                  >
+                    <FolderPlus className="h-4 w-4 mr-2" />
+                    New Folder
+                  </Button>
                   <Button onClick={() => onOpenDocument("new")}>
                     <Plus className="h-4 w-4 mr-2" />
                     New Document
@@ -1348,11 +1398,7 @@ export function NestView({
                         onClick={() => onOpenDocument(n.id)}
                         className="w-full flex items-center gap-3 py-2 px-1 -mx-1 rounded hover:bg-muted/50 text-left group"
                       >
-                        {n.type === "artifact" ? (
-                          <FileCode2 className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
-                        ) : (
-                          <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
-                        )}
+                        <NodeTypeIcon type={n.type} />
                         <span className="text-sm truncate flex-1">
                           {n.title || n.id}
                         </span>
@@ -1427,7 +1473,7 @@ export function NestView({
                             className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 text-left group min-w-0"
                             title={n.title || n.id}
                           >
-                            <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            <NodeTypeIcon type={n.type} className="h-3.5 w-3.5" />
                             <span className="text-sm truncate flex-1">
                               {n.title || n.id}
                             </span>
@@ -1833,20 +1879,10 @@ export function NestView({
                           } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer`}
                         data-testid={`document-row-${node.id}`}
                       >
-                        {!cards &&
-                          (isArtifact ? (
-                            <FileCode2 className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0" />
-                          ) : (
-                            <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                          ))}
+                        {!cards && <NodeTypeIcon type={node.type} className="h-5 w-5" />}
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
-                            {cards &&
-                              (isArtifact ? (
-                                <FileCode2 className="h-4 w-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
-                              ) : (
-                                <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                              ))}
+                            {cards && <NodeTypeIcon type={node.type} className="h-4 w-4" />}
                             <span
                               className="font-medium truncate min-w-0"
                               title={node.title}
@@ -2390,6 +2426,45 @@ export function NestView({
           onDeleted={() => { setShowDelete(false); onBack(); }}
         />
       )}
+
+      <Dialog open={showNewFolder} onOpenChange={setShowNewFolder}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>New folder</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Name the folder. Nest it with a slash — e.g.{" "}
+            <code className="text-xs">gtm/deals</code>. It's seeded with a starter
+            document so it shows up right away.
+          </p>
+          <Input
+            autoFocus
+            value={newFolderPath}
+            onChange={(e) => setNewFolderPath(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void createFolder();
+            }}
+            placeholder="e.g. gtm/deals"
+            className="font-mono"
+          />
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setShowNewFolder(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void createFolder()}
+              disabled={creatingFolder || !newFolderPath.trim()}
+            >
+              {creatingFolder ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <FolderPlus className="h-4 w-4 mr-2" />
+              )}
+              Create folder
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showSaveFilter} onOpenChange={setShowSaveFilter}>
         <DialogContent className="max-w-md">
