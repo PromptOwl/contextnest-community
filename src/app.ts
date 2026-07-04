@@ -676,22 +676,24 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     // Editor steward bypass for nest-read callers: PATCH/DELETE (and the
-    // POST .../revert action) allowed when an editor row covers the node;
-    // POST to create a node allowed only for nest-scope editors.
-    const isNodeRevert =
+    // POST .../revert and .../move actions) allowed when an editor row
+    // covers the node; POST to create a node allowed only for nest-scope
+    // editors.
+    const isNodeAction =
       c.req.method === "POST" &&
       parts.length >= 4 &&
-      parts[parts.length - 1] === "revert";
+      (parts[parts.length - 1] === "revert" ||
+        parts[parts.length - 1] === "move");
     let stewardEditorBypass = false;
     if (required === "write" && permission === "read" && parts[1] === "nodes") {
       const userEmail = await resolveCallerEmail(userId);
       if (
         parts.length >= 3 &&
-        (c.req.method === "PATCH" || c.req.method === "DELETE" || isNodeRevert)
+        (c.req.method === "PATCH" || c.req.method === "DELETE" || isNodeAction)
       ) {
-        // Revert path carries a trailing /revert segment — drop it to
-        // recover the node id; PATCH/DELETE take the id as-is.
-        const idParts = isNodeRevert ? parts.slice(2, -1) : parts.slice(2);
+        // Action paths carry a trailing /revert or /move segment — drop it
+        // to recover the node id; PATCH/DELETE take the id as-is.
+        const idParts = isNodeAction ? parts.slice(2, -1) : parts.slice(2);
         const rawNodeId = idParts.join("/");
         let nodeId = rawNodeId;
         try {
@@ -761,10 +763,15 @@ export function createApp(): Hono<AuthEnv> {
   // Must be mounted BEFORE nodeRoutes because nodeRoutes has a greedy /:nodeId{.+} catch-all.
   // POST routes work fine (Hono matches method+path), but GET routes clash.
   // Solution: mount governance node routes and node CRUD on the same Hono instance.
-  nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
-  // Annotations + sandboxed artifact serving — must precede the greedy
-  // nodeRoutes catch-all so /:nodeId/annotations and /:nodeId/hosted match.
+  // Annotations + sandboxed artifact serving — mounted FIRST among the
+  // /nodes sub-routers: annotation paths carry a literal "annotations"
+  // segment (…/:nodeId/annotations/:threadId/comments), and the governance
+  // router's greedy POST /:nodeId{.+}/comments would otherwise swallow the
+  // nodeId + "annotations/<threadId>" prefix whole and hijack thread
+  // replies. The reverse can't happen: governance paths never contain an
+  // "annotations" segment, so annotation routes can't shadow them.
   nestsApp.route("/:nestId/nodes", annotationRoutes);
+  nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);

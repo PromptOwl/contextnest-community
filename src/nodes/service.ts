@@ -5,13 +5,20 @@
  */
 import { serializeDocument, parseDocument } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
+import { rename, mkdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { safePublishDocument } from "../governance/safe-publish.js";
 import { engineCache } from "./engine.js";
-import { NotFoundError, LockedError, ValidationError } from "../shared/errors.js";
+import {
+  NotFoundError,
+  LockedError,
+  ValidationError,
+  ConflictError,
+} from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { syncNodeTags } from "../governance/tag-index-service.js";
-import { isStewardshipEnabled } from "../nests/service.js";
+import { isStewardshipEnabled, resolveNestPath } from "../nests/service.js";
 import { getPendingReview } from "../governance/review-service.js";
 import {
   resolveCallerEmail,
@@ -32,6 +39,31 @@ async function userIdFromEmail(email: string): Promise<string> {
 }
 
 const normalizeTag = (t: string) => (t.startsWith("#") ? t : `#${t}`);
+
+const slugify = (s: string) =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+
+/**
+ * Slugify + validate a folder path into id segments. Shared by create and
+ * move so both enforce the same depth/length bounds and the same traversal
+ * defense (each segment slugified independently — "../" collapses to "-",
+ * empty segments drop).
+ */
+function folderToSegments(folder: string): string[] {
+  const segments = folder.split("/").map(slugify).filter(Boolean);
+  if (segments.length > 8) {
+    throw new ValidationError("folder may nest at most 8 levels deep");
+  }
+  if (segments.some((seg) => seg.length > 100)) {
+    throw new ValidationError(
+      "each folder or title segment must be at most 100 characters",
+    );
+  }
+  return segments;
+}
 
 const stripUndefined = <T extends Record<string, any>>(o: T): T =>
   Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
@@ -216,11 +248,6 @@ export async function createNode(
 ): Promise<NodeMutationResult> {
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
-  const slugify = (s: string) =>
-    s
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "");
   const slug = slugify(input.title);
   // Slugifying per segment means "../x" or absolute paths can never escape
   // the vault — traversal characters collapse to "-" and empty segments drop.
@@ -228,17 +255,11 @@ export async function createNode(
   // it isn't derived or validated either.
   let id = input.id;
   if (!id) {
-    const folderSegments = (input.folder ?? "")
-      .split("/")
-      .map(slugify)
-      .filter(Boolean);
-    if (folderSegments.length > 8) {
-      throw new ValidationError("folder may nest at most 8 levels deep");
-    }
-    // Bound each slug so an overlong segment (folder or title) fails as a
-    // clean 400 instead of an ENAMETOOLONG surfacing as an unhandled 500 at
+    const folderSegments = folderToSegments(input.folder ?? "");
+    // Bound the title slug too, so an overlong title fails as a clean 400
+    // instead of an ENAMETOOLONG surfacing as an unhandled 500 at
     // storage.writeDocument.
-    if ([...folderSegments, slug].some((seg) => seg.length > 100)) {
+    if (slug.length > 100) {
       throw new ValidationError("each folder or title segment must be at most 100 characters");
     }
     id =
@@ -525,4 +546,165 @@ export async function updateNode(
   }
 
   return { node, version: responseVersion };
+}
+
+/** Mirror of annotations/service.ts derivedAnnotationsId — duplicated here
+ *  because importing it would close the annotations→nodes import cycle. */
+function derivedIdOf(sourceNodeId: string): string {
+  return `nodes/${sourceNodeId.replace(/^nodes\//, "")}--annotations`;
+}
+
+export interface MoveNodeResult {
+  node: ContextNode;
+  previousId: string;
+}
+
+/**
+ * Move a node to another folder, preserving everything keyed to its id:
+ * version history (DB rows + on-disk .versions chain), review state,
+ * approved-version pin, annotations, comments, workflow edges, document
+ * grants, document-scoped stewards, and run traces. The id changes
+ * (nodes/<folder…>/<leaf>); the leaf slug and title do not, so [[Title]]
+ * wiki-links keep resolving.
+ *
+ * Folder grants intentionally do NOT follow the doc — they cover a path
+ * prefix, so a doc moved out of a shared folder leaves that share and a
+ * doc moved into one joins it. That asymmetry is the feature.
+ */
+export async function moveNode(
+  nestId: string,
+  nodeId: string,
+  folder: string,
+  userEmail: string,
+): Promise<MoveNodeResult> {
+  const { storage } = await engineCache.get(nestId);
+
+  let node: ContextNode;
+  try {
+    node = await storage.readDocument(nodeId);
+  } catch {
+    throw new NotFoundError(`Node not found: ${nodeId}`);
+  }
+
+  // Same freeze as edit/delete: a node under open review is what the
+  // reviewer is looking at — its identity can't change mid-review.
+  if ((await isStewardshipEnabled(nestId)) && (await getPendingReview(nestId, nodeId))) {
+    throw new LockedError(
+      "This document is awaiting steward review and is locked. Approve or reject the pending review before moving.",
+    );
+  }
+
+  const leaf = nodeId.split("/").pop()!;
+  const segments = folderToSegments(folder);
+  const newId =
+    segments.length > 0 ? `nodes/${segments.join("/")}/${leaf}` : `nodes/${leaf}`;
+  if (newId === nodeId) return { node, previousId: nodeId };
+
+  try {
+    await storage.readDocument(newId);
+    throw new ConflictError(
+      `A document already exists at that location: ${newId}`,
+    );
+  } catch (err) {
+    if (err instanceof ConflictError) throw err;
+    /* target free — proceed */
+  }
+
+  const moved: ContextNode = {
+    ...node,
+    id: newId,
+    frontmatter: {
+      ...node.frontmatter,
+      updated_at: new Date().toISOString(),
+    },
+  };
+  await storage.writeDocument(newId, serializeDocument(moved));
+
+  // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
+  // doc) so reconstructVersion keeps working for pre-move versions. Layout is
+  // engine-owned, so this is best-effort: if the chain isn't where the
+  // structured layout puts it (e.g. flat imported nests), history still
+  // serves from the governance DB rows migrated below.
+  try {
+    const nestPath = resolveNestPath(nestId);
+    const oldChain = join(nestPath, dirname(nodeId), ".versions", leaf);
+    const newChain = join(nestPath, dirname(newId), ".versions", leaf);
+    if (oldChain !== newChain) {
+      await mkdir(dirname(newChain), { recursive: true });
+      await rename(oldChain, newChain);
+    }
+  } catch {
+    /* no on-disk chain to carry */
+  }
+
+  await storage.deleteDocument(nodeId);
+
+  // Rewrite every table that keys on the node id — the same reference set
+  // DELETE purges, plus workflow edges, grants, and run traces. One
+  // transaction: a half-moved node would be worse than a failed move.
+  const oldDerived = derivedIdOf(nodeId);
+  const newDerived = derivedIdOf(newId);
+  const db = getDb();
+  await db.transaction(async (tx) => {
+    for (const [table, column] of [
+      ["node_versions", "node_id"],
+      ["review_requests", "node_id"],
+      ["approved_versions", "node_id"],
+      ["annotation_threads", "node_id"],
+      ["comments", "node_id"],
+      ["node_tag_index", "node_id"],
+    ] as const) {
+      await tx.run(
+        `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
+        [newId, nestId, nodeId],
+      );
+      await tx.run(
+        `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
+        [newDerived, nestId, oldDerived],
+      );
+    }
+    await tx.run(
+      `UPDATE stewards SET node_pattern = ?
+       WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
+      [newId, nestId, nodeId],
+    );
+    await tx.run(
+      `UPDATE grants SET target = ?
+       WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
+      [newId, nestId, nodeId],
+    );
+    await tx.run(
+      "UPDATE edges SET from_node = ? WHERE nest_id = ? AND from_node = ?",
+      [newId, nestId, nodeId],
+    );
+    await tx.run(
+      "UPDATE edges SET to_node = ? WHERE nest_id = ? AND to_node = ?",
+      [newId, nestId, nodeId],
+    );
+    await tx.run(
+      "UPDATE runs SET agent_node = ? WHERE nest_id = ? AND agent_node = ?",
+      [newId, nestId, nodeId],
+    );
+    await tx.run(
+      `UPDATE run_steps SET node_id = ?
+       WHERE node_id = ? AND run_id IN (SELECT id FROM runs WHERE nest_id = ?)`,
+      [newId, nodeId, nestId],
+    );
+  });
+
+  // The derived annotations node (if any) lives beside its source — move its
+  // storage doc too. Best-effort, same as delete's handling of it.
+  try {
+    const derivedDoc = await storage.readDocument(oldDerived);
+    await storage.writeDocument(
+      newDerived,
+      serializeDocument({ ...derivedDoc, id: newDerived }),
+    );
+    await storage.deleteDocument(oldDerived);
+  } catch {
+    /* no derived annotations node */
+  }
+
+  await trackEvent("node.move", { nestId, nodeId, newId });
+  return { node: moved, previousId: nodeId };
 }

@@ -19,6 +19,7 @@ import { loadStewardsConfig } from "./stewards-parser.js";
 import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
 import { bodyOnly } from "../nodes/service.js";
+import { handleAnnotationReply } from "../annotations/routes.js";
 
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
@@ -306,6 +307,14 @@ governanceNodeRoutes.get("/:nodeId{.+}/comments", async (c) => {
 governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
+  // Annotation thread replies (…/:nodeId/annotations/:threadId/comments) land
+  // here too: RegExpRouter merges the greedy :nodeId across both patterns and
+  // the greedy capture wins, so this route sees
+  // nodeId = "<realNodeId>/annotations/<threadId>". Detect and delegate.
+  const annotationReply = nodeId.match(/^(.+)\/annotations\/([^/]+)$/);
+  if (annotationReply) {
+    return handleAnnotationReply(c, annotationReply[1], annotationReply[2]);
+  }
   const body = await c.req.json<{
     body?: string;
     version?: number;
@@ -334,7 +343,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
 
 // POST /nests/:nestId/nodes/:nodeId/comments/:commentId/resolve
 governanceNodeRoutes.post(
-  "/:nodeId{.+?}/comments/:commentId/resolve",
+  "/:nodeId{.+}/comments/:commentId/resolve",
   async (c) => {
     const nestId = c.req.param("nestId")!;
     const nodeId = c.req.param("nodeId")!;
@@ -494,7 +503,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/can-edit", async (c) => {
 });
 
 // GET /nests/:nestId/nodes/:nodeId/external-edits
-governanceNodeRoutes.get("/:nodeId{.+?}/external-edits", async (c) => {
+governanceNodeRoutes.get("/:nodeId{.+}/external-edits", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const pending = await externalEdits.getPendingChange(nestId, nodeId);
@@ -503,7 +512,7 @@ governanceNodeRoutes.get("/:nodeId{.+?}/external-edits", async (c) => {
 
 // GET /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId
 governanceNodeRoutes.get(
-  "/:nodeId{.+?}/external-edits/:suggestionId",
+  "/:nodeId{.+}/external-edits/:suggestionId",
   async (c) => {
     const nestId = c.req.param("nestId")!;
     const nodeId = c.req.param("nodeId")!;
@@ -522,7 +531,7 @@ governanceNodeRoutes.get(
 
 // POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/approve
 governanceNodeRoutes.post(
-  "/:nodeId{.+?}/external-edits/:suggestionId/approve",
+  "/:nodeId{.+}/external-edits/:suggestionId/approve",
   async (c) => {
     const nestId = c.req.param("nestId")!;
     const nodeId = c.req.param("nodeId")!;
@@ -559,7 +568,7 @@ governanceNodeRoutes.post(
 
 // POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/reject
 governanceNodeRoutes.post(
-  "/:nodeId{.+?}/external-edits/:suggestionId/reject",
+  "/:nodeId{.+}/external-edits/:suggestionId/reject",
   async (c) => {
     const nestId = c.req.param("nestId")!;
     const nodeId = c.req.param("nodeId")!;

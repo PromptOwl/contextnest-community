@@ -125,7 +125,9 @@ async function referencedDefinitions(
 // ─── Nest-scoped routes: trigger + list ─────────────────────────────────
 
 export const runTriggerRoutes = new Hono<AuthEnv>();
-runTriggerRoutes.use("*", requireWorkflowPlane);
+// Per-route (not use("*")): a wildcard middleware path under /run conflicts
+// with the sibling /runs route in RegExpRouter and knocks the app onto
+// TrieRouter, which cannot match deep-nested greedy suffix routes.
 
 /**
  * Sub-agent recursion guard (FEATURE_SUBAGENT_RUNS). Given a claimed parent
@@ -202,7 +204,7 @@ async function resolveParentRun(
 }
 
 // POST /nests/:nestId/run/:agentNode{.+}
-runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
+runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   // SECURITY: the catch-all param can carry `../` — validate before it reaches
   // storage.readDocument, or a caller with write on nest A reads nest B's
@@ -323,8 +325,7 @@ runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
 
 // GET /nests/:nestId/runs?agent=&status=&limit=
 export const runListRoutes = new Hono<AuthEnv>();
-runListRoutes.use("*", requireWorkflowPlane);
-runListRoutes.get("/", async (c) => {
+runListRoutes.get("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const db = getDb();
   let sql = "SELECT * FROM runs WHERE nest_id = ?";
@@ -362,7 +363,6 @@ runListRoutes.get("/", async (c) => {
 // tier, same posture as changes-since deleted[]).
 
 export const runDetailRoutes = new Hono<AuthEnv>();
-runDetailRoutes.use("*", requireWorkflowPlane);
 
 async function loadRunWithPermission(
   c: any,
@@ -411,7 +411,7 @@ async function loadRunWithPermission(
 }
 
 // POST /runs/:id/steps
-runDetailRoutes.post("/:id/steps", async (c) => {
+runDetailRoutes.post("/:id/steps", requireWorkflowPlane, async (c) => {
   const run = await loadRunWithPermission(c, c.req.param("id")!, "write");
   if (run.status !== "running") {
     throw new ConflictError(`Run is ${run.status} — steps can't be appended`);
@@ -456,7 +456,7 @@ runDetailRoutes.post("/:id/steps", async (c) => {
 });
 
 // PATCH /runs/:id — close or update status/trace
-runDetailRoutes.patch("/:id", async (c) => {
+runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
   const run = await loadRunWithPermission(c, c.req.param("id")!, "write");
   if (run.status !== "running") {
     throw new ConflictError(`Run already terminal (${run.status})`);
@@ -483,7 +483,7 @@ runDetailRoutes.patch("/:id", async (c) => {
 });
 
 // GET /runs/:id — full trace; NL rationales redacted below write tier.
-runDetailRoutes.get("/:id", async (c) => {
+runDetailRoutes.get("/:id", requireWorkflowPlane, async (c) => {
   const run = await loadRunWithPermission(c, c.req.param("id")!, "read");
   const canSeeDetail =
     permissionLevel((c as any).get("runPermission")) >=

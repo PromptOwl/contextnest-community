@@ -166,7 +166,13 @@ nestRoutes.post("/", async (c) => {
 // browser uploads each file's relative path + content; the server writes them
 // into the nest's own storage under DATA_ROOT (it never browses its own disk),
 // so import works whether or not the server is colocated with the user.
-nestRoutes.post("/import", async (c) => {
+// Registered as /:nestId with a literal-"import" branch (see the router-compat
+// note on the unsynced routes below): a static /import sibling would knock the
+// app off RegExpRouter. There is no other POST /nests/:nestId endpoint.
+nestRoutes.post("/:nestId", async (c) => {
+  if (c.req.param("nestId") !== "import") {
+    throw new NotFoundError("Not found");
+  }
   const body = await c.req.json<{
     name?: string;
     files?: { path: string; content: string }[];
@@ -190,20 +196,31 @@ nestRoutes.post("/import", async (c) => {
 // sync (dropped in by the starter CLI or copied in manually). In key mode only
 // the license-admin sees them; the listing reflects server-side filesystem
 // state, so non-admins shouldn't be probing what's lying around on disk.
-// Must be registered before `/:nestId` so the literal segment wins routing.
-nestRoutes.get("/unsynced", async (c) => {
+//
+// Served from inside the `/:nestId` param route (literal "unsynced" branch),
+// NOT as a static sibling route: RegExpRouter refuses a static path beside a
+// param at the same position (UnsupportedPathError), which silently dropped
+// the WHOLE app onto TrieRouter — and TrieRouter can't match greedy suffix
+// routes like /:nodeId{.+}/versions for ids nested 3+ segments deep. The
+// public URLs are unchanged.
+async function handleUnsyncedList(c: any) {
   const userId = c.get("userId");
   if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can list unsynced folders");
   }
   return c.json({ folders: listUnsyncedFolders() });
-});
+}
 
 // POST /nests/unsynced/sync — convert a sibling folder into a real nest.
 // Folder identifier travels in the body because leaf paths contain slashes
 // ("nodes/architecture") that would split a path-param across route segments.
-// Same admin-gate as the list endpoint (touches server disk).
-nestRoutes.post("/unsynced/sync", async (c) => {
+// Same admin-gate as the list endpoint (touches server disk). Registered as
+// /:nestId/sync for the router-compat reason above; only the literal
+// "unsynced" segment is served, anything else 404s.
+nestRoutes.post("/:nestId/sync", async (c) => {
+  if (c.req.param("nestId") !== "unsynced") {
+    throw new NotFoundError("Not found");
+  }
   const userId = c.get("userId");
   if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can sync folders");
@@ -223,6 +240,7 @@ nestRoutes.post("/unsynced/sync", async (c) => {
 // GET /nests/:nestId
 nestRoutes.get("/:nestId", async (c) => {
   const nestId = c.req.param("nestId")!;
+  if (nestId === "unsynced") return handleUnsyncedList(c);
   const userId = c.get("userId");
   const permission = await effectivePermission(nestId, userId);
   if (permission === "none") {

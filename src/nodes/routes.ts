@@ -24,6 +24,7 @@ import { derivedAnnotationsId } from "../annotations/service.js";
 import {
   createNode,
   updateNode,
+  moveNode,
   listNodesForCaller,
   toNodeResponse,
   bodyOnly,
@@ -108,7 +109,7 @@ nodeRoutes.post("/", async (c) => {
 // Import governance services inline to avoid circular deps.
 
 // GET /nests/:nestId/nodes/:nodeId/stewards
-nodeRoutes.get("/:nodeId{.+?}/stewards", async (c) => {
+nodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
@@ -132,7 +133,7 @@ nodeRoutes.get("/:nodeId{.+?}/stewards", async (c) => {
 });
 
 // GET /nests/:nestId/nodes/:nodeId/versions
-nodeRoutes.get("/:nodeId{.+?}/versions", async (c) => {
+nodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
@@ -178,7 +179,7 @@ nodeRoutes.get("/:nodeId{.+?}/versions", async (c) => {
 });
 
 // GET /nests/:nestId/nodes/:nodeId/reviews
-nodeRoutes.get("/:nodeId{.+?}/reviews", async (c) => {
+nodeRoutes.get("/:nodeId{.+}/reviews", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
@@ -233,9 +234,55 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   return c.json({ ok: true, version, node: toNodeResponse(node) });
 });
 
-nodeRoutes.get("/:nodeId{.+}", async (c) => {
+// POST /nests/:nestId/nodes/:nodeId/move — relocate a document to another
+// folder. Body: { "folder": "gtm/deals" } ("" = nest root). The id changes;
+// version history, review state, annotations, edges, grants, and traces all
+// follow (see moveNode). POST suffix route, same shape as /revert.
+nodeRoutes.post("/:nodeId{.+}/move", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
+
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
+
+  const body = await c.req
+    .json<{ folder?: string }>()
+    .catch(() => ({}) as { folder?: string });
+  if (typeof body.folder !== "string") {
+    throw new ValidationError('folder (a string; "" for the nest root) is required');
+  }
+
+  const { node, previousId } = await moveNode(nestId, nodeId, body.folder, userEmail);
+  return c.json({ ok: true, node: toNodeResponse(node), previousId });
+});
+
+/** Node id for the greedy catch-alls below, derived from the raw path.
+ *
+ * They register as "/*" instead of "/:nodeId{.+}" deliberately: RegExpRouter
+ * merges same-position params, so a greedy {.+} catch-all shadows every
+ * suffix action route (/versions, /annotations, …) at any depth — and the
+ * old escape hatch (the app silently falling back to TrieRouter because of
+ * unrelated unsupported patterns) couldn't match those suffix routes for ids
+ * nested 3+ folders deep. A plain wildcard coexists with the suffix routes
+ * at every depth; suffix routes are registered first, so they win. */
+function nodeIdFromPath(c: any): string {
+  const raw = c.req.path.replace(/^\/nests\/[^/]+\/nodes\//, "");
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+nodeRoutes.get("/*", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = nodeIdFromPath(c);
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
   const userId = c.get("userId");
@@ -332,10 +379,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   return c.json({ node: response });
 });
 
-// PATCH /nests/:nestId/nodes/:nodeId{.+}
-nodeRoutes.patch("/:nodeId{.+}", async (c) => {
+// PATCH /nests/:nestId/nodes/:nodeId — "/*" for the router-compat reason on
+// nodeIdFromPath above.
+nodeRoutes.patch("/*", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
+  const nodeId = nodeIdFromPath(c);
   const body = await c.req.json<{
     content?: string;
     append?: string;
@@ -383,10 +431,11 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   return c.json({ node: toNodeResponse(node), version: responseVersion });
 });
 
-// DELETE /nests/:nestId/nodes/:nodeId{.+}
-nodeRoutes.delete("/:nodeId{.+}", async (c) => {
+// DELETE /nests/:nestId/nodes/:nodeId — "/*" for the router-compat reason on
+// nodeIdFromPath above.
+nodeRoutes.delete("/*", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
+  const nodeId = nodeIdFromPath(c);
   const { storage } = await engineCache.get(nestId);
 
   // Stewardship lock: a node under open review can't be deleted out from
