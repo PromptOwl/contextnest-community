@@ -210,6 +210,44 @@ export const config = {
     }
     return raw;
   },
+  /**
+   * Workflow plane ("turing" track): typed edges, edge-type registry, runs.
+   * OFF by default — an optional feature an admin turns on (env or Settings).
+   * This flag is also the future license-tier hook: gating a paid tier here
+   * is a one-line change because every plane route checks it per request.
+   */
+  get FEATURE_WORKFLOW_PLANE(): boolean {
+    return process.env.FEATURE_WORKFLOW_PLANE === "true";
+  },
+  /**
+   * Sub-agent runs: lets a run spawn nested runs (an external runner calling
+   * back into POST /run for a child agent). Gated SEPARATELY from the base
+   * plane because recursion is the risky surface — unbounded fan-out,
+   * re-entrancy, resource exhaustion. Off by default; must clear a security
+   * review before an operator turns it on. Requires FEATURE_WORKFLOW_PLANE too.
+   */
+  get FEATURE_SUBAGENT_RUNS(): boolean {
+    return process.env.FEATURE_SUBAGENT_RUNS === "true";
+  },
+  /** Hard ceiling on sub-agent nesting depth — keeps the call tree finite
+   *  (haltable / statically bounded). Clamped to [1, 32]. */
+  get SUBAGENT_MAX_DEPTH(): number {
+    const n = parseInt(process.env.SUBAGENT_MAX_DEPTH || "8", 10);
+    return Number.isFinite(n) ? Math.min(32, Math.max(1, n)) : 8;
+  },
+  /** Max direct children a single run may spawn. Depth bounds the tree's
+   *  height; this bounds its width — together they cap total size so a
+   *  runner can't fork-bomb the DB. Clamped to [1, 128]. */
+  get SUBAGENT_MAX_CHILDREN(): number {
+    const n = parseInt(process.env.SUBAGENT_MAX_CHILDREN || "16", 10);
+    return Number.isFinite(n) ? Math.min(128, Math.max(1, n)) : 16;
+  },
+  /** Max steps a single run may accumulate — bounds a runaway/hostile
+   *  runner's step log. Clamped to [10, 100000]. */
+  get RUN_MAX_STEPS(): number {
+    const n = parseInt(process.env.RUN_MAX_STEPS || "10000", 10);
+    return Number.isFinite(n) ? Math.min(100000, Math.max(10, n)) : 10000;
+  },
   get AUTH_MODE(): "open" | "key" {
     // Default is "key" — requires an explicit AUTH_MODE=open to run
     // without authentication. Safer default for public deployments;

@@ -141,6 +141,7 @@ export interface AdminSettings {
   telemetry_enabled: boolean;
   public_base_url: string;
   max_body_bytes: number;
+  workflow_plane_enabled: boolean;
 }
 
 export async function getAdminSettings() {

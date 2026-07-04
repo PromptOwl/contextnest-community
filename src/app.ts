@@ -14,6 +14,13 @@ import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
+import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
+import { edgeRoutes } from "./workflow/edge-routes.js";
+import {
+  runTriggerRoutes,
+  runListRoutes,
+  runDetailRoutes,
+} from "./workflow/run-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import {
@@ -263,6 +270,7 @@ export function createApp(): Hono<AuthEnv> {
     telemetry_enabled: config.TELEMETRY_ENABLED,
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
+    workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
   });
 
   app.get("/admin/settings", async (c) => {
@@ -303,6 +311,12 @@ export function createApp(): Hono<AuthEnv> {
     }
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
+    }
+    if ("workflow_plane_enabled" in body) {
+      pending.push({
+        name: "FEATURE_WORKFLOW_PLANE",
+        value: body.workflow_plane_enabled ? "true" : null,
+      });
     }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);
@@ -375,6 +389,10 @@ export function createApp(): Hono<AuthEnv> {
       users: usersRow.c,
     });
   });
+
+  // === Runner-facing run detail routes (turing) ===
+  app.use("/runs/*", flexAuthMiddleware);
+  app.route("/runs", runDetailRoutes);
 
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
@@ -684,6 +702,10 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
+  nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
+  nestsApp.route("/:nestId/edges", edgeRoutes);
+  nestsApp.route("/:nestId/run", runTriggerRoutes);
+  nestsApp.route("/:nestId/runs", runListRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);

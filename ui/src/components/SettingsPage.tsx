@@ -179,6 +179,30 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
             </CardContent>
           </Card>
 
+          {/* Workflow plane ("turing" track) */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Workflow plane</CardTitle>
+              <CardDescription>
+                Typed edges, an edge-type registry, and governed runs — the
+                automation layer. Optional; off by default. Turning it on adds
+                API surface and UI views but changes nothing until someone
+                creates an edge.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center justify-between">
+                <span className="text-sm">
+                  {settings.workflow_plane_enabled ? "On" : "Off"}
+                </span>
+                <Switch
+                  checked={settings.workflow_plane_enabled}
+                  onCheckedChange={(v) => onUpdate({ workflow_plane_enabled: v })}
+                />
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Max upload size */}
           <Card>
             <CardHeader>

@@ -21,6 +21,7 @@ import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel } from "../shared/access.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
+import { config } from "../config.js";
 
 export const queryRoutes = new Hono<AuthEnv>();
 
@@ -37,6 +38,29 @@ queryRoutes.get("/graph", async (c) => {
   const canSeeIdentities =
     permissionLevel(c.get("nestPermission")) >= permissionLevel("write");
   const graph = await buildNestGraph(nestId, userId, userEmail, canSeeIdentities);
+  // Workflow plane ("turing"): typed edges ride along when the flag is on.
+  // Only edges whose BOTH endpoints are already in the caller-visible node
+  // set — the graph's own access filtering stays authoritative.
+  if (config.FEATURE_WORKFLOW_PLANE) {
+    const { getDb } = await import("../db/client.js");
+    const rows = (await getDb().all(
+      `SELECT e.from_node, e.to_node, e.condition_mode, t.name as type, t.color, t.is_flow
+         FROM edges e JOIN edge_types t ON t.id = e.type_id
+        WHERE e.nest_id = ?`,
+      [nestId],
+    )) as Array<{ from_node: string; to_node: string; condition_mode: string | null; type: string; color: string | null; is_flow: number }>;
+    const visible = new Set(graph.nodes.map((n: any) => n.id));
+    (graph as any).typedEdges = rows
+      .filter((r) => visible.has(r.from_node) && visible.has(r.to_node))
+      .map((r) => ({
+        source: r.from_node,
+        target: r.to_node,
+        type: r.type,
+        color: r.color,
+        is_flow: !!r.is_flow,
+        condition_mode: r.condition_mode,
+      }));
+  }
   return c.json(graph);
 });
 

@@ -719,6 +719,106 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("012_merge_case_colliding_users");
   }
+  // 016: workflow plane foundations (CU-wdqcpzv34u, "turing" track). Typed
+  //   edges between nodes, with a steward-defined registry articulating what
+  //   each connection MEANS (the definitions-table move, applied to
+  //   relations). Feature-flagged: routes 404 unless FEATURE_WORKFLOW_PLANE
+  //   is on, but the schema ships so flipping the flag needs no migration.
+  //   Case-insensitive uniqueness via LOWER() (portable — NOT COLLATE
+  //   NOCASE; keep in lockstep with migrations.postgres.ts).
+  if (!hasMigration("016_workflow_edges")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS edge_types (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL,
+          direction TEXT NOT NULL DEFAULT 'directed'
+            CHECK(direction IN ('directed', 'undirected')),
+          is_flow INTEGER NOT NULL DEFAULT 0,   -- flow types form the DAG
+          condition_schema TEXT,                -- JSON template | NULL
+          color TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_types_name
+          ON edge_types(nest_id, LOWER(name));
+
+        CREATE TABLE IF NOT EXISTS edges (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          from_node TEXT NOT NULL,
+          to_node TEXT NOT NULL,
+          type_id TEXT NOT NULL REFERENCES edge_types(id) ON DELETE CASCADE,
+          condition_mode TEXT
+            CHECK(condition_mode IN ('structured', 'nl', 'open')),
+          condition TEXT,
+          metadata TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(nest_id, from_node);
+        CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(nest_id, to_node);
+        CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(nest_id, type_id);
+      `);
+    })();
+    recordMigration("016_workflow_edges");
+  }
+
+  // 017: run records (CU-wdqcpzv363, "turing" track). One row per agent
+  //   execution + an append-only step log — the operational trace that
+  //   makes workflows replayable (reads are recorded as selector+hops;
+  //   deterministic retrieval reproduces the identical read-set).
+  if (!hasMigration("017_workflow_runs")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS runs (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          agent_node TEXT NOT NULL,
+          triggered_by TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'running'
+            CHECK(status IN ('running', 'succeeded', 'failed', 'cancelled')),
+          inputs TEXT,
+          trace TEXT,
+          started_at TEXT NOT NULL,
+          finished_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_runs_nest ON runs(nest_id, started_at);
+        CREATE INDEX IF NOT EXISTS idx_runs_agent ON runs(nest_id, agent_node);
+
+        CREATE TABLE IF NOT EXISTS run_steps (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+          seq INTEGER NOT NULL,
+          node_id TEXT,
+          edge_id TEXT,
+          action TEXT NOT NULL,
+          detail TEXT,
+          at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
+      `);
+    })();
+    recordMigration("017_workflow_runs");
+  }
+
+  // 018: sub-agent runs (CU-wdqcpzv3kp). parent_run_id links a nested run to
+  //   the run that spawned it (the call tree); depth bounds recursion so the
+  //   tree stays finite/haltable. Columns ship regardless of the
+  //   FEATURE_SUBAGENT_RUNS flag (schema-first, flag gates behaviour).
+  if (!hasMigration("018_subagent_runs")) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE runs ADD COLUMN parent_run_id TEXT;
+        ALTER TABLE runs ADD COLUMN depth INTEGER NOT NULL DEFAULT 0;
+      `);
+    })();
+    recordMigration("018_subagent_runs");
+  }
 
   // 019: document + folder sharing grants (CU-wdqcpzv656). A dedicated ACCESS
   //   model, distinct from stewardship (which is REVIEW governance). One row =
