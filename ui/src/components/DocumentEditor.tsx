@@ -132,7 +132,7 @@ export function DocumentEditor({
   onJumpBreadcrumb,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
-  const { adminStatus, isAdmin } = useAuth();
+  const { adminStatus, isAdmin, workflowPlaneEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
   // you're reading it" instead of bouncing back to the nest. Same dialog
@@ -218,7 +218,9 @@ export function DocumentEditor({
   const [rawMode, setRawMode] = useState(false);
   // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
   // "document" = the normal markdown editor. Only meaningful while isNew.
-  const [newType, setNewType] = useState<"document" | "artifact">("document");
+  const [newType, setNewType] = useState<
+    "document" | "artifact" | "agent" | "skill"
+  >("document");
   const isArtifactDraft = isNew && newType === "artifact";
   // Inline anchored comments (annotations) parked beside the doc. commentMode
   // forces the rendered read view + highlight overlay even for editors, so
@@ -1477,7 +1479,9 @@ export function DocumentEditor({
               <label className="block text-sm font-medium mb-1">Type</label>
               <Select
                 value={newType}
-                onValueChange={(v) => setNewType(v as "document" | "artifact")}
+                onValueChange={(v) =>
+                  setNewType(v as "document" | "artifact" | "agent" | "skill")
+                }
               >
                 <SelectTrigger data-testid="document-editor-type">
                   <SelectValue />
@@ -1485,8 +1489,23 @@ export function DocumentEditor({
                 <SelectContent>
                   <SelectItem value="document">Document (markdown)</SelectItem>
                   <SelectItem value="artifact">Artifact (hosted HTML)</SelectItem>
+                  {/* Runnable node types — only offered when the workflow
+                      plane is on. Their body is the agent's instructions;
+                      flow edges out of them define what the runner walks. */}
+                  {workflowPlaneEnabled && (
+                    <>
+                      <SelectItem value="agent">Agent (runnable)</SelectItem>
+                      <SelectItem value="skill">Skill (runnable)</SelectItem>
+                    </>
+                  )}
                 </SelectContent>
               </Select>
+              {(newType === "agent" || newType === "skill") && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  The body is the instructions. Add flow edges from it in the
+                  Workflows tab, then trigger a run.
+                </p>
+              )}
             </div>
           )}
 
