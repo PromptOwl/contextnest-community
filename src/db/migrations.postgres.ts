@@ -51,6 +51,7 @@ const HISTORICAL_MIGRATIONS = [
   "018_subagent_runs",
   "019_grants",
   "020_schedules",
+  "021_schedule_bounds",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -311,6 +312,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       every_minutes INTEGER NOT NULL CHECK(every_minutes >= 5),
       enabled INTEGER NOT NULL DEFAULT 1,
       last_run_at TEXT,
+      max_runs INTEGER,
+      runs_created INTEGER NOT NULL DEFAULT 0,
       created_by TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL

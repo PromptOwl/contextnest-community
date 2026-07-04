@@ -141,4 +141,36 @@ describe("scheduler tick", () => {
     const later = await schedulerTick(t0 + 16 * 60_000);
     expect(later.length).toBe(1);
   });
+
+  it("stop-after bound: auto-pauses when max_runs is reached", async () => {
+    const { schedulerTick } = await import("../src/workflow/scheduler.js");
+    await jsonRequest(
+      app, "POST", `/nests/${nestId}/nodes`,
+      { title: "Bounded Agent", content: "# go", type: "agent" }, alice.apiKey,
+    );
+    const created = await jsonRequest(
+      app, "POST", `/nests/${nestId}/schedules`,
+      { agent_node: "nodes/bounded-agent", every_minutes: 5, max_runs: 2 },
+      alice.apiKey,
+    );
+    expect(created.status).toBe(201);
+    expect(created.data.schedule.max_runs).toBe(2);
+
+    const base = Date.now() + 60 * 60_000; // clear of earlier intervals
+    const fired = (await schedulerTick(base)).length
+      + (await schedulerTick(base + 6 * 60_000)).length
+      + (await schedulerTick(base + 12 * 60_000)).length
+      + (await schedulerTick(base + 18 * 60_000)).length;
+    // Both bounded (2) and the still-enabled unbounded schedule fire; the
+    // bounded one must stop contributing after 2.
+    const list = await jsonRequest(
+      app, "GET", `/nests/${nestId}/schedules`, undefined, alice.apiKey,
+    );
+    const bounded = list.data.schedules.find(
+      (x: any) => x.agent_node === "nodes/bounded-agent",
+    );
+    expect(bounded.runs_created).toBe(2);
+    expect(bounded.enabled).toBe(false);
+    expect(fired).toBeGreaterThanOrEqual(2);
+  });
 });

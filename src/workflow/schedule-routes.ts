@@ -29,6 +29,8 @@ interface ScheduleRow {
   created_by: string;
   created_at: string;
   updated_at: string;
+  max_runs: number | null;
+  runs_created: number;
 }
 
 function toResponse(s: ScheduleRow) {
@@ -45,9 +47,21 @@ function toResponse(s: ScheduleRow) {
         ? new Date().toISOString()
         : new Date(last + s.every_minutes * 60_000).toISOString()
       : null,
+    max_runs: s.max_runs,
+    runs_created: s.runs_created,
     created_by: s.created_by,
     created_at: s.created_at,
   };
+}
+
+/** null/undefined = run forever; otherwise a positive run count. */
+function parseMaxRuns(v: unknown): number | null {
+  if (v === undefined || v === null || v === "") return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1 || n > 10_000) {
+    throw new ValidationError("max_runs must be a positive integer (or null for no bound)");
+  }
+  return n;
 }
 
 function parseEvery(v: unknown): number {
@@ -81,6 +95,7 @@ scheduleRoutes.post("/", requireWorkflowPlane, async (c) => {
   if (!agentRaw) throw new ValidationError("agent_node is required");
   const agentNode = assertSafeNodeId(agentRaw);
   const every = parseEvery(body.every_minutes);
+  const maxRuns = parseMaxRuns(body.max_runs);
 
   // Same runnability contract as the manual trigger.
   const { storage } = await engineCache.get(nestId);
@@ -111,14 +126,15 @@ scheduleRoutes.post("/", requireWorkflowPlane, async (c) => {
   const now = new Date().toISOString();
   const id = `sch_${uuid()}`;
   await db.run(
-    `INSERT INTO schedules (id, nest_id, agent_node, every_minutes, enabled, last_run_at, created_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+    `INSERT INTO schedules (id, nest_id, agent_node, every_minutes, enabled, last_run_at, max_runs, runs_created, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, 0, ?, ?, ?)`,
     [
       id,
       nestId,
       agentNode,
       every,
       body.enabled === false ? 0 : 1,
+      maxRuns,
       await resolveCallerEmail(c.get("userId")),
       now,
       now,
@@ -145,10 +161,18 @@ scheduleRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
     body.every_minutes === undefined ? row.every_minutes : parseEvery(body.every_minutes);
   const enabled =
     body.enabled === undefined ? row.enabled : body.enabled ? 1 : 0;
+  const maxRuns =
+    body.max_runs === undefined ? row.max_runs : parseMaxRuns(body.max_runs);
+  // Re-enabling or raising the bound restarts the count — "10 more from now".
+  const runsCreated =
+    body.max_runs !== undefined || (body.enabled && !row.enabled)
+      ? 0
+      : row.runs_created;
 
   await db.run(
-    "UPDATE schedules SET every_minutes = ?, enabled = ?, updated_at = ? WHERE id = ?",
-    [every, enabled, new Date().toISOString(), id],
+    `UPDATE schedules SET every_minutes = ?, enabled = ?, max_runs = ?, runs_created = ?, updated_at = ?
+      WHERE id = ?`,
+    [every, enabled, maxRuns, runsCreated, new Date().toISOString(), id],
   );
   const updated = (await db.get("SELECT * FROM schedules WHERE id = ?", [id])) as ScheduleRow;
   return c.json({ schedule: toResponse(updated) });

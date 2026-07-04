@@ -1139,6 +1139,8 @@ export interface Schedule {
   enabled: boolean;
   last_run_at: string | null;
   next_due_at: string | null;
+  max_runs: number | null;
+  runs_created: number;
   created_by: string;
   created_at: string;
 }
@@ -1150,7 +1152,12 @@ export async function listSchedules(nestId: string) {
 
 export async function createSchedule(
   nestId: string,
-  body: { agent_node: string; every_minutes: number; enabled?: boolean },
+  body: {
+    agent_node: string;
+    every_minutes: number;
+    enabled?: boolean;
+    max_runs?: number | null;
+  },
 ) {
   const r = await request<{ schedule: Schedule }>(`/nests/${nestId}/schedules`, {
     method: "POST",
@@ -1162,7 +1169,7 @@ export async function createSchedule(
 export async function updateSchedule(
   nestId: string,
   id: string,
-  body: { every_minutes?: number; enabled?: boolean },
+  body: { every_minutes?: number; enabled?: boolean; max_runs?: number | null },
 ) {
   const r = await request<{ schedule: Schedule }>(
     `/nests/${nestId}/schedules/${id}`,
@@ -1173,6 +1180,23 @@ export async function updateSchedule(
 
 export async function deleteSchedule(nestId: string, id: string) {
   return request(`/nests/${nestId}/schedules/${id}`, { method: "DELETE" });
+}
+
+/** Deterministic context assembly — what an agent run will actually read. */
+export async function queryContext(
+  nestId: string,
+  selector: string,
+  hops: number,
+  maxTokens = 4000,
+) {
+  return request<{
+    context: string;
+    trace?: { hops_used?: number; nodes_traversed?: number };
+    nodes_traversed?: number;
+  }>(`/nests/${nestId}/context`, {
+    method: "POST",
+    body: JSON.stringify({ selector, hops, max_tokens: maxTokens }),
+  });
 }
 
 export async function listRuns(nestId: string, agent?: string) {

@@ -871,6 +871,21 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("020_schedules");
   }
+
+  // 021: schedule bounds — "run every N minutes UNTIL you've run K times".
+  //   max_runs NULL = forever; runs_created counts firings; the scheduler
+  //   auto-pauses the row when the bound is hit. This is the deterministic
+  //   v1 of a goal condition; condition-based stopping (approve/metric)
+  //   layers on later.
+  if (!hasMigration("021_schedule_bounds")) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE schedules ADD COLUMN max_runs INTEGER;
+        ALTER TABLE schedules ADD COLUMN runs_created INTEGER NOT NULL DEFAULT 0;
+      `);
+    })();
+    recordMigration("021_schedule_bounds");
+  }
 }
 
 /**

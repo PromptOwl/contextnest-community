@@ -24,6 +24,8 @@ interface ScheduleRow {
   enabled: number;
   last_run_at: string | null;
   created_by: string;
+  max_runs: number | null;
+  runs_created: number;
 }
 
 /** True when the schedule's interval has elapsed since its last firing. */
@@ -71,9 +73,15 @@ export async function schedulerTick(now: number = Date.now()): Promise<string[]>
         // honest provenance ("this fired on X's schedule, not X clicking").
         [id, s.nest_id, s.agent_node, `schedule:${s.created_by}`, nowIso],
       );
+      // Stop-after bound: this firing may be the last — auto-pause the row
+      // when it hits max_runs so "run 10 times" completes instead of looping
+      // forever. Deterministic v1 of a goal condition.
+      const fired = s.runs_created + 1;
+      const done = s.max_runs !== null && fired >= s.max_runs;
       await db.run(
-        "UPDATE schedules SET last_run_at = ?, updated_at = ? WHERE id = ?",
-        [nowIso, nowIso, s.id],
+        `UPDATE schedules SET last_run_at = ?, runs_created = ?, enabled = ?, updated_at = ?
+          WHERE id = ?`,
+        [nowIso, fired, done ? 0 : s.enabled, nowIso, s.id],
       );
       created.push(id);
     } catch (err) {

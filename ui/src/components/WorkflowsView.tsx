@@ -32,6 +32,7 @@ import {
   createSchedule,
   updateSchedule,
   deleteSchedule,
+  queryContext,
   type WorkflowEdge,
   type EdgeType,
   type RunSummary,
@@ -92,39 +93,27 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
         </div>
       </div>
 
+      {/* Two surfaces, one mental model: the CANVAS is the workflow itself
+          (structure + per-wire conditions); ACTIVITY is time — standing
+          schedules on top, the run log under them. */}
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="canvas">Canvas</TabsTrigger>
-          <TabsTrigger value="edges">Flows</TabsTrigger>
-          <TabsTrigger value="runs">Runs</TabsTrigger>
-          <TabsTrigger value="schedules">Schedules</TabsTrigger>
+          <TabsTrigger value="activity">Activity</TabsTrigger>
         </TabsList>
         <TabsContent value="canvas" className="mt-4">
           <CanvasPanel nestId={nestId} />
         </TabsContent>
-        <TabsContent value="edges" className="mt-4">
-          <EdgesPanel nestId={nestId} />
-        </TabsContent>
-        <TabsContent value="runs" className="mt-4">
-          <RunsPanel nestId={nestId} />
-        </TabsContent>
-        <TabsContent value="schedules" className="mt-4">
+        <TabsContent value="activity" className="mt-4 space-y-6">
           <SchedulesPanel nestId={nestId} />
+          <RunsPanel nestId={nestId} />
         </TabsContent>
       </Tabs>
     </div>
   );
 }
 
-// ─── Edges: flows first, spreadsheet second ──────────────────────────────
-//
-// The raw edge table read as a database dump — you couldn't see the workflow
-// in it. This panel now leads with FLOWS: every chain of flow-type edges is
-// grouped under its starting node and rendered step by step with document
-// titles, type icons, and a plain-language condition pill per hop. Adding a
-// step is a guided composer (pick two docs, pick when it fires) instead of a
-// blank spreadsheet row. Non-flow (reference) edges keep a compact list at
-// the bottom.
+// ─── Shared glyphs ───────────────────────────────────────────────────────
 
 /** Small type glyph reused across flow rows; mirrors NodeTypeIcon colors. */
 function TypeGlyph({ type }: { type?: string }) {
@@ -132,451 +121,6 @@ function TypeGlyph({ type }: { type?: string }) {
   if (type === "skill") return <Zap className="h-3.5 w-3.5 text-blue-500 shrink-0" />;
   if (type === "artifact") return <FileCode2 className="h-3.5 w-3.5 text-amber-500 shrink-0" />;
   return <FileText className="h-3.5 w-3.5 text-slate-400 shrink-0" />;
-}
-
-/** "always" / if "…" / metric CAC > 500 — one pill per edge. */
-function ConditionPill({ edge }: { edge: WorkflowEdge }) {
-  if (!edge.condition_mode || !edge.condition) {
-    return (
-      <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-        always
-      </span>
-    );
-  }
-  if (edge.condition_mode === "nl") {
-    return (
-      <span
-        className="rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-300 px-2 py-0.5 text-[10px] italic max-w-[260px] truncate inline-block align-middle"
-        title={`AI judges: "${edge.condition}"`}
-      >
-        if “{String(edge.condition)}”
-      </span>
-    );
-  }
-  // structured: {term, op, value} or arbitrary JSON
-  let text = "";
-  try {
-    const c = typeof edge.condition === "string" ? JSON.parse(edge.condition) : edge.condition;
-    text = c && c.term ? `${c.term} ${c.op ?? ""} ${c.value ?? ""}` : JSON.stringify(c);
-  } catch {
-    text = String(edge.condition);
-  }
-  return (
-    <span
-      className="rounded-full bg-blue-500/10 text-blue-700 dark:text-blue-300 px-2 py-0.5 text-[10px] font-mono max-w-[260px] truncate inline-block align-middle"
-      title={`Deterministic check: ${text}`}
-    >
-      {text}
-    </span>
-  );
-}
-
-function EdgesPanel({ nestId }: { nestId: string }) {
-  const [edges, setEdges] = useState<WorkflowEdge[]>([]);
-  const [types, setTypes] = useState<EdgeType[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const [nodes, setNodes] = useState<Array<{ id: string; title?: string; type?: string }>>([]);
-
-  // Composer draft: pick two docs, choose when the step fires; metric
-  // conditions are three plain fields (term / op / value), never raw JSON.
-  const [nFrom, setNFrom] = useState("");
-  const [nTo, setNTo] = useState("");
-  const [nType, setNType] = useState("");
-  const [nWhen, setNWhen] = useState<"" | "nl" | "structured">("");
-  const [nIf, setNIf] = useState("");
-  const [nTerm, setNTerm] = useState("");
-  const [nOp, setNOp] = useState(">");
-  const [nValue, setNValue] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [composerOpen, setComposerOpen] = useState(false);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [e, t, n] = await Promise.all([
-        listEdges(nestId),
-        listEdgeTypes(nestId),
-        listNodes(nestId).then((r) => r.nodes).catch(() => []),
-      ]);
-      setEdges(e);
-      setTypes(t);
-      setNodes(n);
-      if (!nType && t.length) setNType(t.find((x) => x.is_flow)?.name ?? t[0].name);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load edges");
-    } finally {
-      setLoading(false);
-    }
-  }, [nestId, nType]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  const addRow = async () => {
-    if (!nFrom.trim() || !nTo.trim() || !nType) return;
-    setSaving(true);
-    try {
-      const condition =
-        nWhen === "structured"
-          ? { term: nTerm.trim(), op: nOp, value: isNaN(Number(nValue)) ? nValue.trim() : Number(nValue) }
-          : nWhen === "nl"
-            ? nIf.trim()
-            : null;
-      await createEdge(nestId, {
-        from_node: nFrom.trim(),
-        to_node: nTo.trim(),
-        type: nType,
-        condition_mode: nWhen || null,
-        condition: nWhen ? condition : null,
-      });
-      setNTo("");
-      setNIf("");
-      setNTerm("");
-      setNValue("");
-      setNWhen("");
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to add edge");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  /** Open the composer pre-aimed at a source node (the per-step “+” button). */
-  const composeFrom = (fromId: string) => {
-    setNFrom(fromId);
-    setComposerOpen(true);
-  };
-
-  const remove = async (id: string) => {
-    try {
-      await deleteEdge(nestId, id);
-      setEdges((prev) => prev.filter((e) => e.id !== id));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete edge");
-    }
-  };
-
-  const byId = new Map(nodes.map((n) => [n.id, n]));
-  const labelOf = (id: string) => byId.get(id)?.title || id.replace(/^nodes\//, "");
-  const typeOf = (id: string) => byId.get(id)?.type;
-
-  // Flow chains: every flow-type edge grouped under its starting node (a
-  // source no flow edge points AT). Chains render depth-first; a shared
-  // downstream doc renders under each of its parents (it's a DAG, so no
-  // cycles — `seen` only guards duplicate expansion).
-  const flowEdges = edges.filter((e) => e.type.is_flow);
-  const refEdges = edges.filter((e) => !e.type.is_flow);
-  const defaultFlowType = types.find((t) => t.is_flow)?.name;
-  const outgoing = new Map<string, WorkflowEdge[]>();
-  for (const e of flowEdges) {
-    if (!outgoing.has(e.from_node)) outgoing.set(e.from_node, []);
-    outgoing.get(e.from_node)!.push(e);
-  }
-  const hasIncoming = new Set(flowEdges.map((e) => e.to_node));
-  const roots = [...outgoing.keys()].filter((k) => !hasIncoming.has(k)).sort();
-
-  // Agents first in the pickers — they're what flows start from.
-  const nodeOptions = [...nodes].sort((a, b) => {
-    const rank = (n: { type?: string }) =>
-      n.type === "agent" ? 0 : n.type === "skill" ? 1 : 2;
-    return (
-      rank(a) - rank(b) ||
-      String(a.title || a.id).localeCompare(String(b.title || b.id))
-    );
-  });
-
-  const renderChain = (id: string, depth: number, seen: Set<string>) => {
-    const rows: React.ReactNode[] = [];
-    for (const e of outgoing.get(id) ?? []) {
-      rows.push(
-        <div
-          key={e.id}
-          className="flex items-center gap-2 py-1 rounded px-1 -mx-1 hover:bg-muted/40 group"
-          style={{ marginLeft: `${depth * 1.5}rem` }}
-        >
-          <CornerDownRight className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
-          <ConditionPill edge={e} />
-          <ArrowRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
-          <TypeGlyph type={typeOf(e.to_node)} />
-          <span className="text-sm truncate" title={e.to_node}>
-            {labelOf(e.to_node)}
-          </span>
-          {e.type.name !== defaultFlowType && (
-            <span className="text-[10px] text-muted-foreground shrink-0">
-              ({e.type.name})
-            </span>
-          )}
-          <div className="flex-1" />
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6 opacity-0 group-hover:opacity-100 text-muted-foreground"
-            onClick={() => composeFrom(e.to_node)}
-            title="Add a step after this document"
-          >
-            <Plus className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-6 w-6 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
-            onClick={() => void remove(e.id)}
-            title="Remove this step"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-        </div>,
-      );
-      if (!seen.has(e.to_node)) {
-        seen.add(e.to_node);
-        rows.push(...renderChain(e.to_node, depth + 1, seen));
-      }
-    }
-    return rows;
-  };
-
-  const composer = (
-    <div className="rounded-lg border bg-muted/20 p-3" id="wf-composer">
-      <div className="text-xs font-medium mb-2">Connect two documents</div>
-      <div className="flex items-center flex-wrap gap-2">
-        <select
-          value={nFrom}
-          onChange={(e) => setNFrom(e.target.value)}
-          className="h-8 rounded-md border bg-background px-2 text-sm max-w-[220px]"
-          data-testid="wf-compose-from"
-        >
-          <option value="">When this runs…</option>
-          {nodeOptions.map((n) => (
-            <option key={n.id} value={n.id}>
-              {n.type === "agent" ? "🤖 " : n.type === "skill" ? "⚡ " : ""}
-              {n.title || n.id}
-            </option>
-          ))}
-        </select>
-        <ArrowRight className="h-4 w-4 text-muted-foreground shrink-0" />
-        {/* When does the step fire? Chips, not a mode dropdown. */}
-        <div className="flex items-center rounded-md border h-8 text-xs overflow-hidden">
-          {(
-            [
-              ["", "always"],
-              ["nl", "if…"],
-              ["structured", "metric"],
-            ] as const
-          ).map(([mode, label], i) => (
-            <button
-              key={mode}
-              type="button"
-              className={`px-2.5 h-full ${i > 0 ? "border-l" : ""} ${
-                nWhen === mode
-                  ? "bg-primary text-primary-foreground"
-                  : "hover:bg-muted"
-              }`}
-              onClick={() => setNWhen(mode)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        {nWhen === "nl" && (
-          <Input
-            value={nIf}
-            onChange={(e) => setNIf(e.target.value)}
-            placeholder='e.g. "lost on price, not product"'
-            className="h-8 text-sm italic w-60"
-            title="An AI judges this plain-English rule against the run's context"
-          />
-        )}
-        {nWhen === "structured" && (
-          <span className="flex items-center gap-1">
-            <Input
-              value={nTerm}
-              onChange={(e) => setNTerm(e.target.value)}
-              placeholder="CAC"
-              className="h-8 text-sm w-24 font-mono"
-              title="A term from your governed definitions"
-            />
-            <select
-              value={nOp}
-              onChange={(e) => setNOp(e.target.value)}
-              className="h-8 rounded-md border bg-background px-1.5 text-sm font-mono"
-            >
-              {[">", "<", ">=", "<=", "=", "!="].map((op) => (
-                <option key={op} value={op}>{op}</option>
-              ))}
-            </select>
-            <Input
-              value={nValue}
-              onChange={(e) => setNValue(e.target.value)}
-              placeholder="500"
-              className="h-8 text-sm w-20 font-mono"
-            />
-          </span>
-        )}
-        <ArrowRight className="h-4 w-4 text-muted-foreground shrink-0" />
-        <select
-          value={nTo}
-          onChange={(e) => setNTo(e.target.value)}
-          className="h-8 rounded-md border bg-background px-2 text-sm max-w-[220px]"
-          data-testid="wf-compose-to"
-        >
-          <option value="">…continue to</option>
-          {nodeOptions.map((n) => (
-            <option key={n.id} value={n.id}>
-              {n.type === "agent" ? "🤖 " : n.type === "skill" ? "⚡ " : ""}
-              {n.title || n.id}
-            </option>
-          ))}
-        </select>
-        <Button
-          size="sm"
-          className="h-8"
-          disabled={saving || !nFrom || !nTo || (nWhen === "nl" && !nIf.trim()) || (nWhen === "structured" && !nTerm.trim())}
-          onClick={() => void addRow()}
-        >
-          {saving ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Plus className="h-3.5 w-3.5 mr-1" />
-          )}
-          Add step
-        </Button>
-        {/* Edge type stays available but out of the way — "next" is right
-            for flow steps; reference types annotate the ontology. */}
-        <select
-          value={nType}
-          onChange={(e) => setNType(e.target.value)}
-          className="h-8 rounded-md border bg-background px-1.5 text-xs text-muted-foreground ml-auto"
-          title="Edge type — flow types (▶) are walked by the runner; others are reference links"
-        >
-          {types.map((t) => (
-            <option key={t.id} value={t.name}>
-              {t.is_flow ? "▶ " : ""}
-              {t.name}
-            </option>
-          ))}
-        </select>
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <p className="text-sm text-muted-foreground">
-          Each card is a flow the runner can walk, starting from its top node.
-        </p>
-        <div className="flex-1" />
-        <Button variant="outline" size="sm" onClick={() => void load()}>
-          <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
-        </Button>
-      </div>
-
-      {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {error}
-        </div>
-      )}
-
-      {loading ? (
-        <div className="py-8 text-center text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin inline" />
-        </div>
-      ) : roots.length === 0 ? (
-        <div className="rounded-lg border border-dashed p-6 text-center">
-          <p className="text-sm font-medium mb-1">No flows yet</p>
-          <p className="text-xs text-muted-foreground max-w-md mx-auto">
-            A flow is a chain of steps: an <b>agent</b> runs, and each
-            connection says what happens next — always, when an AI judges a
-            rule true, or when a metric crosses a threshold. Connect your
-            first two documents below.
-          </p>
-        </div>
-      ) : (
-        roots.map((rootId) => (
-          <div key={rootId} className="rounded-lg border p-3">
-            <div className="flex items-center gap-2 mb-2">
-              <TypeGlyph type={typeOf(rootId)} />
-              <span className="font-medium text-sm truncate" title={rootId}>
-                {labelOf(rootId)}
-              </span>
-              <Badge variant="secondary" className="text-[10px]">
-                {typeOf(rootId) === "agent" ? "agent · start" : "start"}
-              </Badge>
-              <div className="flex-1" />
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 text-xs text-muted-foreground"
-                onClick={() => composeFrom(rootId)}
-              >
-                <Plus className="h-3.5 w-3.5 mr-1" /> Step
-              </Button>
-            </div>
-            {renderChain(rootId, 0, new Set([rootId]))}
-          </div>
-        ))
-      )}
-
-      {(composerOpen || roots.length === 0 || refEdges.length + flowEdges.length === 0) ? (
-        composer
-      ) : (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => setComposerOpen(true)}
-        >
-          <Plus className="h-3.5 w-3.5 mr-1" /> Connect documents
-        </Button>
-      )}
-
-      {refEdges.length > 0 && (
-        <details className="rounded-lg border px-3 py-2">
-          <summary className="cursor-pointer text-xs font-medium text-muted-foreground select-none">
-            Reference links ({refEdges.length}) — ontology edges the runner
-            doesn't walk
-          </summary>
-          <div className="mt-2 space-y-1">
-            {refEdges.map((e) => (
-              <div key={e.id} className="flex items-center gap-2 text-sm group">
-                <TypeGlyph type={typeOf(e.from_node)} />
-                <span className="truncate" title={e.from_node}>{labelOf(e.from_node)}</span>
-                <span
-                  className="rounded-full px-2 py-0.5 text-[10px] text-muted-foreground border"
-                  style={{ borderColor: e.type.color ?? undefined }}
-                >
-                  {e.type.name}
-                </span>
-                <TypeGlyph type={typeOf(e.to_node)} />
-                <span className="truncate" title={e.to_node}>{labelOf(e.to_node)}</span>
-                <div className="flex-1" />
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-6 w-6 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
-                  onClick={() => void remove(e.id)}
-                  title="Delete link"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        </details>
-      )}
-
-      <p className="text-[11px] text-muted-foreground">
-        <b>always</b> = the step fires whenever the previous one runs ·{" "}
-        <b>if…</b> = an AI judges a plain-English rule against the run's
-        context · <b>metric</b> = a deterministic check like{" "}
-        <code>CAC &gt; 500</code>, resolved from your governed terms.
-      </p>
-    </div>
-  );
 }
 
 // ─── Runs: list + replayable trace ───────────────────────────────────────
@@ -868,6 +412,9 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   const [runFeedback, setRunFeedback] = useState("");
   const [hops, setHops] = useState(1);
   const [copied, setCopied] = useState("");
+  // Test-it-out: run the node's ctx query and show what a runner would read.
+  const [preview, setPreview] = useState<{ text: string; nodes: number } | null>(null);
+  const [previewing, setPreviewing] = useState(false);
   // Shelf search: find a doc/artifact by name, then drag its port to wire it.
   const [shelfSearch, setShelfSearch] = useState("");
 
@@ -997,6 +544,7 @@ function CanvasPanel({ nestId }: { nestId: string }) {
 
   const selectEdge = (e: WorkflowEdge) => {
     setSelNode(null);
+    setPreview(null);
     setSelEdge(e.id);
     setEType(e.type.name);
     setEWhen((e.condition_mode as "" | "nl" | "structured") || "");
@@ -1246,6 +794,7 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                         onClick={(ev) => {
                           ev.stopPropagation();
                           setSelEdge(null);
+                          setPreview(null);
                           setSelNode(p.id);
                         }}
                         onMouseUp={() => {
@@ -1571,6 +1120,53 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                   >
                     {copied === "write" ? "✓ copied" : `write → ${writeCmd.slice(0, 64)}…`}
                   </button>
+                  {/* Test it out: execute the same deterministic read a runner
+                      does and show the assembled context right here. */}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full h-7 text-xs"
+                    disabled={previewing}
+                    onClick={async () => {
+                      setPreviewing(true);
+                      try {
+                        const r = await queryContext(nestId, selector, hops);
+                        setPreview({
+                          text: r.context || "(empty context)",
+                          nodes:
+                            r.trace?.nodes_traversed ?? r.nodes_traversed ?? 0,
+                        });
+                      } catch (err) {
+                        setError(err instanceof Error ? err.message : "Preview failed");
+                      } finally {
+                        setPreviewing(false);
+                      }
+                    }}
+                  >
+                    {previewing ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <>Test: preview what it reads ({hops} hop{hops === 1 ? "" : "s"})</>
+                    )}
+                  </Button>
+                  {preview && (
+                    <div className="rounded-md border bg-muted/30 p-2">
+                      <div className="flex items-center text-[10px] text-muted-foreground mb-1">
+                        <span>{preview.nodes} node{preview.nodes === 1 ? "" : "s"} assembled — exactly what a run reads</span>
+                        <button
+                          type="button"
+                          className="ml-auto hover:text-foreground"
+                          onClick={() => setPreview(null)}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                      <pre className="max-h-56 overflow-auto whitespace-pre-wrap text-[10.5px] leading-relaxed">
+                        {preview.text.slice(0, 4000)}
+                        {preview.text.length > 4000 ? "\n…(truncated)" : ""}
+                      </pre>
+                    </div>
+                  )}
                 </div>
               </div>
             );
@@ -1603,6 +1199,7 @@ function SchedulesPanel({ nestId }: { nestId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [newAgent, setNewAgent] = useState("");
   const [newEvery, setNewEvery] = useState(60);
+  const [newMaxRuns, setNewMaxRuns] = useState<number | "">("");
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
@@ -1638,9 +1235,11 @@ function SchedulesPanel({ nestId }: { nestId: string }) {
   return (
     <div className="max-w-2xl space-y-4">
       <p className="text-sm text-muted-foreground">
-        A schedule creates a run for its agent on the clock; a polling runner
-        executes it. Output still lands as a review request — scheduling
-        doesn't skip governance.
+        A schedule decides <b>when a run starts</b> and its stop-after bound
+        decides <b>when it's done</b>. What happens <em>inside</em> a run —
+        which step fires, on what condition — lives on the wires in the
+        Canvas (click a wire to set always / if… / metric). Scheduled output
+        still lands as a review request; scheduling doesn't skip governance.
       </p>
 
       {error && (
@@ -1658,8 +1257,9 @@ function SchedulesPanel({ nestId }: { nestId: string }) {
           <Clock3 className="h-6 w-6 text-muted-foreground/50 mx-auto mb-2" />
           <p className="text-sm font-medium mb-1">Nothing on the clock yet</p>
           <p className="text-xs text-muted-foreground">
-            Pick an agent below — every interval, the server files a run for
-            it.
+            {runnables.length
+              ? "Pick an agent below — every interval, the server files a run for it."
+              : "This nest has no runnable agents yet. Create one from Documents → New → type Agent (its body is the instructions), then schedule it here."}
           </p>
         </div>
       ) : (
@@ -1673,12 +1273,19 @@ function SchedulesPanel({ nestId }: { nestId: string }) {
               <Badge variant="secondary" className="text-[10px] shrink-0">
                 every {everyLabel(s.every_minutes)}
               </Badge>
+              {s.max_runs !== null && (
+                <Badge variant="outline" className="text-[10px] shrink-0" title="Stops automatically after this many runs">
+                  {s.runs_created}/{s.max_runs} runs
+                </Badge>
+              )}
               {s.enabled ? (
                 s.next_due_at && (
                   <span className="text-[11px] text-muted-foreground shrink-0">
                     next ~{timeOf(s.next_due_at)}
                   </span>
                 )
+              ) : s.max_runs !== null && s.runs_created >= s.max_runs ? (
+                <Badge className="text-[10px] shrink-0 bg-emerald-600">done</Badge>
               ) : (
                 <Badge variant="outline" className="text-[10px] shrink-0">
                   paused
@@ -1760,6 +1367,20 @@ function SchedulesPanel({ nestId }: { nestId: string }) {
             <option value={360}>every 6 hours</option>
             <option value={1440}>every day</option>
           </select>
+          <select
+            value={newMaxRuns}
+            onChange={(e) =>
+              setNewMaxRuns(e.target.value === "" ? "" : Number(e.target.value))
+            }
+            className="h-8 rounded-md border bg-background px-2 text-sm"
+            title="The stop condition: pause automatically after this many runs"
+          >
+            <option value="">until stopped</option>
+            <option value={1}>once</option>
+            <option value={5}>stop after 5</option>
+            <option value={10}>stop after 10</option>
+            <option value={25}>stop after 25</option>
+          </select>
           <Button
             size="sm"
             className="h-8"
@@ -1770,6 +1391,7 @@ function SchedulesPanel({ nestId }: { nestId: string }) {
                 await createSchedule(nestId, {
                   agent_node: newAgent,
                   every_minutes: newEvery,
+                  max_runs: newMaxRuns === "" ? null : newMaxRuns,
                 });
                 setNewAgent("");
                 await load();
