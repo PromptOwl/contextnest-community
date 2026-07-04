@@ -120,64 +120,6 @@ async function validateCondition(
 }
 
 /** Reject a new flow edge that would close a cycle; names the path. */
-/**
- * Whole-graph acyclicity check over ALL current flow edges in a nest.
- * Per-edge `assertNoFlowCycle` only guards edge *creation* while the type is
- * already flow — it can't see a cycle assembled under a NON-flow type that is
- * later flipped to `is_flow`. This is the backstop for that path (called from
- * the edge-type upsert when is_flow goes false→true). Kahn's algorithm: if any
- * node never reaches in-degree 0, the remaining subgraph contains a cycle.
- */
-export async function assertFlowGraphAcyclic(
-  nestId: string,
-  extraFlowTypeId?: string,
-): Promise<void> {
-  const db = getDb();
-  // Evaluate the WOULD-BE flow graph: edges under already-flow types, PLUS
-  // edges under `extraFlowTypeId` (the type about to be flipped to flow), so
-  // the check runs before we commit the flip.
-  const rows = (await db.all(
-    `SELECT e.from_node, e.to_node FROM edges e
-       JOIN edge_types t ON t.id = e.type_id
-      WHERE e.nest_id = ? AND (t.is_flow = 1 OR t.id = ?)`,
-    [nestId, extraFlowTypeId ?? ""],
-  )) as Array<{ from_node: string; to_node: string }>;
-
-  const adj = new Map<string, string[]>();
-  const indeg = new Map<string, number>();
-  const nodes = new Set<string>();
-  for (const r of rows) {
-    if (r.from_node === r.to_node) {
-      throw new ConflictError(
-        `cycle: ["${r.from_node}"] — a flow edge cannot be a self-loop`,
-      );
-    }
-    nodes.add(r.from_node);
-    nodes.add(r.to_node);
-    (adj.get(r.from_node) ?? adj.set(r.from_node, []).get(r.from_node)!).push(
-      r.to_node,
-    );
-    indeg.set(r.to_node, (indeg.get(r.to_node) ?? 0) + 1);
-    if (!indeg.has(r.from_node)) indeg.set(r.from_node, indeg.get(r.from_node) ?? 0);
-  }
-
-  const queue = [...nodes].filter((n) => (indeg.get(n) ?? 0) === 0);
-  let removed = 0;
-  while (queue.length) {
-    const cur = queue.shift()!;
-    removed++;
-    for (const nb of adj.get(cur) ?? []) {
-      indeg.set(nb, (indeg.get(nb) ?? 0) - 1);
-      if ((indeg.get(nb) ?? 0) === 0) queue.push(nb);
-    }
-  }
-  if (removed < nodes.size) {
-    throw new ConflictError(
-      "cycle: enabling flow on this edge type would create a cycle in the flow graph — flow edges must form a DAG",
-    );
-  }
-}
-
 async function assertNoFlowCycle(
   nestId: string,
   fromNode: string,

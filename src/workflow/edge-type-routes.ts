@@ -16,7 +16,7 @@ import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
-import { assertFlowGraphAcyclic } from "./edge-routes.js";
+import { assertFlowGraphAcyclic } from "./flow-graph.js";
 
 export const requireWorkflowPlane = async (c: any, next: any) => {
   if (!config.FEATURE_WORKFLOW_PLANE) {
