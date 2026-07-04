@@ -125,6 +125,7 @@ export async function exchangePromptOwlToken(token: string) {
 export async function getHealth() {
   return request<{
     status: string;
+    version?: string;
     auth_mode: string;
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
@@ -142,6 +143,7 @@ export interface AdminSettings {
   public_base_url: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
+  subagent_runs_enabled: boolean;
 }
 
 export async function getAdminSettings() {

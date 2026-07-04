@@ -44,6 +44,7 @@ export type LoginSuccessUser = {
 export interface AuthContextValue {
   authMode: AuthMode;
   logoUrl: string | null;
+  serverVersion: string | null;
   adminStatus: AdminStatus | null;
   authenticated: boolean;
   isAdmin: boolean;
@@ -59,6 +60,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: PropsWithChildren) {
   const [authMode, setAuthMode] = useState<AuthMode>(null);
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [adminStatus, setAdminStatus] = useState<AdminStatus | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -104,6 +106,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         const mode = h.auth_mode as AuthMode;
         setAuthMode(mode);
         setLogoUrl(h.logo_url ?? null);
+        setServerVersion(h.version ?? null);
 
         const status = await api.getAdminStatus();
         if (cancelled) return;
@@ -236,6 +239,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       value={{
         authMode,
         logoUrl,
+        serverVersion,
         adminStatus,
         authenticated,
         isAdmin,

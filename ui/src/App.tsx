@@ -87,6 +87,7 @@ export default function App() {
   const {
     authMode,
     logoUrl,
+    serverVersion,
     adminStatus,
     authenticated,
     isAdmin,
@@ -713,6 +714,10 @@ export default function App() {
           />
         )}
       </main>
+
+      <footer className="max-w-6xl mx-auto px-4 py-4 text-xs text-muted-foreground text-center">
+        ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
+      </footer>
 
       {showAdminLogin && (
         <AdminLoginModal

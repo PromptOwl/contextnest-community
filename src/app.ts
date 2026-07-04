@@ -43,7 +43,7 @@ import {
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 // Resolve UI static files. In built mode this file lives at dist/index.js,
 // so siblings of __dirname include dist/web3. In dev (`tsx src/index.ts`)
@@ -51,6 +51,17 @@ import { existsSync } from "node:fs";
 // (vite build output) so `npm run dev` serves the freshly-built bundle.
 // serveStatic wants a path relative to CWD.
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+// Built mode puts this file at dist/app.js, dev at src/app.ts — package.json
+// is one level up from either.
+const SERVICE_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"))
+      .version as string;
+  } catch {
+    return "unknown";
+  }
+})();
 const UI_DIR_CANDIDATES = [
   join(HERE, "web3"),
   join(process.cwd(), "dist", "web3"),
@@ -151,7 +162,7 @@ export function createApp(): Hono<AuthEnv> {
     c.json({
       status: isSuspended() ? "suspended" : "ok",
       service: "contextnest-community",
-      version: "0.1.0",
+      version: SERVICE_VERSION,
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
@@ -271,6 +282,7 @@ export function createApp(): Hono<AuthEnv> {
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+    subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
   });
 
   app.get("/admin/settings", async (c) => {
@@ -317,6 +329,21 @@ export function createApp(): Hono<AuthEnv> {
         name: "FEATURE_WORKFLOW_PLANE",
         value: body.workflow_plane_enabled ? "true" : null,
       });
+    }
+    if ("subagent_runs_enabled" in body) {
+      // Requires the base plane: turning recursion on with the plane off is
+      // always a mistake, so reject rather than silently store a dead flag.
+      const planeOn =
+        "workflow_plane_enabled" in body
+          ? Boolean(body.workflow_plane_enabled)
+          : config.FEATURE_WORKFLOW_PLANE;
+      if (body.subagent_runs_enabled && !planeOn)
+        errors.push("subagent_runs_enabled requires workflow_plane_enabled");
+      else
+        pending.push({
+          name: "FEATURE_SUBAGENT_RUNS",
+          value: body.subagent_runs_enabled ? "true" : null,
+        });
     }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);

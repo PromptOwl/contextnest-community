@@ -203,6 +203,30 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
             </CardContent>
           </Card>
 
+          {/* Sub-agent runs (recursion) */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Sub-agent runs</CardTitle>
+              <CardDescription>
+                Lets a run spawn nested sub-agent runs (recursion), with a
+                server-enforced depth cap. Riskier surface — needs the
+                workflow plane on, and is gated separately for a reason.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center justify-between">
+                <span className="text-sm">
+                  {settings.subagent_runs_enabled ? "On" : "Off"}
+                </span>
+                <Switch
+                  checked={settings.subagent_runs_enabled}
+                  disabled={!settings.workflow_plane_enabled}
+                  onCheckedChange={(v) => onUpdate({ subagent_runs_enabled: v })}
+                />
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Max upload size */}
           <Card>
             <CardHeader>
