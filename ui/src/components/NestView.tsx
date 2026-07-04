@@ -16,7 +16,7 @@ import {
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
-  FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus,
+  FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 
@@ -37,7 +37,9 @@ function NodeTypeIcon({
         ? { Icon: Zap, cls: "text-blue-600 dark:text-blue-400 bg-blue-500/10", label: "Skill" }
         : type === "artifact"
           ? { Icon: FileCode2, cls: "text-amber-600 dark:text-amber-400 bg-amber-500/10", label: "Artifact" }
-          : { Icon: FileText, cls: "text-slate-500 dark:text-slate-400 bg-slate-500/10", label: "Document" };
+          : type === "tool"
+            ? { Icon: Wrench, cls: "text-teal-600 dark:text-teal-400 bg-teal-500/10", label: "Tool" }
+            : { Icon: FileText, cls: "text-slate-500 dark:text-slate-400 bg-slate-500/10", label: "Document" };
   return (
     <span
       className={`inline-flex items-center justify-center rounded-md p-1 shrink-0 ${spec.cls}`}

@@ -7,6 +7,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { notifyReviewRequested } from "./notify-service.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
@@ -64,6 +65,15 @@ export async function submitForReview(params: {
     "UPDATE node_versions SET status = 'pending_review' WHERE nest_id = ? AND node_id = ? AND version = ?",
     [params.nestId, params.nodeId, params.version],
   );
+
+  // Fan out to watchers of this doc + of agents flowing into it (HITL tags).
+  // Best-effort inside notifyReviewRequested — never fails the submission.
+  await notifyReviewRequested({
+    nestId: params.nestId,
+    nodeId: params.nodeId,
+    requestedBy: params.requestedBy,
+    reviewId: id,
+  });
 
   return (await getReviewRequest(id))!;
 }

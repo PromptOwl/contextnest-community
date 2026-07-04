@@ -24,6 +24,11 @@ import {
   runDetailRoutes,
 } from "./workflow/run-routes.js";
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
+import { envRoutes } from "./workflow/env-routes.js";
+import {
+  listNotifications,
+  markNotificationsRead,
+} from "./governance/notify-service.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
 import {
@@ -427,7 +432,24 @@ export function createApp(): Hono<AuthEnv> {
     // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
     const items = mine.filter((r) => r.requestedBy !== me).map(toItem).sort(byNewest);
     const waiting = mine.filter((r) => r.requestedBy === me).map(toItem).sort(byNewest);
-    return c.json({ items, waiting });
+    // Watcher notifications (HITL tags) ride along so the inbox is one call.
+    const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });
+    return c.json({ items, waiting, notifications });
+  });
+
+  // Watcher notifications — read + mark-read (auth via the /me/* middleware).
+  app.get("/me/notifications", async (c) => {
+    const me = await resolveCallerEmail(c.get("userId"));
+    const unreadOnly = c.req.query("unread") === "true";
+    return c.json({ notifications: await listNotifications(me, { unreadOnly }) });
+  });
+  app.post("/me/notifications/read", async (c) => {
+    const me = await resolveCallerEmail(c.get("userId"));
+    const body = await c.req
+      .json<{ ids?: string[] | "all" }>()
+      .catch(() => ({}) as { ids?: string[] | "all" });
+    await markNotificationsRead(me, body.ids === "all" ? "all" : body.ids ?? []);
+    return c.json({ ok: true });
   });
 
   // flexAuthMiddleware so it works without auth in open mode and with
@@ -791,6 +813,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
+  nestsApp.route("/:nestId/env", envRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);

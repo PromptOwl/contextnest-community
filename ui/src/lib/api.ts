@@ -1018,8 +1018,22 @@ export interface WorkItem {
   priority?: string;
 }
 
+export interface WatcherNotification {
+  id: string;
+  nest_id: string;
+  kind: string;
+  subject_id: string | null;
+  message: string;
+  created_at: string;
+  read_at: string | null;
+}
+
 export async function getMyWork() {
-  return request<{ items: WorkItem[]; waiting: WorkItem[] }>("/me/work");
+  return request<{
+    items: WorkItem[];
+    waiting: WorkItem[];
+    notifications?: WatcherNotification[];
+  }>("/me/work");
 }
 
 export async function approveReview(nestId: string, nodeId: string, note?: string) {
@@ -1180,6 +1194,63 @@ export async function updateSchedule(
 
 export async function deleteSchedule(nestId: string, id: string) {
   return request(`/nests/${nestId}/schedules/${id}`, { method: "DELETE" });
+}
+
+// Watchers — tag a person to a node (usually an agent) for HITL notifications.
+export async function listNodeWatchers(nestId: string, nodeId: string) {
+  const r = await request<{ watchers: Array<{ user_email: string }> }>(
+    `/nests/${nestId}/nodes/${nodeId}/watchers`,
+  );
+  return r.watchers;
+}
+
+export async function addNodeWatcher(nestId: string, nodeId: string, email: string) {
+  const r = await request<{ watchers: Array<{ user_email: string }> }>(
+    `/nests/${nestId}/nodes/${nodeId}/watchers`,
+    { method: "POST", body: JSON.stringify({ email }) },
+  );
+  return r.watchers;
+}
+
+export async function removeNodeWatcher(nestId: string, nodeId: string, email: string) {
+  const r = await request<{ watchers: Array<{ user_email: string }> }>(
+    `/nests/${nestId}/nodes/${nodeId}/watchers?email=${encodeURIComponent(email)}`,
+    { method: "DELETE" },
+  );
+  return r.watchers;
+}
+
+export async function markNotificationsRead(ids: string[] | "all") {
+  return request<{ ok: boolean }>("/me/notifications/read", {
+    method: "POST",
+    body: JSON.stringify({ ids }),
+  });
+}
+
+// Per-nest env store — tool credentials; values are masked on read.
+export interface EnvEntry {
+  key: string;
+  value_masked: string;
+  updated_by: string;
+  updated_at: string;
+}
+
+export async function listEnv(nestId: string) {
+  const r = await request<{ env: EnvEntry[] }>(`/nests/${nestId}/env`);
+  return r.env;
+}
+
+export async function putEnv(nestId: string, key: string, value: string) {
+  return request<{ key: string; value_masked: string }>(`/nests/${nestId}/env`, {
+    method: "PUT",
+    body: JSON.stringify({ key, value }),
+  });
+}
+
+export async function deleteEnv(nestId: string, key: string) {
+  return request(`/nests/${nestId}/env/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
 }
 
 /** Deterministic context assembly — what an agent run will actually read. */

@@ -52,6 +52,7 @@ const HISTORICAL_MIGRATIONS = [
   "019_grants",
   "020_schedules",
   "021_schedule_bounds",
+  "022_tools_and_watchers",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -320,6 +321,37 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_agent
       ON schedules(nest_id, agent_node);
+
+    CREATE TABLE IF NOT EXISTS nest_env (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_by TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, key)
+    );
+    CREATE TABLE IF NOT EXISTS watchers (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      user_email TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_watchers_unique
+      ON watchers(nest_id, node_id, user_email);
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      user_email TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      subject_id TEXT,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      read_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_user
+      ON notifications(user_email, read_at, created_at);
 
     CREATE TABLE IF NOT EXISTS edge_types (
       id TEXT PRIMARY KEY,

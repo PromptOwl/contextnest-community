@@ -27,6 +27,7 @@ import {
   FileText,
   Bot,
   Zap,
+  Wrench,
   Pencil,
   Users,
   Link as LinkIcon,
@@ -224,7 +225,7 @@ export function DocumentEditor({
   // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
   // "document" = the normal markdown editor. Only meaningful while isNew.
   const [newType, setNewType] = useState<
-    "document" | "artifact" | "agent" | "skill"
+    "document" | "artifact" | "agent" | "skill" | "tool"
   >("document");
   const isArtifactDraft = isNew && newType === "artifact";
   // Inline anchored comments (annotations) parked beside the doc. commentMode
@@ -1558,6 +1559,8 @@ export function DocumentEditor({
                             on: "bg-violet-500/15 text-violet-700 dark:text-violet-300" },
                           { value: "skill", label: "Skill", Icon: Zap,
                             on: "bg-blue-500/15 text-blue-700 dark:text-blue-300" },
+                          { value: "tool", label: "Tool", Icon: Wrench,
+                            on: "bg-teal-500/15 text-teal-700 dark:text-teal-300" },
                         ]
                       : []),
                   ] as const
@@ -1574,10 +1577,14 @@ export function DocumentEditor({
                           ? "Markdown document"
                           : value === "artifact"
                             ? "Hosted HTML artifact"
-                            : `${label} (runnable)`
+                            : value === "tool"
+                              ? "Tool — the body is code an agent can call"
+                              : `${label} (runnable)`
                       }
                       onClick={() =>
-                        setNewType(value as "document" | "artifact" | "agent" | "skill")
+                        setNewType(
+                          value as "document" | "artifact" | "agent" | "skill" | "tool",
+                        )
                       }
                       className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${
                         i > 0 ? "border-l" : ""
@@ -1599,6 +1606,12 @@ export function DocumentEditor({
                 <p className="mt-1 text-[11px] text-muted-foreground">
                   The body is the instructions. Add flow edges from it in the
                   Workflows tab, then trigger a run.
+                </p>
+              )}
+              {newType === "tool" && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  The body is code. Wire it to an agent on the canvas and the
+                  runner ships it (plus the nest's env vars) in the run bundle.
                 </p>
               )}
             </div>

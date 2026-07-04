@@ -17,6 +17,7 @@ import {
   FileCode2,
   CornerDownRight,
   Clock3,
+  Wrench,
 } from "lucide-react";
 import {
   listEdges,
@@ -33,6 +34,13 @@ import {
   updateSchedule,
   deleteSchedule,
   queryContext,
+  listNodeWatchers,
+  addNodeWatcher,
+  removeNodeWatcher,
+  listEnv,
+  putEnv,
+  deleteEnv,
+  type EnvEntry,
   type WorkflowEdge,
   type EdgeType,
   type RunSummary,
@@ -112,6 +120,7 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
         <TabsContent value="activity" className="mt-4 space-y-6">
           <SchedulesPanel nestId={nestId} />
           <RunsPanel nestId={nestId} />
+          <EnvPanel nestId={nestId} />
         </TabsContent>
       </Tabs>
     </div>
@@ -125,6 +134,7 @@ function TypeGlyph({ type }: { type?: string }) {
   if (type === "agent") return <Bot className="h-3.5 w-3.5 text-violet-500 shrink-0" />;
   if (type === "skill") return <Zap className="h-3.5 w-3.5 text-blue-500 shrink-0" />;
   if (type === "artifact") return <FileCode2 className="h-3.5 w-3.5 text-amber-500 shrink-0" />;
+  if (type === "tool") return <Wrench className="h-3.5 w-3.5 text-teal-500 shrink-0" />;
   return <FileText className="h-3.5 w-3.5 text-slate-400 shrink-0" />;
 }
 
@@ -869,6 +879,9 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   const [previewing, setPreviewing] = useState(false);
   // Shelf search: find a doc/artifact by name, then drag its port to wire it.
   const [shelfSearch, setShelfSearch] = useState("");
+  // HITL tags: people watching the selected node (notified on its output).
+  const [watchers, setWatchers] = useState<string[]>([]);
+  const [watcherEmail, setWatcherEmail] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -890,6 +903,17 @@ function CanvasPanel({ nestId }: { nestId: string }) {
       setLoading(false);
     }
   }, [nestId]);
+
+  useEffect(() => {
+    if (!selNode) return;
+    let cancelled = false;
+    listNodeWatchers(nestId, selNode)
+      .then((w) => !cancelled && setWatchers(w.map((x) => x.user_email)))
+      .catch(() => !cancelled && setWatchers([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [nestId, selNode]);
 
   const copy = (key: string, text: string) => {
     void navigator.clipboard?.writeText(text).then(() => {
@@ -1493,6 +1517,68 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                   </div>
                 )}
 
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] uppercase tracking-wide text-muted-foreground">
+                    Notify on output
+                  </label>
+                  {watchers.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {watchers.map((w) => (
+                        <span
+                          key={w}
+                          className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px]"
+                        >
+                          {w}
+                          <button
+                            type="button"
+                            className="text-muted-foreground hover:text-destructive"
+                            title="Stop notifying"
+                            onClick={async () => {
+                              const next = await removeNodeWatcher(nestId, selNode, w);
+                              setWatchers(next.map((x) => x.user_email));
+                            }}
+                          >
+                            ✕
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex items-center gap-1.5">
+                    <Input
+                      value={watcherEmail}
+                      onChange={(e) => setWatcherEmail(e.target.value)}
+                      placeholder="person@team.com"
+                      className="h-7 text-xs flex-1"
+                      onKeyDown={async (e) => {
+                        if (e.key === "Enter" && watcherEmail.includes("@")) {
+                          const next = await addNodeWatcher(nestId, selNode, watcherEmail.trim());
+                          setWatchers(next.map((x) => x.user_email));
+                          setWatcherEmail("");
+                        }
+                      }}
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2"
+                      disabled={!watcherEmail.includes("@")}
+                      onClick={async () => {
+                        const next = await addNodeWatcher(nestId, selNode, watcherEmail.trim());
+                        setWatchers(next.map((x) => x.user_email));
+                        setWatcherEmail("");
+                      }}
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Tagged people get an inbox notification when this node's
+                    output lands for review. (Slack/webhook delivery comes
+                    later — same table.)
+                  </p>
+                </div>
+
                 <div>
                   <label className="block text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
                     Add a step after this
@@ -1859,5 +1945,113 @@ function SchedulesPanel({ nestId }: { nestId: string }) {
         </div>
       </div>
     </div>
+  );
+}
+
+
+// ─── Env: the tool credential store ──────────────────────────────────────
+//
+// Key/value pairs the runner hands to TOOL nodes (via the run bundle).
+// Values are write-only here — the API masks them on read. Not encrypted at
+// rest; same trust domain as the nest content (it says so in the UI).
+
+function EnvPanel({ nestId }: { nestId: string }) {
+  const [env, setEnv] = useState<EnvEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [newKey, setNewKey] = useState("");
+  const [newValue, setNewValue] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setEnv(await listEnv(nestId));
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load env");
+    }
+  }, [nestId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return (
+    <details className="max-w-2xl rounded-lg border px-4 py-3">
+      <summary className="cursor-pointer select-none text-sm font-medium flex items-center gap-2">
+        <Wrench className="h-4 w-4 text-teal-500 inline" /> Tool environment
+        ({env.length} key{env.length === 1 ? "" : "s"})
+      </summary>
+      <div className="mt-3 space-y-3">
+        <p className="text-[11px] text-muted-foreground">
+          Credentials for <b>tool</b> nodes. Values are write-only here and
+          travel to the runner inside the run bundle. Stored alongside nest
+          content, not encrypted — treat this box like the nest itself.
+        </p>
+        {error && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {error}
+          </div>
+        )}
+        {env.length > 0 && (
+          <div className="rounded-md border divide-y">
+            {env.map((e) => (
+              <div key={e.key} className="px-3 py-1.5 flex items-center gap-2 text-xs">
+                <span className="font-mono font-medium">{e.key}</span>
+                <span className="font-mono text-muted-foreground">{e.value_masked}</span>
+                <div className="flex-1" />
+                <span className="text-muted-foreground">{e.updated_by}</span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                  title="Delete key"
+                  onClick={async () => {
+                    await deleteEnv(nestId, e.key);
+                    await load();
+                  }}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center gap-1.5">
+          <Input
+            value={newKey}
+            onChange={(e) => setNewKey(e.target.value.toUpperCase())}
+            placeholder="SLACK_TOKEN"
+            className="h-8 text-xs font-mono w-44"
+          />
+          <Input
+            value={newValue}
+            onChange={(e) => setNewValue(e.target.value)}
+            placeholder="value (write-only)"
+            type="password"
+            className="h-8 text-xs font-mono flex-1"
+          />
+          <Button
+            size="sm"
+            className="h-8"
+            disabled={saving || !/^[A-Z][A-Z0-9_]*$/.test(newKey) || !newValue}
+            onClick={async () => {
+              setSaving(true);
+              try {
+                await putEnv(nestId, newKey, newValue);
+                setNewKey("");
+                setNewValue("");
+                await load();
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Save failed");
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Set"}
+          </Button>
+        </div>
+      </div>
+    </details>
   );
 }

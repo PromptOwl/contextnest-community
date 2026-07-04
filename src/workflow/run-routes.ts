@@ -23,6 +23,7 @@ import { resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { isSuspended, getSuspensionReason, getCurrentLicense } from "../auth/license.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
+import { envValues } from "./env-routes.js";
 
 const RUNNABLE_TYPES = ["agent", "skill"];
 
@@ -268,14 +269,24 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
     reachable.add(e.to_node);
   }
   const node_types: Record<string, string> = {};
+  // Tool nodes reachable from this agent travel WITH the bundle (body =
+  // code the runner can execute as a tool). Documents don't — the runner
+  // reads those through the governed /context path.
+  const tools: Record<string, string> = {};
   for (const nid of reachable) {
     try {
       const d = await storage.readDocument(nid);
-      node_types[nid] = (d.frontmatter.type as string) || "document";
+      const t = (d.frontmatter.type as string) || "document";
+      node_types[nid] = t;
+      if (t === "tool") tools[nid] = d.body || "";
     } catch {
       /* target not yet created — runner treats unknown as a write target */
     }
   }
+  // Env store values ride along for the tools. The bundle already requires
+  // write permission to obtain, and this is the ONLY surface that returns
+  // full values (the /env routes mask them).
+  const env = await envValues(nestId);
   // Derived from auth, never client-supplied — this is the accountability
   // field ("who triggered this run"), so it must be trustworthy. A scheduler
   // or external runner authenticates with its own key; that identity is the
@@ -312,6 +323,8 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
       },
       edges,
       node_types,
+      tools,
+      env,
       definitions,
       trace_hint: {
         retrieval:

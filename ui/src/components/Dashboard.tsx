@@ -51,6 +51,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const [work, setWork] = useState<{
     items: api.WorkItem[];
     waiting: api.WorkItem[];
+    notifications?: api.WatcherNotification[];
   }>({ items: [], waiting: [] });
   const [acting, setActing] = useState<Record<string, boolean>>({});
   const [nests, setNests] = useState<any[]>([]);
@@ -85,7 +86,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           return null;
         }),
         api.listUnsyncedFolders().catch(() => ({ folders: [] })),
-        api.getMyWork().catch(() => ({ items: [], waiting: [] })),
+        api.getMyWork().catch(() => ({ items: [], waiting: [], notifications: [] })),
       ]);
       setNests(nestsData.nests);
       setStats(statsData);
@@ -237,6 +238,37 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           inline. "My Work" = waiting on you; "Waiting on" = you handed off. */}
       <div className="space-y-5">
         <div>
+          {(work.notifications?.length ?? 0) > 0 && (
+            <div className="mb-3 rounded-lg border border-amber-300/50 bg-amber-500/5">
+              <div className="px-4 py-2 flex items-center gap-2 text-sm font-medium">
+                🔔 Notifications
+                <span className="text-xs text-muted-foreground">
+                  ({work.notifications!.length})
+                </span>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  className="text-xs text-primary hover:underline"
+                  onClick={async () => {
+                    await api.markNotificationsRead("all");
+                    setWork((prev) => ({ ...prev, notifications: [] }));
+                  }}
+                >
+                  Mark all read
+                </button>
+              </div>
+              <div className="divide-y border-t">
+                {work.notifications!.slice(0, 8).map((n) => (
+                  <div key={n.id} className="px-4 py-2 text-xs flex items-center gap-2">
+                    <span className="flex-1">{n.message}</span>
+                    <span className="text-muted-foreground shrink-0">
+                      {new Date(n.created_at).toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="flex items-center gap-2 mb-2">
             <Inbox className="h-5 w-5 text-muted-foreground" />
             <h2 className="text-xl font-semibold">My Work</h2>
