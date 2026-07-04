@@ -1010,8 +1010,21 @@ export interface WorkItem {
 }
 
 export async function getMyWork() {
-  const r = await request<{ items: WorkItem[] }>("/me/work");
-  return r.items;
+  return request<{ items: WorkItem[]; waiting: WorkItem[] }>("/me/work");
+}
+
+export async function approveReview(nestId: string, nodeId: string, note?: string) {
+  return request(`/nests/${nestId}/nodes/${nodeId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+}
+
+export async function rejectReview(nestId: string, nodeId: string, note?: string) {
+  return request(`/nests/${nestId}/nodes/${nodeId}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
 }
 
 // ─── Workflow plane (typed edges + governed runs) ────────────────────────

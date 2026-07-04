@@ -392,6 +392,7 @@ export function createApp(): Hono<AuthEnv> {
   app.use("/me/*", flexAuthMiddleware);
   app.get("/me/work", async (c) => {
     const userId = c.get("userId");
+    const me = await resolveCallerEmail(userId);
     const nestName = new Map<string, string>();
     for (const n of [
       ...(await listNests(userId)),
@@ -400,21 +401,23 @@ export function createApp(): Hono<AuthEnv> {
       nestName.set(n.id, n.name ?? n.id);
 
     const { requests } = await getReviewQueue({ status: "pending", limit: 200 });
-    const items = requests
-      .filter((r) => nestName.has(r.nestId))
-      .map((r) => ({
-        type: "review" as const,
-        nest_id: r.nestId,
-        nest_name: nestName.get(r.nestId)!,
-        node_id: r.nodeId,
-        title: r.title || r.nodeId,
-        requested_by: r.requestedBy,
-        requested_at: r.requestedAt,
-        priority: r.priority,
-      }));
-    // Newest first — an inbox, not an archive.
-    items.sort((a, b) => (a.requested_at < b.requested_at ? 1 : -1));
-    return c.json({ items });
+    const toItem = (r: (typeof requests)[number]) => ({
+      type: "review" as const,
+      nest_id: r.nestId,
+      nest_name: nestName.get(r.nestId)!,
+      node_id: r.nodeId,
+      title: r.title || r.nodeId,
+      requested_by: r.requestedBy,
+      requested_at: r.requestedAt,
+      priority: r.priority,
+    });
+    const mine = requests.filter((r) => nestName.has(r.nestId));
+    const byNewest = (a: { requested_at: string }, b: { requested_at: string }) =>
+      a.requested_at < b.requested_at ? 1 : -1;
+    // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
+    const items = mine.filter((r) => r.requestedBy !== me).map(toItem).sort(byNewest);
+    const waiting = mine.filter((r) => r.requestedBy === me).map(toItem).sort(byNewest);
+    return c.json({ items, waiting });
   });
 
   // flexAuthMiddleware so it works without auth in open mode and with

@@ -48,7 +48,11 @@ interface ServerStats {
 export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
-  const [work, setWork] = useState<api.WorkItem[]>([]);
+  const [work, setWork] = useState<{
+    items: api.WorkItem[];
+    waiting: api.WorkItem[];
+  }>({ items: [], waiting: [] });
+  const [acting, setActing] = useState<Record<string, boolean>>({});
   const [nests, setNests] = useState<any[]>([]);
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
@@ -81,7 +85,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           return null;
         }),
         api.listUnsyncedFolders().catch(() => ({ folders: [] })),
-        api.getMyWork().catch(() => [] as api.WorkItem[]),
+        api.getMyWork().catch(() => ({ items: [], waiting: [] })),
       ]);
       setNests(nestsData.nests);
       setStats(statsData);
@@ -122,6 +126,35 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   // so without this the list keeps showing the anonymous-admin view
   // until the page is manually reloaded.
   useEffect(() => { fetchNests(); }, [currentUserEmail]);
+
+  const actOnReview = async (
+    w: api.WorkItem,
+    action: "approve" | "reject",
+  ) => {
+    const key = `${w.nest_id}:${w.node_id}`;
+    setActing((s) => ({ ...s, [key]: true }));
+    try {
+      if (action === "approve")
+        await api.approveReview(w.nest_id, w.node_id);
+      else await api.rejectReview(w.nest_id, w.node_id, "Rejected from inbox");
+      // Optimistic: drop the row, then reconcile from the server.
+      setWork((prev) => ({
+        ...prev,
+        items: prev.items.filter(
+          (i) => !(i.nest_id === w.nest_id && i.node_id === w.node_id),
+        ),
+      }));
+      fetchNests();
+    } catch (e) {
+      console.error("[Dashboard] review action failed", e);
+    } finally {
+      setActing((s) => {
+        const next = { ...s };
+        delete next[key];
+        return next;
+      });
+    }
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -199,47 +232,100 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
         </CardContent>
       </Card>
 
-      {/* My Work — cross-nest inbox of what needs you. Slack/CRM-clean:
-          a tight table, every row clickable straight to the document. */}
-      <div>
-        <div className="flex items-center gap-2 mb-2">
-          <Inbox className="h-5 w-5 text-muted-foreground" />
-          <h2 className="text-xl font-semibold">My Work</h2>
-          {work.length > 0 && (
-            <span className="rounded-full bg-primary text-primary-foreground text-xs font-semibold px-2 py-0.5">
-              {work.length}
-            </span>
+      {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
+          row clicks straight to the document (circular nav), approve/reject
+          inline. "My Work" = waiting on you; "Waiting on" = you handed off. */}
+      <div className="space-y-5">
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <Inbox className="h-5 w-5 text-muted-foreground" />
+            <h2 className="text-xl font-semibold">My Work</h2>
+            {work.items.length > 0 && (
+              <span className="rounded-full bg-primary text-primary-foreground text-xs font-semibold px-2 py-0.5">
+                {work.items.length}
+              </span>
+            )}
+          </div>
+          {work.items.length === 0 ? (
+            <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
+              You're all caught up — nothing waiting on you.
+            </div>
+          ) : (
+            <div className="rounded-lg border divide-y overflow-hidden">
+              {work.items.map((w) => {
+                const key = `${w.nest_id}:${w.node_id}`;
+                const busy = !!acting[key];
+                return (
+                  <div
+                    key={key}
+                    className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
+                  >
+                    <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0">
+                      Review
+                    </span>
+                    <button
+                      onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}
+                      className="flex items-center gap-2 min-w-0 flex-1 text-left"
+                    >
+                      <span className="font-medium truncate">{w.title}</span>
+                      <span className="text-xs text-muted-foreground shrink-0">
+                        in {w.nest_name} · {w.requested_by} · {relTime(w.requested_at)}
+                      </span>
+                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => actOnReview(w, "approve")}
+                      >
+                        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
+                        Approve
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy}
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={() => actOnReview(w, "reject")}
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
-        {work.length === 0 ? (
-          <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
-            You're all caught up — no reviews or approvals waiting on you.
-          </div>
-        ) : (
-          <div className="rounded-lg border divide-y overflow-hidden">
-            {work.map((w) => (
-              <button
-                key={`${w.nest_id}:${w.node_id}`}
-                onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}
-                className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-muted/40 group"
-              >
-                <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0">
-                  Review
-                </span>
-                <span className="font-medium truncate">{w.title}</span>
-                <span className="text-xs text-muted-foreground shrink-0">
-                  in {w.nest_name}
-                </span>
-                <span className="flex-1" />
-                <span className="text-xs text-muted-foreground hidden sm:inline">
-                  {w.requested_by}
-                </span>
-                <span className="text-xs text-muted-foreground hidden md:inline">
-                  {relTime(w.requested_at)}
-                </span>
-                <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-0.5 transition-transform shrink-0" />
-              </button>
-            ))}
+
+        {work.waiting.length > 0 && (
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+                Waiting on others
+              </h3>
+              <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-2 py-0.5">
+                {work.waiting.length}
+              </span>
+            </div>
+            <div className="rounded-lg border divide-y overflow-hidden">
+              {work.waiting.map((w) => (
+                <button
+                  key={`${w.nest_id}:${w.node_id}`}
+                  onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}
+                  className="w-full flex items-center gap-3 px-4 py-2 text-left hover:bg-muted/40 group text-sm"
+                >
+                  <span className="font-medium truncate">{w.title}</span>
+                  <span className="text-xs text-muted-foreground shrink-0">
+                    in {w.nest_name} · submitted {relTime(w.requested_at)}
+                  </span>
+                  <span className="flex-1" />
+                  <span className="text-xs text-muted-foreground">pending review</span>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-0.5 transition-transform shrink-0" />
+                </button>
+              ))}
+            </div>
           </div>
         )}
       </div>

@@ -256,6 +256,24 @@ runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
 
   const edges = await flowSubgraph(nestId, agentNode);
   const definitions = await referencedDefinitions(nestId, edges);
+
+  // Node types for every reachable node, so the runner knows which are
+  // runnable (agent/skill → execute) vs write destinations (document →
+  // receive the producing agent's output). Small graph; cheap reads.
+  const reachable = new Set<string>([agentNode]);
+  for (const e of edges) {
+    reachable.add(e.from_node);
+    reachable.add(e.to_node);
+  }
+  const node_types: Record<string, string> = {};
+  for (const nid of reachable) {
+    try {
+      const d = await storage.readDocument(nid);
+      node_types[nid] = (d.frontmatter.type as string) || "document";
+    } catch {
+      /* target not yet created — runner treats unknown as a write target */
+    }
+  }
   // Derived from auth, never client-supplied — this is the accountability
   // field ("who triggered this run"), so it must be trustworthy. A scheduler
   // or external runner authenticates with its own key; that identity is the
@@ -291,6 +309,7 @@ runTriggerRoutes.post("/:agentNode{.+}", async (c) => {
         content: doc.body || "",
       },
       edges,
+      node_types,
       definitions,
       trace_hint: {
         retrieval:
