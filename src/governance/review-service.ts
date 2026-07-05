@@ -8,12 +8,13 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { notifyReviewRequested, notifyReviewResolved } from "./notify-service.js";
+import { notifySlackForNest } from "../notify/slack.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
 import * as versions from "./version-service.js";
-import { buildTitleMap } from "./title-resolver.js";
+import { buildTitleMap, describeNode } from "./title-resolver.js";
 import type {
   ReviewRequest,
   ReviewRequestPriority,
@@ -64,6 +65,11 @@ export async function submitForReview(params: {
   await db.run(
     "UPDATE node_versions SET status = 'pending_review' WHERE nest_id = ? AND node_id = ? AND version = ?",
     [params.nestId, params.nodeId, params.version],
+  );
+
+  void notifySlackForNest(
+    params.nestId,
+    `:memo: Review requested on *${await describeNode(params.nestId, params.nodeId)}* (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
   );
 
   // Fan out to watchers of this doc + of agents flowing into it (HITL tags).
@@ -120,6 +126,11 @@ export async function approve(params: {
          resolution_note = ?, is_override = ?
      WHERE id = ?`,
     [params.approvedBy, params.note || null, params.override ? 1 : 0, pending.id],
+  );
+
+  void notifySlackForNest(
+    params.nestId,
+    `:white_check_mark: *${await describeNode(params.nestId, params.nodeId)}* v${params.version} approved by ${params.approvedBy}`,
   );
 
   // Verdict fan-out: submitter + watchers hear the approval. Best-effort.
@@ -243,6 +254,11 @@ export async function reject(params: {
   await db.run(
     "UPDATE node_versions SET status = 'rejected' WHERE nest_id = ? AND node_id = ? AND version = ?",
     [params.nestId, params.nodeId, params.version],
+  );
+
+  void notifySlackForNest(
+    params.nestId,
+    `:x: *${await describeNode(params.nestId, params.nodeId)}* v${params.version} rejected by ${params.rejectedBy}${params.note ? ` — "${params.note}"` : ""}`,
   );
 
   // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.

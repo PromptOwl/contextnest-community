@@ -130,6 +130,7 @@ export async function getHealth() {
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
     workflow_plane_enabled?: boolean;
+    runner_key_configured?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
@@ -145,6 +146,8 @@ export interface AdminSettings {
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
   subagent_runs_enabled: boolean;
+  anthropic_api_key_masked?: string | null;
+  slack_webhook_url?: string;
 }
 
 export async function getAdminSettings() {
@@ -152,7 +155,11 @@ export async function getAdminSettings() {
 }
 
 /** Admin: patch one or more server settings. Live + persisted server-side. */
-export async function updateAdminSettings(patch: Partial<AdminSettings>) {
+export async function updateAdminSettings(
+  patch: Partial<AdminSettings> & {
+    anthropic_api_key?: string | null;
+  },
+) {
   return request<{ settings: AdminSettings }>("/admin/settings", {
     method: "PATCH",
     body: JSON.stringify(patch),

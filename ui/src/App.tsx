@@ -139,7 +139,9 @@ export default function App() {
       .then(setServerSettings)
       .catch(() => {});
   }, [isAdmin]);
-  const updateServerSettings = useCallback(async (patch: Partial<AdminSettings>) => {
+  const updateServerSettings = useCallback(async (
+    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
+  ) => {
     try {
       const res = await updateAdminSettings(patch);
       setServerSettings(res.settings);

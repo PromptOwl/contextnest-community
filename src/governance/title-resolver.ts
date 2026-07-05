@@ -19,3 +19,31 @@ export async function buildTitleMap(
     return new Map();
   }
 }
+
+/**
+ * Folder path a node lives under — node ids are storage paths shaped
+ * "nodes/<folder segments…>/<slug>". Returns "" for a root-level document.
+ */
+export function folderForNode(nodeId: string): string {
+  return nodeId
+    .replace(/^nodes\//, "")
+    .split("/")
+    .slice(0, -1)
+    .join("/");
+}
+
+/**
+ * Human-facing label for a node in a notification: its document title (from
+ * frontmatter) plus the folder it lives under, so a reviewer sees "API limits
+ * (in Marketing/API)" rather than the raw "nodes/marketing/api/xyz" path.
+ * Falls back to the node id if the title can't be resolved.
+ */
+export async function describeNode(
+  nestId: string,
+  nodeId: string,
+): Promise<string> {
+  const titles = await buildTitleMap(nestId);
+  const title = titles.get(nodeId) || nodeId;
+  const folder = folderForNode(nodeId);
+  return folder ? `${title} (in ${folder})` : title;
+}

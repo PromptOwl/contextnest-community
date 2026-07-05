@@ -87,11 +87,15 @@ envRoutes.delete("/:key", requireWorkflowPlane, async (c) => {
   return c.json({ deleted: true });
 });
 
-/** Full values — for the run bundle only, never a route response. */
+/** Full values — for the run bundle only, never a route response. The
+ *  server-wide ANTHROPIC_API_KEY (super-admin Settings) is the floor; nest
+ *  env rows override it. */
 export async function envValues(nestId: string): Promise<Record<string, string>> {
   const rows = (await getDb().all(
     "SELECT key, value FROM nest_env WHERE nest_id = ?",
     [nestId],
   )) as Array<{ key: string; value: string }>;
-  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  const base: Record<string, string> = {};
+  if (process.env.ANTHROPIC_API_KEY) base.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  return { ...base, ...Object.fromEntries(rows.map((r) => [r.key, r.value])) };
 }

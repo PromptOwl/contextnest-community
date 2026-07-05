@@ -302,6 +302,11 @@ export function createApp(): Hono<AuthEnv> {
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+    // Server-wide runner default. NEVER the value — masked tail only.
+    anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
+      ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
+      : null,
+    slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
   });
 
   app.get("/admin/settings", async (c) => {
@@ -348,6 +353,24 @@ export function createApp(): Hono<AuthEnv> {
         name: "FEATURE_WORKFLOW_PLANE",
         value: body.workflow_plane_enabled ? "true" : null,
       });
+    }
+    if ("slack_webhook_url" in body) {
+      const v = String(body.slack_webhook_url ?? "").trim();
+      if (v && !/^https:\/\//i.test(v)) {
+        errors.push("slack_webhook_url must be an https:// URL (or empty to disable)");
+      } else {
+        pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
+      }
+    }
+    if ("anthropic_api_key" in body) {
+      const v = body.anthropic_api_key;
+      if (v === null || v === "") {
+        pending.push({ name: "ANTHROPIC_API_KEY", value: null });
+      } else if (typeof v !== "string" || !v.trim().startsWith("sk-")) {
+        errors.push("anthropic_api_key must start with sk- (or null to clear)");
+      } else {
+        pending.push({ name: "ANTHROPIC_API_KEY", value: v.trim() });
+      }
     }
     if ("subagent_runs_enabled" in body) {
       // Requires the base plane: turning recursion on with the plane off is

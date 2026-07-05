@@ -40,6 +40,7 @@ import {
   listEnv,
   putEnv,
   deleteEnv,
+  getHealth,
   type EnvEntry,
   type WorkflowEdge,
   type EdgeType,
@@ -2105,12 +2106,17 @@ function RunnerKeyCallout({ nestId }: { nestId: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    listEnv(nestId)
-      .then((env) => {
-        if (!cancelled)
-          setHasKey(env.some((e) => e.key === "ANTHROPIC_API_KEY"));
-      })
-      .catch(() => !cancelled && setHasKey(null));
+    Promise.all([
+      listEnv(nestId).catch(() => null),
+      getHealth().catch(() => null),
+    ]).then(([env, health]) => {
+      if (cancelled) return;
+      // Server-wide key (super-admin Settings) satisfies runners for every
+      // nest — only prompt when NEITHER level has one.
+      if (health?.runner_key_configured) return setHasKey(true);
+      if (!env) return setHasKey(null);
+      setHasKey(env.some((e) => e.key === "ANTHROPIC_API_KEY"));
+    });
     return () => {
       cancelled = true;
     };
