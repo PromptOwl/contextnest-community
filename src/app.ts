@@ -26,6 +26,7 @@ import {
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
+import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
 import {
   listNotifications,
   markNotificationsRead,
@@ -516,6 +517,10 @@ export function createApp(): Hono<AuthEnv> {
   // === Runner-facing run detail routes (turing) ===
   app.use("/runs/*", flexAuthMiddleware);
   app.route("/runs", runDetailRoutes);
+  // Inbound trigger hooks — public by design: the unguessable token in the
+  // path is the capability; presets add platform signature verification on
+  // top (see workflow/hook-routes.ts).
+  app.route("/hooks", hookFireRoutes);
 
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
@@ -839,6 +844,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
   nestsApp.route("/:nestId/connectors", connectorRoutes);
+  nestsApp.route("/:nestId/hooks", hookNestRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);
