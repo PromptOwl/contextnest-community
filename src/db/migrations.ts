@@ -934,6 +934,31 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("022_tools_and_watchers");
   }
+
+  // 023: connectors — outbound channels as data, not code. One dispatch
+  //   engine; each row = "when <events> happen in this nest, POST to
+  //   <channel-formatted> <url>". url may be a literal https URL or an
+  //   "env:KEY" reference into the same env store tools use — connectors
+  //   are part of the tools layer, lego-style.
+  if (!hasMigration("023_connectors")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS connectors (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          channel TEXT NOT NULL CHECK(channel IN ('slack', 'teams', 'webhook')),
+          url TEXT NOT NULL,               -- https://… or env:KEY
+          events TEXT NOT NULL,            -- JSON array of kinds, or ["*"]
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_connectors_nest ON connectors(nest_id);
+      `);
+    })();
+    recordMigration("023_connectors");
+  }
 }
 
 /**

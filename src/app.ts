@@ -25,6 +25,7 @@ import {
 } from "./workflow/run-routes.js";
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
+import { connectorRoutes } from "./notify/connector-routes.js";
 import {
   listNotifications,
   markNotificationsRead,
@@ -837,6 +838,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/runs", runListRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
+  nestsApp.route("/:nestId/connectors", connectorRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);

@@ -8,7 +8,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { notifyReviewRequested, notifyReviewResolved } from "./notify-service.js";
-import { notifySlackForNest } from "../notify/slack.js";
+import { dispatchEvent } from "../notify/dispatch.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
@@ -67,10 +67,13 @@ export async function submitForReview(params: {
     [params.nestId, params.nodeId, params.version],
   );
 
-  void notifySlackForNest(
-    params.nestId,
-    `:memo: Review requested on *${await describeNode(params.nestId, params.nodeId)}* (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
-  );
+  void dispatchEvent({
+    kind: "review_requested",
+    nestId: params.nestId,
+    subjectId: params.nodeId,
+    actor: params.requestedBy,
+    message: `Review requested on *${await describeNode(params.nestId, params.nodeId)}* (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
+  });
 
   // Fan out to watchers of this doc + of agents flowing into it (HITL tags).
   // Best-effort inside notifyReviewRequested — never fails the submission.
@@ -128,10 +131,13 @@ export async function approve(params: {
     [params.approvedBy, params.note || null, params.override ? 1 : 0, pending.id],
   );
 
-  void notifySlackForNest(
-    params.nestId,
-    `:white_check_mark: *${await describeNode(params.nestId, params.nodeId)}* v${params.version} approved by ${params.approvedBy}`,
-  );
+  void dispatchEvent({
+    kind: "review_approved",
+    nestId: params.nestId,
+    subjectId: params.nodeId,
+    actor: params.approvedBy,
+    message: `*${await describeNode(params.nestId, params.nodeId)}* v${params.version} approved by ${params.approvedBy}`,
+  });
 
   // Verdict fan-out: submitter + watchers hear the approval. Best-effort.
   await notifyReviewResolved({
@@ -256,10 +262,13 @@ export async function reject(params: {
     [params.nestId, params.nodeId, params.version],
   );
 
-  void notifySlackForNest(
-    params.nestId,
-    `:x: *${await describeNode(params.nestId, params.nodeId)}* v${params.version} rejected by ${params.rejectedBy}${params.note ? ` — "${params.note}"` : ""}`,
-  );
+  void dispatchEvent({
+    kind: "review_rejected",
+    nestId: params.nestId,
+    subjectId: params.nodeId,
+    actor: params.rejectedBy,
+    message: `*${await describeNode(params.nestId, params.nodeId)}* v${params.version} rejected by ${params.rejectedBy}${params.note ? ` — "${params.note}"` : ""}`,
+  });
 
   // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.
   await notifyReviewResolved({

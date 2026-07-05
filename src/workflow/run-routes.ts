@@ -24,6 +24,7 @@ import { isSuspended, getSuspensionReason, getCurrentLicense } from "../auth/lic
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
 import { envValues } from "./env-routes.js";
+import { dispatchEvent } from "../notify/dispatch.js";
 
 const RUNNABLE_TYPES = ["agent", "skill"];
 
@@ -514,6 +515,19 @@ runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
       run.id,
     ],
   );
+  if (status === "failed") {
+    const err =
+      body.trace && typeof body.trace === "object"
+        ? String((body.trace as any).error ?? "").slice(0, 200)
+        : "";
+    void dispatchEvent({
+      kind: "run_failed",
+      nestId: run.nest_id,
+      subjectId: run.id,
+      actor: run.triggered_by,
+      message: `Run of *${run.agent_node}* failed${err ? ` — ${err}` : ""}`,
+    });
+  }
   return c.json({ ok: true, status });
 });
 
