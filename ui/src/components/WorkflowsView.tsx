@@ -713,17 +713,19 @@ function RunsPanel({ nestId }: { nestId: string }) {
               it and calls the LLM. Point it at this nest:
             </p>
             <pre className="overflow-x-auto rounded bg-background border p-2 font-mono text-[10.5px] leading-relaxed">
-{`docker run --rm --network host \\
+{`docker run -d --name cn-runner --network host \\
   -e CONTEXTNEST_SERVER=http://localhost:4040 \\
   -e CONTEXTNEST_NEST=${nestId} \\
   -e CONTEXTNEST_KEY=cnst_localdev \\
-  -e ANTHROPIC_API_KEY=sk-ant-... \\
-  contextnest-runner:local run <agent-node-id>`}
+  contextnest-runner:local poll`}
             </pre>
             <p>
-              Or run <code>schedule</code> instead of <code>run</code> to poll
-              this nest continuously. Steps stream back into the trace on the
-              right — refresh to watch.
+              <b>poll</b> claims every run this server creates (Schedules tab,
+              Run buttons) and executes it — one standing container per nest.
+              No Anthropic key flag needed: set{" "}
+              <code>ANTHROPIC_API_KEY</code> in Activity → Tool environment
+              and the runner picks it up from the run bundle. Steps stream
+              back into the trace on the right — refresh to watch.
             </p>
           </div>
         </details>
