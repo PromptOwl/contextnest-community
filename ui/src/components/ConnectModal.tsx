@@ -42,6 +42,7 @@ import {
   RefreshCw,
   ShieldAlert,
   Download,
+  Sparkles,
 } from "lucide-react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
@@ -51,6 +52,9 @@ interface ConnectModalProps {
   onClose: () => void;
   nestId: string;
   nestName: string;
+  /** Opens the Add-with-AI (generate) flow — Connect is the front door for
+   *  every way content gets in or out, including the AI one. */
+  onGenerate?: () => void;
 }
 
 const KEY_PLACEHOLDER = "<paste-your-api-key-here>";
@@ -60,6 +64,7 @@ export function ConnectModal({
   onClose,
   nestId,
   nestName,
+  onGenerate,
 }: ConnectModalProps) {
   const { authenticated, authMode } = useAuth();
   const serverUrl =
@@ -370,6 +375,23 @@ export function ConnectModal({
           )}
 
           <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0">
+            {onGenerate && (
+              <button
+                type="button"
+                onClick={onGenerate}
+                className="w-full mb-3 flex items-center gap-2 rounded-lg border border-dashed px-3 py-2.5 text-sm hover:border-primary hover:bg-muted/40 text-left"
+                data-testid="connect-add-with-ai"
+              >
+                <Sparkles className="h-4 w-4 text-violet-500 shrink-0" />
+                <span>
+                  <span className="font-medium">Add with AI</span>
+                  <span className="text-muted-foreground">
+                    {" "}— point an agent at a repo/topic and push generated
+                    context into this nest
+                  </span>
+                </span>
+              </button>
+            )}
             <Tabs defaultValue="hootie" className="w-full min-w-0">
               <TabsList className="grid w-full grid-cols-5">
                 <TabsTrigger value="hootie">
