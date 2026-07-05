@@ -41,7 +41,16 @@ import {
   putEnv,
   deleteEnv,
   getHealth,
+  listHooks,
+  createHook,
+  deleteHook,
+  listConnectors,
+  createConnector,
+  updateConnector,
+  deleteConnector,
   type EnvEntry,
+  type TriggerHook,
+  type Connector,
   type WorkflowEdge,
   type EdgeType,
   type RunSummary,
@@ -122,6 +131,7 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <RunnerKeyCallout nestId={nestId} />
           <SchedulesPanel nestId={nestId} />
           <RunsPanel nestId={nestId} />
+          <ConnectorsPanel nestId={nestId} />
           <EnvPanel nestId={nestId} />
         </TabsContent>
       </Tabs>
@@ -915,6 +925,9 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   // HITL tags: people watching the selected node (notified on its output).
   const [watchers, setWatchers] = useState<string[]>([]);
   const [watcherEmail, setWatcherEmail] = useState("");
+  // Inbound trigger hooks for the selected runnable node.
+  const [nodeHooks, setNodeHooks] = useState<TriggerHook[]>([]);
+  const [hookPreset, setHookPreset] = useState<TriggerHook["preset"]>("slack");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -943,6 +956,9 @@ function CanvasPanel({ nestId }: { nestId: string }) {
     listNodeWatchers(nestId, selNode)
       .then((w) => !cancelled && setWatchers(w.map((x) => x.user_email)))
       .catch(() => !cancelled && setWatchers([]));
+    listHooks(nestId, selNode)
+      .then((h) => !cancelled && setNodeHooks(h))
+      .catch(() => !cancelled && setNodeHooks([]));
     return () => {
       cancelled = true;
     };
@@ -1547,6 +1563,71 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                         </Button>
                       </div>
                     )}
+                  </div>
+                )}
+
+                {runnable && (
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Triggers — call this agent from outside
+                    </label>
+                    {nodeHooks.map((h) => (
+                      <div key={h.id} className="rounded-md border px-2 py-1.5 text-[11px] space-y-1">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="secondary" className="text-[10px]">{h.preset}</Badge>
+                          <span className="text-muted-foreground">
+                            fired {h.fire_count}×
+                          </span>
+                          <div className="flex-1" />
+                          <button
+                            type="button"
+                            className="text-destructive hover:underline"
+                            onClick={async () => {
+                              await deleteHook(nestId, h.id);
+                              setNodeHooks(await listHooks(nestId, selNode));
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          className="w-full text-left font-mono break-all rounded bg-muted/40 px-1.5 py-1 hover:border-primary border border-transparent"
+                          title="Copy the trigger URL — paste into a Slack slash command / Events API, Teams outgoing webhook, or any system that can POST"
+                          onClick={() => copy(`hook-${h.id}`, h.url)}
+                        >
+                          {copied === `hook-${h.id}` ? "✓ copied" : h.url}
+                        </button>
+                      </div>
+                    ))}
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        value={hookPreset}
+                        onChange={(e) => setHookPreset(e.target.value as TriggerHook["preset"])}
+                        className="h-7 rounded-md border bg-background px-1.5 text-xs flex-1"
+                      >
+                        <option value="slack">Slack (slash command / @mention)</option>
+                        <option value="teams">Teams (outgoing webhook)</option>
+                        <option value="webhook">Webhook (any system)</option>
+                      </select>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2"
+                        onClick={async () => {
+                          await createHook(nestId, selNode, hookPreset);
+                          setNodeHooks(await listHooks(nestId, selNode));
+                        }}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Each trigger is a secret URL that queues a run — message
+                      text becomes the run's inputs. Add
+                      SLACK_SIGNING_SECRET to the Tool environment to verify
+                      Slack requests.
+                    </p>
                   </div>
                 )}
 
@@ -2176,5 +2257,165 @@ function RunnerKeyCallout({ nestId }: { nestId: string }) {
         </Button>
       </div>
     </div>
+  );
+}
+
+
+// ─── Connectors: outbound event → channel bricks ─────────────────────────
+//
+// Rows the dispatch engine fans events into. Channel is a preset (slack /
+// teams / raw webhook); url may be a literal https URL or an env:KEY
+// reference into the Tool environment — same secret store as tools. The
+// server-wide Settings webhook remains an implicit slack connector.
+
+const CONNECTOR_EVENTS = [
+  ["review_requested", "review requested"],
+  ["review_approved", "approved"],
+  ["review_rejected", "rejected"],
+  ["run_failed", "run failed"],
+] as const;
+
+function ConnectorsPanel({ nestId }: { nestId: string }) {
+  const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [channel, setChannel] = useState<Connector["channel"]>("slack");
+  const [url, setUrl] = useState("");
+  const [events, setEvents] = useState<string[]>(["*"]);
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setConnectors(await listConnectors(nestId));
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load connectors");
+    }
+  }, [nestId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const toggleEvent = (k: string) => {
+    setEvents((prev) => {
+      if (k === "*") return ["*"];
+      const without = prev.filter((e) => e !== "*" && e !== k);
+      return prev.includes(k) ? (without.length ? without : ["*"]) : [...without, k];
+    });
+  };
+
+  return (
+    <details className="max-w-2xl rounded-lg border px-4 py-3" open={connectors.length > 0}>
+      <summary className="cursor-pointer select-none text-sm font-medium">
+        📤 Connectors ({connectors.length}) — send events to Slack / Teams / webhooks
+      </summary>
+      <div className="mt-3 space-y-3">
+        <p className="text-[11px] text-muted-foreground">
+          Governance + run events post to each matching channel.
+          Fire-and-forget — a channel outage never blocks a review. The
+          server-wide Slack webhook (super-admin Settings) always fires too.
+        </p>
+        {error && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {error}
+          </div>
+        )}
+        {connectors.length > 0 && (
+          <div className="rounded-md border divide-y">
+            {connectors.map((con) => (
+              <div key={con.id} className="px-3 py-2 flex items-center gap-2 text-xs">
+                <Badge variant="secondary" className="text-[10px] shrink-0">{con.channel}</Badge>
+                <span className="font-mono truncate">{con.url}</span>
+                <span className="text-muted-foreground shrink-0">
+                  {con.events.includes("*") ? "all events" : con.events.join(", ")}
+                </span>
+                <div className="flex-1" />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 text-[11px] px-2 shrink-0"
+                  onClick={async () => {
+                    await updateConnector(nestId, con.id, { enabled: !con.enabled });
+                    await load();
+                  }}
+                >
+                  {con.enabled ? "Pause" : "Resume"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 text-muted-foreground hover:text-destructive shrink-0"
+                  onClick={async () => {
+                    await deleteConnector(nestId, con.id);
+                    await load();
+                  }}
+                  title="Delete connector"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="space-y-2 rounded-md border bg-muted/20 p-2.5">
+          <div className="flex items-center gap-1.5">
+            <select
+              value={channel}
+              onChange={(e) => setChannel(e.target.value as Connector["channel"])}
+              className="h-8 rounded-md border bg-background px-1.5 text-xs"
+            >
+              <option value="slack">Slack</option>
+              <option value="teams">Teams</option>
+              <option value="webhook">Webhook (raw JSON)</option>
+            </select>
+            <Input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://hooks.slack.com/… or env:SLACK_WEBHOOK"
+              className="h-8 text-xs font-mono flex-1"
+            />
+            <Button
+              size="sm"
+              className="h-8"
+              disabled={saving || !(url.startsWith("https://") || url.startsWith("env:"))}
+              onClick={async () => {
+                setSaving(true);
+                try {
+                  await createConnector(nestId, { channel, url: url.trim(), events });
+                  setUrl("");
+                  setEvents(["*"]);
+                  await load();
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "Create failed");
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          <div className="flex items-center flex-wrap gap-1 text-[11px]">
+            <button
+              type="button"
+              className={`rounded-full border px-2 py-0.5 ${events.includes("*") ? "bg-primary text-primary-foreground border-primary" : "hover:bg-muted"}`}
+              onClick={() => toggleEvent("*")}
+            >
+              all events
+            </button>
+            {CONNECTOR_EVENTS.map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                className={`rounded-full border px-2 py-0.5 ${events.includes(k) ? "bg-primary text-primary-foreground border-primary" : "hover:bg-muted"}`}
+                onClick={() => toggleEvent(k)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </details>
   );
 }
