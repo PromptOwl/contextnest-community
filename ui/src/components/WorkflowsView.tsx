@@ -118,6 +118,7 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <EdgesPanel nestId={nestId} />
         </TabsContent>
         <TabsContent value="activity" className="mt-4 space-y-6">
+          <RunnerKeyCallout nestId={nestId} />
           <SchedulesPanel nestId={nestId} />
           <RunsPanel nestId={nestId} />
           <EnvPanel nestId={nestId} />
@@ -2084,5 +2085,90 @@ function EnvPanel({ nestId }: { nestId: string }) {
         </div>
       </div>
     </details>
+  );
+}
+
+
+// ─── First-run key prompt ────────────────────────────────────────────────
+//
+// The single thing every new workflow user hits: runs don't execute without
+// an Anthropic key. Until the nest env store carries ANTHROPIC_API_KEY,
+// this callout sits at the top of Activity with an inline input — no hunting
+// through collapsed sections or env files.
+
+function RunnerKeyCallout({ nestId }: { nestId: string }) {
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [justSet, setJustSet] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    listEnv(nestId)
+      .then((env) => {
+        if (!cancelled)
+          setHasKey(env.some((e) => e.key === "ANTHROPIC_API_KEY"));
+      })
+      .catch(() => !cancelled && setHasKey(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [nestId]);
+
+  if (hasKey !== false) {
+    return justSet ? (
+      <div className="max-w-2xl rounded-lg border border-emerald-400/50 bg-emerald-500/5 px-4 py-3 text-sm">
+        ✓ Key stored (masked from here on). Runners pick it up from the run
+        bundle — start one in poll mode and your queued runs execute.
+      </div>
+    ) : null;
+  }
+
+  return (
+    <div className="max-w-2xl rounded-lg border border-amber-400/60 bg-amber-500/5 px-4 py-3">
+      <div className="text-sm font-medium mb-1">
+        🔑 Add your Anthropic API key to execute runs
+      </div>
+      <p className="text-xs text-muted-foreground mb-2">
+        Runs are created here, but a runner needs a key to call the model.
+        Paste it once — it's stored write-only for this nest (masked
+        everywhere, delivered to runners inside the run bundle). Get one at
+        console.anthropic.com → Settings → API keys.
+      </p>
+      {error && (
+        <p className="text-xs text-destructive mb-2">{error}</p>
+      )}
+      <div className="flex items-center gap-2">
+        <Input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="sk-ant-…"
+          className="h-8 text-sm font-mono flex-1"
+          data-testid="runner-key-input"
+        />
+        <Button
+          size="sm"
+          className="h-8"
+          disabled={saving || !value.trim().startsWith("sk-")}
+          onClick={async () => {
+            setSaving(true);
+            try {
+              await putEnv(nestId, "ANTHROPIC_API_KEY", value.trim());
+              setValue("");
+              setHasKey(true);
+              setJustSet(true);
+            } catch (err) {
+              setError(err instanceof Error ? err.message : "Save failed");
+            } finally {
+              setSaving(false);
+            }
+          }}
+        >
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Save key"}
+        </Button>
+      </div>
+    </div>
   );
 }
