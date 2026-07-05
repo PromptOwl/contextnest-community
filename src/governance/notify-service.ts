@@ -116,6 +116,63 @@ export async function notifyReviewRequested(params: {
   }
 }
 
+/**
+ * Fan a review RESOLUTION out: the submitter always hears the verdict; node
+ * + upstream-agent watchers hear it too. Best-effort like the request side.
+ */
+export async function notifyReviewResolved(params: {
+  nestId: string;
+  nodeId: string;
+  status: "approved" | "rejected";
+  resolvedBy: string;
+  requestedBy: string;
+  reviewId: string;
+}): Promise<number> {
+  const { nestId, nodeId, status, resolvedBy, requestedBy, reviewId } = params;
+  const db = getDb();
+  try {
+    const rows = (await db.all(
+      `SELECT DISTINCT w.user_email
+         FROM watchers w
+        WHERE w.nest_id = ?
+          AND (w.node_id = ?
+               OR w.node_id IN (
+                 SELECT e.from_node FROM edges e
+                   JOIN edge_types t ON t.id = e.type_id
+                  WHERE e.nest_id = ? AND e.to_node = ? AND t.is_flow = 1
+               ))`,
+      [nestId, nodeId, nestId, nodeId],
+    )) as Array<{ user_email: string }>;
+
+    const recipients = new Set(rows.map((r) => r.user_email.toLowerCase()));
+    recipients.add(requestedBy.toLowerCase()); // verdicts always reach the submitter
+    recipients.delete(resolvedBy.toLowerCase()); // not the person who clicked
+
+    const now = new Date().toISOString();
+    let created = 0;
+    for (const email of recipients) {
+      await db.run(
+        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          uuid(),
+          nestId,
+          email,
+          `review_${status}`,
+          reviewId,
+          `"${nodeId}" was ${status} by ${resolvedBy}`,
+          now,
+        ],
+      );
+      created++;
+    }
+    return created;
+  } catch (err) {
+    console.error("[notify] resolution fan-out failed", nestId, nodeId, err);
+    return 0;
+  }
+}
+
 export interface Notification {
   id: string;
   nest_id: string;

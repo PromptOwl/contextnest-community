@@ -121,6 +121,27 @@ describe("watchers → notifications", () => {
     expect(inbox.data.notifications.length).toBe(0);
   });
 
+  it("verdict notifies the submitter (approve path)", async () => {
+    // Bob (reviewer) approves alice's pending submission from the earlier
+    // test; alice — the submitter — must hear the verdict.
+    const approve = await jsonRequest(app, "POST",
+      `/nests/${nestId}/nodes/nodes/digest-output/approve`,
+      { note: "looks right" }, bob.apiKey);
+    expect([200, 201]).toContain(approve.status);
+
+    const inbox = await jsonRequest(app, "GET", "/me/notifications?unread=true",
+      undefined, alice.apiKey);
+    const verdicts = inbox.data.notifications.filter(
+      (n: any) => n.kind === "review_approved");
+    expect(verdicts.length).toBe(1);
+    expect(verdicts[0].message).toContain("approved by");
+    // The approver themself hears nothing.
+    const bobInbox = await jsonRequest(app, "GET", "/me/notifications?unread=true",
+      undefined, bob.apiKey);
+    expect(bobInbox.data.notifications.filter(
+      (n: any) => n.kind === "review_approved").length).toBe(0);
+  });
+
   it("untag stops future notifications", async () => {
     const untag = await jsonRequest(app, "DELETE",
       `/nests/${nestId}/nodes/nodes/poster-agent/watchers?email=${encodeURIComponent(bob.email)}`,

@@ -594,6 +594,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [triggerNode, setTriggerNode] = useState("");
   const [triggering, setTriggering] = useState(false);
+  const [triggerInputs, setTriggerInputs] = useState("");
   const [nodes, setNodes] = useState<Array<{ id: string; title?: string; type?: string }>>([]);
 
   const load = useCallback(async () => {
@@ -631,8 +632,21 @@ function RunsPanel({ nestId }: { nestId: string }) {
     if (!triggerNode.trim()) return;
     setTriggering(true);
     try {
-      await triggerRun(nestId, triggerNode.trim());
+      // Inputs: JSON object if it parses as one, otherwise wrapped prose —
+      // either way the bundle carries it and conditions/vars can read it.
+      const raw = triggerInputs.trim();
+      let inputs: Record<string, unknown> | undefined;
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          inputs = typeof parsed === "object" && parsed !== null ? parsed : { input: parsed };
+        } catch {
+          inputs = { input: raw };
+        }
+      }
+      await triggerRun(nestId, triggerNode.trim(), inputs);
       setTriggerNode("");
+      setTriggerInputs("");
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to trigger run");
@@ -676,9 +690,16 @@ function RunsPanel({ nestId }: { nestId: string }) {
             )}
           </Button>
         </div>
+        <textarea
+          value={triggerInputs}
+          onChange={(e) => setTriggerInputs(e.target.value)}
+          placeholder='Inputs (optional) — plain text or JSON, e.g. {"account":"Foley"}'
+          className="w-full mb-2 rounded-md border bg-background px-2 py-1.5 text-xs font-mono min-h-[52px]"
+        />
         <p className="text-[11px] text-muted-foreground mb-2">
-          Triggering creates a run record + bundle. A runner (the
-          contextnest-runner) walks it and posts each step back here.
+          Triggering creates a run record + bundle (inputs ride along). A
+          runner (the contextnest-runner) walks it and posts each step back
+          here.
         </p>
 
         <details className="mb-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px]">
@@ -742,6 +763,14 @@ function RunsPanel({ nestId }: { nestId: string }) {
                 <div className="text-[11px] text-muted-foreground truncate">
                   {r.agent_node} · {timeOf(r.started_at)}
                 </div>
+                {r.status === "failed" && r.trace?.error && (
+                  <div
+                    className="text-[11px] text-destructive truncate mt-0.5"
+                    title={String(r.trace.error)}
+                  >
+                    {String(r.trace.error).replace(/^\d+ /, "").slice(0, 110)}
+                  </div>
+                )}
               </button>
             ))
           )}

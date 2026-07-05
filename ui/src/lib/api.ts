@@ -1079,6 +1079,8 @@ export interface RunSummary {
   finished_at: string | null;
   depth?: number;
   parent_run_id?: string | null;
+  /** Write-tier only; null for read-tier callers. */
+  trace?: { error?: string; [k: string]: unknown } | null;
 }
 
 export interface RunStep {
@@ -1293,6 +1295,8 @@ export async function triggerRun(
 ) {
   return request<{ run_id: string }>(
     `/nests/${nestId}/run/${agentNode}`,
-    { method: "POST", body: JSON.stringify(inputs ?? {}) },
+    // The route reads body.inputs — wrap, don't spread (a bare {foo:1} body
+    // would silently drop the inputs).
+    { method: "POST", body: JSON.stringify(inputs ? { inputs } : {}) },
   );
 }

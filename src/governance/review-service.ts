@@ -7,7 +7,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
-import { notifyReviewRequested } from "./notify-service.js";
+import { notifyReviewRequested, notifyReviewResolved } from "./notify-service.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
@@ -122,6 +122,16 @@ export async function approve(params: {
     [params.approvedBy, params.note || null, params.override ? 1 : 0, pending.id],
   );
 
+  // Verdict fan-out: submitter + watchers hear the approval. Best-effort.
+  await notifyReviewResolved({
+    nestId: params.nestId,
+    nodeId: params.nodeId,
+    status: "approved",
+    resolvedBy: params.approvedBy,
+    requestedBy: pending.requested_by,
+    reviewId: pending.id,
+  });
+
   // Update version status. We write 'published' (not 'approved') so the DB
   // mirrors the engine's terminal status — history.yaml/frontmatter record
   // the post-approve state as published, and divergence between the two
@@ -234,6 +244,16 @@ export async function reject(params: {
     "UPDATE node_versions SET status = 'rejected' WHERE nest_id = ? AND node_id = ? AND version = ?",
     [params.nestId, params.nodeId, params.version],
   );
+
+  // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.
+  await notifyReviewResolved({
+    nestId: params.nestId,
+    nodeId: params.nodeId,
+    status: "rejected",
+    resolvedBy: params.rejectedBy,
+    requestedBy: pending.requested_by,
+    reviewId: pending.id,
+  });
 
   return (await getReviewRequest(pending.id))!;
 }
