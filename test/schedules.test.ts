@@ -142,6 +142,35 @@ describe("scheduler tick", () => {
     expect(later.length).toBe(1);
   });
 
+  it("scheduled runs are claimable: unclaimed list + bundle re-hand", async () => {
+    const unclaimed = await jsonRequest(
+      app, "GET", `/nests/${nestId}/runs?unclaimed=true`, undefined, alice.apiKey,
+    );
+    expect(unclaimed.status).toBe(200);
+    expect(unclaimed.data.count).toBeGreaterThanOrEqual(1);
+    const runId = unclaimed.data.runs[0].id;
+
+    const bundle = await jsonRequest(
+      app, "GET", `/runs/${runId}/bundle`, undefined, alice.apiKey,
+    );
+    expect(bundle.status).toBe(200);
+    expect(bundle.data.run_id).toBe(runId);
+    expect(bundle.data.agent.id).toBe("nodes/digest-agent");
+    expect(bundle.data.agent.content).toContain("Digest instructions");
+    expect(bundle.data.env).toBeDefined();
+
+    // A step claims it — it leaves the unclaimed queue.
+    const step = await jsonRequest(
+      app, "POST", `/runs/${runId}/steps`,
+      { action: "read", node_id: "nodes/digest-agent" }, alice.apiKey,
+    );
+    expect(step.status).toBe(201);
+    const after = await jsonRequest(
+      app, "GET", `/nests/${nestId}/runs?unclaimed=true`, undefined, alice.apiKey,
+    );
+    expect(after.data.runs.map((r: any) => r.id)).not.toContain(runId);
+  });
+
   it("stop-after bound: auto-pauses when max_runs is reached", async () => {
     const { schedulerTick } = await import("../src/workflow/scheduler.js");
     await jsonRequest(

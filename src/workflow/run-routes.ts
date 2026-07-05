@@ -123,6 +123,76 @@ async function referencedDefinitions(
   return out;
 }
 
+/**
+ * Everything a runner needs to walk an agent, minus run identity: agent doc,
+ * flow subgraph, per-node types, reachable TOOL bodies, env store values,
+ * and referenced definitions. Shared by POST /run/:agent (which creates the
+ * run) and GET /runs/:id/bundle (which re-hands the bundle for a run created
+ * server-side, e.g. by the interval scheduler).
+ */
+async function buildRunBundle(nestId: string, agentNode: string) {
+  const { storage } = await engineCache.get(nestId);
+  let doc;
+  try {
+    doc = await storage.readDocument(agentNode);
+  } catch {
+    throw new NotFoundError(`Agent node not found: ${agentNode}`);
+  }
+  const nodeType = doc.frontmatter.type || "document";
+  if (!RUNNABLE_TYPES.includes(nodeType)) {
+    throw new ValidationError(
+      `"${agentNode}" is type "${nodeType}" — only agent/skill nodes are runnable`,
+    );
+  }
+
+  const edges = await flowSubgraph(nestId, agentNode);
+  const definitions = await referencedDefinitions(nestId, edges);
+
+  // Node types for every reachable node, so the runner knows which are
+  // runnable (agent/skill → execute) vs write destinations (document →
+  // receive the producing agent's output). Small graph; cheap reads.
+  const reachable = new Set<string>([agentNode]);
+  for (const e of edges) {
+    reachable.add(e.from_node);
+    reachable.add(e.to_node);
+  }
+  const node_types: Record<string, string> = {};
+  // Tool nodes reachable from this agent travel WITH the bundle (body =
+  // code the runner can execute as a tool). Documents don't — the runner
+  // reads those through the governed /context path.
+  const tools: Record<string, string> = {};
+  for (const nid of reachable) {
+    try {
+      const d = await storage.readDocument(nid);
+      const t = (d.frontmatter.type as string) || "document";
+      node_types[nid] = t;
+      if (t === "tool") tools[nid] = d.body || "";
+    } catch {
+      /* target not yet created — runner treats unknown as a write target */
+    }
+  }
+  // Env store values ride along for the tools AND the runner's own LLM key
+  // (ANTHROPIC_API_KEY set from the UI). The bundle requires write
+  // permission to obtain, and this is the ONLY surface that returns full
+  // values (the /env routes mask them).
+  const env = await envValues(nestId);
+
+  return {
+    agent: {
+      id: agentNode,
+      title: String(doc.frontmatter.title ?? agentNode),
+      type: nodeType,
+      schedule: (doc.frontmatter.metadata as any)?.schedule ?? null,
+      content: doc.body || "",
+    },
+    edges,
+    node_types,
+    tools,
+    env,
+    definitions,
+  };
+}
+
 // ─── Nest-scoped routes: trigger + list ─────────────────────────────────
 
 export const runTriggerRoutes = new Hono<AuthEnv>();
@@ -215,20 +285,6 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
     .json<{ inputs?: unknown; parent_run_id?: unknown }>()
     .catch(() => ({}) as { inputs?: unknown; parent_run_id?: unknown });
 
-  const { storage } = await engineCache.get(nestId);
-  let doc;
-  try {
-    doc = await storage.readDocument(agentNode);
-  } catch {
-    throw new NotFoundError(`Agent node not found: ${agentNode}`);
-  }
-  const nodeType = doc.frontmatter.type || "document";
-  if (!RUNNABLE_TYPES.includes(nodeType)) {
-    throw new ValidationError(
-      `"${agentNode}" is type "${nodeType}" — only agent/skill nodes are runnable`,
-    );
-  }
-
   // Sub-agent (nested) run? Validate the parent chain before creating anything.
   let parentRunId: string | null = null;
   let depth = 0;
@@ -257,36 +313,7 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
     }
   }
 
-  const edges = await flowSubgraph(nestId, agentNode);
-  const definitions = await referencedDefinitions(nestId, edges);
-
-  // Node types for every reachable node, so the runner knows which are
-  // runnable (agent/skill → execute) vs write destinations (document →
-  // receive the producing agent's output). Small graph; cheap reads.
-  const reachable = new Set<string>([agentNode]);
-  for (const e of edges) {
-    reachable.add(e.from_node);
-    reachable.add(e.to_node);
-  }
-  const node_types: Record<string, string> = {};
-  // Tool nodes reachable from this agent travel WITH the bundle (body =
-  // code the runner can execute as a tool). Documents don't — the runner
-  // reads those through the governed /context path.
-  const tools: Record<string, string> = {};
-  for (const nid of reachable) {
-    try {
-      const d = await storage.readDocument(nid);
-      const t = (d.frontmatter.type as string) || "document";
-      node_types[nid] = t;
-      if (t === "tool") tools[nid] = d.body || "";
-    } catch {
-      /* target not yet created — runner treats unknown as a write target */
-    }
-  }
-  // Env store values ride along for the tools. The bundle already requires
-  // write permission to obtain, and this is the ONLY surface that returns
-  // full values (the /env routes mask them).
-  const env = await envValues(nestId);
+  const bundle = await buildRunBundle(nestId, agentNode);
   // Derived from auth, never client-supplied — this is the accountability
   // field ("who triggered this run"), so it must be trustworthy. A scheduler
   // or external runner authenticates with its own key; that identity is the
@@ -314,18 +341,7 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
       run_id: id,
       parent_run_id: parentRunId,
       depth,
-      agent: {
-        id: agentNode,
-        title: String(doc.frontmatter.title ?? agentNode),
-        type: nodeType,
-        schedule: (doc.frontmatter.metadata as any)?.schedule ?? null,
-        content: doc.body || "",
-      },
-      edges,
-      node_types,
-      tools,
-      env,
-      definitions,
+      ...bundle,
       trace_hint: {
         retrieval:
           "POST /context is deterministic — record selector+hops per read so the run replays to the identical read-set",
@@ -352,6 +368,12 @@ runListRoutes.get("/", requireWorkflowPlane, async (c) => {
   if (status) {
     sql += " AND status = ?";
     args.push(status);
+  }
+  // ?unclaimed=true → running runs no runner has touched yet (zero steps).
+  // The poll loop's work queue.
+  if (c.req.query("unclaimed") === "true") {
+    sql +=
+      " AND status = 'running' AND NOT EXISTS (SELECT 1 FROM run_steps WHERE run_steps.run_id = runs.id)";
   }
   sql += " ORDER BY started_at DESC LIMIT ?";
   args.push(Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 500));
@@ -493,6 +515,25 @@ runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
     ],
   );
   return c.json({ ok: true, status });
+});
+
+// GET /runs/:id/bundle — re-hand the executable bundle for an EXISTING run.
+// This is how a polling runner claims server-created runs (interval
+// scheduler, UI trigger): list unclaimed running runs, fetch each bundle,
+// walk it, close it. Write-gated: the bundle carries env values.
+runDetailRoutes.get("/:id/bundle", requireWorkflowPlane, async (c) => {
+  const run = await loadRunWithPermission(c, c.req.param("id")!, "write");
+  if (run.status !== "running") {
+    throw new ConflictError(`Run is ${run.status} — nothing to execute`);
+  }
+  const bundle = await buildRunBundle(run.nest_id, run.agent_node);
+  return c.json({
+    run_id: run.id,
+    parent_run_id: run.parent_run_id,
+    depth: run.depth,
+    inputs: safeJson(run.inputs),
+    ...bundle,
+  });
 });
 
 // GET /runs/:id — full trace; NL rationales redacted below write tier.
