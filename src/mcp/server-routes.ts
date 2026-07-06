@@ -314,6 +314,7 @@ async function handleServerToolCall(
     nestId: nest.id,
     userId,
     userEmail,
+    baseUrl,
   });
 }
 
