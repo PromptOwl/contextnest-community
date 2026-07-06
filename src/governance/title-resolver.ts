@@ -7,6 +7,8 @@
  */
 
 import { engineCache } from "../nodes/engine.js";
+import { getDb } from "../db/client.js";
+import { config } from "../config.js";
 
 export async function buildTitleMap(
   nestId: string,
@@ -47,4 +49,57 @@ export async function describeNode(
   const title = titles.get(nodeId) || nodeId;
   const folder = folderForNode(nodeId);
   return folder ? `${title} (in ${folder})` : title;
+}
+
+/** The nest's human name (best-effort; falls back to the id). */
+export async function nestName(nestId: string): Promise<string> {
+  try {
+    const row = (await getDb().get("SELECT name FROM nests WHERE id = ?", [
+      nestId,
+    ])) as { name?: string } | undefined;
+    return row?.name || nestId;
+  } catch {
+    return nestId;
+  }
+}
+
+/**
+ * Direct link to open a document in the UI: matches the app's own deep-link
+ * shape (`?nest=<id>&doc=<nodeId>`). `baseUrl` is the request-derived origin
+ * (or PUBLIC_BASE_URL when set); empty when neither is available — the email
+ * template then omits the "Open document" button.
+ */
+export function docLink(
+  nestId: string,
+  nodeId?: string,
+  baseUrl?: string,
+): string {
+  const base = baseUrl || config.PUBLIC_BASE_URL;
+  if (!base) return "";
+  const q = new URLSearchParams({ nest: nestId });
+  if (nodeId) q.set("doc", nodeId);
+  return `${base.replace(/\/$/, "")}/?${q.toString()}`;
+}
+
+/**
+ * Resolve the structured pieces the email connector needs for a document
+ * event: the document title, its "Nest / Subfolder" path, and a direct link.
+ * `baseUrl` is the request-derived origin used to build the link.
+ */
+export async function buildDocContext(
+  nestId: string,
+  nodeId: string,
+  baseUrl?: string,
+): Promise<{ docTitle: string; label: string; path: string; link: string }> {
+  const titles = await buildTitleMap(nestId);
+  const docTitle = titles.get(nodeId) || nodeId;
+  const folder = folderForNode(nodeId);
+  const name = await nestName(nestId);
+  return {
+    docTitle,
+    // Slack one-liner label ("Title (in Folder)"), same as describeNode().
+    label: folder ? `${docTitle} (in ${folder})` : docTitle,
+    path: folder ? `${name} / ${folder}` : name,
+    link: docLink(nestId, nodeId, baseUrl),
+  };
 }

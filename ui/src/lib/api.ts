@@ -431,6 +431,21 @@ export async function getServerStats() {
 
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
+// Upload an image into the nest's assets folder. Multipart (not the JSON
+// request() helper) — the browser sets the boundary content-type itself.
+export async function uploadAsset(nestId: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`/nests/${nestId}/assets`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Upload failed: ${res.status}`);
+  return data as { file: string; url: string; markdown: string };
+}
+
 export async function listNodes(nestId: string) {
   return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
 }

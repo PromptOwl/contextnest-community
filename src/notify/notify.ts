@@ -14,6 +14,7 @@
 import { config } from "../config.js";
 import { notifySlackForNest } from "./slack.js";
 import { notifyEmailForNest } from "./email.js";
+import type { EmailEventDetails } from "./email-render.js";
 
 const DIGEST_LINE_CAP = 10;
 
@@ -22,9 +23,15 @@ function debounceMs(): number {
   return Number.isFinite(n) && n >= 0 ? n : 15_000;
 }
 
+// Per-nest buffer. Each buffered event keeps BOTH its Slack line and the
+// structured details the email connector renders — so a lone event still
+// produces a rich, single-event email while a burst collapses into a digest.
 const buffers = new Map<
   string,
-  { lines: string[]; timer: ReturnType<typeof setTimeout> }
+  {
+    events: Array<{ line: string; details?: EmailEventDetails }>;
+    timer: ReturnType<typeof setTimeout>;
+  }
 >();
 
 function buildText(lines: string[]): string {
@@ -44,26 +51,38 @@ async function flush(nestId: string): Promise<void> {
   const buf = buffers.get(nestId);
   if (!buf) return;
   buffers.delete(nestId);
-  const text = buildText(buf.lines);
+  const text = buildText(buf.events.map((e) => e.line));
+  // A lone event carries its structured details for a rich per-event email; a
+  // multi-event digest has no single event to describe, so email falls back to
+  // the digest text (the connector's generic renderHtml/renderText path).
+  const details =
+    buf.events.length === 1 ? buf.events[0].details : undefined;
   await Promise.allSettled([
     notifySlackForNest(nestId, text),
-    notifyEmailForNest(nestId, text),
+    notifyEmailForNest(nestId, text, details),
   ]);
 }
 
+/**
+ * `message` is the Slack-flavored one-liner (mrkdwn); `details`, when present,
+ * is the structured event the email connector renders into a rich per-event
+ * email. Slack always uses `message`; email uses `details` when the event
+ * flushes on its own (un-batched) and falls back to `message` otherwise.
+ */
 export async function notifyNestEvent(
   nestId: string,
   message: string,
+  details?: EmailEventDetails,
 ): Promise<void> {
   // Nothing configured → don't even buffer.
   if (!config.SLACK_WEBHOOK_URL && !config.SMTP_URL) return;
 
   const buf = buffers.get(nestId);
   if (buf) {
-    buf.lines.push(message);
+    buf.events.push({ line: message, details });
     return;
   }
   const timer = setTimeout(() => void flush(nestId), debounceMs());
   timer.unref?.();
-  buffers.set(nestId, { lines: [message], timer });
+  buffers.set(nestId, { events: [{ line: message, details }], timer });
 }
