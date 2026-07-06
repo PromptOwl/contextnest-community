@@ -107,13 +107,21 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
   const [size, setSize] = useState({ w: 800, h: 560 });
   const [sim, setSim] = useState<{ nodes: GNode[]; links: GLink[] }>({ nodes: [], links: [] });
 
-  // ── Pan / zoom ──
+  // ── Pan / zoom + node drag ──
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
-  const drag = useRef<{ active: boolean; px: number; py: number }>({
-    active: false,
-    px: 0,
-    py: 0,
-  });
+  const [panning, setPanning] = useState(false);
+  // One gesture at a time: either panning the canvas or dragging a node.
+  const drag = useRef<
+    | { mode: "pan"; px: number; py: number }
+    | { mode: "node"; node: GNode; moved: boolean }
+    | null
+  >(null);
+
+  // client px → world coords (undo pan + zoom), for node dragging.
+  const toWorld = (clientX: number, clientY: number) => {
+    const r = svgRef.current!.getBoundingClientRect();
+    return { x: (clientX - r.left - view.x) / view.k, y: (clientY - r.top - view.y) / view.k };
+  };
 
   // Fit the laid-out graph into the viewport (centred, padded). Used on first
   // layout and via the Fit button so a large graph never spills off-screen.
@@ -166,20 +174,46 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
     // browser's default ctrl+wheel zooms the whole page instead of the graph.
   }, [size.w, size.h, loading, error]);
 
+  // Pointer down on empty canvas → pan. Capture on the svg so moves keep
+  // routing here even when the cursor leaves a node during a drag.
   const onPanStart = (e: ReactPointerEvent) => {
-    drag.current = { active: true, px: e.clientX, py: e.clientY };
-    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    svgRef.current?.setPointerCapture?.(e.pointerId);
+    drag.current = { mode: "pan", px: e.clientX, py: e.clientY };
+    setPanning(true);
+  };
+  // Pointer down on a node → drag that node (stops the pan from also starting).
+  const onNodeDown = (e: ReactPointerEvent, n: GNode) => {
+    e.stopPropagation();
+    svgRef.current?.setPointerCapture?.(e.pointerId);
+    drag.current = { mode: "node", node: n, moved: false };
   };
   const onPanMove = (e: ReactPointerEvent) => {
-    if (!drag.current.active) return;
-    const dx = e.clientX - drag.current.px;
-    const dy = e.clientY - drag.current.py;
-    drag.current.px = e.clientX;
-    drag.current.py = e.clientY;
-    setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+    const d = drag.current;
+    if (!d) return;
+    if (d.mode === "pan") {
+      const dx = e.clientX - d.px;
+      const dy = e.clientY - d.py;
+      d.px = e.clientX;
+      d.py = e.clientY;
+      setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+    } else {
+      d.moved = true;
+      const p = toWorld(e.clientX, e.clientY);
+      d.node.x = p.x;
+      d.node.y = p.y;
+      // Lines reference the same node objects, so a new array ref re-renders both.
+      setSim((s) => ({ ...s, nodes: s.nodes.slice() }));
+    }
   };
-  const onPanEnd = () => {
-    drag.current.active = false;
+  const onPanEnd = (e: ReactPointerEvent) => {
+    const d = drag.current;
+    svgRef.current?.releasePointerCapture?.(e.pointerId);
+    // A node press that never moved is a click → toggle selection.
+    if (d?.mode === "node" && !d.moved) {
+      setSelected((cur) => (cur?.id === d.node.id ? null : d.node));
+    }
+    drag.current = null;
+    setPanning(false);
   };
 
   useEffect(() => {
@@ -367,6 +401,14 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
               {label}
             </label>
           ))}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setView({ x: 0, y: 0, k: 1 })}
+            title="Reset pan & zoom"
+          >
+            Reset view
+          </Button>
         </div>
       </div>
 
@@ -392,24 +434,19 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           )}
           {!loading && !error && (
             <>
+              {/* Pan handlers live on the svg itself: dragging empty canvas
+                  pans, node presses stopPropagation and drag their node. */}
               <svg
                 ref={svgRef}
                 width={size.w}
                 height={size.h}
                 className="block touch-none"
+                style={{ cursor: panning ? "grabbing" : "grab" }}
+                onPointerDown={onPanStart}
+                onPointerMove={onPanMove}
+                onPointerUp={onPanEnd}
+                onPointerLeave={onPanEnd}
               >
-                {/* Background pan surface — dragging here pans; node clicks
-                    sit above it and aren't intercepted. */}
-                <rect
-                  width={size.w}
-                  height={size.h}
-                  fill="transparent"
-                  style={{ cursor: drag.current.active ? "grabbing" : "grab" }}
-                  onPointerDown={onPanStart}
-                  onPointerMove={onPanMove}
-                  onPointerUp={onPanEnd}
-                  onPointerLeave={onPanEnd}
-                />
                 <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
                   <g>
                     {sim.links.map((l, i) => {
@@ -440,10 +477,8 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
                         <g
                           key={n.id}
                           transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
-                          onClick={() =>
-                            setSelected((cur) => (cur?.id === n.id ? null : n))
-                          }
-                          style={{ cursor: "pointer" }}
+                          onPointerDown={(e) => onNodeDown(e, n)}
+                          style={{ cursor: "grab" }}
                           opacity={inHood ? 1 : 0.25}
                         >
                           <circle

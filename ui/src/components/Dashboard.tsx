@@ -501,12 +501,20 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                             {nest.steward_count}
                           </span>
                         )}
-                        {isAnonymous && (
+                        {isAnonymous && !nest.stewardship_enabled && (
                           <span
                             className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200"
                             title="Owned by the anonymous admin — no stewardship applied"
                           >
                             Ungoverned
+                          </span>
+                        )}
+                        {isAnonymous && nest.stewardship_enabled && (
+                          <span
+                            className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200"
+                            title="Stewardship is enabled — drafts require review before AI use"
+                          >
+                            Governed
                           </span>
                         )}
                         {isShared && roleBadge && RoleIcon && (

@@ -254,6 +254,8 @@ export function DocumentEditor({
   const [commentMode, setCommentMode] = useState(false);
   const [pendingAnchor, setPendingAnchor] = useState<api.AnnotationAnchor | null>(null);
   const [selPopover, setSelPopover] = useState<{ x: number; y: number } | null>(null);
+  // Anchor snapshotted at mouseup (selection is live then); consumed on click.
+  const stagedAnchorRef = useRef<api.AnnotationAnchor | null>(null);
   const docViewRef = useRef<HTMLDivElement | null>(null);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -261,8 +263,12 @@ export function DocumentEditor({
   const pendingFocusRef = useRef<string | null>(null);
 
   // Read the current selection inside the rendered doc and, if non-empty,
-  // surface a floating "Comment" button at the selection. Building the anchor
-  // is deferred to the click so we don't compute on every mouseup.
+  // surface a floating "Comment" button at the selection. We build the anchor
+  // HERE (mouseup), while the selection is guaranteed live, and stash it in
+  // stagedAnchorRef — the button click just consumes it. Deferring the build
+  // to the click loses selections the browser collapses over interactive/
+  // structured nodes (links render as <a>/<button>, headings as block
+  // elements), which is why the button used to do nothing on those.
   const onDocMouseUp = useCallback(() => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
@@ -279,39 +285,25 @@ export function DocumentEditor({
       setSelPopover(null);
       return;
     }
-    const rect = range.getBoundingClientRect();
-    // Anchor the button just above the selection (viewport/fixed coords).
-    setSelPopover({ x: rect.left + rect.width / 2, y: rect.top });
-  }, []);
 
-  // Turn the live selection into a resilient anchor: quote + up to 250c of
-  // surrounding rendered text + a best-effort source line hint.
-  //
-  // Offsets come from the actual selection Range — NOT String.indexOf — so that
-  // selecting the 2nd/3rd occurrence of a repeated phrase anchors to that exact
-  // spot. We measure against the same flat text the read side builds (raw text
-  // nodes concatenated in order, which is what Range.toString() yields), so the
-  // `before` tail that anchor-highlight.ts#locate uses to disambiguate matches.
-  const stageAnchorFromSelection = useCallback(() => {
-    const sel = window.getSelection();
-    const container = docViewRef.current;
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !container) return;
-    const range = sel.getRangeAt(0);
-    if (!container.contains(range.commonAncestorContainer)) return;
-
-    // Global char offset of a (node, offset) boundary within the container's
-    // flattened text: length of the text from container start up to that point.
+    // Turn the live selection into a resilient anchor: quote + up to 250c of
+    // surrounding rendered text + a best-effort source line hint.
+    //
+    // Offsets come from the actual selection Range — NOT String.indexOf — so
+    // that selecting the 2nd/3rd occurrence of a repeated phrase anchors to
+    // that exact spot. We measure against the same flat text the read side
+    // builds (raw text nodes concatenated in order, which is what
+    // Range.toString() yields), so the `before` tail that
+    // anchor-highlight.ts#locate uses to disambiguate matches stays consistent.
     const offsetOf = (node: Node, nodeOffset: number): number => {
       const r = document.createRange();
       r.setStart(container, 0);
       r.setEnd(node, nodeOffset);
       return r.toString().length;
     };
-
     const contents = document.createRange();
     contents.selectNodeContents(container);
     const full = contents.toString();
-
     let start = offsetOf(range.startContainer, range.startOffset);
     let end = offsetOf(range.endContainer, range.endOffset);
     if (start > end) [start, end] = [end, start];
@@ -319,17 +311,31 @@ export function DocumentEditor({
     // quote and its context stay consistent with the flattened text.
     while (start < end && /\s/.test(full[start])) start++;
     while (end > start && /\s/.test(full[end - 1])) end--;
-
     const quote = full.slice(start, end);
-    if (!quote) return;
+    if (!quote) {
+      setSelPopover(null);
+      return;
+    }
     const before = full.slice(Math.max(0, start - 250), start);
     const after = full.slice(end, end + 250);
     const srcIdx = content.indexOf(quote);
     const line = srcIdx >= 0 ? content.slice(0, srcIdx).split("\n").length : undefined;
-    setPendingAnchor({ quote, before, after, line });
-    setSelPopover(null);
-    sel.removeAllRanges();
+    stagedAnchorRef.current = { quote, before, after, line };
+
+    const rect = range.getBoundingClientRect();
+    // Anchor the button just above the selection (viewport/fixed coords).
+    setSelPopover({ x: rect.left + rect.width / 2, y: rect.top });
   }, [content]);
+
+  // Consume the anchor snapshotted at mouseup (selection was live then) and
+  // pin the pending comment to it.
+  const stageAnchorFromSelection = useCallback(() => {
+    const anchor = stagedAnchorRef.current;
+    if (!anchor) return;
+    setPendingAnchor(anchor);
+    setSelPopover(null);
+    window.getSelection()?.removeAllRanges();
+  }, []);
 
   // Rebuild the painted comment highlights whenever the doc text or the set
   // of anchored threads changes (and only in the rendered, non-diff view).
@@ -719,7 +725,6 @@ export function DocumentEditor({
     // Always reopen compare in the default Source view, and reset on exit.
     setDiffRendered(false);
   }, []);
-
   // A pending-review doc is LOCKED: the server rejects edits/deletes with
   // 423 while a review is open (nodes/routes). Plain drafts stay editable —
   // only status==='pending_review' locks, so the editor flows normally until
@@ -959,9 +964,9 @@ export function DocumentEditor({
   // remounts DocumentViewer→MarkdownEditor and loses the caret/reflows.
   // Read-only sessions (view-only / locked / reviewer) keep the rendered view.
   useEffect(() => {
-    if (loading || mode === "edit") return;
+    if (loading || mode === "edit" || commentMode) return;
     if (!isViewOnly && !isLocked && !isReviewerOnly) setMode("edit");
-  }, [loading, isViewOnly, isLocked, isReviewerOnly, mode]);
+  }, [loading, isViewOnly, isLocked, isReviewerOnly, mode, commentMode]);
 
   // A doc can become locked while already in edit mode (e.g. the user just
   // submitted it for review). Kick back to read-only view so the editor
@@ -1233,23 +1238,27 @@ export function DocumentEditor({
           >
             <Code2 className="h-4 w-4" />
           </Button>
-          {/* Write/review affordances hidden for public reader.
-              Copy link + Share nest collapsed into an overflow menu to keep
-              the header uncluttered; primary actions (Publish/Save) stay inline. */}
+          {/* Visible document-share action — copies the deep link the App's
+              ?nest=&doc= probe understands. Promoted out of the overflow menu
+              so sharing a single document is discoverable. */}
+          {!isNew && (
+            <Button
+              variant="outline"
+              size="sm"
+              title="Copy a shareable link to this document"
+              data-testid="document-editor-copy-link"
+              onClick={() => {
+                const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
+                navigator.clipboard.writeText(url);
+                toast.success("Link copied — recipient needs access to this nest");
+              }}
+            >
+              <LinkIcon className="h-4 w-4 mr-1" /> Share
+            </Button>
+          )}
+          {/* Share-nest (collaborators / visibility) stays in the overflow. */}
           {(() => {
             const moreActions: OverflowAction[] = [];
-            if (!isNew)
-              moreActions.push({
-                label: "Copy link",
-                icon: LinkIcon,
-                testId: "document-editor-copy-link",
-                onSelect: () => {
-                  // Deep link the App's ?nest=&doc= probe understands.
-                  const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
-                  navigator.clipboard.writeText(url);
-                  toast.success("Link copied — recipient needs access to this nest");
-                },
-              });
             if (canShare)
               moreActions.push({
                 label: "Share nest",
@@ -1257,13 +1266,13 @@ export function DocumentEditor({
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
               });
-            return (
+            return moreActions.length ? (
               <OverflowMenu
                 actions={moreActions}
                 variant="outline"
                 testId="document-editor-more"
               />
-            );
+            ) : null;
           })()}
         </div>
       </div>
