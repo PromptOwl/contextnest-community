@@ -128,7 +128,7 @@ interface NestViewProps {
   isOwner: boolean;
   isAnonOwned: boolean;
   onBack: () => void;
-  onOpenDocument: (nodeId: string | "new") => void;
+  onOpenDocument: (nodeId: string | "new", opts?: { folder?: string }) => void;
   /** Seed the search filter on mount. Used when arriving from a tag
    *  click on a document detail page. */
   initialSearch?: string;
@@ -1208,6 +1208,12 @@ export function NestView({
             <Link2 className="h-4 w-4 mr-2" />
             Connect
           </Button>
+          {canManage && (
+            <Button variant="outline" onClick={() => setShowShare(true)}>
+              <Users className="h-4 w-4 mr-2" />
+              Share
+            </Button>
+          )}
           {!isReadOnly && canEditDocs && (
             <>
               {/* Visible import affordance — same path as drag-and-drop.
@@ -1268,12 +1274,6 @@ export function NestView({
                 label: "Nest settings",
                 icon: SettingsIcon,
                 onSelect: () => setShowSettings(true),
-              });
-            if (canManage)
-              actions.push({
-                label: "Share",
-                icon: Users,
-                onSelect: () => setShowShare(true),
               });
             // Gate on canManageGovernance (owner/admin on THIS nest), not the
             // server-admin flag — otherwise a license admin who is only an
@@ -1424,9 +1424,9 @@ export function NestView({
           </TabsList>
           {!isReadOnly && canEditDocs && (
             <Button
-              variant="ghost"
+              variant="outline"
               size="sm"
-              className="text-muted-foreground"
+              className="ml-auto text-muted-foreground"
               onClick={() => setShowNewFolder(true)}
               title="Create a folder (nest with parent/child)"
             >
@@ -1600,6 +1600,26 @@ export function NestView({
                             {g.items.length}
                           </Badge>
                           <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover/folder:text-muted-foreground" />
+                          {canEditDocs && (
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/folder:opacity-100 hover:text-primary hover:bg-primary/10"
+                              title={`New document in ${prettyFolderPath(g.folder)}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenDocument("new", { folder: g.folder });
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.stopPropagation();
+                                  onOpenDocument("new", { folder: g.folder });
+                                }
+                              }}
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                            </span>
+                          )}
                         </button>
                       )}
                       <div className="grid gap-1 sm:grid-cols-2">
@@ -1772,6 +1792,17 @@ export function NestView({
                   <Badge variant="secondary" className="ml-1 text-[10px] px-1.5 py-0 h-5">
                     {filtered.length}
                   </Badge>
+                  {canEditDocs && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-muted-foreground ml-1"
+                      onClick={() => onOpenDocument("new", { folder: folderFilter })}
+                      title={`New document in this folder`}
+                    >
+                      <Plus className="h-3.5 w-3.5 mr-1" /> New here
+                    </Button>
+                  )}
                 </div>
               )}
               {/* Saved filters — one-click apply of a named filter snapshot.
@@ -2219,7 +2250,7 @@ export function NestView({
                           <div key={g.folder || "__root"}>
                             {showHeader && (
                               <div
-                                className={`flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none cursor-pointer transition-colors ${
+                                className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none cursor-pointer transition-colors ${
                                   isDropTarget
                                     ? "bg-primary/10 ring-1 ring-primary"
                                     : "hover:bg-muted/50"
@@ -2258,6 +2289,19 @@ export function NestView({
                                 >
                                   {g.items.length}
                                 </Badge>
+                                {canEditDocs && (
+                                  <button
+                                    type="button"
+                                    className="ml-1 rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
+                                    title={`New document in ${prettyFolderPath(g.folder)}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onOpenDocument("new", { folder: g.folder });
+                                    }}
+                                  >
+                                    <Plus className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
                               </div>
                             )}
                             {!(showHeader && isCollapsed) && (

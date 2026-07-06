@@ -117,6 +117,8 @@ interface DocumentEditorProps {
   onCreateDocument?: (nestId: string, title: string) => void;
   /** Pre-fill title when nodeId === "new" (wiki-create flow). */
   initialTitle?: string;
+  /** Pre-file a NEW doc into this folder (folder-tree + buttons). */
+  initialFolder?: string;
   /** Prior wiki-link hops, oldest first; rendered as clickable chips. */
   breadcrumb?: BreadcrumbEntry[];
   /** Jump to ancestor at `index`; drops entries after it. */
@@ -127,6 +129,7 @@ export function DocumentEditor({
   nestId,
   nestName,
   nodeId,
+  initialFolder,
   isOwner = false,
   onBack,
   onSaved,
@@ -160,7 +163,7 @@ export function DocumentEditor({
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
   // moving an existing doc is a rename with backlink fallout, handled elsewhere.
-  const [folder, setFolder] = useState("");
+  const [folder, setFolder] = useState(initialFolder ?? "");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState<string[]>([]);
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited

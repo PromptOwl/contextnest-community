@@ -658,26 +658,41 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                           <FileText className="h-3 w-3" />
                           {nest.document_count ?? 0}
                         </span>
-                        {(nest.collaborator_count ?? 0) > 0 && (
-                          <span
-                            className="inline-flex items-center gap-1"
-                            title={`${nest.collaborator_count} collaborator${
-                              nest.collaborator_count === 1 ? "" : "s"
-                            }`}
-                          >
-                            <Users className="h-3 w-3" />
-                            {nest.collaborator_count}
+                        {/* WHO, not just counts: shared-with (plain chips)
+                            and stewards (shield-tinted chips), initials with
+                            the email on hover. */}
+                        {(nest.collaborator_emails?.length ?? 0) > 0 && (
+                          <span className="inline-flex items-center gap-0.5" title="Shared with">
+                            <Users className="h-3 w-3 mr-0.5" />
+                            {nest.collaborator_emails!.slice(0, 4).map((e: string) => (
+                              <span
+                                key={e}
+                                title={`Shared with ${e}`}
+                                className="inline-flex h-4.5 min-w-[18px] items-center justify-center rounded-full bg-muted px-1 text-[9px] font-semibold uppercase"
+                              >
+                                {e.slice(0, 2)}
+                              </span>
+                            ))}
+                            {nest.collaborator_emails!.length > 4 && (
+                              <span className="text-[10px]">+{nest.collaborator_emails!.length - 4}</span>
+                            )}
                           </span>
                         )}
-                        {(nest.steward_count ?? 0) > 0 && (
-                          <span
-                            className="inline-flex items-center gap-1"
-                            title={`${nest.steward_count} steward${
-                              nest.steward_count === 1 ? "" : "s"
-                            }`}
-                          >
-                            <Shield className="h-3 w-3" />
-                            {nest.steward_count}
+                        {(nest.steward_emails?.length ?? 0) > 0 && (
+                          <span className="inline-flex items-center gap-0.5" title="Stewards">
+                            <Shield className="h-3 w-3 mr-0.5 text-emerald-600" />
+                            {nest.steward_emails!.slice(0, 4).map((e: string) => (
+                              <span
+                                key={e}
+                                title={`Steward: ${e}`}
+                                className="inline-flex h-4.5 min-w-[18px] items-center justify-center rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-1 text-[9px] font-semibold uppercase"
+                              >
+                                {e.slice(0, 2)}
+                              </span>
+                            ))}
+                            {nest.steward_emails!.length > 4 && (
+                              <span className="text-[10px]">+{nest.steward_emails!.length - 4}</span>
+                            )}
                           </span>
                         )}
                         {isAnonymous && (

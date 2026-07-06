@@ -65,6 +65,8 @@ type View =
       nodeId: string | "new";
       isOwner: boolean;
       isAnonOwned: boolean;
+      /** Pre-file a NEW doc into this folder (folder-tree + buttons). */
+      initialFolder?: string;
       /** Pre-fill the title when arriving via a broken-wikilink click.
        *  Only meaningful when nodeId === "new". */
       initialTitle?: string;
@@ -597,7 +599,7 @@ export default function App() {
               }
               setView({ page: "dashboard" });
             }}
-            onOpenDocument={(nodeId) =>
+            onOpenDocument={(nodeId, opts) =>
               setView({
                 page: "document",
                 nestId: view.nestId,
@@ -605,6 +607,7 @@ export default function App() {
                 nodeId,
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
+                initialFolder: opts?.folder,
               })
             }
           />
@@ -640,10 +643,11 @@ export default function App() {
               // doc's body renders under the new doc's chrome — and
               // isNew flips true with stale state, hiding the status
               // badge + Submit-for-review button on the original doc.
-              key={`${doc.nestId}/${doc.nodeId}`}
+              key={`${doc.nestId}/${doc.nodeId}/${(doc as any).initialFolder ?? ""}`}
               nestId={doc.nestId}
               nestName={doc.nestName}
               nodeId={doc.nodeId}
+              initialFolder={(doc as any).initialFolder}
               isOwner={doc.isOwner}
               breadcrumb={doc.breadcrumb}
               onBack={() => {
