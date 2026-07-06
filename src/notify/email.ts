@@ -40,13 +40,26 @@ let warnedOnce = false;
  * for the same reason). `parseConnectionUrl` DOES copy URL query params into
  * transport options, so this is the only channel that actually lands them.
  * String-appended (not re-encoded through URL()) to byte-preserve inline
- * credentials; if the admin already set a timeout in their URL it wins
- * (parseConnectionUrl keeps the first occurrence).
+ * credentials.
+ *
+ * Only append a param the admin hasn't already set: a DUPLICATE key makes
+ * nodemailer's parser collapse it to an array (`connectionTimeout: ['9999',
+ * '5000']`), which is not a number and silently disables the timeout — the
+ * exact hang this guards against. So an admin-supplied value is preserved and
+ * never duplicated.
  */
-const SMTP_TIMEOUTS =
-  "connectionTimeout=5000&greetingTimeout=5000&socketTimeout=10000";
-function withTimeouts(url: string): string {
-  return url + (url.includes("?") ? "&" : "?") + SMTP_TIMEOUTS;
+const SMTP_TIMEOUT_DEFAULTS: Array<[string, number]> = [
+  ["connectionTimeout", 5000],
+  ["greetingTimeout", 5000],
+  ["socketTimeout", 10000],
+];
+export function withTimeouts(url: string): string {
+  const query = url.includes("?") ? url.slice(url.indexOf("?") + 1) : "";
+  const missing = SMTP_TIMEOUT_DEFAULTS.filter(
+    ([name]) => !new RegExp(`(^|&)${name}=`, "i").test(query),
+  ).map(([name, ms]) => `${name}=${ms}`);
+  if (missing.length === 0) return url;
+  return url + (url.includes("?") ? "&" : "?") + missing.join("&");
 }
 
 async function getTransporter(): Promise<any | null> {

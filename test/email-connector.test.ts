@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+import { withTimeouts } from "../src/notify/email.js";
 
 const sendMail = vi.fn(async () => ({ messageId: "test" }));
 const createTransport = vi.fn(() => ({ sendMail }));
@@ -138,6 +139,27 @@ describe("email connector", () => {
     await settle();
     expect(sendMail).not.toHaveBeenCalled();
     process.env.NOTIFY_EMAIL_TO = "team@test.local";
+  });
+});
+
+describe("withTimeouts (SMTP URL socket-timeout hardening)", () => {
+  it("appends all three timeouts when the URL has no query string", () => {
+    const out = withTimeouts("smtps://u:p@host:465");
+    expect(out).toContain("connectionTimeout=5000");
+    expect(out).toContain("greetingTimeout=5000");
+    expect(out).toContain("socketTimeout=10000");
+  });
+
+  it("preserves an admin-supplied timeout and never duplicates the key", () => {
+    // A duplicate query key makes nodemailer parse the value as an array
+    // (['9999','5000']) which disables the timeout — so an existing value
+    // must win and NOT be appended again.
+    const out = withTimeouts("smtps://u:p@host:465?connectionTimeout=9999");
+    expect(out.match(/connectionTimeout=/g)).toHaveLength(1);
+    expect(out).toContain("connectionTimeout=9999");
+    // The other two are still filled in, joined onto the existing query.
+    expect(out).toContain("greetingTimeout=5000");
+    expect(out).toContain("socketTimeout=10000");
   });
 });
 
