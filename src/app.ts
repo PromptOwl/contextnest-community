@@ -183,6 +183,9 @@ export function createApp(): Hono<AuthEnv> {
       version: SERVICE_VERSION,
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
+      // Presence only, never the value: lets the UI stop prompting for a
+      // runner key once the server-wide one exists.
+      runner_key_configured: !!process.env.ANTHROPIC_API_KEY,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
       // Surfaced so the UI can show/hide the Workflows nav without an
       // admin-only /admin/settings call. Public, matches logo_url/gate.
@@ -727,6 +730,11 @@ export function createApp(): Hono<AuthEnv> {
       required = c.req.method === "GET" || c.req.method === "POST"
         ? "write"
         : "admin";
+    } else if (parts[1] === "hooks") {
+      // Hook rows carry trigger capability (the token fires runs, which is
+      // a write-tier action) — reading the list must not be a read-tier
+      // privilege escalation.
+      required = "write";
     } else if (
       c.req.method !== "GET" &&
       !isStewardActionPath &&

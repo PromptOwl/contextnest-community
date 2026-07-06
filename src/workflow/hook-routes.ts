@@ -52,10 +52,12 @@ function hookUrl(c: any, id: string): string {
   return `${base}/hooks/${id}`;
 }
 
-function toResponse(c: any, r: HookRow) {
+function toResponse(c: any, r: HookRow, opts: { reveal?: boolean } = {}) {
   return {
-    id: r.id,
-    url: hookUrl(c, r.id),
+    // The id doubles as the capability token, so the LIST view masks it —
+    // the full URL is shown exactly once, at creation (API-key semantics).
+    id: opts.reveal ? r.id : `${r.id.slice(0, 7)}…${r.id.slice(-4)}`,
+    url: opts.reveal ? hookUrl(c, r.id) : null,
     agent_node: r.agent_node,
     preset: r.preset,
     enabled: !!r.enabled,
@@ -115,20 +117,25 @@ hookNestRoutes.post("/", requireWorkflowPlane, async (c) => {
     [id, nestId, agentNode, preset, await resolveCallerEmail(c.get("userId")), now],
   );
   const row = (await getDb().get("SELECT * FROM trigger_hooks WHERE id = ?", [id])) as HookRow;
-  return c.json({ hook: toResponse(c, row) }, 201);
+  return c.json({ hook: toResponse(c, row, { reveal: true }) }, 201);
 });
 
-// DELETE /nests/:nestId/hooks/:id
+// DELETE /nests/:nestId/hooks/:id — accepts the full token OR the masked
+// display form (hk_xxxx…yyyy) the list returns, so revoke works without
+// ever re-exposing the capability.
 hookNestRoutes.delete("/:id", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const id = c.req.param("id")!;
   const db = getDb();
-  const row = await db.get(
-    "SELECT id FROM trigger_hooks WHERE id = ? AND nest_id = ?",
-    [id, nestId],
-  );
+  const masked = id.match(/^(.{7})…(.{4})$/);
+  const row = (await db.get(
+    masked
+      ? "SELECT id FROM trigger_hooks WHERE nest_id = ? AND id LIKE ? AND id LIKE ?"
+      : "SELECT id FROM trigger_hooks WHERE nest_id = ? AND id = ?",
+    masked ? [nestId, `${masked[1]}%`, `%${masked[2]}`] : [nestId, id],
+  )) as { id: string } | undefined;
   if (!row) throw new NotFoundError("Hook not found");
-  await db.run("DELETE FROM trigger_hooks WHERE id = ?", [id]);
+  await db.run("DELETE FROM trigger_hooks WHERE id = ?", [row.id]);
   return c.json({ deleted: true });
 });
 
@@ -183,11 +190,11 @@ export const hookFireRoutes = new Hono<AuthEnv>();
 // POST /hooks/:token — public; the token is the auth.
 hookFireRoutes.post("/:token", async (c) => {
   const token = c.req.param("token")!;
-  // Cheap fence before any DB work: 30 fires/min per token, 120/min global.
-  if (
-    !tryConsume(`hook:${token}`, { max: 30, windowMs: 60_000 }) ||
-    !tryConsume("hook:*", { max: 120, windowMs: 60_000 })
-  ) {
+  // Global fence FIRST (bounded key). The per-token bucket is only created
+  // after the row is known to exist — keying a limiter on an
+  // attacker-controlled string before validation would let /hooks/<random>
+  // grow the bucket map without bound.
+  if (!tryConsume("hook:*", { max: 120, windowMs: 60_000 })) {
     return c.json({ error: "rate limited" }, 429);
   }
 
@@ -198,6 +205,9 @@ hookFireRoutes.post("/:token", async (c) => {
   )) as HookRow | undefined;
   // Uniform 404 for unknown AND disabled — a prober learns nothing.
   if (!hook) throw new NotFoundError("Not found");
+  if (!tryConsume(`hook:${hook.id}`, { max: 30, windowMs: 60_000 })) {
+    return c.json({ error: "rate limited" }, 429);
+  }
 
   const raw = await c.req.text();
   const ct = c.req.header("content-type") || "";

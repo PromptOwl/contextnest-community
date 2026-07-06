@@ -984,6 +984,19 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("024_trigger_hooks");
   }
+
+  // 025: atomic run claiming. Two pollers seeing the same unclaimed run and
+  //   both executing it means duplicate side effects — the claim column is
+  //   the mutex: UPDATE … WHERE claimed_by IS NULL, check rows-affected.
+  if (!hasMigration("025_run_claims")) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE runs ADD COLUMN claimed_by TEXT;
+        ALTER TABLE runs ADD COLUMN claimed_at TEXT;
+      `);
+    })();
+    recordMigration("025_run_claims");
+  }
 }
 
 /**

@@ -928,6 +928,9 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   // Inbound trigger hooks for the selected runnable node.
   const [nodeHooks, setNodeHooks] = useState<TriggerHook[]>([]);
   const [hookPreset, setHookPreset] = useState<TriggerHook["preset"]>("slack");
+  // Full trigger URLs are revealed exactly once, at creation (API-key
+  // semantics) — cache them for this session so copy keeps working.
+  const [revealedHookUrls, setRevealedHookUrls] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1590,14 +1593,21 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                             Remove
                           </button>
                         </div>
-                        <button
-                          type="button"
-                          className="w-full text-left font-mono break-all rounded bg-muted/40 px-1.5 py-1 hover:border-primary border border-transparent"
-                          title="Copy the trigger URL — paste into a Slack slash command / Events API, Teams outgoing webhook, or any system that can POST"
-                          onClick={() => copy(`hook-${h.id}`, h.url)}
-                        >
-                          {copied === `hook-${h.id}` ? "✓ copied" : h.url}
-                        </button>
+                        {(h.url ?? revealedHookUrls[h.id]) ? (
+                          <button
+                            type="button"
+                            className="w-full text-left font-mono break-all rounded bg-muted/40 px-1.5 py-1 hover:border-primary border border-transparent"
+                            title="Copy the trigger URL — paste into a Slack slash command / Events API, Teams outgoing webhook, or any system that can POST"
+                            onClick={() => copy(`hook-${h.id}`, h.url ?? revealedHookUrls[h.id])}
+                          >
+                            {copied === `hook-${h.id}` ? "✓ copied" : (h.url ?? revealedHookUrls[h.id])}
+                          </button>
+                        ) : (
+                          <p className="text-muted-foreground px-1.5">
+                            URL was shown at creation only (like an API key).
+                            Remove + re-add to mint a fresh one.
+                          </p>
+                        )}
                       </div>
                     ))}
                     <div className="flex items-center gap-1.5">
@@ -1615,7 +1625,13 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                         variant="outline"
                         className="h-7 px-2"
                         onClick={async () => {
-                          await createHook(nestId, selNode, hookPreset);
+                          const created = await createHook(nestId, selNode, hookPreset);
+                          if (created.url) {
+                            // List responses mask the id (hk_xxxx…yyyy) —
+                            // key the reveal cache by that same masked form.
+                            const maskedId = `${created.id.slice(0, 7)}…${created.id.slice(-4)}`;
+                            setRevealedHookUrls((prev) => ({ ...prev, [maskedId]: created.url! }));
+                          }
                           setNodeHooks(await listHooks(nestId, selNode));
                         }}
                       >

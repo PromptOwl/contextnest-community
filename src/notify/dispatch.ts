@@ -76,16 +76,51 @@ function formatBody(
   };
 }
 
+/**
+ * SSRF fence for outbound connector targets. The server POSTs these URLs
+ * from its own network position, so an editor-supplied URL must not reach
+ * loopback, RFC1918/link-local ranges, or the cloud metadata endpoint.
+ * Hostname-level check: a public DNS name that RESOLVES to a private IP
+ * (rebinding) is out of scope here — noted limitation, not a regression.
+ */
+export function isForbiddenConnectorHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal"))
+    return true;
+  if (h === "::1" || h === "0.0.0.0" || h.startsWith("fe80:") || h.startsWith("fc") || h.startsWith("fd"))
+    return true;
+  const m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  if (a === 127 || a === 10 || a === 0) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true; // link-local incl. cloud metadata
+  return false;
+}
+
+/** True for an https URL whose host passes the SSRF fence. */
+export function isSafeConnectorUrl(raw: string): boolean {
+  if (!/^https:\/\//i.test(raw)) return false;
+  try {
+    return !isForbiddenConnectorHost(new URL(raw).hostname);
+  } catch {
+    return false;
+  }
+}
+
 /** Resolve a connector url: literal https URL or env:KEY via the env store
- *  (nest values over the server floor — exactly like tool credentials). */
+ *  (nest values over the server floor — exactly like tool credentials).
+ *  The SSRF fence applies at DISPATCH time too, so an env-value swap can't
+ *  smuggle a private target past creation-time validation. */
 async function resolveUrl(nestId: string, raw: string): Promise<string | null> {
   if (raw.startsWith("env:")) {
     const key = raw.slice(4).trim();
     const env = await envValues(nestId);
     const v = env[key];
-    return v && /^https:\/\//i.test(v) ? v : null;
+    return v && isSafeConnectorUrl(v) ? v : null;
   }
-  return /^https:\/\//i.test(raw) ? raw : null;
+  return isSafeConnectorUrl(raw) ? raw : null;
 }
 
 const warned = new Set<string>();

@@ -55,6 +55,7 @@ const HISTORICAL_MIGRATIONS = [
   "022_tools_and_watchers",
   "023_connectors",
   "024_trigger_hooks",
+  "025_run_claims",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -426,7 +427,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       inputs TEXT,
       trace TEXT,
       started_at TEXT NOT NULL,
-      finished_at TEXT
+      finished_at TEXT,
+      claimed_by TEXT,
+      claimed_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_runs_nest ON runs(nest_id, started_at);
     CREATE INDEX IF NOT EXISTS idx_runs_agent ON runs(nest_id, agent_node);

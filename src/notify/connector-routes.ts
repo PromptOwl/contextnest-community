@@ -11,6 +11,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
+import { isSafeConnectorUrl } from "./dispatch.js";
 
 export const KNOWN_EVENTS = [
   "review_requested",
@@ -71,9 +72,9 @@ function parseEvents(v: unknown): string {
 function parseUrl(v: unknown): string {
   const raw = typeof v === "string" ? v.trim() : "";
   if (raw.startsWith("env:") && raw.length > 4) return raw;
-  if (/^https:\/\//i.test(raw)) return raw;
+  if (isSafeConnectorUrl(raw)) return raw;
   throw new ValidationError(
-    'url must be https://… or an env reference like "env:SLACK_WEBHOOK"',
+    'url must be a public https:// URL (loopback/private/metadata hosts are refused) or an env reference like "env:SLACK_WEBHOOK"',
   );
 }
 

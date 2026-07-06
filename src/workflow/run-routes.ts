@@ -370,11 +370,10 @@ runListRoutes.get("/", requireWorkflowPlane, async (c) => {
     sql += " AND status = ?";
     args.push(status);
   }
-  // ?unclaimed=true → running runs no runner has touched yet (zero steps).
-  // The poll loop's work queue.
+  // ?unclaimed=true → running runs no runner has claimed. The poll loop's
+  // work queue; GET /runs/:id/bundle performs the atomic claim.
   if (c.req.query("unclaimed") === "true") {
-    sql +=
-      " AND status = 'running' AND NOT EXISTS (SELECT 1 FROM run_steps WHERE run_steps.run_id = runs.id)";
+    sql += " AND status = 'running' AND claimed_by IS NULL";
   }
   sql += " ORDER BY started_at DESC LIMIT ?";
   args.push(Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 500));
@@ -539,6 +538,18 @@ runDetailRoutes.get("/:id/bundle", requireWorkflowPlane, async (c) => {
   const run = await loadRunWithPermission(c, c.req.param("id")!, "write");
   if (run.status !== "running") {
     throw new ConflictError(`Run is ${run.status} — nothing to execute`);
+  }
+  // Atomic claim: first caller wins, everyone else 409s. This is what keeps
+  // two pollers from double-executing the same run (duplicate tool calls,
+  // duplicate write-backs). rows-affected is the arbiter, not a pre-read.
+  const claimer = await resolveCallerEmail(c.get("userId"));
+  const res = await getDb().run(
+    `UPDATE runs SET claimed_by = ?, claimed_at = ?
+      WHERE id = ? AND claimed_by IS NULL`,
+    [claimer, new Date().toISOString(), run.id],
+  );
+  if (!res.changes) {
+    throw new ConflictError("Run already claimed by another runner");
   }
   const bundle = await buildRunBundle(run.nest_id, run.agent_node);
   return c.json({

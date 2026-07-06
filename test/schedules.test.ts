@@ -159,16 +159,16 @@ describe("scheduler tick", () => {
     expect(bundle.data.agent.content).toContain("Digest instructions");
     expect(bundle.data.env).toBeDefined();
 
-    // A step claims it — it leaves the unclaimed queue.
-    const step = await jsonRequest(
-      app, "POST", `/runs/${runId}/steps`,
-      { action: "read", node_id: "nodes/digest-agent" }, alice.apiKey,
-    );
-    expect(step.status).toBe(201);
+    // Fetching the bundle IS the claim — the run leaves the queue and a
+    // second poller gets 409 instead of double-executing.
     const after = await jsonRequest(
       app, "GET", `/nests/${nestId}/runs?unclaimed=true`, undefined, alice.apiKey,
     );
     expect(after.data.runs.map((r: any) => r.id)).not.toContain(runId);
+    const again = await jsonRequest(
+      app, "GET", `/runs/${runId}/bundle`, undefined, alice.apiKey,
+    );
+    expect(again.status).toBe(409);
   });
 
   it("stop-after bound: auto-pauses when max_runs is reached", async () => {

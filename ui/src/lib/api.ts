@@ -1265,7 +1265,8 @@ export async function deleteEnv(nestId: string, key: string) {
 // Inbound trigger hooks — tokenized listener URLs (slack/teams/webhook).
 export interface TriggerHook {
   id: string;
-  url: string;
+  /** Full URL only at creation; null in list responses (token masked). */
+  url: string | null;
   agent_node: string;
   preset: "slack" | "teams" | "webhook";
   enabled: boolean;
