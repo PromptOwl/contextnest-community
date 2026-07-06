@@ -18,6 +18,7 @@ let alice: { apiKey: string; userId: string; email: string };
 let nestId: string;
 
 beforeAll(async () => {
+  process.env.NOTIFY_DEBOUNCE_MS = "10"; // near-instant flush for tests
   process.env.SMTP_URL = "smtps://user:pass@smtp.test:465";
   process.env.NOTIFY_EMAIL_FROM = "nest@test.local";
   process.env.NOTIFY_EMAIL_TO = "team@test.local";

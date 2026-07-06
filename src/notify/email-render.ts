@@ -214,7 +214,11 @@ export function renderHtml(message: string, nestName: string): string {
   const lead = message.match(/^(:[a-z_]+:)\s*/);
   const meta = (lead && EVENT[lead[1]]) || { icon: "🔔", color: "#475569" };
   const rest = lead ? message.slice(lead[0].length) : message;
-  const body = escapeHtml(rest).replace(/\*([^*]+)\*/g, "<strong>$1</strong>");
+  // `\n` → `<br>` so a multi-line body (e.g. a burst digest) keeps its line
+  // breaks; HTML collapses raw newlines. Escape first, so this can't inject.
+  const body = escapeHtml(rest)
+    .replace(/\*([^*]+)\*/g, "<strong>$1</strong>")
+    .replace(/\n/g, "<br>");
   const safeNest = escapeHtml(nestName);
   return `<div style="background:#f6f8fa;padding:24px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">

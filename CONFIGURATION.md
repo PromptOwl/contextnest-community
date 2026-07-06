@@ -70,6 +70,7 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `SMTP_URL` | _(unset — connector off)_ | SMTP connection URL for email notifications (`smtp://` or `smtps://`, credentials inline). Requires `NOTIFY_EMAIL_FROM` and `NOTIFY_EMAIL_TO`. Also editable from Settings. |
 | `NOTIFY_EMAIL_FROM` | _(unset)_ | From address for notification emails. |
 | `NOTIFY_EMAIL_TO` | _(unset)_ | Comma-separated recipients for notification emails. |
+| `NOTIFY_DEBOUNCE_MS` | `15000` | Per-nest buffer window before notifications flush; bursts collapse into one digest message. |
 
 ---
 

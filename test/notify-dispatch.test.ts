@@ -5,7 +5,7 @@
  * mocked so this asserts the dispatcher's Promise.allSettled semantics
  * directly, independent of Slack/SMTP wiring.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 
 // vi.mock is hoisted above these decls, so create the spies via vi.hoisted
 // (which runs first) to avoid the temporal-dead-zone reference error.
@@ -20,14 +20,36 @@ vi.mock("../src/notify/email.js", () => ({ notifyEmailForNest: emailSpy }));
 
 import { notifyNestEvent } from "../src/notify/notify.js";
 
+// Connectors fire on the debounce flush, not synchronously — give it a beat.
+const settle = () => new Promise((r) => setTimeout(r, 50));
+
 describe("notifyNestEvent fan-out", () => {
-  it("a throwing Slack connector does not block email or reject", async () => {
+  beforeAll(() => {
+    // A connector must be configured or the dispatcher short-circuits before
+    // buffering. These URLs only gate dispatch; the connectors are mocked, so
+    // no real Slack/SMTP call happens. Small window for a near-instant flush.
+    process.env.NOTIFY_DEBOUNCE_MS = "5";
+    process.env.SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/T/B/X";
+    process.env.SMTP_URL = "smtps://u:p@smtp.test:465";
+  });
+  afterAll(() => {
+    delete process.env.NOTIFY_DEBOUNCE_MS;
+    delete process.env.SLACK_WEBHOOK_URL;
+    delete process.env.SMTP_URL;
+  });
+
+  it("a throwing Slack connector does not block email, and the dispatch never rejects", async () => {
     const details = { status: "approved" as const, docTitle: "D", path: "N" };
+    // notifyNestEvent buffers and resolves immediately (fire-and-forget) — it
+    // must never surface a connector failure to the awaiting governance path.
     await expect(
       notifyNestEvent("nest1", "msg", details),
     ).resolves.toBeUndefined();
+
+    // On flush the connectors fan out under Promise.allSettled, so Slack
+    // throwing doesn't stop email from receiving the call + structured details.
+    await settle();
     expect(slackSpy).toHaveBeenCalledWith("nest1", "msg");
-    // Email still receives the call — and the structured details — despite Slack throwing.
     expect(emailSpy).toHaveBeenCalledWith("nest1", "msg", details);
   });
 });
