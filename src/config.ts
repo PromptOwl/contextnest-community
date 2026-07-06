@@ -315,11 +315,15 @@ export const config = {
   /**
    * Per-nest notification digest window in milliseconds. A burst of governance
    * events on one nest inside this window collapses into a single digest
-   * message instead of one post per event. Non-numeric / negative / unset →
-   * 15000 (15s).
+   * message instead of one post per event. Empty / non-numeric / negative /
+   * unset → 15000 (15s).
    */
   get NOTIFY_DEBOUNCE_MS(): number {
-    const n = Number(process.env.NOTIFY_DEBOUNCE_MS);
+    // Guard empty-but-set (NOTIFY_DEBOUNCE_MS=) first: Number("") is 0, not
+    // NaN, so it would otherwise yield a 0ms window instead of the default.
+    const raw = process.env.NOTIFY_DEBOUNCE_MS?.trim();
+    if (!raw) return 15_000;
+    const n = Number(raw);
     return Number.isFinite(n) && n >= 0 ? n : 15_000;
   },
   /**

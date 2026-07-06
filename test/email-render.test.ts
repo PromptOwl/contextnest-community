@@ -3,7 +3,7 @@
  * subject/text/html shaping and, importantly, that user fragments are escaped.
  */
 import { describe, it, expect } from "vitest";
-import { renderEmail } from "../src/notify/email-render.js";
+import { renderEmail, renderHtml } from "../src/notify/email-render.js";
 
 describe("renderEmail", () => {
   it("renders an approved event with title, details, and a link button", () => {
@@ -87,5 +87,24 @@ describe("renderEmail", () => {
     });
     expect(subject).not.toContain("\n");
     expect(subject).not.toContain("\r");
+  });
+});
+
+describe("renderHtml (fallback path — burst digests)", () => {
+  it("keeps a multi-line digest's line breaks as <br>", () => {
+    // A burst digest routes through the fallback (no structured details), so
+    // its newlines must survive as <br> or the HTML body collapses to one line.
+    const digest = "3 updates:\n• a@x.com\n• b@x.com\n• c@x.com";
+    const html = renderHtml(digest, "Team Nest");
+    expect(html.match(/<br>/g)?.length).toBe(3);
+    expect(html).toContain("3 updates:<br>");
+    expect(html).toContain("• a@x.com<br>• b@x.com");
+  });
+
+  it("still escapes user fragments before inserting <br> (no injection)", () => {
+    const html = renderHtml("line1\n<img src=x onerror=alert(1)>", "Nest");
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img");
+    expect(html).toContain("line1<br>");
   });
 });

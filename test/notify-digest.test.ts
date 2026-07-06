@@ -136,8 +136,13 @@ describe("config.NOTIFY_DEBOUNCE_MS fallback", () => {
     else process.env.NOTIFY_DEBOUNCE_MS = original;
   });
 
-  it("defaults to 15000 for unset / non-numeric / negative, honours a valid value", () => {
+  it("defaults to 15000 for unset / empty / non-numeric / negative, honours a valid value", () => {
     delete process.env.NOTIFY_DEBOUNCE_MS;
+    expect(config.NOTIFY_DEBOUNCE_MS).toBe(15_000);
+    // Set-but-empty (NOTIFY_DEBOUNCE_MS=): Number("") is 0, must NOT yield 0ms.
+    process.env.NOTIFY_DEBOUNCE_MS = "";
+    expect(config.NOTIFY_DEBOUNCE_MS).toBe(15_000);
+    process.env.NOTIFY_DEBOUNCE_MS = "   ";
     expect(config.NOTIFY_DEBOUNCE_MS).toBe(15_000);
     process.env.NOTIFY_DEBOUNCE_MS = "abc";
     expect(config.NOTIFY_DEBOUNCE_MS).toBe(15_000);
