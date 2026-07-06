@@ -50,8 +50,17 @@ describe("email connector", () => {
     await settle();
 
     // Transport built from the SMTP URL with file/URL access disabled.
-    expect(createTransport).toHaveBeenCalledWith(
-      "smtps://user:pass@smtp.test:465",
+    expect(createTransport).toHaveBeenCalled();
+    const [urlArg, optsArg] = createTransport.mock.calls[0] as [string, any];
+    expect(urlArg).toContain("smtps://user:pass@smtp.test:465");
+    // Timeouts MUST ride on the URL query string — nodemailer ignores socket
+    // timeouts passed in the options arg when the transport is a URL string.
+    // Asserting them on the URL is what catches a regression back to the
+    // (silently-ignored) options-arg placement.
+    expect(urlArg).toContain("connectionTimeout=5000");
+    expect(urlArg).toContain("greetingTimeout=5000");
+    expect(urlArg).toContain("socketTimeout=10000");
+    expect(optsArg).toEqual(
       expect.objectContaining({
         disableFileAccess: true,
         disableUrlAccess: true,
@@ -64,7 +73,17 @@ describe("email connector", () => {
     expect(msg.to).toBe("team@test.local");
     expect(msg.subject).toContain("Mail Nest");
     expect(msg.text).toContain("bob@acme.com");
-    // Hardened per the scan: belt-and-braces flags on the message, no raw.
+    // Multipart: a branded HTML part is sent alongside the plain-text fallback,
+    // *bold* markup is rendered, and the raw shortcode markers don't leak.
+    expect(msg.html).toContain("ContextNest");
+    expect(msg.html).toContain("<strong>");
+    expect(msg.html).not.toContain(":key:");
+    expect(msg.text).not.toContain("*");
+    // The document/nest link is derived from the request origin — no
+    // PUBLIC_BASE_URL configured in this test, yet a link is still built.
+    expect(process.env.PUBLIC_BASE_URL).toBeUndefined();
+    expect(msg.html).toContain("http://localhost/?nest=");
+    expect(msg.html).toContain(">Open nest<");
     expect(msg.disableFileAccess).toBe(true);
     expect(msg.disableUrlAccess).toBe(true);
     expect(msg.raw).toBeUndefined();
@@ -80,6 +99,29 @@ describe("email connector", () => {
       alice.apiKey,
     );
     expect(res.status).toBe(201);
+  });
+
+  it("strips CR/LF from the nest name before it reaches the Subject header", async () => {
+    sendMail.mockClear();
+    const evil = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Injected\r\nBcc: attacker@evil.com" },
+      alice.apiKey,
+    );
+    const evilId = evil.data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${evilId}/collaborators`,
+      { email: "eve@acme.com", permission: "read" },
+      alice.apiKey,
+    );
+    await settle();
+    const msg = sendMail.mock.calls[0][0] as any;
+    expect(msg.subject).not.toContain("\n");
+    expect(msg.subject).not.toContain("\r");
   });
 
   it("does nothing when from/to are missing", async () => {
@@ -113,6 +155,33 @@ describe("admin settings validation", () => {
     });
     expect(clear.status).toBe(200);
     expect(clear.data.settings.smtp_url).toBe("");
+    process.env.SMTP_URL = "smtps://user:pass@smtp.test:465";
+    process.env.NOTIFY_EMAIL_FROM = "nest@test.local";
+    process.env.NOTIFY_EMAIL_TO = "team@test.local";
+  });
+
+  it("rejects a malformed notify_email_from / notify_email_to", async () => {
+    const openApp = await createTestApp("open");
+    const badFrom = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      notify_email_from: "not-an-email",
+    });
+    expect(badFrom.status).toBe(400);
+    // A comma-list where one entry is malformed rejects the whole field.
+    const badTo = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      notify_email_to: "ok@acme.com, bogus",
+    });
+    expect(badTo.status).toBe(400);
+    // A header-injection shape (interior CR/LF, survives .trim()) is rejected.
+    const crlf = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      notify_email_from: "nest@acme.com\nBcc: attacker@evil.com",
+    });
+    expect(crlf.status).toBe(400);
+    // Well-formed values round-trip.
+    const good = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      notify_email_from: "nest@acme.com",
+      notify_email_to: "a@acme.com, b@acme.com",
+    });
+    expect(good.status).toBe(200);
     process.env.SMTP_URL = "smtps://user:pass@smtp.test:465";
     process.env.NOTIFY_EMAIL_FROM = "nest@test.local";
     process.env.NOTIFY_EMAIL_TO = "team@test.local";

@@ -21,6 +21,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -353,15 +354,6 @@ function createServerMcp(
     });
   }
   return server;
-}
-
-function requestBaseUrl(reqUrl: string): string {
-  if (config.PUBLIC_BASE_URL) return config.PUBLIC_BASE_URL;
-  try {
-    return new URL(reqUrl).origin;
-  } catch {
-    return "";
-  }
 }
 
 export const serverMcpRoutes = new Hono<AuthEnv>();
