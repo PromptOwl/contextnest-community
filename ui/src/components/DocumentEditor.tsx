@@ -168,6 +168,8 @@ export function DocumentEditor({
   // (quote + 250c context + line hint); a floating button pins a comment to it.
   const [pendingAnchor, setPendingAnchor] = useState<api.AnnotationAnchor | null>(null);
   const [selPopover, setSelPopover] = useState<{ x: number; y: number } | null>(null);
+  // Anchor snapshotted at mouseup (selection is live then); consumed on click.
+  const stagedAnchorRef = useRef<api.AnnotationAnchor | null>(null);
   const docViewRef = useRef<HTMLDivElement | null>(null);
   // Anchored threads mirrored up from the panel, the DOM ranges we paint for
   // them, and which thread is currently emphasized (doc ⇄ rail sync).
@@ -440,8 +442,12 @@ export function DocumentEditor({
   }, []);
 
   // Read the current selection inside the rendered doc and, if non-empty,
-  // surface a floating "Comment" button at the selection. Building the anchor
-  // is deferred to the click so we don't compute on every mouseup.
+  // surface a floating "Comment" button at the selection. We build the anchor
+  // HERE (mouseup), while the selection is guaranteed live, and stash it — the
+  // button click just consumes it. Deferring the build to the click loses
+  // selections that the browser collapses over interactive/structured nodes
+  // (links render as <a>/<button>, headings as block elements), which is why
+  // the button did nothing on those.
   const onDocMouseUp = useCallback(() => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
@@ -454,33 +460,32 @@ export function DocumentEditor({
       setSelPopover(null);
       return;
     }
-    if (!sel.toString().trim()) {
+    const quote = sel.toString().trim();
+    if (!quote) {
       setSelPopover(null);
       return;
     }
-    const rect = range.getBoundingClientRect();
-    // Anchor the button just above the selection (viewport/fixed coords).
-    setSelPopover({ x: rect.left + rect.width / 2, y: rect.top });
-  }, []);
-
-  // Turn the live selection into a resilient anchor: quote + up to 250c of
-  // surrounding rendered text + a best-effort source line hint.
-  const stageAnchorFromSelection = useCallback(() => {
-    const sel = window.getSelection();
-    const container = docViewRef.current;
-    if (!sel || sel.isCollapsed || !container) return;
-    const quote = sel.toString().trim();
-    if (!quote) return;
     const full = container.innerText || container.textContent || "";
     const idx = full.indexOf(quote);
     const before = idx >= 0 ? full.slice(Math.max(0, idx - 250), idx) : "";
     const after = idx >= 0 ? full.slice(idx + quote.length, idx + quote.length + 250) : "";
     const srcIdx = content.indexOf(quote);
     const line = srcIdx >= 0 ? content.slice(0, srcIdx).split("\n").length : undefined;
-    setPendingAnchor({ quote, before, after, line });
-    setSelPopover(null);
-    sel.removeAllRanges();
+    stagedAnchorRef.current = { quote, before, after, line };
+    const rect = range.getBoundingClientRect();
+    // Anchor the button just above the selection (viewport/fixed coords).
+    setSelPopover({ x: rect.left + rect.width / 2, y: rect.top });
   }, [content]);
+
+  // Turn the live selection into a resilient anchor: quote + up to 250c of
+  // surrounding rendered text + a best-effort source line hint.
+  const stageAnchorFromSelection = useCallback(() => {
+    const anchor = stagedAnchorRef.current;
+    if (!anchor) return;
+    setPendingAnchor(anchor);
+    setSelPopover(null);
+    window.getSelection()?.removeAllRanges();
+  }, []);
 
   // Rebuild the painted comment highlights whenever the doc text or the set
   // of anchored threads changes (and only in the rendered, non-diff view).
