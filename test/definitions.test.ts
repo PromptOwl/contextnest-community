@@ -160,3 +160,81 @@ describe("real-time lookup", () => {
     expect(after.data.count).toBe(0);
   });
 });
+
+describe("edit by editing_id (rename in place)", () => {
+  // Runs last: the glossary is empty here (prior block deleted everything).
+  let fooId: string;
+  let barId: string;
+
+  beforeAll(async () => {
+    const foo = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/definitions`,
+      { term: "Foo", definition: "the foo." },
+      owner.apiKey,
+    );
+    fooId = foo.data.definition.id;
+    const bar = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/definitions`,
+      { term: "Bar", definition: "the bar." },
+      owner.apiKey,
+    );
+    barId = bar.data.definition.id;
+  });
+
+  it("renames a row in place without creating a duplicate", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/definitions`,
+      { term: "Foobar", definition: "the foo, renamed.", editing_id: fooId },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.definition.id).toBe(fooId);
+    expect(res.data.definition.term).toBe("Foobar");
+    const gone = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/definitions?term=Foo`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(gone.status).toBe(404); // old name gone, not duplicated
+  });
+
+  it("409s (no data loss) when a rename collides with another row", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/definitions`,
+      { term: "Bar", definition: "overwrite attempt.", editing_id: fooId },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(409);
+    // Bar's original definition must be untouched.
+    const bar = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/definitions?term=Bar`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(bar.data.definition.id).toBe(barId);
+    expect(bar.data.definition.definition).toBe("the bar.");
+  });
+
+  it("404s when editing_id points at no row in this nest", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/definitions`,
+      { term: "Ghost", definition: "x", editing_id: "does-not-exist" },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(404);
+  });
+});

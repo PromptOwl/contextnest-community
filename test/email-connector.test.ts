@@ -38,7 +38,13 @@ afterAll(() => {
   env.cleanup();
 });
 
+// Notify dispatch is debounced + the SMTP send is async, so a fixed sleep
+// races the flush under a loaded (full-suite, parallel) test run. Poll for the
+// spy instead of guessing a delay. `settle` stays for the negative assertions
+// (proving a send did NOT happen needs a bounded wait, not a poll).
 const settle = () => new Promise((r) => setTimeout(r, 50));
+const waitForSend = () =>
+  vi.waitFor(() => expect(sendMail).toHaveBeenCalled(), { timeout: 3000 });
 
 describe("email connector", () => {
   it("sends on a governance event with hardened transport + message options", async () => {
@@ -49,7 +55,7 @@ describe("email connector", () => {
       { email: "bob@acme.com", permission: "write" },
       alice.apiKey,
     );
-    await settle();
+    await waitForSend();
 
     // Transport built from the SMTP URL with file/URL access disabled.
     expect(createTransport).toHaveBeenCalled();
@@ -120,7 +126,7 @@ describe("email connector", () => {
       { email: "eve@acme.com", permission: "read" },
       alice.apiKey,
     );
-    await settle();
+    await waitForSend();
     const msg = sendMail.mock.calls[0][0] as any;
     expect(msg.subject).not.toContain("\n");
     expect(msg.subject).not.toContain("\r");

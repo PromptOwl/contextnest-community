@@ -449,7 +449,15 @@ export async function listDefinitions(nestId: string) {
 
 export async function upsertDefinition(
   nestId: string,
-  data: { term: string; definition: string; linked_tag?: string | null },
+  data: {
+    term: string;
+    definition: string;
+    linked_tag?: string | null;
+    // The row being edited, when renaming/editing an existing definition.
+    // Scopes the upsert to that row so a rename can't overwrite a sibling
+    // that already owns the new term (server returns 409 instead).
+    editing_id?: string;
+  },
 ) {
   return request<{ definition: Definition }>(`/nests/${nestId}/definitions`, {
     method: "POST",

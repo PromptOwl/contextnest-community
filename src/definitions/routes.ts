@@ -13,7 +13,12 @@ import { Hono } from "hono";
 import { v4 as uuid } from "uuid";
 import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
-import { ValidationError, NotFoundError } from "../shared/errors.js";
+import type { Querier } from "../db/adapter.js";
+import {
+  ValidationError,
+  NotFoundError,
+  ConflictError,
+} from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 
 export const definitionRoutes = new Hono<AuthEnv>();
@@ -59,6 +64,7 @@ definitionRoutes.post("/", async (c) => {
     term?: unknown;
     definition?: unknown;
     linked_tag?: unknown;
+    editing_id?: unknown;
   }>();
   // Runtime shape checks — the json<>() cast is compile-time only, and a
   // numeric term would otherwise TypeError into a generic 500.
@@ -72,8 +78,16 @@ definitionRoutes.post("/", async (c) => {
     typeof body.linked_tag !== "string"
   )
     throw new ValidationError("linked_tag must be a string or null");
+  if (body.editing_id !== undefined && typeof body.editing_id !== "string")
+    throw new ValidationError("editing_id must be a string");
   const term = (body.term as string | undefined)?.trim();
   const definition = (body.definition as string | undefined)?.trim();
+  // editing_id = the specific row the UI opened for edit. It scopes the
+  // upsert to that row so a term rename replaces it in place instead of
+  // matching (and overwriting) a different row that happens to share the
+  // new name. Absent it, writes upsert by term text (add form, agents).
+  const editingId =
+    (body.editing_id as string | undefined)?.trim() || undefined;
   if (!term || !definition) {
     throw new ValidationError("term and definition are required");
   }
@@ -90,40 +104,67 @@ definitionRoutes.post("/", async (c) => {
   const db = getDb();
   const definedBy = await resolveCallerEmail(c.get("userId"));
   const now = new Date().toISOString();
-  // Transaction closes the select-then-branch race: two concurrent defines
-  // of the same new term serialize instead of the loser 409ing on the
-  // unique index.
-  await db.transaction(async (tx) => {
+  const applyUpdate = async (tx: Querier, id: string) => {
+    if (linkedTagProvided) {
+      await tx.run(
+        "UPDATE definitions SET term = ?, definition = ?, linked_tag = ?, defined_by = ?, updated_at = ? WHERE id = ?",
+        [term, definition, linkedTag, definedBy, now, id],
+      );
+    } else {
+      await tx.run(
+        "UPDATE definitions SET term = ?, definition = ?, defined_by = ?, updated_at = ? WHERE id = ?",
+        [term, definition, definedBy, now, id],
+      );
+    }
+  };
+
+  // One transaction covers the whole read-decide-write and re-selects the
+  // row inside it, so (a) two concurrent defines of the same new term
+  // serialize instead of one 409ing on the unique index, and (b) the
+  // response row can't be yanked by a concurrent DELETE between commit and
+  // a follow-up SELECT.
+  const { row, created } = await db.transaction(async (tx) => {
     const existing = (await tx.get(
       "SELECT id FROM definitions WHERE nest_id = ? AND LOWER(term) = LOWER(?)",
       [nestId, term],
     )) as { id: string } | undefined;
 
-    if (existing) {
-      if (linkedTagProvided) {
-        await tx.run(
-          "UPDATE definitions SET term = ?, definition = ?, linked_tag = ?, defined_by = ?, updated_at = ? WHERE id = ?",
-          [term, definition, linkedTag, definedBy, now, existing.id],
-        );
-      } else {
-        await tx.run(
-          "UPDATE definitions SET term = ?, definition = ?, defined_by = ?, updated_at = ? WHERE id = ?",
-          [term, definition, definedBy, now, existing.id],
-        );
+    let targetId: string;
+    let wasCreated = false;
+
+    if (editingId) {
+      // Renaming/editing a specific row. Guard against clobbering a sibling
+      // that already owns the new term.
+      const editing = (await tx.get(
+        "SELECT id FROM definitions WHERE id = ? AND nest_id = ?",
+        [editingId, nestId],
+      )) as { id: string } | undefined;
+      if (!editing) throw new NotFoundError("Definition not found");
+      if (existing && existing.id !== editingId) {
+        throw new ConflictError(`A definition for "${term}" already exists`);
       }
+      await applyUpdate(tx, editingId);
+      targetId = editingId;
+    } else if (existing) {
+      // Add form / real-time writers: upsert by term text in place.
+      await applyUpdate(tx, existing.id);
+      targetId = existing.id;
     } else {
+      targetId = uuid();
+      wasCreated = true;
       await tx.run(
         `INSERT INTO definitions (id, nest_id, term, definition, linked_tag, defined_by, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [uuid(), nestId, term, definition, linkedTag, definedBy, now, now],
+        [targetId, nestId, term, definition, linkedTag, definedBy, now, now],
       );
     }
+
+    const fresh = (await tx.get("SELECT * FROM definitions WHERE id = ?", [
+      targetId,
+    ])) as DefinitionRow;
+    return { row: fresh, created: wasCreated };
   });
-  const row = (await db.get(
-    "SELECT * FROM definitions WHERE nest_id = ? AND LOWER(term) = LOWER(?)",
-    [nestId, term],
-  )) as DefinitionRow;
-  const created = row.created_at === now;
+
   return c.json({ definition: row }, created ? 201 : 200);
 });
 

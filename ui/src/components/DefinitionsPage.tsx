@@ -25,11 +25,11 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
   const [rows, setRows] = useState<Definition[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  // One shared form for add + edit; editingId null = adding. The original
-  // term is kept so renaming during an edit replaces the old row (the
-  // backend upserts by term text, so a rename would otherwise duplicate).
+  // One shared form for add + edit; editingId null = adding. The id is sent
+  // as editing_id on save so a rename replaces that exact row server-side
+  // (and 409s if the new name already belongs to another row) — no
+  // client-side delete-the-old dance.
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingTerm, setEditingTerm] = useState<string | null>(null);
   const [term, setTerm] = useState("");
   const [definition, setDefinition] = useState("");
   const [linkedTag, setLinkedTag] = useState("");
@@ -52,7 +52,6 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
 
   const resetForm = () => {
     setEditingId(null);
-    setEditingTerm(null);
     setTerm("");
     setDefinition("");
     setLinkedTag("");
@@ -60,7 +59,6 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
 
   const startEdit = (d: Definition) => {
     setEditingId(d.id);
-    setEditingTerm(d.term);
     setTerm(d.term);
     setDefinition(d.definition);
     setLinkedTag(d.linked_tag?.replace(/^#/, "") ?? "");
@@ -77,16 +75,10 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
         term: term.trim(),
         definition: definition.trim(),
         linked_tag: linkedTag.trim() || null,
+        // Scope the write to the opened row so a rename replaces it in place
+        // (server 409s if the new term already belongs to another row).
+        ...(editingId ? { editing_id: editingId } : {}),
       });
-      // Renamed during edit → the upsert created a NEW row; remove the old
-      // one so this is a rename, not a duplicate.
-      if (
-        editingId &&
-        editingTerm &&
-        term.trim().toLowerCase() !== editingTerm.toLowerCase()
-      ) {
-        await api.deleteDefinition(nestId, editingId);
-      }
       toast.success(editingId ? "Definition updated" : "Term defined");
       resetForm();
       await load();
