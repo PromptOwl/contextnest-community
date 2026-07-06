@@ -5,6 +5,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
 import { TOOL_DEFINITIONS, handleToolCall } from "./tools.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 import { z } from "zod";
 
 export const mcpRoutes = new Hono<AuthEnv>();
@@ -20,6 +21,7 @@ function createMcpServerForNest(
   nestId: string,
   userId: string,
   userEmail: string,
+  baseUrl: string,
 ): McpServer {
   const server = new McpServer(
     { name: `contextnest-${nestId}`, version: "1.0.0" },
@@ -46,6 +48,8 @@ function createMcpServerForNest(
 
     server.tool(tool.name, tool.description, shape, async (args) => {
       const engine = await engineCache.get(nestId);
+      // Audit logging happens inside handleToolCall (covers per-nest +
+      // server-level MCP, and thrown calls).
       const text = await handleToolCall(tool.name, args, {
         storage: engine.storage,
         queryEngine: engine.query,
@@ -53,6 +57,7 @@ function createMcpServerForNest(
         nestId,
         userId,
         userEmail,
+        baseUrl,
       });
       return { content: [{ type: "text" as const, text }] };
     });
@@ -67,7 +72,12 @@ mcpRoutes.all("/", async (c) => {
   const userId = c.get("userId");
   const userEmail = await getUserEmail(userId);
   // Create a fresh server per request (stateless) with the current user's identity
-  const server = createMcpServerForNest(nestId, userId, userEmail);
+  const server = createMcpServerForNest(
+    nestId,
+    userId,
+    userEmail,
+    requestBaseUrl(c.req.url),
+  );
 
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,

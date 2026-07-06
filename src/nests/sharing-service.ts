@@ -9,6 +9,8 @@
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { notifyNestEvent } from "../notify/notify.js";
+import { nestName, docLink } from "../governance/title-resolver.js";
 import { ValidationError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
 import { permissionLevel, type NestPermission } from "../shared/access.js";
@@ -32,6 +34,8 @@ export async function addCollaborator(params: {
    * Omitted by callers that gate admin themselves (e.g. the MCP tool).
    */
   callerPermission?: NestPermission;
+  /** Request origin, for building the notification's nest link. */
+  baseUrl?: string;
 }): Promise<NestCollaborator> {
   const { nestId } = params;
   if (
@@ -133,6 +137,21 @@ export async function addCollaborator(params: {
   await db.run(
     "INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by) VALUES (?, ?, ?, ?, ?)",
     [collabId, nestId, userId, params.permission, granterId],
+  );
+
+  const shareNestName = await nestName(nestId);
+  void notifyNestEvent(
+    nestId,
+    `:key: ${params.email || userId} added as *${params.permission}*${params.grantedByEmail ? ` by ${params.grantedByEmail}` : ""}`,
+    {
+      status: "shared",
+      docTitle: shareNestName,
+      path: shareNestName,
+      link: docLink(nestId, undefined, params.baseUrl),
+      actor: params.email || userId,
+      permission: params.permission,
+      by: params.grantedByEmail || undefined,
+    },
   );
 
   return (await db.get(

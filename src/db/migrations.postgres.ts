@@ -41,6 +41,14 @@ const HISTORICAL_MIGRATIONS = [
   "010_sso_used_jti",
   "011_comments",
   "015_definitions",
+  // 012 merges case-colliding SQLite user rows. Postgres can never have them:
+  // the NOCASE-unique idx_users_email_nocase (lower(email)) exists from table
+  // creation, so duplicates are rejected on insert and there's nothing to merge.
+  // Seed the id so bookkeeping matches SQLite and future incremental Postgres
+  // migrations gate correctly.
+  "012_merge_case_colliding_users",
+  "013_node_deletion_tombstones",
+  "014_api_events",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -293,6 +301,38 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- COLLATE NOCASE; Postgres has no NOCASE collation).
     CREATE UNIQUE INDEX IF NOT EXISTS idx_definitions_term
       ON definitions(nest_id, LOWER(term));
+
+    -- node_deletions tombstones (migration 013). DELETE /nodes purges all other
+    -- governance rows for the node; this is the only record that a doc was
+    -- removed, read by GET /nests/:id/changes. One row per (nest, node); a
+    -- re-delete after recreate upserts in place. deleted_at written explicitly.
+    CREATE TABLE IF NOT EXISTS node_deletions (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      deleted_by TEXT,
+      deleted_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, node_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_deletions_time
+      ON node_deletions(nest_id, deleted_at);
+
+    -- activity trace (migration 014). One row per API request / MCP tool call
+    -- so the server admin has a single place to audit everything. Pruned on a
+    -- rolling window in trace-log.ts.
+    CREATE TABLE IF NOT EXISTS api_events (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      ts TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('api', 'mcp')),
+      method TEXT,                 -- HTTP method (api rows)
+      path TEXT,                   -- request path (api rows)
+      tool TEXT,                   -- tool name (mcp rows)
+      nest_id TEXT,
+      user_id TEXT,
+      user_email TEXT,
+      status INTEGER,              -- HTTP status (api + mcp rows)
+      duration_ms INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_api_events_ts ON api_events(ts);
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

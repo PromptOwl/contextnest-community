@@ -14,6 +14,7 @@ export interface SavedFilter {
   tags?: string[];
   author?: string;
   datePreset?: DatePreset;
+  type?: string;
 }
 
 const PRESET_DAYS: Record<Exclude<DatePreset, "any">, number> = {
