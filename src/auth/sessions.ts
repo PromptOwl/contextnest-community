@@ -19,6 +19,7 @@
 import { randomBytes } from "crypto";
 import type { Context } from "hono";
 import { getDb } from "../db/client.js";
+import { nowExpr } from "../db/sql.js";
 
 export const SESSION_COOKIE = "cnst_session";
 const SESSION_TTL_DAYS = 30;
@@ -40,13 +41,14 @@ function expiryIso(ttlSeconds: number = SESSION_TTL_SECS): string {
  * is the source of truth — deleting it logs the user out everywhere
  * that cookie is used.
  */
-export function createSession(userId: string, userAgent?: string): string {
+export async function createSession(userId: string, userAgent?: string): Promise<string> {
   const db = getDb();
   const id = newSessionId();
-  db.prepare(
+  await db.run(
     `INSERT INTO sessions (id, user_id, expires_at, user_agent)
      VALUES (?, ?, ?, ?)`,
-  ).run(id, userId, expiryIso(), userAgent || null);
+    [id, userId, expiryIso(), userAgent || null],
+  );
   return id;
 }
 
@@ -55,36 +57,36 @@ export function createSession(userId: string, userAgent?: string): string {
  * and is not expired; null otherwise. Bumps `last_seen_at` so admins
  * can see active sessions in the DB. Expired rows are deleted lazily.
  */
-export function resolveSession(id: string): string | null {
+export async function resolveSession(id: string): Promise<string | null> {
   const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT user_id, expires_at FROM sessions WHERE id = ?`,
-    )
-    .get(id) as { user_id: string; expires_at: string } | undefined;
+  const row = await db.get(
+    `SELECT user_id, expires_at FROM sessions WHERE id = ?`,
+    [id],
+  ) as { user_id: string; expires_at: string } | undefined;
 
   if (!row) return null;
   if (new Date(row.expires_at).getTime() <= Date.now()) {
-    db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    await db.run("DELETE FROM sessions WHERE id = ?", [id]);
     return null;
   }
 
-  db.prepare(
-    "UPDATE sessions SET last_seen_at = datetime('now') WHERE id = ?",
-  ).run(id);
+  await db.run(
+    `UPDATE sessions SET last_seen_at = ${nowExpr(db)} WHERE id = ?`,
+    [id],
+  );
 
   return row.user_id;
 }
 
-export function deleteSession(id: string): void {
+export async function deleteSession(id: string): Promise<void> {
   const db = getDb();
-  db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+  await db.run("DELETE FROM sessions WHERE id = ?", [id]);
 }
 
 /** Drop every session row for a user — e.g. on password change. */
-export function deleteAllSessionsForUser(userId: string): void {
+export async function deleteAllSessionsForUser(userId: string): Promise<void> {
   const db = getDb();
-  db.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+  await db.run("DELETE FROM sessions WHERE user_id = ?", [userId]);
 }
 
 /** Parse the session id out of the `Cookie` header, if present. */

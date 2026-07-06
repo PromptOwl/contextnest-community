@@ -2,11 +2,12 @@
  * AnnotationsPanel — threaded comments on a document, backed by the existing
  * /annotations API. Supports anchored comments (highlight text in the doc → a
  * comment pinned to that quote, with line + 250c context) and whole-document
- * threads, plus replies and resolve/reopen. The server projects these into a
- * derived markdown node so the feedback also flows into the context/MCP path.
+ * threads, plus replies and resolve/reopen. For artifacts the server also
+ * projects these into a derived markdown node so the feedback flows into the
+ * context/MCP path; plain documents keep their comments in SQLite only.
  */
 import { useEffect, useRef, useState } from "react";
-import { MessageSquare, Check, RotateCcw, Loader2, Quote, X } from "lucide-react";
+import { MessageSquare, Check, RotateCcw, Loader2, Quote, X, CornerDownRight, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
@@ -105,7 +106,7 @@ export function AnnotationsPanel({
     if (!body) return;
     setBusy(true);
     try {
-      await api.createAnnotation(nestId, nodeId, body, pendingAnchor ?? null);
+      await api.createAnnotation(nestId, nodeId, { body, anchor: pendingAnchor ?? null });
       setDraft("");
       onClearAnchor?.();
       await load();
@@ -121,7 +122,7 @@ export function AnnotationsPanel({
     if (!body) return;
     setBusy(true);
     try {
-      await api.addAnnotationComment(nestId, nodeId, threadId, body);
+      await api.replyAnnotation(nestId, nodeId, threadId, body);
       setReplyText("");
       setReplyFor(null);
       await load();
@@ -135,12 +136,11 @@ export function AnnotationsPanel({
   const toggleStatus = async (t: api.AnnotationThread) => {
     setBusy(true);
     try {
-      await api.setAnnotationStatus(
-        nestId,
-        nodeId,
-        t.id,
-        t.status === "open" ? "resolve" : "reopen",
-      );
+      if (t.status === "open") {
+        await api.resolveAnnotation(nestId, nodeId, t.id);
+      } else {
+        await api.reopenAnnotation(nestId, nodeId, t.id);
+      }
       await load();
     } catch (e: any) {
       toast.error(e?.message || "Failed to update thread");
@@ -150,10 +150,15 @@ export function AnnotationsPanel({
   };
 
   const count = threads?.length ?? 0;
+  // Newest thread first in the rail (replies inside a thread stay chronological).
+  // UI-only ordering — the server list + derived projection keep their own order.
+  const ordered = threads
+    ? [...threads].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    : threads;
 
   return (
-    <section className="rounded-lg border border-border bg-card p-4" data-testid="annotations-panel">
-      <div className="flex items-center gap-2 mb-3">
+    <section className="flex flex-col flex-1 min-h-0 max-h-[calc(100vh-2rem)] rounded-lg border border-border bg-card p-4" data-testid="annotations-panel">
+      <div className="flex items-center gap-2 mb-3 shrink-0">
         <MessageSquare className="h-4 w-4 text-muted-foreground" />
         <h3 className="text-sm font-semibold">
           Comments{threads ? ` (${count})` : ""}
@@ -172,7 +177,7 @@ export function AnnotationsPanel({
       </div>
 
       {!readOnly && (
-        <div className="mb-4">
+        <div className="mb-4 shrink-0">
           {/* Staged anchor chip — shows which highlighted text this comment
               will be pinned to, or a hint to select text. */}
           {commenting &&
@@ -242,143 +247,158 @@ export function AnnotationsPanel({
         </div>
       )}
 
-      {threads === null ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading comments…
-        </div>
-      ) : count === 0 ? (
-        <p className="text-sm text-muted-foreground py-2">No comments yet.</p>
-      ) : (
-        <ul className="space-y-3">
-          {threads.map((t) => (
-            <li
-              key={t.id}
-              ref={(el) => {
-                itemRefs.current[t.id] = el;
-              }}
-              className={`rounded-md border p-3 transition-shadow ${
-                activeThreadId === t.id
-                  ? "border-amber-400 ring-2 ring-amber-300/60"
-                  : t.status === "resolved"
-                    ? "border-emerald-200 bg-emerald-50/40 dark:bg-emerald-950/20"
-                    : "border-border"
-              }`}
-            >
-              <div className="flex items-center justify-between mb-2">
-                <span
-                  className={`text-[10px] px-1.5 py-0.5 rounded ${
-                    t.status === "resolved"
-                      ? "bg-emerald-100 text-emerald-800"
-                      : "bg-amber-100 text-amber-800"
-                  }`}
-                >
-                  {t.status}
-                </span>
-                {!readOnly && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 text-xs"
-                    onClick={() => toggleStatus(t)}
-                    disabled={busy}
+      <div className="flex-1 min-h-0 overflow-auto -mr-2 pr-2">
+        {threads === null ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading comments…
+          </div>
+        ) : count === 0 ? (
+          <p className="text-sm text-muted-foreground py-2">No comments yet.</p>
+        ) : (
+          <ul className="space-y-3">
+            {ordered!.map((t) => (
+              <li
+                key={t.id}
+                ref={(el) => {
+                  itemRefs.current[t.id] = el;
+                }}
+                className={`rounded-md border p-3 transition-shadow ${
+                  activeThreadId === t.id
+                    ? "border-amber-400 ring-2 ring-amber-300/60"
+                    : t.status === "resolved"
+                      ? "border-emerald-200 bg-emerald-50/40 dark:bg-emerald-950/20"
+                      : "border-border"
+                }`}
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded ${
+                      t.status === "resolved"
+                        ? "bg-emerald-100 text-emerald-800"
+                        : "bg-amber-100 text-amber-800"
+                    }`}
                   >
-                    {t.status === "open" ? (
-                      <>
-                        <Check className="h-3 w-3 mr-1" /> Resolve
-                      </>
-                    ) : (
-                      <>
-                        <RotateCcw className="h-3 w-3 mr-1" /> Reopen
-                      </>
-                    )}
-                  </Button>
-                )}
-              </div>
-
-              {/* Anchored quote — what this thread is pinned to. Click to jump. */}
-              {t.anchor?.quote && (
-                <button
-                  type="button"
-                  onClick={() => onFocusAnchor?.(t.anchor!)}
-                  className="group mb-2 block w-full text-left rounded border-l-2 border-amber-400 bg-amber-50/50 dark:bg-amber-950/20 px-2 py-1 text-xs italic text-foreground/75 hover:bg-amber-100/70"
-                  title="Jump to this text in the document"
-                >
-                  <Quote className="inline h-3 w-3 mr-1 text-amber-600 align-[-1px]" />
-                  {shortQuote(t.anchor.quote)}
-                </button>
-              )}
-
-              {/* First comment is the thread root; the rest are replies,
-                  nested under it with a connector rail. */}
-              {t.comments.length > 0 && (
-                <div className="text-sm">
-                  <div className="text-xs text-muted-foreground">
-                    <span className="font-medium text-foreground">
-                      {t.comments[0].author}
-                    </span>{" "}
-                    · {when(t.comments[0].createdAt)}
-                  </div>
-                  <div className="whitespace-pre-wrap">{t.comments[0].body}</div>
+                    {t.status}
+                  </span>
                 </div>
-              )}
-              {t.comments.length > 1 && (
-                <ul className="mt-2 ml-2 space-y-2 border-l-2 border-border pl-3">
-                  {t.comments.slice(1).map((c) => (
-                    <li key={c.id} className="text-sm">
-                      <div className="text-xs text-muted-foreground">
-                        <span className="font-medium text-foreground">{c.author}</span>{" "}
-                        replied · {when(c.createdAt)}
-                      </div>
-                      <div className="whitespace-pre-wrap">{c.body}</div>
-                    </li>
-                  ))}
-                </ul>
-              )}
 
-              {!readOnly &&
-                (replyFor === t.id ? (
-                  <div className="mt-2">
-                    <textarea
-                      value={replyText}
-                      onChange={(e) => setReplyText(e.target.value)}
-                      placeholder="Reply…"
-                      rows={2}
-                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-y"
-                      autoFocus
-                    />
-                    <div className="flex justify-end gap-2 mt-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
+                {/* Anchored quote — what this thread is pinned to. Click to jump. */}
+                {t.anchor?.quote && (
+                  <button
+                    type="button"
+                    onClick={() => onFocusAnchor?.(t.anchor!)}
+                    className="group mb-2 block w-full text-left rounded border-l-2 border-amber-400 bg-amber-50/50 dark:bg-amber-950/20 px-2 py-1 text-xs italic text-foreground/75 hover:bg-amber-100/70"
+                    title="Jump to this text in the document"
+                  >
+                    <Quote className="inline h-3 w-3 mr-1 text-amber-600 align-[-1px]" />
+                    {shortQuote(t.anchor.quote)}
+                  </button>
+                )}
+
+                {/* First comment is the thread root; the rest are replies,
+                    nested under it with a connector rail. */}
+                {t.comments.length > 0 && (
+                  <div className="text-sm">
+                    <div className="text-xs text-muted-foreground">
+                      <span className="font-medium text-foreground">
+                        {t.comments[0].author}
+                      </span>{" "}
+                      · {when(t.comments[0].createdAt)}
+                    </div>
+                    <div className="whitespace-pre-wrap">{t.comments[0].body}</div>
+                  </div>
+                )}
+                {t.comments.length > 1 && (
+                  <ul className="mt-2 ml-2 space-y-2 border-l-2 border-border pl-3">
+                    {t.comments.slice(1).map((c) => (
+                      <li key={c.id} className="text-sm">
+                        <div className="text-xs text-muted-foreground">
+                          <span className="font-medium text-foreground">{c.author}</span>{" "}
+                          replied · {when(c.createdAt)}
+                        </div>
+                        <div className="whitespace-pre-wrap">{c.body}</div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+
+                {/* Resolve audit line — who closed the thread and when. */}
+                {t.status === "resolved" && t.resolvedBy && (
+                  <div className="mt-2 flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      Resolved by{" "}
+                      <span className="font-medium">{t.resolvedBy}</span>
+                      {t.resolvedAt && <> · {when(t.resolvedAt)}</>}
+                    </span>
+                  </div>
+                )}
+
+                {!readOnly &&
+                  (replyFor === t.id ? (
+                    <div className="mt-2">
+                      <textarea
+                        value={replyText}
+                        onChange={(e) => setReplyText(e.target.value)}
+                        placeholder="Reply…"
+                        rows={2}
+                        className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-y"
+                        autoFocus
+                      />
+                      <div className="flex justify-end gap-2 mt-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setReplyFor(null);
+                            setReplyText("");
+                          }}
+                        >
+                          Cancel
+                        </Button>
+                        <Button size="sm" onClick={() => reply(t.id)} disabled={busy || !replyText.trim()}>
+                          Reply
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="mt-3 flex items-center gap-2">
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
                         onClick={() => {
-                          setReplyFor(null);
+                          setReplyFor(t.id);
                           setReplyText("");
                         }}
                       >
-                        Cancel
-                      </Button>
-                      <Button size="sm" onClick={() => reply(t.id)} disabled={busy || !replyText.trim()}>
-                        Reply
-                      </Button>
+                        <CornerDownRight className="h-3 w-3" /> Reply
+                      </button>
+                      {t.status === "open" ? (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          className="inline-flex items-center gap-1 rounded-md border border-emerald-600 bg-emerald-600 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50"
+                          onClick={() => toggleStatus(t)}
+                        >
+                          <Check className="h-3.5 w-3.5" /> Resolve
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+                          onClick={() => toggleStatus(t)}
+                        >
+                          <RotateCcw className="h-3 w-3" /> Reopen
+                        </button>
+                      )}
                     </div>
-                  </div>
-                ) : (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 px-2 mt-1 text-xs"
-                    onClick={() => {
-                      setReplyFor(t.id);
-                      setReplyText("");
-                    }}
-                  >
-                    Reply
-                  </Button>
-                ))}
-            </li>
-          ))}
-        </ul>
-      )}
+                  ))}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </section>
   );
 }

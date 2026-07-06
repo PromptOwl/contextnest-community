@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import {
   forceSimulation,
@@ -13,7 +14,7 @@ import {
   forceCollide,
   type SimulationNodeDatum,
 } from "d3-force";
-import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2 } from "lucide-react";
+import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
 import { Button } from "./ui/button";
 
@@ -48,6 +49,42 @@ function linkStroke(kind: GLink["kind"]): string {
   return kind === "steward" ? "#16a34a66" : kind === "tag" ? "#f59e0b66" : "#94a3b8aa";
 }
 
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+const MIN_ZOOM = 0.15;
+const MAX_ZOOM = 5;
+
+/**
+ * Deterministic selector for a graph node, in the grammar POST /context
+ * accepts: docs by exact [[Title]] (resolved server-side, hop-expanded),
+ * tags by #name. Stewards and the root have no selector of their own —
+ * callers fall back to the neighborhood union. A title containing "]]" or
+ * "|" can't be expressed in an OR-union of wiki selectors (the server splits
+ * parts on "|" before matching [[...]]), so those yield no selector rather
+ * than a broken one.
+ */
+function selectorForNode(n: GNode): string | null {
+  if (n.kind === "doc") {
+    return n.name.includes("]]") || n.name.includes("|")
+      ? null
+      : `[[${n.name}]]`;
+  }
+  if (n.kind === "tag") return `#${n.name.replace(/^#/, "")}`;
+  return null;
+}
+
+/** Wrap for a single-quoted shell argument: ' → '\'' so a title with an
+ *  apostrophe can't break out of the copied curl -d payload. */
+function shellSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Pan/zoom transform: screen = world * k + (x, y). */
+interface View {
+  x: number;
+  y: number;
+  k: number;
+}
+
 /**
  * Ontology graph view — nodes + [[wikilink]] edges + tag clusters + stewardship
  * overlay, laid out with a d3-force simulation and rendered as SVG (pure JS, no
@@ -60,81 +97,124 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [layers, setLayers] = useState({ links: true, stewardship: true, categories: true });
   const [selected, setSelected] = useState<GNode | null>(null);
+  // Traversal depth for the highlighted neighborhood AND the copyable
+  // query — the same number feeds the server's `hops` param, so what you
+  // see highlighted is what the query pulls.
+  const [hopDepth, setHopDepth] = useState(1);
 
   const wrapRef = useRef<HTMLDivElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
   const [size, setSize] = useState({ w: 800, h: 560 });
   const [sim, setSim] = useState<{ nodes: GNode[]; links: GLink[] }>({ nodes: [], links: [] });
 
-  // ── Interaction: drag nodes, pan the canvas, wheel-zoom ──────────────────
-  const svgRef = useRef<SVGSVGElement>(null);
-  const [tf, setTf] = useState({ x: 0, y: 0, k: 1 });
+  // ── Pan / zoom + node drag ──
+  const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
   const [panning, setPanning] = useState(false);
+  // One gesture at a time: either panning the canvas or dragging a node.
   const drag = useRef<
-    | { mode: "node"; node: GNode }
-    | { mode: "pan"; px: number; py: number; ox: number; oy: number }
+    | { mode: "pan"; px: number; py: number }
+    | { mode: "node"; node: GNode; moved: boolean }
     | null
   >(null);
 
-  // client px → graph coords (undo pan + zoom)
-  const toGraph = (clientX: number, clientY: number) => {
+  // client px → world coords (undo pan + zoom), for node dragging.
+  const toWorld = (clientX: number, clientY: number) => {
     const r = svgRef.current!.getBoundingClientRect();
-    return { x: (clientX - r.left - tf.x) / tf.k, y: (clientY - r.top - tf.y) / tf.k };
+    return { x: (clientX - r.left - view.x) / view.k, y: (clientY - r.top - view.y) / view.k };
   };
 
-  const onNodeDown = (e: ReactPointerEvent, n: GNode) => {
-    e.stopPropagation(); // don't also start a pan
-    svgRef.current?.setPointerCapture(e.pointerId);
-    drag.current = { mode: "node", node: n };
-    setSelected(n);
-  };
-
-  const onBgDown = (e: ReactPointerEvent<SVGSVGElement>) => {
-    svgRef.current?.setPointerCapture(e.pointerId);
-    drag.current = { mode: "pan", px: e.clientX, py: e.clientY, ox: tf.x, oy: tf.y };
-    setPanning(true);
-  };
-
-  const onMove = (e: ReactPointerEvent<SVGSVGElement>) => {
-    const d = drag.current;
-    if (!d) return;
-    if (d.mode === "node") {
-      const p = toGraph(e.clientX, e.clientY);
-      d.node.x = p.x;
-      d.node.y = p.y;
-      // Lines reference the same node objects, so a new array ref re-renders both.
-      setSim((s) => ({ ...s, nodes: s.nodes.slice() }));
-    } else {
-      setTf((t) => ({ ...t, x: d.ox + (e.clientX - d.px), y: d.oy + (e.clientY - d.py) }));
+  // Fit the laid-out graph into the viewport (centred, padded). Used on first
+  // layout and via the Fit button so a large graph never spills off-screen.
+  const fitView = (nodes: GNode[], w: number, h: number) => {
+    const pts = nodes.filter((n) => n.x != null && n.y != null);
+    if (!pts.length) return setView({ x: w / 2, y: h / 2, k: 1 });
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of pts) {
+      minX = Math.min(minX, n.x!);
+      minY = Math.min(minY, n.y!);
+      maxX = Math.max(maxX, n.x!);
+      maxY = Math.max(maxY, n.y!);
     }
+    const pad = 48;
+    const gw = maxX - minX || 1;
+    const gh = maxY - minY || 1;
+    const k = clamp(Math.min((w - 2 * pad) / gw, (h - 2 * pad) / gh), MIN_ZOOM, 1.5);
+    setView({
+      x: w / 2 - ((minX + maxX) / 2) * k,
+      y: h / 2 - ((minY + maxY) / 2) * k,
+      k,
+    });
   };
 
-  const onUp = (e: ReactPointerEvent<SVGSVGElement>) => {
-    if (!drag.current) return;
-    svgRef.current?.releasePointerCapture?.(e.pointerId);
-    drag.current = null;
-    setPanning(false);
+  // Zoom by a factor about a screen anchor (default: viewport centre), keeping
+  // the world point under the anchor fixed.
+  const zoomBy = (factor: number, ax = size.w / 2, ay = size.h / 2) => {
+    setView((v) => {
+      const k = clamp(v.k * factor, MIN_ZOOM, MAX_ZOOM);
+      const wx = (ax - v.x) / v.k;
+      const wy = (ay - v.y) / v.k;
+      return { k, x: ax - wx * k, y: ay - wy * k };
+    });
   };
 
-  // React's onWheel is passive, so preventDefault is ignored there — attach a
-  // native non-passive listener to zoom toward the cursor without scrolling.
+  // Wheel zoom toward the cursor. Attached natively (non-passive) so
+  // preventDefault stops the page from scrolling under the graph.
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const r = svg.getBoundingClientRect();
-      const sx = e.clientX - r.left;
-      const sy = e.clientY - r.top;
-      setTf((t) => {
-        const k = Math.min(4, Math.max(0.3, t.k * (e.deltaY < 0 ? 1.1 : 1 / 1.1)));
-        const gx = (sx - t.x) / t.k;
-        const gy = (sy - t.y) / t.k;
-        return { k, x: sx - gx * k, y: sy - gy * k };
-      });
+      const rect = svg.getBoundingClientRect();
+      zoomBy(e.deltaY < 0 ? 1.1 : 1 / 1.1, e.clientX - rect.left, e.clientY - rect.top);
     };
     svg.addEventListener("wheel", onWheel, { passive: false });
     return () => svg.removeEventListener("wheel", onWheel);
-  }, []);
+    // Re-bind once the svg actually mounts (it renders only after loading
+    // clears) and on resize — otherwise the listener never attaches and the
+    // browser's default ctrl+wheel zooms the whole page instead of the graph.
+  }, [size.w, size.h, loading, error]);
+
+  // Pointer down on empty canvas → pan. Capture on the svg so moves keep
+  // routing here even when the cursor leaves a node during a drag.
+  const onPanStart = (e: ReactPointerEvent) => {
+    svgRef.current?.setPointerCapture?.(e.pointerId);
+    drag.current = { mode: "pan", px: e.clientX, py: e.clientY };
+    setPanning(true);
+  };
+  // Pointer down on a node → drag that node (stops the pan from also starting).
+  const onNodeDown = (e: ReactPointerEvent, n: GNode) => {
+    e.stopPropagation();
+    svgRef.current?.setPointerCapture?.(e.pointerId);
+    drag.current = { mode: "node", node: n, moved: false };
+  };
+  const onPanMove = (e: ReactPointerEvent) => {
+    const d = drag.current;
+    if (!d) return;
+    if (d.mode === "pan") {
+      const dx = e.clientX - d.px;
+      const dy = e.clientY - d.py;
+      d.px = e.clientX;
+      d.py = e.clientY;
+      setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+    } else {
+      d.moved = true;
+      const p = toWorld(e.clientX, e.clientY);
+      d.node.x = p.x;
+      d.node.y = p.y;
+      // Lines reference the same node objects, so a new array ref re-renders both.
+      setSim((s) => ({ ...s, nodes: s.nodes.slice() }));
+    }
+  };
+  const onPanEnd = (e: ReactPointerEvent) => {
+    const d = drag.current;
+    svgRef.current?.releasePointerCapture?.(e.pointerId);
+    // A node press that never moved is a click → toggle selection.
+    if (d?.mode === "node" && !d.moved) {
+      setSelected((cur) => (cur?.id === d.node.id ? null : d.node));
+    }
+    drag.current = null;
+    setPanning(false);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -151,46 +231,29 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
   useEffect(() => {
     if (!wrapRef.current) return;
     const el = wrapRef.current;
-    const ro = new ResizeObserver(() =>
-      setSize({ w: el.clientWidth, h: Math.max(420, el.clientHeight) }),
-    );
+    const apply = () =>
+      setSize({ w: el.clientWidth, h: Math.max(420, el.clientHeight) });
+    // Set the real size synchronously at mount — the observer fires async, so
+    // without this the first simulation runs at the 800px default and clips
+    // the layout on narrower viewports until a resize nudges it.
+    apply();
+    // Debounce resizes: each size change restarts the 300-tick layout, so an
+    // unthrottled observer would thrash the main thread during a drag-resize.
+    let t: ReturnType<typeof setTimeout>;
+    const ro = new ResizeObserver(() => {
+      clearTimeout(t);
+      t = setTimeout(apply, 150);
+    });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      clearTimeout(t);
+      ro.disconnect();
+    };
   }, []);
 
-  // ── Governance signals (the value, not the pretty web) ──
-  const signals = useMemo(() => {
-    if (!graph) return null;
-    const docIds = new Set(graph.nodes.map((n) => n.id));
-    const linked = new Set<string>();
-    for (const l of graph.links) {
-      linked.add(l.source);
-      linked.add(l.target);
-    }
-    const orphans = graph.nodes.filter((n) => !linked.has(n.id));
-
-    const hasNestSteward = graph.stewards.some((s) => s.scope === "nest");
-    const stewardedTags = new Set(
-      graph.stewards.filter((s) => s.scope === "tag").map((s) => s.target),
-    );
-    const unstewardedTags = hasNestSteward
-      ? []
-      : graph.tags.filter((t) => !stewardedTags.has(t.name));
-
-    const tagDocCount = new Map(graph.tags.map((t) => [t.name, t.count]));
-    const bySteward = new Map<string, number>();
-    for (const s of graph.stewards) {
-      const covered =
-        s.scope === "nest" ? docIds.size : s.scope === "tag" ? tagDocCount.get(s.target) || 0 : 1;
-      bySteward.set(s.email, (bySteward.get(s.email) || 0) + covered);
-    }
-    const bottlenecks = [...bySteward.entries()]
-      .filter(([, c]) => docIds.size > 0 && c / docIds.size >= 0.5)
-      .map(([email, c]) => ({ email, share: Math.round((c / docIds.size) * 100) }))
-      .sort((a, b) => b.share - a.share);
-
-    return { orphans, unstewardedTags, bottlenecks };
-  }, [graph]);
+  // Governance signals are now computed server-side over the FULL set (so they
+  // stay accurate even when the drawn graph is truncated for the hairball cap).
+  const signals = graph?.signals ?? null;
 
   // ── Build renderable graph from active layers ──
   const data = useMemo<{ nodes: GNode[]; links: GLink[] }>(() => {
@@ -218,15 +281,26 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
     }
 
     if (layers.stewardship) {
-      for (const email of new Set(graph.stewards.map((s) => s.email)))
-        nodes.push({ id: `steward:${email}`, name: email, kind: "steward", color: COLORS.steward, val: 3 });
+      const labelById = new Map(graph.stewards.map((s) => [s.id, s.label]));
+      for (const s of graph.stewards)
+        nodes.push({ id: `steward:${s.id}`, name: s.label, kind: "steward", color: COLORS.steward, val: 3 });
       let needRoot = false;
-      for (const s of graph.stewards) {
-        const from = `steward:${s.email}`;
-        if (s.scope === "tag") {
-          if (layers.categories) links.push({ source: from, target: `tag:${s.target}`, kind: "steward" });
-        } else if (s.scope === "document") {
-          links.push({ source: from, target: s.target, kind: "steward" });
+      for (const e of graph.stewardEdges) {
+        const from = `steward:${e.steward}`;
+        if (!labelById.has(e.steward)) continue;
+        if (e.scope === "tag") {
+          // Tag-scope steward edge: hop through the tag node when the Categories
+          // layer is on, otherwise pin straight to the doc(s) the tag covers so
+          // the steward never floats orphaned with Categories off.
+          if (layers.categories) {
+            links.push({ source: from, target: e.target, kind: "steward" });
+          } else {
+            const tag = e.target.replace(/^tag:/, "");
+            for (const n of graph.nodes)
+              if (n.tags.includes(tag)) links.push({ source: from, target: n.id, kind: "steward" });
+          }
+        } else if (e.scope === "document") {
+          links.push({ source: from, target: e.target, kind: "steward" });
         } else {
           needRoot = true;
           links.push({ source: from, target: "root:nest", kind: "steward" });
@@ -260,9 +334,45 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
       .stop();
     for (let i = 0; i < 300; i++) simulation.tick();
     setSim({ nodes, links });
+    // Fit the fresh layout into the viewport so a large graph never spills off.
+    fitView(nodes, size.w, size.h);
   }, [data, size.w, size.h]);
 
   const radius = (n: GNode) => 3 + n.val;
+
+  // BFS the selected node's N-hop neighborhood over the visible links.
+  // Sim links carry resolved GNode refs after the force pass, so read ids
+  // off the endpoints. Null when nothing is selected → no dimming.
+  const neighborhood = useMemo<Set<string> | null>(() => {
+    if (!selected) return null;
+    const adj = new Map<string, string[]>();
+    for (const l of sim.links) {
+      const s = typeof l.source === "string" ? l.source : l.source.id;
+      const t = typeof l.target === "string" ? l.target : l.target.id;
+      (adj.get(s) ?? adj.set(s, []).get(s)!).push(t);
+      (adj.get(t) ?? adj.set(t, []).get(t)!).push(s);
+    }
+    const seen = new Set<string>([selected.id]);
+    let frontier = [selected.id];
+    for (let d = 0; d < hopDepth && frontier.length; d++) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        for (const nb of adj.get(id) ?? []) {
+          if (!seen.has(nb)) {
+            seen.add(nb);
+            next.push(nb);
+          }
+        }
+      }
+      frontier = next;
+    }
+    return seen;
+  }, [selected, hopDepth, sim.links]);
+
+  const nodesById = useMemo(
+    () => new Map(sim.nodes.map((n) => [n.id, n])),
+    [sim.nodes],
+  );
 
   return (
     <div className="space-y-4">
@@ -294,7 +404,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setTf({ x: 0, y: 0, k: 1 })}
+            onClick={() => setView({ x: 0, y: 0, k: 1 })}
             title="Reset pan & zoom"
           >
             Reset view
@@ -317,59 +427,94 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
               {error}
             </div>
           )}
+          {!loading && !error && graph?.truncated && (
+            <div className="absolute top-2 left-2 z-10 rounded bg-amber-100 text-amber-800 text-xs px-2 py-1 border border-amber-300">
+              Showing {graph.nodes.length} of {graph.totalNodes} nodes (highest-connected). Gaps below cover all {graph.totalNodes}.
+            </div>
+          )}
           {!loading && !error && (
-            <svg
-              ref={svgRef}
-              width={size.w}
-              height={size.h}
-              className="block"
-              style={{ cursor: panning ? "grabbing" : "grab", touchAction: "none" }}
-              onPointerDown={onBgDown}
-              onPointerMove={onMove}
-              onPointerUp={onUp}
-              onPointerLeave={onUp}
-            >
-              <g transform={`translate(${tf.x},${tf.y}) scale(${tf.k})`}>
-              <g>
-                {sim.links.map((l, i) => {
-                  const s = l.source as GNode;
-                  const t = l.target as GNode;
-                  if (s?.x == null || t?.x == null) return null;
-                  return (
-                    <line
-                      key={i}
-                      x1={s.x}
-                      y1={s.y}
-                      x2={t.x}
-                      y2={t.y}
-                      stroke={linkStroke(l.kind)}
-                      strokeWidth={1}
-                    />
-                  );
-                })}
-              </g>
-              <g>
-                {sim.nodes.map((n) => (
-                  <g
-                    key={n.id}
-                    transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
-                    onPointerDown={(e) => onNodeDown(e, n)}
-                    style={{ cursor: "grab" }}
-                  >
-                    <circle
-                      r={radius(n)}
-                      fill={n.color}
-                      stroke={selected?.id === n.id ? "#111827" : "#ffffff"}
-                      strokeWidth={selected?.id === n.id ? 2 : 1}
-                    />
-                    <text x={radius(n) + 3} y={3} fontSize={9} fill="#475569">
-                      {n.name.length > 24 ? n.name.slice(0, 24) + "…" : n.name}
-                    </text>
+            <>
+              {/* Pan handlers live on the svg itself: dragging empty canvas
+                  pans, node presses stopPropagation and drag their node. */}
+              <svg
+                ref={svgRef}
+                width={size.w}
+                height={size.h}
+                className="block touch-none"
+                style={{ cursor: panning ? "grabbing" : "grab" }}
+                onPointerDown={onPanStart}
+                onPointerMove={onPanMove}
+                onPointerUp={onPanEnd}
+                onPointerLeave={onPanEnd}
+              >
+                <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+                  <g>
+                    {sim.links.map((l, i) => {
+                      const s = l.source as GNode;
+                      const t = l.target as GNode;
+                      if (s?.x == null || t?.x == null) return null;
+                      const inHood =
+                        !neighborhood ||
+                        (neighborhood.has(s.id) && neighborhood.has(t.id));
+                      return (
+                        <line
+                          key={i}
+                          x1={s.x}
+                          y1={s.y}
+                          x2={t.x}
+                          y2={t.y}
+                          stroke={linkStroke(l.kind)}
+                          strokeWidth={(inHood && neighborhood ? 1.6 : 1) / view.k}
+                          opacity={inHood ? 1 : 0.15}
+                        />
+                      );
+                    })}
                   </g>
-                ))}
-              </g>
-              </g>
-            </svg>
+                  <g>
+                    {sim.nodes.map((n) => {
+                      const inHood = !neighborhood || neighborhood.has(n.id);
+                      return (
+                        <g
+                          key={n.id}
+                          transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
+                          onPointerDown={(e) => onNodeDown(e, n)}
+                          style={{ cursor: "grab" }}
+                          opacity={inHood ? 1 : 0.25}
+                        >
+                          <circle
+                            r={radius(n)}
+                            fill={n.color}
+                            stroke={
+                              selected?.id === n.id
+                                ? "#111827"
+                                : inHood && neighborhood
+                                  ? "#111827aa"
+                                  : "#ffffff"
+                            }
+                            strokeWidth={selected?.id === n.id ? 2 : 1}
+                          />
+                          <text x={radius(n) + 3} y={3} fontSize={9} fill="#475569">
+                            {n.name.length > 24 ? n.name.slice(0, 24) + "…" : n.name}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </g>
+                </g>
+              </svg>
+              {/* Zoom controls */}
+              <div className="absolute bottom-2 right-2 z-10 flex flex-col gap-1">
+                <ZoomCtl label="Zoom in" onClick={() => zoomBy(1.25)}>
+                  <ZoomIn className="h-4 w-4" />
+                </ZoomCtl>
+                <ZoomCtl label="Zoom out" onClick={() => zoomBy(1 / 1.25)}>
+                  <ZoomOut className="h-4 w-4" />
+                </ZoomCtl>
+                <ZoomCtl label="Fit to view" onClick={() => fitView(sim.nodes, size.w, size.h)}>
+                  <Maximize2 className="h-4 w-4" />
+                </ZoomCtl>
+              </div>
+            </>
           )}
         </div>
 
@@ -389,7 +534,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
                 />
                 <GapRow
                   label="Bottleneck stewards (≥50% of nodes)"
-                  items={signals.bottlenecks.map((b) => `${b.email} — ${b.share}%`)}
+                  items={signals.bottlenecks.map((b) => `${b.label} — ${b.share}%`)}
                   empty="No single-owner concentration."
                 />
                 <GapRow
@@ -402,10 +547,15 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           </div>
 
           {selected && (
-            <div className="border border-border rounded-lg bg-card p-3 text-sm">
-              <div className="font-medium mb-1 break-all">{selected.name}</div>
-              <div className="text-xs text-muted-foreground capitalize">{selected.kind}</div>
-            </div>
+            <NodeDetail
+              node={selected}
+              graph={graph}
+              nestId={nestId}
+              hopDepth={hopDepth}
+              onHopDepth={setHopDepth}
+              neighborhood={neighborhood}
+              nodesById={nodesById}
+            />
           )}
 
           <div className="text-xs text-muted-foreground space-y-1">
@@ -416,6 +566,175 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ZoomCtl({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+      className="flex h-7 w-7 items-center justify-center rounded border border-border bg-card text-foreground shadow-sm hover:bg-accent"
+    >
+      {children}
+    </button>
+  );
+}
+
+function NodeDetail({
+  node,
+  graph,
+  nestId,
+  hopDepth,
+  onHopDepth,
+  neighborhood,
+  nodesById,
+}: {
+  node: GNode;
+  graph: NestGraph | null;
+  nestId: string;
+  hopDepth: number;
+  onHopDepth: (d: number) => void;
+  neighborhood: Set<string> | null;
+  nodesById: Map<string, GNode>;
+}) {
+  const doc = node.kind === "doc" ? graph?.nodes.find((n) => n.id === node.id) : null;
+  const linkCount =
+    doc && graph
+      ? graph.links.filter((l) => l.source === doc.id || l.target === doc.id).length
+      : 0;
+
+  const selector = selectorForNode(node);
+  // Union selector for everything highlighted — the deterministic "give me
+  // exactly this set" query (hops:0), independent of server traversal.
+  const hoodSelectors = neighborhood
+    ? [...neighborhood]
+        .map((id) => nodesById.get(id))
+        .filter((n): n is GNode => !!n)
+        .map(selectorForNode)
+        .filter((s): s is string => !!s)
+    : [];
+  const unionSelector = hoodSelectors.join(" | ");
+  const serverUrl =
+    typeof window !== "undefined" ? window.location.origin : "";
+  // Anchor query: this node + hopDepth server-side hops. Matches what's
+  // highlighted (the server traverses the same link graph).
+  const curl = selector
+    ? `curl -X POST ${serverUrl}/nests/${nestId}/context \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer <api-key>" \\\n  -d ${shellSingleQuote(JSON.stringify({ selector, hops: hopDepth }))}`
+    : null;
+
+  return (
+    <div className="border border-border rounded-lg bg-card p-3 text-sm space-y-2">
+      <div>
+        <div className="font-medium mb-1 break-all">{node.name}</div>
+        <div className="text-xs text-muted-foreground capitalize">{node.kind}</div>
+      </div>
+      {doc && (
+        <div className="space-y-1 text-xs">
+          {doc.tags.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {doc.tags.map((t) => (
+                <span key={t} className="rounded bg-amber-50 text-amber-700 px-1.5 py-0.5">
+                  #{t}
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="text-muted-foreground">
+            {linkCount === 0
+              ? "No wikilinks"
+              : `${linkCount} wikilink${linkCount === 1 ? "" : "s"}`}
+          </div>
+        </div>
+      )}
+
+      {/* Click-to-query: the selection IS a query. Depth drives both the
+          highlight and the copyable request. */}
+      <div className="border-t pt-2 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium">Query this selection</span>
+          <label className="flex items-center gap-1 text-xs text-muted-foreground">
+            hops
+            <select
+              className="border border-border rounded bg-card px-1 py-0.5 text-xs"
+              value={hopDepth}
+              onChange={(e) => onHopDepth(Number(e.target.value))}
+            >
+              {[0, 1, 2, 3].map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {selector && (
+          <QuerySnippet label="Selector" value={selector} />
+        )}
+        {curl && (
+          <QuerySnippet
+            label={`API call (this node + ${hopDepth} hop${hopDepth === 1 ? "" : "s"})`}
+            value={curl}
+          />
+        )}
+        {hoodSelectors.length > 1 && (
+          <QuerySnippet
+            label={`Highlighted set (${hoodSelectors.length} nodes, exact — use hops: 0)`}
+            value={unionSelector}
+          />
+        )}
+        {!selector && hoodSelectors.length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            No selector for this node kind — select a document or tag.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function QuerySnippet({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable (http, permissions) — nothing to do */
+    }
+  };
+  return (
+    <div className="min-w-0">
+      <div className="flex items-center justify-between gap-2 mb-0.5">
+        <span className="text-[11px] text-muted-foreground truncate">{label}</span>
+        <button
+          type="button"
+          aria-label={`Copy ${label}`}
+          onClick={copy}
+          className="flex h-5 w-5 items-center justify-center rounded hover:bg-accent shrink-0"
+        >
+          {copied ? (
+            <Check className="h-3 w-3 text-green-600" />
+          ) : (
+            <Copy className="h-3 w-3" />
+          )}
+        </button>
+      </div>
+      <pre className="bg-muted rounded px-2 py-1.5 text-[10px] font-mono whitespace-pre-wrap break-all max-h-28 overflow-y-auto">
+        {value}
+      </pre>
     </div>
   );
 }

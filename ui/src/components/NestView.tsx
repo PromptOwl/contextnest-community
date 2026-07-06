@@ -12,13 +12,14 @@ import {
   type DatePreset, type SavedFilter,
 } from "../lib/saved-filters";
 import {
-  FileText, Plus, ArrowLeft, History, Shield, Search,
+  FileText, FileCode2, Plus, ArrowLeft, History, Shield, Search, Upload, Sparkles,
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
+import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { DeleteNestDialog } from "./DeleteNestDialog";
@@ -72,6 +73,12 @@ function prettyFolder(name: string) {
     .join(" ");
 }
 
+/** "nodes/gtm/deals" → "Nodes / Gtm / Deals" for nested group headers. */
+function prettyFolderPath(path: string) {
+  if (path === "Root") return "Root";
+  return path.split("/").map(prettyFolder).join(" / ");
+}
+
 interface NestViewProps {
   nestId: string;
   nestName: string;
@@ -100,11 +107,6 @@ export function NestView({
   //   - anon-owned + key mode → license-admin caretaker only
   const canDeleteNest =
     isOwner || (isAnonOwned && authMode !== "open" && isAdmin);
-  // Stewardship is governance of the commons / one's own nests, not a tool
-  // server admins impose on other users' nests. So the steward roster,
-  // assign-steward UI, and Settings modal are hidden when an admin views a
-  // real user's nest.
-  const canManageGovernance = isAdmin && (isOwner || isAnonOwned);
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
 
   // Local mirror of the nest name so inline rename feels instant while the
@@ -167,6 +169,22 @@ export function NestView({
   const [isImported, setIsImported] = useState(false);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
+  // Stewardship is governance of the commons / one's own nests, not a tool
+  // server admins impose on other users' nests. So the steward roster,
+  // assign-steward UI, and Settings modal are hidden when an admin views a
+  // real user's nest. Delegation (mirrors server canManageStewards): the
+  // nest owner or an admin collaborator also manages governance, so owners
+  // can hand people-management to other admins.
+  // Server admins resolve to "admin" on EVERY nest (resolveNestPermission),
+  // so gate the delegated branch on !isAdmin — otherwise the roster/settings
+  // UI would reappear for admins viewing other users' nests, which the rule
+  // above deliberately hides.
+  // `isOwner` is known synchronously (prop); include it so a non-admin owner
+  // sees the governance UI on first render instead of flickering until the
+  // async `permission` from GET /nests/:id resolves.
+  const canManageGovernance =
+    (isAdmin && (isOwner || isAnonOwned)) ||
+    (!isAdmin && (isOwner || permission === "owner" || permission === "admin"));
   // Caller's merged effective roles (collaborator + steward), nest-wide.
   const [roles, setRoles] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
@@ -186,8 +204,17 @@ export function NestView({
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
     );
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [typeFilter, setTypeFilter] = useState<string>("all");
   const [authorFilter, setAuthorFilter] = useState<string>("all");
   const [dateFilter, setDateFilter] = useState<DatePreset>("any");
+  // Document list sort: by title, last edited, or comment (annotation) count.
+  const [sortMode, setSortMode] = useState<"name" | "edited" | "comments">(
+    "name",
+  );
+  // Per-node comment (annotation thread) counts, for the "Most comments" sort.
+  const [commentCounts, setCommentCounts] = useState<
+    Record<string, { count: number; lastAt: string | null }>
+  >({});
   // List vs cards, persisted per-browser (not per-nest — it's a reading pref).
   const [viewMode, setViewMode] = useState<"list" | "cards">(() => {
     try {
@@ -236,6 +263,7 @@ export function NestView({
         tags: tagFilters.length ? tagFilters : undefined,
         author: authorFilter !== "all" ? authorFilter : undefined,
         datePreset: dateFilter !== "any" ? dateFilter : undefined,
+        type: typeFilter !== "all" ? typeFilter : undefined,
       }),
     );
     setSaveFilterName("");
@@ -247,6 +275,7 @@ export function NestView({
     setTagFilters(f.tags ?? []);
     setAuthorFilter(f.author ?? "all");
     setDateFilter(f.datePreset ?? "any");
+    setTypeFilter(f.type ?? "all");
   };
   const [reviewNode, setReviewNode] = useState<any | null>(null);
   const [submitNode, setSubmitNode] = useState<any | null>(null);
@@ -258,6 +287,7 @@ export function NestView({
   }>({ versions: [], approvedVersion: null, currentVersion: 0 });
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
+  const [showGenerate, setShowGenerate] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
 
@@ -267,7 +297,7 @@ export function NestView({
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta] =
+    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta, countsData] =
       await Promise.all([
         api.listNodes(nestId).catch((e) => {
           console.error("[NestView] listNodes failed", nestId, e);
@@ -294,7 +324,12 @@ export function NestView({
           console.error("[NestView] getNest failed", nestId, e);
           return null;
         }),
+        api.getCommentCounts(nestId).catch((e) => {
+          console.error("[NestView] getCommentCounts failed", nestId, e);
+          return { counts: {} };
+        }),
       ]);
+    setCommentCounts(countsData.counts);
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
@@ -372,12 +407,37 @@ export function NestView({
         tags: tagFilters,
         author: authorFilter,
         updatedAfter,
+        type: typeFilter,
       })
     )
       return false;
     if (!search) return true;
     return matchesFilters(n, { search }) || contentHits.has(n.id);
   });
+
+  // Sort the filtered list. "name" = title A–Z; "edited" = most-recently
+  // edited first (updated_at already on each node); "comments" = most comment
+  // threads first, tie-broken by most recent comment then title.
+  const sorted = [...filtered];
+  if (sortMode === "edited") {
+    sorted.sort((a, b) =>
+      String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
+    );
+  } else if (sortMode === "comments") {
+    sorted.sort((a, b) => {
+      const cb = commentCounts[b.id]?.count || 0;
+      const ca = commentCounts[a.id]?.count || 0;
+      if (cb !== ca) return cb - ca;
+      const lb = commentCounts[b.id]?.lastAt || "";
+      const la = commentCounts[a.id]?.lastAt || "";
+      if (lb !== la) return String(lb).localeCompare(String(la));
+      return String(a.title || "").localeCompare(String(b.title || ""));
+    });
+  } else {
+    sorted.sort((a, b) =>
+      String(a.title || "").localeCompare(String(b.title || "")),
+    );
+  }
 
   // Orphans + broken [[links]], client-side from the loaded list.
   const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
@@ -389,15 +449,25 @@ export function NestView({
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [nodes]);
 
+  // Distinct node types present (missing type = "document"), for the type
+  // filter dropdown. Only offered when the nest actually mixes types.
+  const typesPresent = useMemo(() => {
+    const set = new Set<string>();
+    for (const n of nodes) set.add(n.type || "document");
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [nodes]);
+
   const hasActiveFilters =
     !!search ||
     statusFilter !== "all" ||
+    typeFilter !== "all" ||
     tagFilters.length > 0 ||
     authorFilter !== "all" ||
     dateFilter !== "any";
   const clearAllFilters = () => {
     setSearch("");
     setStatusFilter("all");
+    setTypeFilter("all");
     setTagFilters([]);
     setAuthorFilter("all");
     setDateFilter("any");
@@ -418,6 +488,40 @@ export function NestView({
     "90d": "Last 90 days",
     "1y": "Last year",
   };
+  const TYPE_LABELS: Record<string, string> = {
+    document: "Document",
+    artifact: "Artifact",
+    agent: "Agent",
+    skill: "Skill",
+  };
+  // Colored pill for a non-document node type, shown on each list/card row so
+  // the kind is scannable. `document` returns null (the default — no pill).
+  const typePill = (
+    t: string,
+  ): { label: string; cls: string; title: string } | null => {
+    switch (t) {
+      case "artifact":
+        return {
+          label: "HTML",
+          title: "Hosted HTML artifact",
+          cls: "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300",
+        };
+      case "agent":
+        return {
+          label: "Agent",
+          title: "Runnable agent node",
+          cls: "bg-violet-100 text-violet-800 dark:bg-violet-950/40 dark:text-violet-300",
+        };
+      case "skill":
+        return {
+          label: "Skill",
+          title: "Runnable skill node",
+          cls: "bg-sky-100 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300",
+        };
+      default:
+        return null;
+    }
+  };
   const activeFilterChips: Array<{ label: string; clear: () => void }> = [];
   if (search)
     activeFilterChips.push({ label: `Search: ${search}`, clear: () => setSearch("") });
@@ -425,6 +529,11 @@ export function NestView({
     activeFilterChips.push({
       label: `Status: ${STATUS_LABELS[statusFilter] ?? statusFilter}`,
       clear: () => setStatusFilter("all"),
+    });
+  if (typeFilter !== "all")
+    activeFilterChips.push({
+      label: `Type: ${TYPE_LABELS[typeFilter] ?? typeFilter}`,
+      clear: () => setTypeFilter("all"),
     });
   if (authorFilter !== "all")
     activeFilterChips.push({
@@ -553,11 +662,15 @@ export function NestView({
     });
   };
 
-  // Review queue: who can act on each request. canReviewNode gates capability;
-  // own submissions are dropped (SoD) unless the caller is the owner and the
-  // nest allows self-approve (the seeding switch). A non-owner reviewer can
-  // never approve their own work.
+  // Review queue: who can act on each request. The server stamps each request
+  // with `canReview` via the authoritative canUserApprove (admin/owner/steward
+  // scope + separation-of-duties), so we trust it rather than re-deriving
+  // steward scope client-side — the client re-derivation diverged for a
+  // reviewer-steward reaching the nest via public visibility, hiding the queue
+  // and the Review button. Fall back to the client check only for an older
+  // server that doesn't send the flag.
   const reviewableQueue = reviewQueue.filter((r) => {
+    if (r.canReview !== undefined) return r.canReview;
     const node = nodes.find((n) => n.id === r.nodeId);
     if (!node) return false;
     if (!canReviewNode(node)) return false;
@@ -566,6 +679,13 @@ export function NestView({
     return true;
   });
 
+  // Node ids the caller can review right now (authoritative, from the queue
+  // annotation). Drives the per-row Review button so it stays in lockstep with
+  // the in-document approve/reject affordance.
+  const reviewableNodeIds = new Set(
+    reviewableQueue.map((r) => r.nodeId),
+  );
+
   // The caller's own pending submissions. SoD keeps these out of the
   // actionable queue above (authors can't approve their own work), which made
   // it look like "submit for review did nothing." Surface them in their own
@@ -573,10 +693,14 @@ export function NestView({
   const myPendingSubmissions = reviewQueue.filter(
     (r) => r.requestedBy.toLowerCase() === currentEmail,
   );
-  // Show the Review tab whenever stewardship is on OR there are pending
-  // requests at all — otherwise a submitted edit is stranded with no tab
-  // (e.g. stewardship later disabled, or the submitter has no reviewer role).
-  const showReviewTab = stewardshipEnabled || reviewQueue.length > 0;
+  // Show the Review tab whenever stewardship is on, the caller can review
+  // (reviewer steward / admin), OR there are pending requests at all —
+  // otherwise a submitted edit is stranded with no tab (e.g. stewardship
+  // later disabled, the submitter has no reviewer role, or a reviewer-steward
+  // reached the nest via public visibility where the settings flag reads
+  // false client-side).
+  const showReviewTab =
+    stewardshipEnabled || caps.canReviewDocs || reviewQueue.length > 0;
 
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
@@ -596,17 +720,37 @@ export function NestView({
   // (excluded from the node list as a meta-file); surfacing that engine-built
   // index is a deeper follow-up — this is the lightweight UI overview.
   const tocGroups = (() => {
+    // Group by the FULL folder path (everything before the leaf), not just
+    // the first segment, so nested folders like nodes/gtm/deals each get
+    // their own group. Sorting by path keeps children right under parents;
+    // depth drives the header indent.
     const groups = new Map<string, any[]>();
     for (const n of nodes) {
       const id: string = n.id || "";
-      const slash = id.indexOf("/");
-      const folder = slash > 0 ? id.slice(0, slash) : "Root";
+      // Strip the "nodes/" storage root — it's not a user folder. What's left
+      // is the real folder path; a doc directly under nodes/ has none → Root.
+      const rel = id.startsWith("nodes/") ? id.slice(6) : id;
+      const slash = rel.lastIndexOf("/");
+      const folder = slash > 0 ? rel.slice(0, slash) : "Root";
       if (!groups.has(folder)) groups.set(folder, []);
       groups.get(folder)!.push(n);
     }
+    // Compare paths segment-by-segment (not as flat strings) so children
+    // always sort directly under their parent — a sibling like "nodes-extra"
+    // would otherwise wedge between "nodes" and "nodes/a".
+    const byPathSegments = (a: string, b: string) => {
+      const as = a.split("/");
+      const bs = b.split("/");
+      for (let i = 0; i < Math.min(as.length, bs.length); i++) {
+        const cmp = as[i].localeCompare(bs[i]);
+        if (cmp !== 0) return cmp;
+      }
+      return as.length - bs.length;
+    };
     return [...groups.entries()]
       .map(([folder, items]) => ({
         folder,
+        depth: folder === "Root" ? 0 : folder.split("/").length,
         items: [...items].sort((a, b) =>
           String(a.title || a.id).localeCompare(String(b.title || b.id)),
         ),
@@ -616,7 +760,7 @@ export function NestView({
           ? -1
           : b.folder === "Root"
             ? 1
-            : a.folder.localeCompare(b.folder),
+            : byPathSegments(a.folder, b.folder),
       );
   })();
 
@@ -752,8 +896,101 @@ export function NestView({
     }
   };
 
+  // ── Drag-and-drop ingestion ────────────────────────────────────────────
+  // Drop .md/.markdown/.txt → a markdown document; .html/.htm → a hosted HTML
+  // artifact (commentable in the ArtifactViewer's Annotate pane). Title comes
+  // from the filename. A single dropped file opens straight into its editor.
+  const [dragOver, setDragOver] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const kindForFile = (name: string): "document" | "artifact" | null => {
+    const ext = name.toLowerCase().split(".").pop() || "";
+    if (ext === "html" || ext === "htm") return "artifact";
+    if (ext === "md" || ext === "markdown" || ext === "txt") return "document";
+    return null;
+  };
+
+  const importFiles = useCallback(
+    async (fileList: FileList) => {
+      const files = Array.from(fileList).filter((f) => kindForFile(f.name));
+      const skipped = fileList.length - files.length;
+      if (!files.length) {
+        toast.error("Drop .md or .html files to add them to this vault.");
+        return;
+      }
+      setImporting(true);
+      const createdIds: string[] = [];
+      try {
+        for (const file of files) {
+          const type = kindForFile(file.name)!;
+          const title = file.name.replace(/\.(md|markdown|txt|html|htm)$/i, "");
+          try {
+            const text = await file.text();
+            const res = await api.createNode(nestId, { title, content: text, type });
+            const id = (res as any)?.node?.id;
+            if (id) createdIds.push(id);
+          } catch (e: any) {
+            toast.error(`${file.name}: ${e?.message || "failed to import"}`);
+          }
+        }
+        if (createdIds.length) {
+          toast.success(
+            `Added ${createdIds.length} ${createdIds.length === 1 ? "item" : "items"}` +
+              (skipped ? ` (skipped ${skipped} unsupported)` : ""),
+          );
+          await fetchData();
+          if (createdIds.length === 1) onOpenDocument(createdIds[0]);
+        }
+      } finally {
+        setImporting(false);
+      }
+    },
+    [nestId, fetchData, onOpenDocument],
+  );
+
   return (
-    <div className="md:py-6">
+    <div
+      className="md:py-6 relative"
+      onDragOver={(e) => {
+        if (!canEditDocs) return;
+        if (Array.from(e.dataTransfer.types).includes("Files")) {
+          e.preventDefault();
+          setDragOver(true);
+        }
+      }}
+      onDragLeave={(e) => {
+        // Only clear when leaving the whole region, not on child enter/leave.
+        if (e.currentTarget === e.target) setDragOver(false);
+      }}
+      onDrop={(e) => {
+        if (!canEditDocs) return;
+        e.preventDefault();
+        setDragOver(false);
+        if (e.dataTransfer.files?.length) void importFiles(e.dataTransfer.files);
+      }}
+    >
+      {/* Drop overlay — appears while dragging files over the vault. */}
+      {dragOver && canEditDocs && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/5 backdrop-blur-[1px]">
+          <div className="flex flex-col items-center gap-2 text-primary">
+            <Upload className="h-8 w-8" />
+            <div className="text-sm font-medium">
+              Drop to add to this vault
+            </div>
+            <div className="text-xs text-muted-foreground">
+              .md → document · .html → hosted artifact
+            </div>
+          </div>
+        </div>
+      )}
+      {importing && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-background/60">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Importing…
+          </div>
+        </div>
+      )}
       {/* Header — PromptOwl ContextDashboard layout */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4 mb-4">
         <div className="flex min-w-0 items-center gap-3">
@@ -871,10 +1108,42 @@ export function NestView({
                 </Button>
               )}
               {canEditDocs && (
-                <Button onClick={() => onOpenDocument("new")}>
-                  <Plus className="h-4 w-4 mr-2" />
-                  New Document
-                </Button>
+                <>
+                  {/* Visible import affordance — same path as drag-and-drop. */}
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    multiple
+                    accept=".md,.markdown,.txt,.html,.htm"
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files?.length) void importFiles(e.target.files);
+                      e.target.value = "";
+                    }}
+                  />
+                  <Button
+                    variant="outline"
+                    onClick={() => importInputRef.current?.click()}
+                    title="Import .md or .html files (or just drag them onto the page)"
+                    data-testid="nest-import-files"
+                  >
+                    <Upload className="h-4 w-4 mr-2" />
+                    Import
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setShowGenerate(true)}
+                    title="Generate context with an AI agent and push it into this nest"
+                    data-testid="nest-generate-context"
+                  >
+                    <Sparkles className="h-4 w-4 mr-2" />
+                    Add with AI
+                  </Button>
+                  <Button onClick={() => onOpenDocument("new")}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    New Document
+                  </Button>
+                </>
               )}
             </>
           )}
@@ -896,7 +1165,11 @@ export function NestView({
                 icon: Users,
                 onSelect: () => setShowShare(true),
               });
-            if (!isReadOnly && stewardshipEnabled && isAdmin)
+            // Gate on canManageGovernance (owner/admin on THIS nest), not the
+            // server-admin flag — otherwise a license admin who is only an
+            // editor collaborator here sees "Assign Steward" in the menu while
+            // the Steward tab (also canManageGovernance-gated) stays hidden.
+            if (!isReadOnly && stewardshipEnabled && canManageGovernance)
               actions.push({
                 label: "Assign Steward",
                 icon: Shield,
@@ -1028,8 +1301,11 @@ export function NestView({
             <TabsTrigger value="stewards">Stewards</TabsTrigger>
           )}
           {/* Collaborators — plain access sharing, independent of
-              stewardship. Managing it is owner/admin only (server gate). */}
-          {canManage && (
+              stewardship. Owner/admin manage the full roster; write
+              collaborators can invite (escalation-capped server-side), so
+              they see the tab too. The roster controls cap themselves by the
+              caller's permission (see CollaboratorManager). */}
+          {(canManage || collabCanWrite) && (
             <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
           )}
         </TabsList>
@@ -1125,10 +1401,27 @@ export function NestView({
                         onClick={() => onOpenDocument(n.id)}
                         className="w-full flex items-center gap-3 py-2 px-1 -mx-1 rounded hover:bg-muted/50 text-left group"
                       >
-                        <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                        {n.type === "artifact" ? (
+                          <FileCode2 className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                        ) : n.type === "agent" || n.type === "skill" ? (
+                          <Sparkles className="h-4 w-4 text-violet-600 dark:text-violet-400 shrink-0" />
+                        ) : (
+                          <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                        )}
                         <span className="text-sm truncate flex-1">
                           {n.title || n.id}
                         </span>
+                        {(() => {
+                          const p = typePill(n.type || "document");
+                          return p ? (
+                            <span
+                              className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${p.cls}`}
+                              title={p.title}
+                            >
+                              {p.label}
+                            </span>
+                          ) : null;
+                        })()}
                         {n.updated_at && (
                           <span className="text-xs text-muted-foreground shrink-0">
                             {timeAgo(n.updated_at)}
@@ -1165,19 +1458,25 @@ export function NestView({
               ) : (
                 <div className="space-y-5">
                   {tocGroups.map((g) => (
-                    <div key={g.folder}>
-                      <div className="flex items-center gap-2 mb-2">
-                        <FolderOpen className="h-4 w-4 text-muted-foreground" />
-                        <h4 className="text-sm font-medium">
-                          {prettyFolder(g.folder)}
-                        </h4>
-                        <Badge
-                          variant="secondary"
-                          className="text-[10px] px-1.5 py-0 h-5"
-                        >
-                          {g.items.length}
-                        </Badge>
-                      </div>
+                    <div
+                      key={g.folder}
+                      style={{ marginLeft: `${g.depth * 1.25}rem` }}
+                    >
+                      {/* Root = docs directly under nodes/; no folder header. */}
+                      {g.folder !== "Root" && (
+                        <div className="flex items-center gap-2 mb-2">
+                          <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                          <h4 className="text-sm font-medium">
+                            {prettyFolderPath(g.folder)}
+                          </h4>
+                          <Badge
+                            variant="secondary"
+                            className="text-[10px] px-1.5 py-0 h-5"
+                          >
+                            {g.items.length}
+                          </Badge>
+                        </div>
+                      )}
                       <div className="grid gap-1 sm:grid-cols-2">
                         {g.items.map((n) => (
                           <button
@@ -1186,10 +1485,27 @@ export function NestView({
                             className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 text-left group min-w-0"
                             title={n.title || n.id}
                           >
-                            <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            {n.type === "artifact" ? (
+                              <FileCode2 className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                            ) : n.type === "agent" || n.type === "skill" ? (
+                              <Sparkles className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400 shrink-0" />
+                            ) : (
+                              <FileText className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            )}
                             <span className="text-sm truncate flex-1">
                               {n.title || n.id}
                             </span>
+                            {(() => {
+                              const p = typePill(n.type || "document");
+                              return p ? (
+                                <span
+                                  className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${p.cls}`}
+                                  title={p.title}
+                                >
+                                  {p.label}
+                                </span>
+                              ) : null;
+                            })()}
                             <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
                           </button>
                         ))}
@@ -1205,9 +1521,9 @@ export function NestView({
         <TabsContent value="documents" className="space-y-4">
           <Card>
             <CardHeader>
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div className="flex flex-col gap-3">
                 <CardTitle className="text-lg">Documents</CardTitle>
-                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                <div className="flex flex-wrap items-center gap-2 w-full">
                   <div className="relative flex-1 min-w-[12rem] sm:flex-none sm:w-80">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
                     <Input
@@ -1235,6 +1551,21 @@ export function NestView({
                         <SelectItem value="approved">Approved</SelectItem>
                         <SelectItem value="published">Published</SelectItem>
                         <SelectItem value="rejected">Rejected</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+                  {typesPresent.length > 1 && (
+                    <Select value={typeFilter} onValueChange={setTypeFilter}>
+                      <SelectTrigger className="w-[130px] h-8" title="Filter by type">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All types</SelectItem>
+                        {typesPresent.map((t) => (
+                          <SelectItem key={t} value={t}>
+                            {TYPE_LABELS[t] ?? t}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   )}
@@ -1266,6 +1597,21 @@ export function NestView({
                       <SelectItem value="30d">Last 30 days</SelectItem>
                       <SelectItem value="90d">Last 90 days</SelectItem>
                       <SelectItem value="1y">Last year</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Select
+                    value={sortMode}
+                    onValueChange={(v) =>
+                      setSortMode(v as "name" | "edited" | "comments")
+                    }
+                  >
+                    <SelectTrigger className="w-[150px] h-8" title="Sort documents">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="name">Name (A–Z)</SelectItem>
+                      <SelectItem value="edited">Recently edited</SelectItem>
+                      <SelectItem value="comments">Most comments</SelectItem>
                     </SelectContent>
                   </Select>
                   {/* List vs cards density toggle. */}
@@ -1439,10 +1785,17 @@ export function NestView({
                     <button
                       key={n.id}
                       type="button"
-                      className="rounded-full border px-2 py-0.5 text-primary hover:bg-muted truncate max-w-[180px]"
+                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 hover:bg-muted truncate max-w-[180px] ${
+                        n.type === "artifact"
+                          ? "border-amber-300 text-amber-700 dark:text-amber-300"
+                          : "text-primary"
+                      }`}
                       onClick={() => onOpenDocument(n.id)}
                     >
-                      {n.title}
+                      {n.type === "artifact" && (
+                        <FileCode2 className="h-3 w-3 shrink-0" />
+                      )}
+                      <span className="truncate">{n.title}</span>
                     </button>
                   ))}
                 </div>
@@ -1452,9 +1805,25 @@ export function NestView({
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
               ) : filtered.length === 0 ? (
-                <div className="text-center py-8 text-sm text-muted-foreground">
-                  {hasActiveFilters ? "No matching documents" : "No documents yet"}
-                </div>
+                hasActiveFilters || !canEditDocs ? (
+                  <div className="text-center py-8 text-sm text-muted-foreground">
+                    {hasActiveFilters ? "No matching documents" : "No documents yet"}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => importInputRef.current?.click()}
+                    className="w-full flex flex-col items-center gap-2 rounded-lg border-2 border-dashed border-border py-10 text-muted-foreground hover:border-primary hover:text-primary transition-colors"
+                  >
+                    <Upload className="h-7 w-7" />
+                    <div className="text-sm font-medium">
+                      Drag files here, or click to import
+                    </div>
+                    <div className="text-xs">
+                      .md → document · .html → hosted artifact
+                    </div>
+                  </button>
+                )
               ) : (
                 <div
                   className={
@@ -1463,18 +1832,33 @@ export function NestView({
                       : "space-y-2"
                   }
                 >
-                  {filtered.map((node) => {
+                  {sorted.map((node) => {
                     const cards = viewMode === "cards";
+                    // Hosted HTML artifacts get a distinct icon + badge so they
+                    // read differently from markdown documents in the list.
+                    const nodeType = node.type || "document";
+                    const isArtifact = nodeType === "artifact";
+                    const isRunnable = nodeType === "agent" || nodeType === "skill";
+                    const nodePill = typePill(nodeType);
                     const canSubmit =
                       stewardshipEnabled &&
                       node.status === "draft" &&
                       canEditNode(node);
-                    const canReview =
-                      stewardshipEnabled &&
-                      node.status === "pending_review" &&
-                      canReviewNode(node) &&
-                      (submitterByNode.get(node.id) !== currentEmail ||
-                        (isOwner && allowSelfApprove));
+                    // Show Review when the server says this caller can review
+                    // this node (authoritative reviewable set, from the queue's
+                    // canUserApprove annotation — includes admin/owner/steward
+                    // scope + separation-of-duties). This replaced a client-side
+                    // steward-scope re-derivation that diverged for a reviewer-
+                    // steward reaching the nest via public visibility, hiding the
+                    // button even though the in-doc approve/reject showed it.
+                    // Fall back to the client check for an older server that
+                    // doesn't stamp canReview.
+                    const canReview = reviewableNodeIds.has(node.id)
+                      ? true
+                      : node.status === "pending_review" &&
+                        canReviewNode(node) &&
+                        (submitterByNode.get(node.id) !== currentEmail ||
+                          (isOwner && allowSelfApprove));
                     const canEdit =
                       node.status !== "pending_review" && canEditNode(node);
                     const canDelete = canEditNode(node);
@@ -1542,20 +1926,38 @@ export function NestView({
                           } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer`}
                         data-testid={`document-row-${node.id}`}
                       >
-                        {!cards && (
-                          <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
-                        )}
+                        {!cards &&
+                          (isArtifact ? (
+                            <FileCode2 className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                          ) : isRunnable ? (
+                            <Sparkles className="h-5 w-5 text-violet-600 dark:text-violet-400 flex-shrink-0" />
+                          ) : (
+                            <FileText className="h-5 w-5 text-muted-foreground flex-shrink-0" />
+                          ))}
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
-                            {cards && (
-                              <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
-                            )}
+                            {cards &&
+                              (isArtifact ? (
+                                <FileCode2 className="h-4 w-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                              ) : isRunnable ? (
+                                <Sparkles className="h-4 w-4 text-violet-600 dark:text-violet-400 flex-shrink-0" />
+                              ) : (
+                                <FileText className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                              ))}
                             <span
                               className="font-medium truncate min-w-0"
                               title={node.title}
                             >
                               {node.title}
                             </span>
+                            {nodePill && (
+                              <span
+                                className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${nodePill.cls}`}
+                                title={nodePill.title}
+                              >
+                                {nodePill.label}
+                              </span>
+                            )}
                             <LifecycleStatusBadge
                               status={(node.status as DocumentLifecycleStatus) || "draft"}
                               size="sm"
@@ -1980,7 +2382,7 @@ export function NestView({
           </TabsContent>
         )}
 
-        {canManage && (
+        {(canManage || collabCanWrite) && (
           <TabsContent value="collaborators" className="space-y-4">
             <Card>
               <CardHeader className="pb-3">
@@ -1997,6 +2399,7 @@ export function NestView({
                   nestName={nestName}
                   onChanged={fetchData}
                   currentUserEmail={currentEmail}
+                  callerPermission={permission ?? undefined}
                 />
               </CardContent>
             </Card>
@@ -2040,6 +2443,16 @@ export function NestView({
           onClose={() => setShowConnect(false)}
           nestId={nestId}
           nestName={nestName}
+        />
+      )}
+
+      {showGenerate && (
+        <GenerateContextModal
+          isOpen={showGenerate}
+          onClose={() => setShowGenerate(false)}
+          nestId={nestId}
+          nestName={nestName}
+          openMode={authMode === "open"}
         />
       )}
 

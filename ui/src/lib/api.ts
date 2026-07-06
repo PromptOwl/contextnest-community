@@ -132,6 +132,33 @@ export async function getHealth() {
   }>("/health");
 }
 
+export type SignInGate = "open" | "admin-only" | "disabled";
+
+/** Server-wide settings editable from the admin Settings page. */
+export interface AdminSettings {
+  promptowl_sign_in_gate: SignInGate;
+  logo_url: string | null;
+  telemetry_enabled: boolean;
+  public_base_url: string;
+  max_body_bytes: number;
+  slack_webhook_url: string;
+  smtp_url: string;
+  notify_email_from: string;
+  notify_email_to: string;
+}
+
+export async function getAdminSettings() {
+  return request<AdminSettings>("/admin/settings");
+}
+
+/** Admin: patch one or more server settings. Live + persisted server-side. */
+export async function updateAdminSettings(patch: Partial<AdminSettings>) {
+  return request<{ settings: AdminSettings }>("/admin/settings", {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
 // ─── License ───────────────────────────────────────────────────────────
 
 export interface LicenseStatus {
@@ -189,14 +216,14 @@ export async function listTeammates() {
   }>("/auth/teammates");
 }
 
-export async function inviteTeammate(email: string, label?: string) {
+export async function inviteTeammate(email: string) {
   return request<{
-    api_key: string;
+    temporary_password: string;
     user: { id: string; email: string };
     message: string;
   }>("/auth/invite", {
     method: "POST",
-    body: JSON.stringify({ email, label }),
+    body: JSON.stringify({ email }),
   });
 }
 
@@ -207,6 +234,30 @@ export async function changePassword(current: string, next: string) {
     method: "POST",
     body: JSON.stringify({ current, next }),
   });
+}
+
+// Superadmin activity trace — API + MCP call rows, newest first, paginated.
+export async function getAdminTrace(params: {
+  kind?: "api" | "mcp";
+  user?: string;
+  nest?: string;
+  limit?: number;
+  offset?: number;
+} = {}) {
+  const qs = new URLSearchParams();
+  if (params.kind) qs.set("kind", params.kind);
+  if (params.user) qs.set("user", params.user);
+  if (params.nest) qs.set("nest", params.nest);
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return request<{
+    count: number;
+    total: number;
+    limit: number;
+    offset: number;
+    events: any[];
+  }>(`/admin/trace${suffix}`);
 }
 
 // Admin removes a user entirely — revokes all access and deletes them.
@@ -378,10 +429,74 @@ export async function getServerStats() {
   return request<{ nests: number; documents: number; users: number }>("/stats");
 }
 
+// ─── Glossary definitions ──────────────────────────────────────────────
+
+export interface Definition {
+  id: string;
+  term: string;
+  definition: string;
+  linked_tag: string | null;
+  defined_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listDefinitions(nestId: string) {
+  return request<{ count: number; definitions: Definition[] }>(
+    `/nests/${nestId}/definitions`,
+  );
+}
+
+export async function upsertDefinition(
+  nestId: string,
+  data: {
+    term: string;
+    definition: string;
+    linked_tag?: string | null;
+    // The row being edited, when renaming/editing an existing definition.
+    // Scopes the upsert to that row so a rename can't overwrite a sibling
+    // that already owns the new term (server returns 409 instead).
+    editing_id?: string;
+  },
+) {
+  return request<{ definition: Definition }>(`/nests/${nestId}/definitions`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteDefinition(nestId: string, id: string) {
+  return request<{ deleted: boolean }>(
+    `/nests/${nestId}/definitions/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
 // ─── Nodes ──────────────────────────────────────────────────────────────
+
+// Upload an image into the nest's assets folder. Multipart (not the JSON
+// request() helper) — the browser sets the boundary content-type itself.
+export async function uploadAsset(nestId: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`/nests/${nestId}/assets`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Upload failed: ${res.status}`);
+  return data as { file: string; url: string; markdown: string };
+}
 
 export async function listNodes(nestId: string) {
   return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
+}
+
+/** Per-node comment (annotation thread) counts for sorting the document list. */
+export async function getCommentCounts(nestId: string) {
+  return request<{
+    counts: Record<string, { count: number; lastAt: string | null }>;
+  }>(`/nests/${nestId}/comment-counts`);
 }
 
 export async function getNode(nestId: string, nodeId: string) {
@@ -390,7 +505,15 @@ export async function getNode(nestId: string, nodeId: string) {
 
 export async function createNode(
   nestId: string,
-  data: { title: string; content: string; tags?: string[]; type?: string },
+  data: {
+    title: string;
+    content: string;
+    tags?: string[];
+    type?: string;
+    folder?: string;
+    /** Orchestrator schedule — runnable types (agent/skill) only. */
+    schedule?: string;
+  },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
     method: "POST",
@@ -401,7 +524,14 @@ export async function createNode(
 export async function updateNode(
   nestId: string,
   nodeId: string,
-  data: { content?: string; tags?: string[]; title?: string; changeNote?: string },
+  data: {
+    content?: string;
+    tags?: string[];
+    title?: string;
+    changeNote?: string;
+    /** Runnable types (agent/skill) only; "" clears it. */
+    schedule?: string;
+  },
   baseVersion?: number,
 ) {
   const headers: Record<string, string> = {};
@@ -417,77 +547,6 @@ export async function updateNode(
 
 export async function deleteNode(nestId: string, nodeId: string) {
   return request(`/nests/${nestId}/nodes/${nodeId}`, { method: "DELETE" });
-}
-
-// ─── Annotations / comment threads ──────────────────────────────────────
-export interface AnnotationComment {
-  id: string;
-  author: string;
-  body: string;
-  createdAt: string;
-}
-/** Resilient text anchor (W3C TextQuote). null = whole-document comment. */
-export interface AnnotationAnchor {
-  /** 1-based line hint in the source markdown. */
-  line?: number;
-  /** The highlighted text. */
-  quote: string;
-  /** Up to ~250 chars before the quote. */
-  before: string;
-  /** Up to ~250 chars after the quote. */
-  after: string;
-}
-export interface AnnotationThread {
-  id: string;
-  status: "open" | "resolved";
-  anchor: AnnotationAnchor | null;
-  createdBy: string;
-  createdAt: string;
-  resolvedBy: string | null;
-  resolvedAt: string | null;
-  comments: AnnotationComment[];
-}
-
-export async function listAnnotations(nestId: string, nodeId: string) {
-  return request<{ threads: AnnotationThread[] }>(
-    `/nests/${nestId}/nodes/${nodeId}/annotations`,
-  );
-}
-
-export async function createAnnotation(
-  nestId: string,
-  nodeId: string,
-  body: string,
-  anchor?: AnnotationAnchor | null,
-) {
-  return request<{ thread: AnnotationThread }>(
-    `/nests/${nestId}/nodes/${nodeId}/annotations`,
-    { method: "POST", body: JSON.stringify({ body, anchor: anchor ?? null }) },
-  );
-}
-
-export async function addAnnotationComment(
-  nestId: string,
-  nodeId: string,
-  threadId: string,
-  body: string,
-) {
-  return request<{ thread: AnnotationThread }>(
-    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments`,
-    { method: "POST", body: JSON.stringify({ body }) },
-  );
-}
-
-export async function setAnnotationStatus(
-  nestId: string,
-  nodeId: string,
-  threadId: string,
-  action: "resolve" | "reopen",
-) {
-  return request<{ thread: AnnotationThread }>(
-    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/${action}`,
-    { method: "POST" },
-  );
 }
 
 // ─── Search & Query ─────────────────────────────────────────────────────
@@ -653,6 +712,220 @@ export async function getNodeReviews(nestId: string, nodeId: string) {
   return request<{ reviews: any[] }>(`/nests/${nestId}/nodes/${nodeId}/reviews`);
 }
 
+// ─── Hosted artifacts + annotations ──────────────────────────────────────
+
+export interface AnnotationAnchor {
+  /** 1-based line in the artifact's extracted text. Hint only. */
+  line?: number;
+  /** The highlighted text. */
+  quote: string;
+  /** Up to ~250 chars before the quote. */
+  before: string;
+  /** Up to ~250 chars after the quote. */
+  after: string;
+}
+
+export interface AnnotationComment {
+  id: string;
+  author: string;
+  body: string;
+  createdAt: string;
+}
+
+export interface AnnotationThread {
+  id: string;
+  nestId: string;
+  nodeId: string;
+  snapshotVersion: number | null;
+  anchor: AnnotationAnchor | null;
+  status: "open" | "resolved";
+  createdBy: string;
+  createdAt: string;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+  comments: AnnotationComment[];
+}
+
+/** URL of the sandboxed artifact render (iframe `src`). `v` pins a snapshot. */
+export function hostedArtifactUrl(
+  nestId: string,
+  nodeId: string,
+  version?: number | null,
+): string {
+  const v = version != null ? `?v=${version}` : "";
+  return `${API_BASE}/nests/${nestId}/nodes/${nodeId}/hosted${v}`;
+}
+
+/**
+ * Fetch the artifact's served HTML as text — used to derive the *extracted
+ * text* the annotation layer highlights over (same text the nest indexes).
+ * Same-origin, cookie-authed; not subject to the iframe sandbox.
+ */
+export async function fetchArtifactHtml(
+  nestId: string,
+  nodeId: string,
+  version?: number | null,
+): Promise<{ html: string; snapshot: number | null }> {
+  const res = await fetch(hostedArtifactUrl(nestId, nodeId, version), {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to load artifact (${res.status})`);
+  }
+  const snapHeader = res.headers.get("X-Artifact-Snapshot");
+  const snapshot = snapHeader ? Number(snapHeader) : null;
+  return {
+    html: await res.text(),
+    snapshot: Number.isFinite(snapshot as number) ? snapshot : null,
+  };
+}
+
+export async function listAnnotations(nestId: string, nodeId: string) {
+  return request<{ threads: AnnotationThread[] }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations`,
+  );
+}
+
+export async function createAnnotation(
+  nestId: string,
+  nodeId: string,
+  input: {
+    body: string;
+    anchor?: AnnotationAnchor | null;
+    snapshotVersion?: number | null;
+  },
+) {
+  return request<{ thread: AnnotationThread }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function replyAnnotation(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+  body: string,
+) {
+  return request<{ thread: AnnotationThread }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/comments`,
+    { method: "POST", body: JSON.stringify({ body }) },
+  );
+}
+
+export async function resolveAnnotation(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+) {
+  return request<{ thread: AnnotationThread }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/resolve`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export async function reopenAnnotation(
+  nestId: string,
+  nodeId: string,
+  threadId: string,
+) {
+  return request<{ thread: AnnotationThread }>(
+    `/nests/${nestId}/nodes/${nodeId}/annotations/${threadId}/reopen`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+
+// ─── Comments & activity (collaboration) ─────────────────────────────────
+
+export interface CommentAnchor {
+  // Document character offsets — optional. A client that only has the quoted
+  // text (plain selection, no editor offset mapping) sends just `text`.
+  start?: number;
+  end?: number;
+  text?: string;
+}
+
+export interface Comment {
+  id: string;
+  nestId: string;
+  nodeId: string;
+  version?: number;
+  anchor?: CommentAnchor;
+  parentId?: string;
+  author: string;
+  body: string;
+  status: "open" | "resolved";
+  createdAt: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+}
+
+export type ActivityType =
+  | "comment"
+  | "comment_resolved"
+  | "edit"
+  | "edit_proposed"
+  | "review_requested"
+  | "review_resolved";
+
+export interface ActivityEntry {
+  type: ActivityType;
+  nodeId: string;
+  actor: string;
+  at: string;
+  detail?: string;
+  refId?: string;
+}
+
+export async function getNodeComments(
+  nestId: string,
+  nodeId: string,
+  status?: "open" | "resolved",
+) {
+  const qs = status ? `?status=${status}` : "";
+  return request<{ comments: Comment[] }>(
+    `/nests/${nestId}/nodes/${nodeId}/comments${qs}`,
+  );
+}
+
+export async function createComment(
+  nestId: string,
+  nodeId: string,
+  input: {
+    body: string;
+    version?: number;
+    parentId?: string;
+    anchor?: CommentAnchor;
+  },
+) {
+  return request<{ comment: Comment }>(
+    `/nests/${nestId}/nodes/${nodeId}/comments`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function resolveComment(
+  nestId: string,
+  nodeId: string,
+  commentId: string,
+) {
+  return request<{ comment: Comment }>(
+    `/nests/${nestId}/nodes/${nodeId}/comments/${commentId}/resolve`,
+    { method: "POST", body: "{}" },
+  );
+}
+
+export async function getNodeActivity(
+  nestId: string,
+  nodeId: string,
+  limit = 100,
+) {
+  return request<{ activity: ActivityEntry[] }>(
+    `/nests/${nestId}/nodes/${nodeId}/activity?limit=${limit}`,
+  );
+}
+
 // ─── External edits (direct filesystem edits awaiting approval) ──────────
 
 export interface ExternalEditEntry {
@@ -772,16 +1045,41 @@ export async function removeCollaborator(nestId: string, collabId: string) {
 
 // ─── Ontology graph ───────────────────────────────────────────────────────
 
+export interface GraphNode {
+  id: string;
+  title: string;
+  type: string;
+  tags: string[];
+}
+
 export interface NestGraph {
-  nodes: Array<{ id: string; title: string; type: string; tags: string[] }>;
+  nodes: GraphNode[];
   links: Array<{ source: string; target: string }>;
   stewards: Array<{
-    email: string;
+    /** Stable identity key — email for write+ callers, opaque "sN" otherwise. */
+    id: string;
+    /** Display name — email for write+ callers, "Steward N" otherwise. */
+    label: string;
     role: string;
     scope: "nest" | "tag" | "document";
     target: string;
   }>;
+  /** Steward → tag/doc/nest-root edges, pre-assembled server-side. */
+  stewardEdges: Array<{
+    steward: string;
+    target: string;
+    scope: "nest" | "tag" | "document";
+  }>;
   tags: Array<{ name: string; count: number }>;
+  /** Governance gaps, computed server-side over the full set. */
+  signals: {
+    orphans: GraphNode[];
+    unstewardedTags: Array<{ name: string; count: number }>;
+    bottlenecks: Array<{ steward: string; label: string; share: number }>;
+  };
+  /** True when the drawn node set was capped; signals stay full-set accurate. */
+  truncated: boolean;
+  totalNodes: number;
 }
 
 export async function getNestGraph(nestId: string) {

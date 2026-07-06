@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
+import { insertOrReplace, nowExpr } from "../db/sql.js";
 
 export interface LicenseInfo {
   valid: boolean;
@@ -36,11 +37,12 @@ export function isLicenseAdminEmail(
   return lic.ownerEmail.toLowerCase() === email.toLowerCase();
 }
 
-export function isLicenseAdminUserId(userId: string): boolean {
+export async function isLicenseAdminUserId(userId: string): Promise<boolean> {
   try {
-    const row = getDb()
-      .prepare("SELECT email FROM users WHERE id = ?")
-      .get(userId) as { email?: string } | undefined;
+    const row = (await getDb().get(
+      "SELECT email FROM users WHERE id = ?",
+      [userId],
+    )) as { email?: string } | undefined;
     return isLicenseAdminEmail(row?.email);
   } catch {
     return false;
@@ -54,7 +56,7 @@ export function isLicenseAdminUserId(userId: string): boolean {
  *
  * Pass value=null to delete the line.
  */
-function upsertEnvVar(
+export function upsertEnvVar(
   filePath: string,
   varName: string,
   value: string | null,
@@ -145,7 +147,7 @@ export function startLicenseSafetyPoll(): void {
       const isValid = !!currentLicense?.valid;
       if (wasValid && !isValid) {
         console.log("[license] safety poll detected revocation");
-        handleLicenseRevoked();
+        await handleLicenseRevoked();
       }
     } catch (err) {
       // Don't escalate — the watcher and next safety tick will retry.
@@ -166,10 +168,10 @@ export function startLicenseSafetyPoll(): void {
  * resurrect the dead key, and clears the in-process PROMPTOWL_KEY so
  * the next validate call starts from "unlicensed".
  */
-function handleLicenseRevoked(): void {
+async function handleLicenseRevoked(): Promise<void> {
   try {
     const db = getDb();
-    const result = db.prepare("DELETE FROM sessions").run();
+    const result = await db.run("DELETE FROM sessions");
     console.warn(
       `[license] revoked — wiped ${result.changes} active session(s).`,
     );
@@ -263,9 +265,10 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
 
   // Check local cache
   const db = getDb();
-  const cached = db
-    .prepare("SELECT * FROM license_cache WHERE key = ?")
-    .get(key) as
+  const cached = (await db.get(
+    "SELECT * FROM license_cache WHERE key = ?",
+    [key],
+  )) as
     | {
       tier: string;
       org: string;
@@ -385,7 +388,7 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
       // the key is no longer valid. Clear any cached row so a subsequent
       // outage can't resurrect this license under the grace-period
       // fallback above.
-      db.prepare("DELETE FROM license_cache WHERE key = ?").run(key);
+      await db.run("DELETE FROM license_cache WHERE key = ?", [key]);
       return {
         valid: false,
         tier: "none",
@@ -400,15 +403,21 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
     // Cache valid licenses
     if (data.valid) {
       const limitsJson = data.limits ? JSON.stringify(data.limits) : null;
-      db.prepare(
-        `INSERT OR REPLACE INTO license_cache (key, tier, org, limits_json, owner_email, validated_at)
-         VALUES (?, ?, ?, ?, ?, datetime('now'))`,
-      ).run(
-        key,
-        data.tier || "community",
-        data.org || null,
-        limitsJson,
-        data.owner_email || null,
+      await db.run(
+        insertOrReplace(
+          db,
+          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, validated_at)
+           VALUES (?, ?, ?, ?, ?, ${nowExpr(db)})`,
+          ["key"],
+          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, validated_at = ${nowExpr(db)}`,
+        ),
+        [
+          key,
+          data.tier || "community",
+          data.org || null,
+          limitsJson,
+          data.owner_email || null,
+        ],
       );
     }
 

@@ -29,6 +29,28 @@ if (envFileLoaded && !isTestRun) {
 // loaded above (dev) to avoid a redundant pass.
 const canonicalEnvFile = process.env.ENV_FILE_PATH || join(dataRoot(), ".env");
 let canonicalEnvLoaded: string | null = null;
+// Warn at most once when SLACK_WEBHOOK_URL is set to a non-https value. The
+// getter is read once per governance event, so without this a misconfigured
+// env value (set directly, bypassing the /admin/settings validator) would
+// spam the log on every submit/approve/reject/add-collaborator.
+let slackUrlWarned = false;
+let emailFromWarned = false;
+let emailToWarned = false;
+
+/**
+ * Loose email shape gate for the notification envelope: something@something,
+ * no whitespace, no CR/LF. `\s` already excludes interior newlines; the extra
+ * CR/LF reject closes the JS quirk where a non-`m` `$` still matches before a
+ * single trailing "\n" (header-injection shape). Shared by config getters and
+ * the /admin/settings validator so env-set and UI-set values gate identically.
+ */
+export function isEmailish(v: string): boolean {
+  return /^[^\s@]+@[^\s@]+$/.test(v) && !/[\r\n]/.test(v);
+}
+/** Comma-separated recipient list where every entry is isEmailish(). */
+export function isEmailListish(v: string): boolean {
+  return v.split(",").every((e) => isEmailish(e.trim()));
+}
 if (
   !isTestRun &&
   canonicalEnvFile !== envFileLoaded &&
@@ -60,11 +82,101 @@ export const config = {
       process.env.DATABASE_PATH || join(dataRoot(), "community.db")
     );
   },
+  /**
+   * Root directory for nest vault files. Defaults to `<DATA_ROOT>/nests`.
+   * Override (e.g. a GCS volume mount on Cloud Run) to store nest files
+   * separately from the SQLite DB. See `src/shared/paths.ts`.
+   */
+  get NEST_STORAGE_ROOT() {
+    return process.env.NEST_STORAGE_ROOT || join(dataRoot(), "nests");
+  },
+  /**
+   * Which database backend to use.
+   *   "sqlite"   — default; the on-disk file at DATABASE_PATH (existing behaviour).
+   *   "postgres" — Cloud SQL / PostgreSQL, for durable Cloud Run deployments.
+   * Explicit DB_DRIVER wins; otherwise we infer "postgres" when a connection
+   * is configured (DATABASE_URL or CLOUD_SQL_CONNECTION_NAME), else "sqlite".
+   * So existing deployments with no new env vars keep using SQLite untouched.
+   */
+  get DB_DRIVER(): "sqlite" | "postgres" {
+    const v = (process.env.DB_DRIVER || "").trim().toLowerCase();
+    if (v === "postgres" || v === "postgresql" || v === "pg") return "postgres";
+    if (v === "sqlite") return "sqlite";
+    return process.env.DATABASE_URL || process.env.CLOUD_SQL_CONNECTION_NAME
+      ? "postgres"
+      : "sqlite";
+  },
+  /** Postgres connection string, e.g. postgres://user:pass@host:5432/db (TCP). */
+  get DATABASE_URL(): string {
+    return process.env.DATABASE_URL || "";
+  },
+  /**
+   * Cloud SQL instance connection name (project:region:instance). When set,
+   * the server connects over the unix socket at /cloudsql/<name> created by
+   * the Cloud SQL Auth Proxy (the recommended Cloud Run setup). Combine with
+   * DB_USER / DB_PASSWORD / DB_NAME.
+   */
+  get CLOUD_SQL_CONNECTION_NAME(): string {
+    return process.env.CLOUD_SQL_CONNECTION_NAME || "";
+  },
+  get DB_HOST(): string {
+    return process.env.DB_HOST || "";
+  },
+  get DB_PORT(): number {
+    return parseInt(process.env.DB_PORT || "5432", 10);
+  },
+  get DB_USER(): string {
+    return process.env.DB_USER || "";
+  },
+  get DB_PASSWORD(): string {
+    return process.env.DB_PASSWORD || "";
+  },
+  get DB_NAME(): string {
+    return process.env.DB_NAME || "";
+  },
+  /** Max Postgres pool connections. Keep modest — Cloud SQL tiers cap connections. */
+  get DB_POOL_MAX(): number {
+    return parseInt(process.env.DB_POOL_MAX || "10", 10);
+  },
+  /** Enable TLS for Postgres TCP connections (not needed over the unix socket). */
+  get DB_SSL(): boolean {
+    return process.env.DB_SSL === "true";
+  },
+  /** Optional path to a CA cert (PEM) for verify-ca/verify-full TLS. */
+  get DB_SSL_CA(): string {
+    return process.env.DB_SSL_CA || "";
+  },
   get PROMPTOWL_API_URL() {
     return process.env.PROMPTOWL_API_URL || "https://app.promptowl.ai";
   },
   get PROMPTOWL_KEY() {
     return process.env.PROMPTOWL_KEY || "";
+  },
+  /**
+   * Shared secret for one-click SSO auto-login from PromptOwl (PO).
+   *
+   * THIS IS THE DOMAIN LOCK. Only the ONE official community deployment is
+   * given this secret (it matches OFFICIAL_COMMUNITY_SSO_SECRET on PO). PO
+   * signs a short-lived JWT ticket with it; this server verifies the ticket
+   * with the same secret at GET /auth/sso.
+   *
+   * Self-hosted deployments leave this UNSET — GET /auth/sso then returns 404,
+   * so the auto-login feature is disabled for every domain except ours. Those
+   * users keep using the manual device-code flow (/auth/promptowl).
+   */
+  get OFFICIAL_COMMUNITY_SSO_SECRET(): string {
+    return process.env.OFFICIAL_COMMUNITY_SSO_SECRET || "";
+  },
+  /**
+   * This server's own canonical, externally-reachable base URL (e.g.
+   * "https://community.promptowl.ai"). Used to validate the `aud` claim on
+   * incoming SSO tickets — a ticket minted for a different audience is
+   * rejected, so a ticket can't be replayed against another server. Compared
+   * with the trailing slash stripped. When unset, the `aud` check is skipped
+   * (the shared-secret check is still the primary gate).
+   */
+  get PUBLIC_BASE_URL(): string {
+    return (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
   },
   /**
    * Restrict "Sign in with PromptOwl":
@@ -125,6 +237,94 @@ export const config = {
     // without authentication. Safer default for public deployments;
     // local/dev users opt in explicitly.
     return (process.env.AUTH_MODE || "key") as "open" | "key";
+  },
+  /**
+   * Optional SMTP connection URL for email notifications, e.g.
+   * smtps://user:pass@smtp.example.com:465. smtp:// or smtps:// only.
+   * Empty/unset = email connector off. Requires NOTIFY_EMAIL_FROM/_TO.
+   */
+  get SMTP_URL(): string | null {
+    const raw = process.env.SMTP_URL?.trim();
+    if (!raw) return null;
+    if (!/^smtps?:\/\//i.test(raw)) {
+      console.warn(
+        "[config] SMTP_URL rejected: must be an smtp:// or smtps:// URL. Email notifications disabled.",
+      );
+      return null;
+    }
+    return raw;
+  },
+  /**
+   * From address for notification emails. Shape-validated here (not only in
+   * the /admin/settings PATCH) so a value set directly via env/Docker can't
+   * reach nodemailer's envelope unchecked. Invalid = connector off.
+   */
+  get NOTIFY_EMAIL_FROM(): string | null {
+    const raw = process.env.NOTIFY_EMAIL_FROM?.trim();
+    if (!raw) return null;
+    if (!isEmailish(raw)) {
+      if (!emailFromWarned) {
+        emailFromWarned = true;
+        console.warn(
+          "[config] NOTIFY_EMAIL_FROM rejected: must be a plain email address. Email notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
+  },
+  /**
+   * Comma-separated recipient list for notification emails. Shape-validated
+   * here for the same env-bypass reason as NOTIFY_EMAIL_FROM. Invalid (any
+   * entry malformed) = connector off.
+   */
+  get NOTIFY_EMAIL_TO(): string | null {
+    const raw = process.env.NOTIFY_EMAIL_TO?.trim();
+    if (!raw) return null;
+    if (!isEmailListish(raw)) {
+      if (!emailToWarned) {
+        emailToWarned = true;
+        console.warn(
+          "[config] NOTIFY_EMAIL_TO rejected: must be a comma-separated list of email addresses. Email notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
+  },
+  /**
+   * Optional Slack incoming-webhook URL for team notifications (review
+   * submitted/approved/rejected, nest shared). Empty/unset = connector off.
+   * https only — a webhook carries an implicit secret in its path, so it
+   * never travels plaintext.
+   */
+  get SLACK_WEBHOOK_URL(): string | null {
+    const raw = process.env.SLACK_WEBHOOK_URL?.trim();
+    if (!raw) return null;
+    if (!/^https:\/\//i.test(raw)) {
+      if (!slackUrlWarned) {
+        slackUrlWarned = true;
+        console.warn(
+          "[config] SLACK_WEBHOOK_URL rejected: must be an https:// URL. Slack notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
+  },
+  /**
+   * Per-nest notification digest window in milliseconds. A burst of governance
+   * events on one nest inside this window collapses into a single digest
+   * message instead of one post per event. Empty / non-numeric / negative /
+   * unset → 15000 (15s).
+   */
+  get NOTIFY_DEBOUNCE_MS(): number {
+    // Guard empty-but-set (NOTIFY_DEBOUNCE_MS=) first: Number("") is 0, not
+    // NaN, so it would otherwise yield a 0ms window instead of the default.
+    const raw = process.env.NOTIFY_DEBOUNCE_MS?.trim();
+    if (!raw) return 15_000;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 15_000;
   },
   /**
    * CORS origin allowlist. Comma-separated list of origins or "*".

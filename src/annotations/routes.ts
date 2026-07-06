@@ -10,7 +10,7 @@ import {
   syncAnnotationsNode,
   readArtifact,
 } from "./service.js";
-import type { AnnotationAnchor } from "./types.js";
+import { ARTIFACT_NODE_TYPE, type AnnotationAnchor } from "./types.js";
 
 /**
  * Routes for hosted-artifact annotations + sandboxed serving.
@@ -36,11 +36,11 @@ annotationRoutes.get("/:nodeId{.+}/annotations", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = getNodeId(c);
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
-  return c.json({ threads: listThreads(nestId, nodeId) });
+  return c.json({ threads: await listThreads(nestId, nodeId) });
 });
 
 // POST /nests/:nestId/nodes/:nodeId/annotations — create a thread (anchored or whole-artifact)
@@ -48,8 +48,8 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = getNodeId(c);
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
 
@@ -62,7 +62,7 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
     throw new ValidationError("body is required");
   }
 
-  const thread = createThread(
+  const thread = await createThread(
     nestId,
     nodeId,
     {
@@ -82,8 +82,8 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/comments", async (c) =
   const nodeId = getNodeId(c);
   const threadId = c.req.param("threadId")!;
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
 
@@ -92,7 +92,7 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/comments", async (c) =
     throw new ValidationError("body is required");
   }
 
-  const thread = addComment(threadId, userEmail, input.body);
+  const thread = await addComment(nestId, nodeId, threadId, userEmail, input.body);
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 });
@@ -103,12 +103,12 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/resolve", async (c) =>
   const nodeId = getNodeId(c);
   const threadId = c.req.param("threadId")!;
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
 
-  const thread = setThreadStatus(threadId, "resolved", userEmail);
+  const thread = await setThreadStatus(nestId, nodeId, threadId, "resolved", userEmail);
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 });
@@ -119,12 +119,12 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/reopen", async (c) => 
   const nodeId = getNodeId(c);
   const threadId = c.req.param("threadId")!;
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
 
-  const thread = setThreadStatus(threadId, "open", userEmail);
+  const thread = await setThreadStatus(nestId, nodeId, threadId, "open", userEmail);
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
 });
@@ -137,17 +137,50 @@ annotationRoutes.get("/:nodeId{.+}/hosted", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = getNodeId(c);
   const userId = c.get("userId");
-  const userEmail = resolveCallerEmail(userId);
-  if (!canReadNode(nestId, nodeId, userId, userEmail)) {
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
 
-  const { html } = await readArtifact(nestId, nodeId);
+  // Optional ?v=N pins a frozen snapshot; otherwise the approved version.
+  const vRaw = c.req.query("v");
+  const vNum = vRaw !== undefined ? Number(vRaw) : NaN;
+  const version =
+    Number.isFinite(vNum) && vNum > 0 ? Math.floor(vNum) : undefined;
+
+  const { html, version: served, type } = await readArtifact(
+    nestId,
+    nodeId,
+    version,
+  );
+  // Only genuine artifact nodes render through the HTML host path. A live doc
+  // of another kind (ordinary markdown) is not served as HTML. When the live
+  // doc is gone (type === null) we still serve the reconstructed snapshot.
+  if (type !== null && type !== ARTIFACT_NODE_TYPE) {
+    return c.json({ error: "Not a hosted artifact" }, 404);
+  }
+  // Strict, self-contained CSP. `sandbox` (no allow-same-origin) forces an
+  // opaque origin so the artifact can't touch host cookies/storage; the
+  // resource directives then cap what its inline scripts may load or reach:
+  // `connect-src 'none'` blocks fetch/XHR/beacon exfiltration, `default-src
+  // 'none'` blocks external loads, and only inline script/style + data/blob
+  // images are permitted (self-contained decks/dashboards need no network).
   c.header(
     "Content-Security-Policy",
-    "sandbox allow-scripts allow-popups allow-forms allow-modals",
+    [
+      "sandbox allow-scripts allow-popups allow-modals",
+      "default-src 'none'",
+      "script-src 'unsafe-inline'",
+      "style-src 'unsafe-inline'",
+      "img-src data: blob:",
+      "font-src data:",
+      "connect-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+    ].join("; "),
   );
   c.header("X-Content-Type-Options", "nosniff");
   c.header("Referrer-Policy", "no-referrer");
+  if (served != null) c.header("X-Artifact-Snapshot", String(served));
   return c.html(html);
 });

@@ -4,6 +4,9 @@ import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
@@ -24,11 +27,12 @@ import {
   Link as LinkIcon,
   History,
   Code2,
+  MessageSquare,
+  MessageSquarePlus,
   GitCompare,
   ChevronDown,
   Check,
-  MessageSquarePlus,
-  MessageSquare,
+  Copy,
 } from "lucide-react";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { toast } from "sonner";
@@ -38,6 +42,7 @@ import {
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
+import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
@@ -148,8 +153,17 @@ export function DocumentEditor({
   >([]);
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
+  // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
+  // moving an existing doc is a rename with backlink fallout, handled elsewhere.
+  const [folder, setFolder] = useState("");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState<string[]>([]);
+  // Orchestrator schedule (free-form cron/interval). Only meaningful for
+  // runnable node types (agent/skill); ignored/hidden otherwise. "" = none.
+  const [schedule, setSchedule] = useState("");
+  // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
+  // as markdown — once loaded we hand off to ArtifactViewer (see below).
+  const [nodeType, setNodeType] = useState<string | null>(null);
   // Version history for the detail view (CU-wdqcpztgwn). Lazily loaded when
   // the user opens the modal — VersionHistory already renders highlighted diffs.
   const [versionData, setVersionData] = useState<{
@@ -159,26 +173,10 @@ export function DocumentEditor({
   } | null>(null);
   const [showVersions, setShowVersions] = useState(false);
   // Ever-present inline diff: pick a past version from the "Compare" dropdown
-  // and the doc area renders current → vN side-by-side, no modal.
+  // and the doc area renders current↔vN inline (no modal). diffRendered swaps
+  // the unified line-diff for a side-by-side rendered-markdown comparison.
   const [compareVersion, setCompareVersion] = useState<number | null>(null);
-  // Inline-diff display: "source" = unified line diff; "rendered" = both
-  // versions rendered as markdown, side by side.
   const [diffRendered, setDiffRendered] = useState(false);
-  // Anchored comments: text highlighted in the rendered doc stages an anchor
-  // (quote + 250c context + line hint); a floating button pins a comment to it.
-  const [pendingAnchor, setPendingAnchor] = useState<api.AnnotationAnchor | null>(null);
-  const [selPopover, setSelPopover] = useState<{ x: number; y: number } | null>(null);
-  // Anchor snapshotted at mouseup (selection is live then); consumed on click.
-  const stagedAnchorRef = useRef<api.AnnotationAnchor | null>(null);
-  const docViewRef = useRef<HTMLDivElement | null>(null);
-  // Anchored threads mirrored up from the panel, the DOM ranges we paint for
-  // them, and which thread is currently emphasized (doc ⇄ rail sync).
-  const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
-  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const anchorRangesRef = useRef<{ id: string; range: Range }[]>([]);
-  // Thread to scroll/emphasize once highlights (re)build — set when a comment
-  // is clicked from edit mode and we have to flip into comment mode first.
-  const pendingFocusRef = useRef<string | null>(null);
   const [tagInput, setTagInput] = useState("");
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
@@ -218,236 +216,59 @@ export function DocumentEditor({
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
   const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : "view");
-  // Comment mode: force the rendered (read) view + annotation overlay even for
-  // users who can edit, so highlighting-to-comment and the painted highlights
-  // are reachable without the buttery editor stealing focus into TipTap.
-  const [commentMode, setCommentMode] = useState(false);
   // Raw markdown source view — `content` is already markdown (the editor
   // serializes via tiptap-markdown), so this is just a textarea over the same
   // state. Editable in edit mode, read-only in view mode.
   const [rawMode, setRawMode] = useState(false);
-
-  const editorRef = useRef<MarkdownEditorHandle | null>(null);
-
-  // Last loaded/saved snapshot; drives isDirty for the leave-confirm path.
-  const initialSnapshotRef = useRef<{
-    title: string;
-    content: string;
-    tags: string[];
-  }>({
-    title: isNew && initialTitle ? initialTitle : "",
-    content: "",
-    tags: [],
-  });
-
-  // Title as it was last LOADED from the server — only updated by loadNode,
-  // never by (auto)save. The rename warning compares against this so silent
-  // autosave doesn't move the baseline out from under it and dismiss the
-  // warning before the user sees it. (initialSnapshotRef tracks the saved
-  // state and is mutated by every persist, so it's the wrong baseline here.)
-  const loadedTitleRef = useRef<string>("");
-
-  const [loading, setLoading] = useState(!isNew);
-  // Cached nest node list (with content) — feeds both the backlinks panel
-  // and wiki-link hover previews from one fetch. Best-effort.
-  const [nestNodes, setNestNodes] = useState<
-    Array<{ id: string; title: string; content?: string; tags?: string[] }>
-  >([]);
-  useEffect(() => {
-    if (isNew || loading) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const { nodes } = await api.listNodes(nestId);
-        if (!cancelled) {
-          setNestNodes(
-            nodes as Array<{
-              id: string;
-              title: string;
-              content?: string;
-              tags?: string[];
-            }>,
-          );
-        }
-      } catch {
-        /* best-effort; list failures already surface elsewhere */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [isNew, loading, nestId]);
-
-  // Docs in this nest that wiki-link to this one ("what links here").
-  const backlinks = useMemo(
-    () => (isNew ? [] : findBacklinks(nestNodes, { id: nodeId, title })),
-    [isNew, nestNodes, nodeId, title],
-  );
-
-  // Related docs (shared tags + shared links) and link-discovery candidates
-  // (docs that name this one in prose but never [[link]] it).
-  const related = useMemo(
-    () =>
-      isNew
-        ? []
-        : relatedDocs({ id: nodeId, title, tags, content }, nestNodes),
-    [isNew, nestNodes, nodeId, title, tags, content],
-  );
-  const unlinked = useMemo(
-    () => (isNew ? [] : unlinkedMentions({ id: nodeId, title }, nestNodes)),
-    [isNew, nestNodes, nodeId, title],
-  );
-
-  // Outgoing links here whose visible label is stale because the target doc
-  // was renamed (`[[slug|Old Name]]`). Link still resolves; only the label
-  // lags. Surfaced so the linking doc's author can refresh the labels.
-  const staleLinks = useMemo(
-    () => (isNew ? [] : staleAliasLinks(content, nestNodes)),
-    [isNew, content, nestNodes],
-  );
-
-  // Hover-preview lookup for `[[wiki links]]` in the read view — resolves
-  // against the cached list, no per-hover fetch.
-  const previewFor = useCallback(
-    (target: string) => {
-      const node = resolveWikiTarget(nestNodes, target);
-      if (!node) return null;
-      return { title: node.title, snippet: previewSnippet(node.content ?? "") };
-    },
-    [nestNodes],
-  );
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
-  const [touched, setTouched] = useState(false);
-
-  // Settings → Submit-for-Review visibility; permission → read-only gate.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [settings, meta] = await Promise.all([
-          api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false, allow_self_approve: false })),
-          api.getNest(nestId).catch(() => null),
-        ]);
-        if (cancelled) return;
-        setStewardshipEnabled(!!settings.stewardship_enabled);
-        setAllowSelfApprove(!!settings.allow_self_approve);
-        setPermission(meta?.permission ?? null);
-        setMyStewards(((meta as any)?.myStewards ?? []) as Array<{
-          role: string;
-          scope: string;
-        }>);
-      } catch {
-        /* non-fatal */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [nestId]);
-
-  // Resolve per-node steward role; null = no special permissions.
-  useEffect(() => {
-    if (isNew || !nodeId || !currentEmail) {
-      setMyNodeRoles([]);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const { stewards } = await api.getNodeStewards(nestId, nodeId);
-        if (cancelled) return;
-        const mine = (stewards as any[]).filter(
-          (s) => (s.email || "").toLowerCase() === currentEmail,
-        );
-        setMyNodeRoles(mine.map((s) => s.role));
-      } catch {
-        if (!cancelled) setMyNodeRoles([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [isNew, nestId, nodeId, currentEmail]);
-
-  const loadNode = useCallback(async () => {
-    if (isNew) return;
-    setLoading(true);
+  // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
+  // "document" = the normal markdown editor. Only meaningful while isNew.
+  const [newType, setNewType] = useState<
+    "document" | "artifact" | "agent" | "skill"
+  >("document");
+  const isArtifactDraft = isNew && newType === "artifact";
+  // Runnable = orchestrator-facing node (agent/skill) that carries a schedule.
+  // For a new node it's the picked kind; for an existing one it's the loaded
+  // type. Drives whether the schedule field shows and is sent on save.
+  const isRunnable = isNew
+    ? newType === "agent" || newType === "skill"
+    : nodeType === "agent" || nodeType === "skill";
+  // Orchestrator fetch URL for this nest's runnable nodes — shown inline on
+  // agent/skill nodes so the user sees how an external scheduler pulls them.
+  const serverOrigin =
+    typeof window !== "undefined" ? window.location.origin : "";
+  const runnablesUrl = `${serverOrigin}/nests/${nestId}/runnables`;
+  const [copiedRunnables, setCopiedRunnables] = useState(false);
+  const copyRunnablesUrl = async () => {
     try {
-      const { node } = await api.getNode(nestId, nodeId);
-      // Coerce to strings — YAML frontmatter can parse `title: 123` as a
-      // number, and `title.trim()` later would throw "trim is not a function".
-      const loadedTitle = node?.title == null ? "" : String(node.title);
-      const loadedContent = node?.content == null ? "" : String(node.content);
-      const loadedTags = Array.isArray(node?.tags)
-        ? node.tags.map((t: unknown) => String(t))
-        : [];
-      setTitle(loadedTitle);
-      setContent(loadedContent);
-      setTags(loadedTags);
-      setBaseVersion(node?.version);
-      setStatus(node?.status ?? null);
-      setPendingChange((node as any)?.pendingChange ?? null);
-      setPendingReviewBy(
-        ((node as any)?.pendingReviewBy as string | null | undefined) ?? null,
-      );
-      initialSnapshotRef.current = {
-        title: loadedTitle,
-        content: loadedContent,
-        tags: loadedTags,
-      };
-      loadedTitleRef.current = loadedTitle;
-      setTouched(false);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
+      await navigator.clipboard.writeText(runnablesUrl);
+      setCopiedRunnables(true);
+      setTimeout(() => setCopiedRunnables(false), 1500);
+    } catch {
+      /* clipboard blocked — no-op */
     }
-  }, [isNew, nestId, nodeId]);
-
-  const loadVersions = useCallback(async () => {
-    if (isNew) {
-      setVersionData(null);
-      return;
-    }
-    try {
-      setVersionData(await api.getNodeVersions(nestId, nodeId));
-    } catch (e: any) {
-      console.error("[DocumentEditor] getNodeVersions failed", nestId, nodeId, e);
-      setVersionData(null);
-      toast.error(e?.message || "Failed to load version history");
-    }
-  }, [isNew, nestId, nodeId]);
-
-  useEffect(() => {
-    if (isNew) return;
-    loadNode();
-  }, [isNew, loadNode]);
-
-  const openVersions = useCallback(async () => {
-    setShowVersions(true);
-    await loadVersions();
-  }, [loadVersions]);
-
-  // Load versions on demand when the Compare dropdown opens, so the list is
-  // populated without forcing the user through the history modal first.
-  const ensureVersions = useCallback(async () => {
-    if (!versionData) await loadVersions();
-  }, [versionData, loadVersions]);
-
-  // Selecting a past version from Compare shows it; clearing returns to edit.
-  const compareWith = useCallback((v: number | null) => {
-    setCompareVersion(v);
-  }, []);
+  };
+  // Inline anchored comments (annotations) parked beside the doc. commentMode
+  // forces the rendered read view + highlight overlay even for editors, so
+  // select-to-comment and painted highlights are reachable without TipTap
+  // stealing focus. Backed by the same /annotations API the ArtifactViewer uses.
+  const [commentMode, setCommentMode] = useState(false);
+  const [pendingAnchor, setPendingAnchor] = useState<api.AnnotationAnchor | null>(null);
+  const [selPopover, setSelPopover] = useState<{ x: number; y: number } | null>(null);
+  // Anchor snapshotted at mouseup (selection is live then); consumed on click.
+  const stagedAnchorRef = useRef<api.AnnotationAnchor | null>(null);
+  const docViewRef = useRef<HTMLDivElement | null>(null);
+  const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const anchorRangesRef = useRef<{ id: string; range: Range }[]>([]);
+  const pendingFocusRef = useRef<string | null>(null);
 
   // Read the current selection inside the rendered doc and, if non-empty,
   // surface a floating "Comment" button at the selection. We build the anchor
-  // HERE (mouseup), while the selection is guaranteed live, and stash it — the
-  // button click just consumes it. Deferring the build to the click loses
-  // selections that the browser collapses over interactive/structured nodes
-  // (links render as <a>/<button>, headings as block elements), which is why
-  // the button did nothing on those.
+  // HERE (mouseup), while the selection is guaranteed live, and stash it in
+  // stagedAnchorRef — the button click just consumes it. Deferring the build
+  // to the click loses selections the browser collapses over interactive/
+  // structured nodes (links render as <a>/<button>, headings as block
+  // elements), which is why the button used to do nothing on those.
   const onDocMouseUp = useCallback(() => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
@@ -460,25 +281,54 @@ export function DocumentEditor({
       setSelPopover(null);
       return;
     }
-    const quote = sel.toString().trim();
+    if (!sel.toString().trim()) {
+      setSelPopover(null);
+      return;
+    }
+
+    // Turn the live selection into a resilient anchor: quote + up to 250c of
+    // surrounding rendered text + a best-effort source line hint.
+    //
+    // Offsets come from the actual selection Range — NOT String.indexOf — so
+    // that selecting the 2nd/3rd occurrence of a repeated phrase anchors to
+    // that exact spot. We measure against the same flat text the read side
+    // builds (raw text nodes concatenated in order, which is what
+    // Range.toString() yields), so the `before` tail that
+    // anchor-highlight.ts#locate uses to disambiguate matches stays consistent.
+    const offsetOf = (node: Node, nodeOffset: number): number => {
+      const r = document.createRange();
+      r.setStart(container, 0);
+      r.setEnd(node, nodeOffset);
+      return r.toString().length;
+    };
+    const contents = document.createRange();
+    contents.selectNodeContents(container);
+    const full = contents.toString();
+    let start = offsetOf(range.startContainer, range.startOffset);
+    let end = offsetOf(range.endContainer, range.endOffset);
+    if (start > end) [start, end] = [end, start];
+    // Trim whitespace at the selection edges, keeping offsets in sync so the
+    // quote and its context stay consistent with the flattened text.
+    while (start < end && /\s/.test(full[start])) start++;
+    while (end > start && /\s/.test(full[end - 1])) end--;
+    const quote = full.slice(start, end);
     if (!quote) {
       setSelPopover(null);
       return;
     }
-    const full = container.innerText || container.textContent || "";
-    const idx = full.indexOf(quote);
-    const before = idx >= 0 ? full.slice(Math.max(0, idx - 250), idx) : "";
-    const after = idx >= 0 ? full.slice(idx + quote.length, idx + quote.length + 250) : "";
+    const before = full.slice(Math.max(0, start - 250), start);
+    const after = full.slice(end, end + 250);
     const srcIdx = content.indexOf(quote);
     const line = srcIdx >= 0 ? content.slice(0, srcIdx).split("\n").length : undefined;
     stagedAnchorRef.current = { quote, before, after, line };
+
     const rect = range.getBoundingClientRect();
     // Anchor the button just above the selection (viewport/fixed coords).
     setSelPopover({ x: rect.left + rect.width / 2, y: rect.top });
   }, [content]);
 
-  // Turn the live selection into a resilient anchor: quote + up to 250c of
-  // surrounding rendered text + a best-effort source line hint.
+  // Consume the anchor snapshotted at mouseup (selection was live then) and
+  // pin the pending comment to it.
   const stageAnchorFromSelection = useCallback(() => {
     const anchor = stagedAnchorRef.current;
     if (!anchor) return;
@@ -623,6 +473,258 @@ export function DocumentEditor({
     return () => document.removeEventListener("mousedown", onDown);
   }, [selPopover]);
 
+  const editorRef = useRef<MarkdownEditorHandle | null>(null);
+
+  // Last loaded/saved snapshot; drives isDirty for the leave-confirm path.
+  const initialSnapshotRef = useRef<{
+    title: string;
+    content: string;
+    tags: string[];
+    schedule: string;
+  }>({
+    title: isNew && initialTitle ? initialTitle : "",
+    content: "",
+    tags: [],
+    schedule: "",
+  });
+
+  // Title as it was last LOADED from the server — only updated by loadNode,
+  // never by (auto)save. The rename warning compares against this so silent
+  // autosave doesn't move the baseline out from under it and dismiss the
+  // warning before the user sees it. (initialSnapshotRef tracks the saved
+  // state and is mutated by every persist, so it's the wrong baseline here.)
+  const loadedTitleRef = useRef<string>("");
+
+  const [loading, setLoading] = useState(!isNew);
+  // Cached nest node list (with content) — feeds both the backlinks panel
+  // and wiki-link hover previews from one fetch. Best-effort.
+  const [nestNodes, setNestNodes] = useState<
+    Array<{ id: string; title: string; content?: string; tags?: string[] }>
+  >([]);
+  useEffect(() => {
+    // New docs need the list too — the folder picker derives its
+    // suggestions from existing node ids.
+    if (loading) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { nodes } = await api.listNodes(nestId);
+        if (!cancelled) {
+          setNestNodes(
+            nodes as Array<{
+              id: string;
+              title: string;
+              content?: string;
+              tags?: string[];
+            }>,
+          );
+        }
+      } catch {
+        /* best-effort; list failures already surface elsewhere */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isNew, loading, nestId]);
+
+  // Every folder prefix in use (ids minus the nodes/ root and the leaf),
+  // so the folder picker suggests existing paths at each depth.
+  const folderOptions = useMemo(() => {
+    const opts = new Set<string>();
+    for (const n of nestNodes) {
+      const rel = n.id.startsWith("nodes/") ? n.id.slice(6) : n.id;
+      const segs = rel.split("/").slice(0, -1);
+      for (let i = 1; i <= segs.length; i++) opts.add(segs.slice(0, i).join("/"));
+    }
+    return [...opts].sort();
+  }, [nestNodes]);
+
+  // Folder path this doc lives under (id minus the "nodes/" root and the leaf
+  // slug), prettified for the header breadcrumb so users see where a nested
+  // doc sits. Empty for new docs and docs directly under nodes/.
+  const folderSegments = useMemo(() => {
+    if (isNew || !nodeId) return [];
+    const rel = nodeId.startsWith("nodes/") ? nodeId.slice(6) : nodeId;
+    return rel
+      .split("/")
+      .slice(0, -1)
+      .map((seg) =>
+        seg
+          .split("-")
+          .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+          .join(" "),
+      );
+  }, [isNew, nodeId]);
+
+  // Docs in this nest that wiki-link to this one ("what links here").
+  const backlinks = useMemo(
+    () => (isNew ? [] : findBacklinks(nestNodes, { id: nodeId, title })),
+    [isNew, nestNodes, nodeId, title],
+  );
+
+  // Related docs (shared tags + shared links) and link-discovery candidates
+  // (docs that name this one in prose but never [[link]] it).
+  const related = useMemo(
+    () =>
+      isNew
+        ? []
+        : relatedDocs({ id: nodeId, title, tags, content }, nestNodes),
+    [isNew, nestNodes, nodeId, title, tags, content],
+  );
+  const unlinked = useMemo(
+    () => (isNew ? [] : unlinkedMentions({ id: nodeId, title }, nestNodes)),
+    [isNew, nestNodes, nodeId, title],
+  );
+
+  // Outgoing links here whose visible label is stale because the target doc
+  // was renamed (`[[slug|Old Name]]`). Link still resolves; only the label
+  // lags. Surfaced so the linking doc's author can refresh the labels.
+  const staleLinks = useMemo(
+    () => (isNew ? [] : staleAliasLinks(content, nestNodes)),
+    [isNew, content, nestNodes],
+  );
+
+  // Hover-preview lookup for `[[wiki links]]` in the read view — resolves
+  // against the cached list, no per-hover fetch.
+  const previewFor = useCallback(
+    (target: string) => {
+      const node = resolveWikiTarget(nestNodes, target);
+      if (!node) return null;
+      return { title: node.title, snippet: previewSnippet(node.content ?? "") };
+    },
+    [nestNodes],
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
+  const [touched, setTouched] = useState(false);
+
+  // Settings → Submit-for-Review visibility; permission → read-only gate.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [settings, meta] = await Promise.all([
+          api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false, allow_self_approve: false })),
+          api.getNest(nestId).catch(() => null),
+        ]);
+        if (cancelled) return;
+        setStewardshipEnabled(!!settings.stewardship_enabled);
+        setAllowSelfApprove(!!settings.allow_self_approve);
+        setPermission(meta?.permission ?? null);
+        setMyStewards(((meta as any)?.myStewards ?? []) as Array<{
+          role: string;
+          scope: string;
+        }>);
+      } catch {
+        /* non-fatal */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [nestId]);
+
+  // Resolve per-node steward role; null = no special permissions.
+  useEffect(() => {
+    if (isNew || !nodeId || !currentEmail) {
+      setMyNodeRoles([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { stewards } = await api.getNodeStewards(nestId, nodeId);
+        if (cancelled) return;
+        const mine = (stewards as any[]).filter(
+          (s) => (s.email || "").toLowerCase() === currentEmail,
+        );
+        setMyNodeRoles(mine.map((s) => s.role));
+      } catch {
+        if (!cancelled) setMyNodeRoles([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isNew, nestId, nodeId, currentEmail]);
+
+  const loadNode = useCallback(async () => {
+    if (isNew) return;
+    setLoading(true);
+    try {
+      const { node } = await api.getNode(nestId, nodeId);
+      // Coerce to strings — YAML frontmatter can parse `title: 123` as a
+      // number, and `title.trim()` later would throw "trim is not a function".
+      const loadedTitle = node?.title == null ? "" : String(node.title);
+      const loadedContent = node?.content == null ? "" : String(node.content);
+      const loadedTags = Array.isArray(node?.tags)
+        ? node.tags.map((t: unknown) => String(t))
+        : [];
+      setTitle(loadedTitle);
+      setContent(loadedContent);
+      setTags(loadedTags);
+      setNodeType(node?.type ?? null);
+      const loadedSchedule =
+        node?.schedule == null ? "" : String(node.schedule);
+      setSchedule(loadedSchedule);
+      setBaseVersion(node?.version);
+      setStatus(node?.status ?? null);
+      setPendingChange((node as any)?.pendingChange ?? null);
+      setPendingReviewBy(
+        ((node as any)?.pendingReviewBy as string | null | undefined) ?? null,
+      );
+      initialSnapshotRef.current = {
+        title: loadedTitle,
+        content: loadedContent,
+        tags: loadedTags,
+        schedule: loadedSchedule,
+      };
+      loadedTitleRef.current = loadedTitle;
+      setTouched(false);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [isNew, nestId, nodeId]);
+
+  const loadVersions = useCallback(async () => {
+    if (isNew) {
+      setVersionData(null);
+      return;
+    }
+    try {
+      setVersionData(await api.getNodeVersions(nestId, nodeId));
+    } catch (e: any) {
+      console.error("[DocumentEditor] getNodeVersions failed", nestId, nodeId, e);
+      setVersionData(null);
+      toast.error(e?.message || "Failed to load version history");
+    }
+  }, [isNew, nestId, nodeId]);
+
+  useEffect(() => {
+    if (isNew) return;
+    loadNode();
+  }, [isNew, loadNode]);
+
+  const openVersions = useCallback(async () => {
+    setShowVersions(true);
+    await loadVersions();
+  }, [loadVersions]);
+
+  // Load versions on demand when the Compare dropdown opens, so the list is
+  // populated without forcing the user through the history modal first.
+  const ensureVersions = useCallback(async () => {
+    if (!versionData) await loadVersions();
+  }, [versionData, loadVersions]);
+
+  const compareWith = useCallback((v: number | null) => {
+    setCompareVersion(v);
+    // Always reopen compare in the default Source view, and reset on exit.
+    setDiffRendered(false);
+  }, []);
   // A pending-review doc is LOCKED: the server rejects edits/deletes with
   // 423 while a review is open (nodes/routes). Plain drafts stay editable —
   // only status==='pending_review' locks, so the editor flows normally until
@@ -651,8 +753,9 @@ export function DocumentEditor({
     for (let i = 0; i < tags.length; i++) {
       if (tags[i] !== snap.tags[i]) return true;
     }
+    if (schedule.trim() !== snap.schedule.trim()) return true;
     return false;
-  }, [touched, title, content, tags]);
+  }, [touched, title, content, tags, schedule]);
 
   const addTag = useCallback(() => {
     // Split on whitespace/comma; strip leading "#" (stored bare).
@@ -682,10 +785,23 @@ export function DocumentEditor({
     const payload = { title: title.trim(), content, tags };
     let savedId: string | undefined;
     if (isNew) {
-      const res = await api.createNode(nestId, payload);
+      const res = await api.createNode(nestId, {
+        ...payload,
+        type: newType,
+        ...(folder.trim() ? { folder: folder.trim() } : {}),
+        // schedule is server-rejected on non-runnable types, so only send it
+        // for agent/skill drafts.
+        ...(isRunnable ? { schedule: schedule.trim() } : {}),
+      });
       savedId = (res as any)?.node?.id;
     } else {
-      const res = await api.updateNode(nestId, nodeId, payload, baseVersion);
+      const res = await api.updateNode(
+        nestId,
+        nodeId,
+        // Only runnable nodes accept schedule; "" clears it server-side.
+        isRunnable ? { ...payload, schedule: schedule.trim() } : payload,
+        baseVersion,
+      );
       // Engine bumps version on publish; pick it up so next save's X-Base-Version matches.
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
@@ -696,6 +812,7 @@ export function DocumentEditor({
       title: payload.title,
       content,
       tags: [...tags],
+      schedule: schedule.trim(),
     };
     setTouched(false);
     return { ok: true, savedId };
@@ -910,6 +1027,22 @@ export function DocumentEditor({
     }
   };
 
+  // Artifact nodes are hosted HTML, not markdown — render the sandboxed
+  // viewer + annotation surface instead of the editor. Gated on a loaded node
+  // so all hooks above still run unconditionally (rules-of-hooks).
+  if (!isNew && !loading && nodeType === ARTIFACT_NODE_TYPE) {
+    return (
+      <ArtifactViewer
+        nestId={nestId}
+        nodeId={nodeId}
+        title={title}
+        snapshotVersion={null}
+        currentEmail={currentEmail}
+        onBack={onBack}
+      />
+    );
+  }
+
   return (
     <div className="md:py-6">
       {/* Header */}
@@ -944,6 +1077,18 @@ export function DocumentEditor({
                 >
                   {entry.title}
                 </button>
+              </Fragment>
+            ))}
+            {/* Folder path (nested docs only) so the location is visible. */}
+            {folderSegments.map((seg, i) => (
+              <Fragment key={`folder-${i}`}>
+                <span className="text-muted-foreground shrink-0">›</span>
+                <span
+                  className="text-sm text-muted-foreground truncate max-w-[160px]"
+                  title={seg}
+                >
+                  {seg}
+                </span>
               </Fragment>
             ))}
             <span className="text-muted-foreground shrink-0">›</span>
@@ -1022,7 +1167,7 @@ export function DocumentEditor({
             </Button>
           )}
           {/* Compare ▾ — pick a past version; the doc area renders an
-              ever-present current→vN diff inline (no modal). */}
+              ever-present current↔vN diff inline (no modal). */}
           {!isNew && (
             <DropdownMenu
               onOpenChange={(o) => {
@@ -1056,8 +1201,8 @@ export function DocumentEditor({
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" /> Loading…
                   </DropdownMenuItem>
                 ) : versionData.versions.filter(
-                    (v) => v.version !== versionData.currentVersion,
-                  ).length === 0 ? (
+                  (v) => v.version !== versionData.currentVersion,
+                ).length === 0 ? (
                   <DropdownMenuItem disabled>No earlier versions</DropdownMenuItem>
                 ) : (
                   versionData.versions
@@ -1211,19 +1356,19 @@ export function DocumentEditor({
                 return (
                   <Alert className="mt-2 border-amber-300 bg-amber-50 text-amber-800">
                     <div className="flex items-center gap-2">
-                    <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
-                    <AlertDescription className="text-amber-800">
-                      Renaming affects {affected.length} wiki link
-                      {affected.length !== 1 ? "s" : ""} in other documents that
-                      reference this one by its old title (
-                      {affected
-                        .slice(0, 3)
-                        .map((a) => a.title)
-                        .join(", ")}
-                      {affected.length > 3 ? ", …" : ""}
-                      ). Links by slug still resolve, but their visible label
-                      keeps the old name; plain [[title]] links break.
-                    </AlertDescription>
+                      <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
+                      <AlertDescription className="text-amber-800">
+                        Renaming affects {affected.length} wiki link
+                        {affected.length !== 1 ? "s" : ""} in other documents that
+                        reference this one by its old title (
+                        {affected
+                          .slice(0, 3)
+                          .map((a) => a.title)
+                          .join(", ")}
+                        {affected.length > 3 ? ", …" : ""}
+                        ). Links by slug still resolve, but their visible label
+                        keeps the old name; plain [[title]] links break.
+                      </AlertDescription>
                     </div>
                   </Alert>
                 );
@@ -1237,18 +1382,41 @@ export function DocumentEditor({
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-4 w-4 shrink-0 text-amber-600" />
                 <AlertDescription className="text-amber-800">
-                {staleLinks.length} link{staleLinks.length !== 1 ? "s" : ""} in
-                this document show an outdated name — the target document
-                {staleLinks.length !== 1 ? "s were" : " was"} renamed (
-                {staleLinks
-                  .slice(0, 3)
-                  .map((s) => `"${s.shownAs}" → "${s.currentTitle}"`)
-                  .join(", ")}
-                {staleLinks.length > 3 ? ", …" : ""}
-                ). The links still work; only the visible label is out of date.
+                  {staleLinks.length} link{staleLinks.length !== 1 ? "s" : ""} in
+                  this document show an outdated name — the target document
+                  {staleLinks.length !== 1 ? "s were" : " was"} renamed (
+                  {staleLinks
+                    .slice(0, 3)
+                    .map((s) => `"${s.shownAs}" → "${s.currentTitle}"`)
+                    .join(", ")}
+                  {staleLinks.length > 3 ? ", …" : ""}
+                  ). The links still work; only the visible label is out of date.
                 </AlertDescription>
               </div>
             </Alert>
+          )}
+
+          {/* Folder (create-only): files the doc under nodes/<path>/ */}
+          {isNew && (
+            <div>
+              <label className="block mb-1 text-sm font-medium">Folder</label>
+              <Input
+                list="document-editor-folder-options"
+                value={folder}
+                onChange={(e) => {
+                  setFolder(e.target.value);
+                  setTouched(true);
+                }}
+                placeholder='Optional — e.g. "gtm/deals" to nest this document'
+                disabled={fieldsDisabled}
+                data-testid="document-editor-folder-input"
+              />
+              <datalist id="document-editor-folder-options">
+                {folderOptions.map((f) => (
+                  <option key={f} value={f} />
+                ))}
+              </datalist>
+            </div>
           )}
 
           {/* Tags */}
@@ -1354,6 +1522,113 @@ export function DocumentEditor({
               );
             })()}
 
+          {/* Type + Schedule share one row: Type (new-doc kind) on the left,
+              Schedule (runnable orchestrator hint) on the right. Each takes half
+              when both show; a lone field spans the row. Existing artifacts open
+              straight into the ArtifactViewer (handled above), so Type is
+              create-only; Schedule shows for any agent/skill node. */}
+          {!isViewOnly && (isNew || isRunnable) && (
+            <div className="flex flex-col sm:flex-row gap-4 w-full">
+              {isNew && (
+                <div className="flex-1 min-w-0">
+                  <label className="block text-sm font-medium mb-1">Type</label>
+                  <Select
+                    value={newType}
+                    onValueChange={(v) =>
+                      setNewType(
+                        v as "document" | "artifact" | "agent" | "skill",
+                      )
+                    }
+                  >
+                    <SelectTrigger data-testid="document-editor-type">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="document">
+                        Document (markdown)
+                      </SelectItem>
+                      <SelectItem value="artifact">
+                        Artifact (hosted HTML)
+                      </SelectItem>
+                      <SelectItem value="agent">Agent (runnable)</SelectItem>
+                      <SelectItem value="skill">Skill (runnable)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
+              {isRunnable && (
+                <div className="flex-1 min-w-0">
+                  <label
+                    htmlFor="document-editor-schedule"
+                    className="block text-sm font-medium mb-1"
+                  >
+                    Schedule{" "}
+                    <span className="font-normal text-muted-foreground">
+                      (cron / interval — optional)
+                    </span>
+                  </label>
+                  <input
+                    id="document-editor-schedule"
+                    data-testid="document-editor-schedule"
+                    type="text"
+                    value={schedule}
+                    placeholder="e.g. 0 6 * * *  or  @daily"
+                    onChange={(e) => {
+                      setSchedule(e.target.value);
+                      setTouched(true);
+                      scheduleAutosave();
+                    }}
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Opaque to this server — an external orchestrator parses it
+                    and runs the{" "}
+                    {newType === "skill" || nodeType === "skill"
+                      ? "skill"
+                      : "agent"}
+                    . Leave blank for none.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Runnable-node discovery hint: where an orchestrator fetches this
+              node (+ every other agent/skill in the nest). Shown for agent/skill
+              nodes, including read-only viewers, so the API surface is
+              discoverable from the doc itself. */}
+          {isRunnable && (
+            <div className="w-full rounded-md border border-dashed bg-muted/40 px-3 py-2.5">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <span className="text-xs font-medium text-muted-foreground">
+                  Orchestrator fetch — this {nodeType === "skill" || newType === "skill" ? "skill" : "agent"} appears here
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 shrink-0"
+                  onClick={copyRunnablesUrl}
+                  title="Copy URL"
+                >
+                  {copiedRunnables ? (
+                    <Check className="h-3 w-3 text-green-600" />
+                  ) : (
+                    <Copy className="h-3 w-3" />
+                  )}
+                </Button>
+              </div>
+              <code className="block text-[11px] font-mono break-all text-foreground/80">
+                GET {runnablesUrl}
+              </code>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Returns every runnable node (approved agent/skill) with its
+                schedule + content, so an external scheduler can discover what to
+                run and when.
+              </p>
+            </div>
+          )}
+
           {/* Document + ever-present comments rail (Notion/Docs-style):
               editor left, comments a sticky panel on the right. */}
           <div className="flex flex-col lg:flex-row gap-6 items-start">
@@ -1365,99 +1640,103 @@ export function DocumentEditor({
               highlighted phrase to open its thread. Editing is paused.
             </div>
           )}
-          {compareVersion != null ? (
-            /* Ever-present inline diff: current vs a chosen past version. */
-            <div data-testid="document-editor-inline-diff">
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-sm font-medium flex items-center gap-2">
-                  <GitCompare className="h-4 w-4" />
-                  Diff: v{compareVersion} → current (v
-                  {versionData?.currentVersion ?? baseVersion ?? "?"})
-                </label>
-                <div className="flex items-center gap-1">
-                  {/* Source = exact line changes; Rendered = formatted markdown. */}
-                  <div className="flex rounded-md border overflow-hidden text-xs">
-                    <button
-                      type="button"
-                      className={`px-2 py-1 ${!diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
-                      onClick={() => setDiffRendered(false)}
-                    >
-                      Source
-                    </button>
-                    <button
-                      type="button"
-                      className={`px-2 py-1 ${diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
-                      onClick={() => setDiffRendered(true)}
-                    >
-                      Rendered
-                    </button>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7"
-                    onClick={() => setCompareVersion(null)}
-                  >
-                    <X className="h-4 w-4 mr-1" /> Exit diff
-                  </Button>
-                </div>
-              </div>
-              {(() => {
-                const past = versionData?.versions.find(
-                  (v) => v.version === compareVersion,
-                );
-                if (!past) {
-                  return (
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 border rounded-lg">
-                      <Loader2 className="h-4 w-4 animate-spin" /> Loading version{" "}
-                      {compareVersion}…
-                    </div>
-                  );
-                }
-                if (diffRendered) {
-                  // Side-by-side rendered markdown: past vs current.
-                  return (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div className="border rounded-lg overflow-hidden">
-                        <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
-                          v{compareVersion}
-                        </div>
-                        <DocumentViewer
-                          content={past.content || ""}
-                          className="px-4 py-3"
-                        />
-                      </div>
-                      <div className="border rounded-lg overflow-hidden">
-                        <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
-                          current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
-                        </div>
-                        <DocumentViewer content={content} className="px-4 py-3" />
-                      </div>
-                    </div>
-                  );
-                }
-                return (
-                  <DiffViewer
-                    patch={unifiedDiff(past.content || "", content)}
-                    className="max-h-none border rounded-lg"
-                  />
-                );
-              })()}
-            </div>
-          ) : (
-          /* Dblclick → edit unless locked/reviewer/public-viewer. */
+          {/* Dblclick → edit unless commenting/locked/reviewer/public-viewer. */}
           <div
             onClick={() => {
-              if (commentMode || isViewOnly || isLocked) return;
+              if (commentMode || isViewOnly || isLocked || isArtifactDraft) return;
               if (mode === "view" && !isReviewerOnly) {
                 setMode("edit");
               }
             }}
           >
             <label className="block text-sm font-medium mb-1">
-              Content <span className="text-destructive">*</span>
+              {isArtifactDraft ? "Artifact HTML" : "Content"}{" "}
+              <span className="text-destructive">*</span>
             </label>
-            {rawMode ? (
+            {compareVersion != null ? (
+              /* Ever-present inline diff: current vs a chosen past version. */
+              <div data-testid="document-editor-inline-diff">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-sm font-medium flex items-center gap-2">
+                    <GitCompare className="h-4 w-4" />
+                    Diff: v{compareVersion} → current (v
+                    {versionData?.currentVersion ?? baseVersion ?? "?"})
+                    {isDirty && (
+                      <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase">
+                        incl. unsaved edits
+                      </span>
+                    )}
+                  </label>
+                  <div className="flex items-center gap-1">
+                    {/* Source = exact line changes; Rendered = formatted markdown. */}
+                    <div className="flex rounded-md border overflow-hidden text-xs">
+                      <button
+                        type="button"
+                        className={`px-2 py-1 ${!diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+                        onClick={() => setDiffRendered(false)}
+                      >
+                        Source
+                      </button>
+                      <button
+                        type="button"
+                        className={`px-2 py-1 ${diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+                        onClick={() => setDiffRendered(true)}
+                      >
+                        Rendered
+                      </button>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7"
+                      onClick={() => compareWith(null)}
+                    >
+                      <X className="h-4 w-4 mr-1" /> Exit diff
+                    </Button>
+                  </div>
+                </div>
+                {(() => {
+                  const past = versionData?.versions.find(
+                    (v) => v.version === compareVersion,
+                  );
+                  if (!past) {
+                    return (
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 border rounded-lg">
+                        <Loader2 className="h-4 w-4 animate-spin" /> Loading version{" "}
+                        {compareVersion}…
+                      </div>
+                    );
+                  }
+                  if (diffRendered) {
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="border rounded-lg overflow-hidden">
+                          <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                            v{compareVersion}
+                          </div>
+                          <DocumentViewer
+                            content={past.content || ""}
+                            className="px-4 py-3"
+                          />
+                        </div>
+                        <div className="border rounded-lg overflow-hidden">
+                          <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                            current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
+                          </div>
+                          <DocumentViewer content={content} className="px-4 py-3" />
+                        </div>
+                      </div>
+                    );
+                  }
+                  return (
+                    <DiffViewer
+                      patch={unifiedDiff(past.content || "", content)}
+                      className="max-h-none border rounded-lg"
+                    />
+                  );
+                })()}
+              </div>
+            ) : rawMode ? (
               <textarea
                 value={content}
                 onChange={(e) => {
@@ -1472,6 +1751,17 @@ export function DocumentEditor({
                 placeholder="# Raw markdown"
                 className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
                 data-testid="document-editor-raw-markdown"
+              />
+            ) : isArtifactDraft ? (
+              <textarea
+                value={content}
+                onChange={(e) => {
+                  setContent(e.target.value);
+                  setTouched(true);
+                }}
+                placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
+                spellCheck={false}
+                className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
               />
             ) : (commentMode || mode === "view") && !looksLikeHtml(content) ? (
               <div
@@ -1505,17 +1795,20 @@ export function DocumentEditor({
                 currentNodeId={isNew ? undefined : nodeId}
                 editable={!fieldsDisabled}
                 onRequestDocLink={() => setShowDocPicker(true)}
+                onUploadImage={async (file) => {
+                  const { url } = await api.uploadAsset(nestId, file);
+                  return url;
+                }}
                 onWikiLinkClick={handleWikiLinkClick}
                 placeholder="Start writing..."
               />
             )}
           </div>
-          )}
           </div>
 
           {/* Ever-present comments rail — beside the doc, not stacked below. */}
           {!isNew && (
-            <aside className="w-full lg:w-80 shrink-0 lg:sticky lg:top-4 self-start max-h-[calc(100vh-2rem)] overflow-y-auto">
+            <aside className="w-full lg:w-80 shrink-0 self-start lg:sticky lg:top-4 flex flex-col min-h-0 max-h-[70vh]">
               <AnnotationsPanel
                 nestId={nestId}
                 nodeId={nodeId}
@@ -1662,14 +1955,14 @@ export function DocumentEditor({
                   isViewOnly
                     ? undefined
                     : async (v) => {
-                        try {
-                          await api.revertToVersion(nestId, nodeId, v);
-                          toast.success(`Reverted to version ${v}`);
-                          await Promise.all([loadNode(), loadVersions()]);
-                        } catch (e: any) {
-                          toast.error(e?.message || "Revert failed");
-                        }
+                      try {
+                        await api.revertToVersion(nestId, nodeId, v);
+                        toast.success(`Reverted to version ${v}`);
+                        await Promise.all([loadNode(), loadVersions()]);
+                      } catch (e: any) {
+                        toast.error(e?.message || "Revert failed");
                       }
+                    }
                 }
               />
             ) : (

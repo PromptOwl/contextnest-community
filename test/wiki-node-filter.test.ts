@@ -52,6 +52,16 @@ describe("matchesFilters", () => {
     expect(matchesFilters(node, { author: "me@x.com" })).toBe(false);
   });
 
+  it("filters by type ('all' passes, missing type = document)", () => {
+    const agent = { ...node, type: "agent" };
+    expect(matchesFilters(agent, { type: "all" })).toBe(true);
+    expect(matchesFilters(agent, { type: "agent" })).toBe(true);
+    expect(matchesFilters(agent, { type: "document" })).toBe(false);
+    // A node with no explicit type is treated as a document.
+    expect(matchesFilters(node, { type: "document" })).toBe(true);
+    expect(matchesFilters(node, { type: "agent" })).toBe(false);
+  });
+
   it("filters by updatedAfter threshold", () => {
     const n = { ...node, updated_at: "2026-06-01T00:00:00Z" };
     const may = Date.parse("2026-05-01T00:00:00Z");

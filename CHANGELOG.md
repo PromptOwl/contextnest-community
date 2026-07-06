@@ -1,5 +1,171 @@
 # @promptowl/contextnest-community
 
+## 1.8.0
+
+### Minor Changes
+
+- v1.8.0 — a server-level agent entry point, an activity trace, an external-sync primitive, scheduled agent/skill nodes, and a Slack connector.
+
+  ### Agent entry point
+
+  - **Connect once to the server instead of per nest** (`src/mcp/server-routes.ts`, `src/app.ts`) — a new server-level surface: `GET /llms.txt` (public agent manual covering endpoints, MCP, selector grammar, hop/skip retrieval, the `ctx` CLI and npm packages), `GET /index` (the caller's grounded nest index as markdown or json), and a stateless `ALL /mcp` endpoint exposing `nest_index` plus cross-nest read tools that take a `nest` id-or-name argument. Reads are gated per call via `resolveNestPermission` and nest-scoped API keys are honored; write tools stay on the per-nest `/nests/:id/mcp` endpoint so cross-nest mutation through one socket can't slip past authz.
+  - **Agent docs page** (`ui/src/components/AgentDocsPage.tsx`, `ui/src/App.tsx`) surfaces the manual in-app.
+
+  ### Superadmin activity trace
+
+  - **One row per API request / MCP tool call** (`src/telemetry/trace-log.ts`, `ui/src/components/ActivityTracePage.tsx`) — an operator audit surface (who / what / where / outcome / duration) covering every API and MCP call in one place, with pagination. Writes are best-effort fire-and-forget with a rolling 14-day retention window pruned opportunistically. Distinct from product telemetry: it never leaves the server and ignores `TELEMETRY_ENABLED`. Postgres parity and MCP audit coverage added in review.
+
+  ### External sync primitive
+
+  - **`GET /nests/:id/changes?since=`** (`src/nodes/query-routes.ts`) — a change-feed endpoint for external mirrors that uses approval time as the change signal for public readers, so downstream copies only ever see approved content.
+
+  ### Scheduled agent / skill nodes
+
+  - **Agent and skill node types with a schedule** (`src/nodes/service.ts`, `src/nodes/routes.ts`, `ui/src/components/DocumentEditor.tsx`, `ui/src/components/NestView.tsx`) plus a `GET /runnables` orchestrator API that lists runnable nodes with their schedules. Schedule is string-coerced at the API boundary and surfaced in the UI.
+
+  ### Slack connector
+
+  - **Admin-configured incoming-webhook notifications** (`src/notify/slack.ts`, `ui/src/components/SettingsPage.tsx`) — optional team notifications for governance/review events (Settings → Slack webhook URL; empty = off). Deliberately minimal: a plain fetch with a short timeout, fire-and-forget so a Slack outage never slows or fails the triggering action. Notifications include the document title and folder; Slack mrkdwn control chars are escaped, the webhook input is masked, and a bad URL warns once then goes quiet. No new dependencies.
+
+  ### Security & fixes
+
+  - **Path-traversal guard on node ids** (`src/shared/node-id.ts`, `src/nodes/routes.ts`, `src/mcp/tools.ts`) — a centralized traversal guard applied across every node router, closing cross-tenant read/write/delete via crafted node ids.
+  - **MCP nest-name resolution scoped to the caller** (`src/mcp/tools.ts`, `src/governance/title-resolver.ts`) — colliding nest names no longer resolve across tenants.
+  - **Foldered node sub-routes served correctly** (`src/app.ts`) — `/hosted`, `/annotations`, and sibling sub-routes now resolve for documents in nested folders.
+  - **Postgres schema/migration parity** (`src/db/migrations.ts`, `src/db/migrations.postgres.ts`) — `node_deletions` added to the Postgres schema with a migration-parity guard so the two backends stay in lockstep.
+
+  ### Configuration
+
+  - New `DB_*` / Slack-related settings documented in `.env.example` and `CONFIGURATION.md`; `API.md` updated for the new endpoints.
+
+  ### Tests
+
+  New/expanded coverage: `test/admin-trace.test.ts`, `test/agent-entrypoint.test.ts`, `test/changes-since.test.ts`, `test/migration-parity.test.ts`, `test/node-id-traversal.test.ts`, `test/runnables.test.ts`, `test/slack-connector.test.ts`, `test/wiki-node-filter.test.ts`, plus additions to `test/annotations.test.ts` and `test/db-postgres.test.ts`.
+
+## 1.7.0
+
+### Minor Changes
+
+- e187c6d: v1.7.0 — anchored inline comments, delegated nest admins, nested folders, and a documented deterministic-retrieval API.
+
+  ### Comments → anchored inline annotations
+
+  - **Replaces the comment modal with anchored inline threads** (`ui/src/components/AnnotationsPanel.tsx`, `ui/src/lib/anchor-highlight.ts`): highlight text in a markdown doc to pin a comment to that quote (W3C TextQuote anchor), painted via the CSS Custom Highlight API; click/hover a highlight to focus its thread in a sticky rail. A new comment-mode toggle forces the rendered read view so select-to-comment works without TipTap stealing focus. `CommentsPanel.tsx` and its modal trigger are deleted — no backend/schema change, reuses the existing `/annotations` service.
+  - **Postgres-safe annotation ordering** (`src/annotations/service.ts`) — `ORDER BY rowid` (a SQLite-only pseudo-column) replaced with `ORDER BY id`, a portable deterministic tiebreak.
+  - **`context_comments` gated on approval** (`src/mcp/tools.ts`) — the MCP tool resolved threads directly, bypassing the approved-only gate `context_get`/`context_export` enforce; an unapproved draft's quoted text and paraphrased comment bodies could leak through this side door. Now refuses with the same "no approved version yet" message as the other content tools.
+  - **Document list — sort by name, recency, or comment count** (`src/nests/routes.ts`, `ui/src/components/NestView.tsx`) — new `countThreadsByNode` aggregate and `GET /nests/:nestId/comment-counts` power a "Most comments" sort option alongside name and recently-edited.
+
+  ### Delegated nest administration
+
+  - **Nest owner/admin collaborators can manage stewards, settings, and MCP sharing** (`src/governance/stewardship-service.ts`, `src/app.ts`, `src/mcp/tools.ts`, `ui/src/components/TeammatesPage.tsx`) — `canManageStewards` is now nest-aware (server admin OR nest owner/admin) instead of requiring the license admin; `PATCH /nests/:id/settings` and MCP `context_share_nest` now follow the same rule as REST, closing a prior TODO.
+  - **Follow-up hardening** (`f865dad`): the steward roster endpoint (`/nests/:id/stewards`) is excluded from public/anonymous read (was leaking steward emails/roles on anon-owned nests); disabling stewardship (which hard-deletes stewards and pending reviews) stays owner/server-admin-only so a delegated admin can't wipe governance state. Dead `canManageWith` removed from `src/governance/roles.ts`.
+
+  ### Nested folders
+
+  - **Documents can be created at any depth under `nodes/`** (`src/nodes/service.ts`, `src/nodes/routes.ts`, `src/mcp/tools.ts`) — creation previously flattened everything to `nodes/<slug>`; `createNode` now accepts a per-segment-slugified `folder` (traversal chars collapse, empty segments drop, max 8 levels) via REST `POST /nodes` and MCP `context_create`.
+  - `DocumentEditor` gets a Folder field (datalist of existing paths); `NestView` groups its Contents list by full folder path with depth-indented headers instead of only the first path segment.
+
+  ### Deterministic retrieval API
+
+  - **Connect modal — new API tab** (`ui/src/components/ConnectModal.tsx`) documents the previously-unlisted `POST /nests/:id/context` endpoint (selector + hops + max_tokens → assembled markdown with a hops_used/nodes_traversed trace), the selector grammar (`#tag`, `type:`, `[[Title]]`, `scope:`, `+AND`/`|OR`/`-NOT`), and 1-hop vs multi-hop semantics; the CLI tab cross-references it. MCP tab now lists all 21 registered tools (was undercounting at 18); snippets wrap instead of truncating, and open-mode snippets drop the now-unneeded auth flags.
+  - **`context_query`/`context_resolve` take a caller-set `hops`** (default 2, was hardcoded) with matching REST support, then hardened: `normalizeHops` treats `null`/`undefined` as the default instead of `0`, and caps depth at `MAX_HOPS=10`. Both tools are now routed through `resolveLlmBody` so hop-expanded neighborhoods can no longer surface unapproved/draft bodies — previously only `context_get`/`search`/`export` enforced that gate.
+  - **Graph click-to-query** (`ui/src/components/OntologyGraphView.tsx`) — clicking a node in the ontology graph surfaces its engine selector (`[[Title]]` / `#tag`) with a copy button and a 0-3 hop picker that drives both the highlighted neighborhood (BFS over visible links) and a matching copyable `POST /context` curl.
+  - **`[[Title]]` selector + hop-expansion hardening** (`src/nodes/query-routes.ts`) — a pure `[[Title]]` selector sent alongside `prompt` no longer gets silently overwritten; hop expansion now checks document status so drafts can't leak in via a neighbor 1+ hops from a matched title when `include_drafts` is off; id-style `[[nodes/some-id]]` wikilinks resolve in hop adjacency the same way the graph builder does.
+
+  ### Accounts & auth
+
+  - **`POST /auth/invite` issues a temporary password, not an API key** (`src/auth/routes.ts`, `ui/src/components/TeammatesPage.tsx`) — invited teammates previously got an unusable placeholder password and could never log in with email + password. Re-inviting an unclaimed user now refreshes the temp password; an already-claimed user gets `409` (use Reset password) so a real login can't be clobbered.
+  - Login normalizes email via trim + lowercase, so autofill whitespace no longer 401s. Admin password reset no longer revokes the user's API key (independent credentials); sessions are still cleared.
+  - **Auth invite flow ported to the async DB adapter** (`src/annotations/service.ts`, `src/auth/routes.ts`) so it works against Postgres, not just SQLite.
+  - **Migration 012 — merge case-colliding user rows** (`src/db/migrations.ts`, `src/db/migrations.postgres.ts`) — pre-existing `Bob@x.com`/`bob@x.com` collisions (left behind by migration 009's NOCASE-unique constraint) resolved to different rows, so password resets and logins targeted the wrong account. The migration merges each case-insensitive email group into one winner and repoints every FK and email-keyed reference, then canonicalizes emails to lowercase. A follow-up fix corrected the steward dedup, whose correlated `EXISTS` self-matched every row in a collision group and deleted _all_ active steward grants for the email instead of collapsing duplicates — a governance regression hidden inside the login fix.
+
+  ### Nest dashboard
+
+  - **`GET /nests` tile metadata actually works** (`src/nests/routes.ts`) — was 500ing (`db.prepare` doesn't exist on the async DB adapter) and, once fixed, always reported 0 documents (missing `await` on `engineCache.get()`). Per-nest filesystem scans replaced with grouped queries over `node_versions`/`nest_collaborators`/`stewards`, so `Dashboard.tsx` nest tiles show accurate document/collaborator/steward counts with no per-load fs I/O.
+
+  ### Tests
+
+  New/expanded coverage: `test/annotations.test.ts`, `test/context-endpoint.test.ts`, `test/db-postgres.test.ts`, `test/delegated-admins.test.ts`, `test/invite.test.ts`, `test/key-mode.test.ts`, `test/mcp-routes.test.ts`, `test/merge-colliding-users.test.ts`, `test/nest-tile-metadata.test.ts`, `test/nested-folders.test.ts`.
+
+## 1.6.0
+
+### Minor Changes
+
+- v1.6.0 — configurable nest storage and a PostgreSQL/Cloud SQL backend for durable Cloud Run deployments.
+
+  ### Storage
+
+  - **Configurable `NEST_STORAGE_ROOT`** — nest vault files (markdown + version history) can now live outside `DATA_ROOT`, e.g. on a GCS volume mount on Cloud Run, while the DB stays on `DATA_ROOT`. Path resolution is centralised so the root is set in one place (`src/config.ts`, `src/shared/paths.ts`, `src/nests/service.ts`). Defaults to `<DATA_ROOT>/nests`, so existing deployments are unchanged.
+
+  ### Database
+
+  - **PostgreSQL / Cloud SQL backend** — an async DB adapter lets the server run on PostgreSQL alongside the existing SQLite backend, with Cloud SQL Auth Proxy (unix socket) and TCP+TLS connection support for durable Cloud Run deployments (`src/db/adapter.ts`, `src/db/adapter.postgres.ts`, `src/db/adapter.sqlite.ts`, `src/db/migrations.postgres.ts`, `src/db/sql.ts`, `src/db/client.ts`). New `DB_*` env vars: `DB_DRIVER`, `DATABASE_URL`, `CLOUD_SQL_CONNECTION_NAME`, `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_POOL_MAX`, `DB_SSL`, `DB_SSL_CA`. SQLite stays the default when no connection is configured, so existing deployments keep working untouched (`CONFIGURATION.md`, `.env.example`).
+
+  ### Fixes
+
+  - **Security** — the admin guard on `/admin/settings` is now correctly awaited, closing a window where the async check did not gate the request (`src/app.ts`).
+  - **AdminLoginModal** — now respects `PROMPTOWL_SIGN_IN_GATE` (`ui/src/components/AdminLoginModal.tsx`).
+  - **Drift scanner toggle** — `DRIFT_SCAN_INTERVAL_MS=0` now disables the drift scanner (`src/index.ts`).
+  - **Nest-root seam** — the unsynced-service no longer risks deleting live nests when `NEST_STORAGE_ROOT` is nested under `DATA_ROOT` (`src/nests/unsynced-service.ts`, `src/nests/service.ts`).
+
+## 1.5.0
+
+### Minor Changes
+
+- v1.5.0 — AI-assisted context authoring, drag-and-drop ingestion, editor power tools, and a dedicated Server settings page.
+
+  ### Authoring & AI
+
+  - **"Add with AI"** — generate structured context from a prompt and push it straight into the nest; the assistant interviews and organizes the material rather than dumping raw text (`ui/src/components/GenerateContextModal.tsx`, `ui/src/components/NestView.tsx`, `ui/src/lib/api.ts`).
+  - **Drag-and-drop file ingestion** — drop files directly onto a vault to import them, with a discoverable import button and an empty-state drop zone (`ui/src/components/NestView.tsx`).
+
+  ### Document editor
+
+  - **Raw markdown toggle** — switch the document editor between rich and raw markdown views (`ui/src/components/DocumentEditor.tsx`).
+  - **Inline version diff** — view a highlighted diff against a prior version from inside the editor, with an unsaved-changes indicator and diff reset (`ui/src/components/DocumentEditor.tsx`, `ui/src/components/governance/VersionHistory.tsx`).
+  - **HTML artifact markers** — documents containing HTML artifacts are flagged in both the document list and the recently-edited views (`ui/src/components/NestView.tsx`).
+
+  ### Server settings
+
+  - **Dedicated Server settings page** with admin controls for logo, telemetry, base URL, and upload size limit, backed by new `/admin/settings` GET/PATCH endpoints (`ui/src/components/SettingsPage.tsx`, `src/app.ts`, `ui/src/lib/api.ts`).
+  - **Admin sign-in gate toggle** — admins can set the PromptOwl sign-in gate (`open` / `admin-only` / `disabled`) from the user menu (`ui/src/App.tsx`, `ui/src/lib/api.ts`).
+
+  ### Fixes
+
+  - `/admin/settings` PATCH is now atomic, with test coverage (`src/app.ts`, `test/admin-settings.test.ts`).
+  - Whitespace-only passwords are rejected at registration/login (`src/auth/routes.ts`, `test/password-validation.test.ts`).
+  - The document list reappears after clearing a no-result search in the Link-to-Document modal (`ui/src/components/DocumentPickerModal.tsx`).
+
+## 1.4.0
+
+### Minor Changes
+
+- v1.4.0 — collaboration, hosted artifacts, ontology graph, and one-click SSO.
+
+  ### Collaboration & sharing
+
+  - **Standalone collaboration comments + activity log** — contributors can comment on documents independent of the review workflow, and a per-nest activity log records governance events (`src/governance/comment-service.ts`, `CommentsPanel.tsx`).
+  - **Granular share permissions** — collaborator invites are now escalation-capped instead of admin-only, so an editor can invite another collaborator without exceeding their own permission tier (`src/nests/sharing-service.ts`).
+  - **Shareable document URLs** — documents now have stable deep-link URLs that open the target document directly.
+
+  ### Hosted artifacts & annotations
+
+  - **Hosted artifacts + threaded annotations** — non-markdown artifacts can be hosted and viewed in-app, with threaded annotations anchored to artifact text (`src/annotations/*`, `ArtifactViewer.tsx`, `ui/src/lib/artifact-text.ts`).
+
+  ### Ontology graph
+
+  - **Ontology graph view** — an interactive canvas of nodes, `[[wikilinks]]`, and stewardship overlay that surfaces coverage gaps. Supports pan, zoom, and fit-to-view; steward emails are masked for the read tier and the drawn-node count is capped for large graphs (`src/nodes/graph-service.ts`, `OntologyGraphView.tsx`).
+
+  ### Auth
+
+  - **One-click SSO auto-login** — users can sign into ContextNest Community directly from PromptOwl via a short-lived SSO token (`src/auth/sso-token.ts`, `test/sso-route.test.ts`, `test/sso-token.test.ts`).
+
+  ### Fixes
+
+  - Hyperlink / wiki-link navigation now resolves to the configured target.
+  - Comment and annotation projection conflict resolved.
+  - Editors can add new collaborators in the UI.
+
 ## 1.3.0
 
 ### Minor Changes

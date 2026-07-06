@@ -5,12 +5,16 @@ import { NestView } from "./components/NestView";
 import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
+import { SettingsPage } from "./components/SettingsPage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
-import { getLicenseStatus, getNest, changePassword, type LicenseStatus } from "./lib/api";
+import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen, ScrollText, BookMarked } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
+import { AgentDocsPage } from "./components/AgentDocsPage";
+import { ActivityTracePage } from "./components/ActivityTracePage";
+import { DefinitionsPage } from "./components/DefinitionsPage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -69,13 +73,27 @@ type View =
       breadcrumb?: BreadcrumbEntry[];
     }
   | { page: "teammates" }
+  | { page: "settings" }
+  | { page: "trace" }
+  | { page: "docs" }
   | {
       page: "ontology-graph";
       nestId: string;
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+    }
+  | {
+      page: "definitions";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
     };
+
+// Runs the ?sso_error toast exactly once per page load (survives React
+// StrictMode's dev double-mount). Resets naturally on the next full navigation.
+let ssoErrorHandled = false;
 
 export default function App() {
   const {
@@ -113,6 +131,25 @@ export default function App() {
   const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [logoutPending, setLogoutPending] = useState(false);
   const [showChangePassword, setShowChangePassword] = useState(false);
+  // Server-wide settings for the admin Settings page. Loaded once for admins.
+  const [serverSettings, setServerSettings] = useState<AdminSettings | null>(null);
+  useEffect(() => {
+    if (!isAdmin) return;
+    getAdminSettings()
+      .then(setServerSettings)
+      .catch(() => {});
+  }, [isAdmin]);
+  const updateServerSettings = useCallback(async (patch: Partial<AdminSettings>) => {
+    try {
+      const res = await updateAdminSettings(patch);
+      setServerSettings(res.settings);
+      toast.success("Settings saved");
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to save settings");
+      // Re-sync from server so the UI reflects the true state.
+      getAdminSettings().then(setServerSettings).catch(() => {});
+    }
+  }, []);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
   const [showQuickOpen, setShowQuickOpen] = useState(false);
 
@@ -226,6 +263,48 @@ export default function App() {
       window.history.replaceState({}, "", next);
     }
   }, [view, deepLinkProbe.status]);
+
+  // One-click PromptOwl SSO (GET /auth/sso) bounces back to "/?sso_error=<code>"
+  // when a ticket can't be redeemed (bad/expired/replayed ticket, wrong
+  // audience, rate limit, sign-in gate) or when this community doesn't support
+  // SSO at all (no shared secret on a self-hosted deploy → "not_supported").
+  // Surface a human-readable toast and strip the param so a refresh doesn't
+  // re-fire it.
+  //
+  // The module-level guard + deferred toast handle React StrictMode's dev
+  // double-mount: the effect fires twice, and a toast queued synchronously in
+  // the first pass is dropped when sonner's <Toaster> remounts. The guard runs
+  // the body exactly once per page load (each SSO redirect is a full
+  // navigation, so it resets), and the setTimeout lets the toast land after the
+  // mount churn settles so it actually renders.
+  useEffect(() => {
+    if (typeof window === "undefined" || ssoErrorHandled) return;
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("sso_error");
+    if (!code) return;
+    ssoErrorHandled = true;
+
+    params.delete("sso_error");
+    const qs = params.toString();
+    window.history.replaceState(
+      {},
+      "",
+      window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
+    );
+
+    const messages: Record<string, string> = {
+      not_supported: "One-click sign-in isn't available on this community.",
+      missing_ticket: "The sign-in link was incomplete. Try again from PromptOwl.",
+      invalid_ticket: "The sign-in link is invalid or has expired. Try again from PromptOwl.",
+      bad_audience: "This sign-in link was issued for a different community.",
+      ticket_used: "This sign-in link was already used. Start again from PromptOwl.",
+      rate_limited: "Too many sign-in attempts. Wait a moment and try again.",
+      sign_in_restricted: "Sign-in is restricted on this community. Contact an admin.",
+      service_error: "Something went wrong signing you in. Please try again.",
+    };
+    const msg = messages[code] ?? "Sign-in failed. Try again from PromptOwl.";
+    setTimeout(() => toast.error(msg), 0);
+  }, []);
 
   useEffect(() => {
     refreshLicense();
@@ -404,6 +483,18 @@ export default function App() {
               </span>
             )}
 
+            {view.page !== "docs" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setView({ page: "docs" })}
+                title="API, MCP & CLI docs for agents"
+              >
+                <BookOpen className="h-3.5 w-3.5 mr-1" />
+                Docs
+              </Button>
+            )}
+
             {view.page === "nest" && (
               <Button
                 variant="outline"
@@ -423,11 +514,32 @@ export default function App() {
               </Button>
             )}
 
+            {view.page === "nest" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setView({
+                    page: "definitions",
+                    nestId: view.nestId,
+                    nestName: view.nestName,
+                    isOwner: view.isOwner,
+                    isAnonOwned: view.isAnonOwned,
+                  })
+                }
+              >
+                <BookMarked className="h-3.5 w-3.5 mr-1" />
+                Definitions
+              </Button>
+            )}
+
             {adminStatus?.me ? (
               <UserMenu
                 me={adminStatus.me}
                 isAdmin={isAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
+                onSettings={() => setView({ page: "settings" })}
+                onTrace={() => setView({ page: "trace" })}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
               />
@@ -620,8 +732,37 @@ export default function App() {
             />
           );
         })()}
+        {view.page === "definitions" && (
+          <DefinitionsPage
+            nestId={view.nestId}
+            nestName={view.nestName}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
+        )}
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
+        )}
+
+        {view.page === "settings" && (
+          <SettingsPage
+            onBack={() => setView({ page: "dashboard" })}
+            settings={serverSettings}
+            onUpdate={updateServerSettings}
+          />
+        )}
+        {view.page === "trace" && (
+          <ActivityTracePage onBack={() => setView({ page: "dashboard" })} />
+        )}
+        {view.page === "docs" && (
+          <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}
         {view.page === "ontology-graph" && (
           <OntologyGraphView
@@ -655,6 +796,8 @@ interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
   onTeammates: () => void;
+  onSettings: () => void;
+  onTrace: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
 }
@@ -663,6 +806,8 @@ function UserMenu({
   me,
   isAdmin,
   onTeammates,
+  onSettings,
+  onTrace,
   onChangePassword,
   onLogout,
 }: UserMenuProps) {
@@ -716,6 +861,14 @@ function UserMenu({
             <DropdownMenuItem onSelect={onTeammates} className="cursor-pointer">
               <Users className="h-3.5 w-3.5 mr-2" />
               Teammates
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onSettings} className="cursor-pointer">
+              <Shield className="h-3.5 w-3.5 mr-2" />
+              Server settings
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onTrace} className="cursor-pointer">
+              <ScrollText className="h-3.5 w-3.5 mr-2" />
+              Activity trace
             </DropdownMenuItem>
           </>
         )}
@@ -796,6 +949,10 @@ function ChangePasswordDialog({
 
   const submit = async () => {
     setError(null);
+    if (next.trim().length === 0) {
+      setError("New password cannot be empty or only whitespace.");
+      return;
+    }
     if (next.length < 8) {
       setError("New password must be at least 8 characters.");
       return;

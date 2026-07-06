@@ -44,8 +44,6 @@ export const canEditWith = (roles: EffectiveRole[]) =>
   includesAny(roles, ["owner", "admin", "editor"]);
 export const canApproveWith = (roles: EffectiveRole[]) =>
   includesAny(roles, ["owner", "admin", "reviewer"]);
-export const canManageWith = (roles: EffectiveRole[]) =>
-  includesAny(roles, ["owner", "admin"]);
 
 /** Highest-privilege role first — for a single representative label. */
 const PRECEDENCE: EffectiveRole[] = [

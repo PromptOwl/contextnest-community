@@ -9,9 +9,11 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError, ConflictError } from "../shared/errors.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
+import * as comments from "./comment-service.js";
 import * as versions from "./version-service.js";
 import * as externalEdits from "./external-edit-service.js";
 import { loadStewardsConfig } from "./stewards-parser.js";
@@ -22,6 +24,16 @@ import { bodyOnly } from "../nodes/service.js";
 // ═════════════════════════════════════════════════════════════════════════
 // Nest-level routes (mounted at /:nestId)
 // ═════════════════════════════════════════════════════════════════════════
+
+/** Parse a ?limit= query into a sane bound. A non-numeric value (e.g. "abc")
+ *  is truthy, so `|| "100"` never fires and parseInt yields NaN — which then
+ *  slips through `?? 100` and makes slice(0, NaN) return an empty list. Guard
+ *  NaN / out-of-range explicitly and cap at 1000. */
+function parseLimit(raw: string | undefined, def = 100, max = 1000): number {
+  const n = parseInt(raw ?? "", 10);
+  if (Number.isNaN(n) || n < 1) return def;
+  return Math.min(n, max);
+}
 
 export const governanceRoutes = new Hono<AuthEnv>();
 
@@ -42,18 +54,19 @@ governanceRoutes.get("/stewards", async (c) => {
     string,
     { collaboratorRole: string | null; roles: string[] }
   >();
-  const enriched = stewards.map((s) => {
+  const enriched = [];
+  for (const s of stewards) {
     const key = s.userEmail.toLowerCase();
     let merged = cache.get(key);
     if (!merged) {
       merged = {
-        collaboratorRole: stewardship.getCollaboratorRole(nestId, s.userEmail),
-        roles: stewardship.resolveUserRoles(nestId, s.userEmail),
+        collaboratorRole: await stewardship.getCollaboratorRole(nestId, s.userEmail),
+        roles: await stewardship.resolveUserRoles(nestId, s.userEmail),
       };
       cache.set(key, merged);
     }
-    return { ...s, ...merged };
-  });
+    enriched.push({ ...s, ...merged });
+  }
   return c.json({ stewards: enriched });
 });
 
@@ -64,7 +77,7 @@ governanceRoutes.get("/stewards", async (c) => {
 governanceRoutes.post("/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
   const body = await c.req.json<any>();
-  const assignedBy = getUserEmail(c);
+  const assignedBy = await getUserEmail(c);
 
   if (!body.scope) throw new ValidationError("scope is required");
   if (body.scope === "folder") {
@@ -118,7 +131,7 @@ governanceRoutes.patch("/stewards/:stewardId", async (c) => {
   if (!body.role && !body.scope) {
     throw new ValidationError("role or scope is required");
   }
-  const steward = stewardship.updateSteward(stewardId, {
+  const steward = await stewardship.updateSteward(stewardId, {
     role: body.role as any,
     scope: body.scope as any,
     documentId: body.nodePattern,
@@ -130,7 +143,7 @@ governanceRoutes.patch("/stewards/:stewardId", async (c) => {
 // DELETE /nests/:nestId/stewards/:stewardId — soft-remove one row
 governanceRoutes.delete("/stewards/:stewardId", async (c) => {
   const stewardId = c.req.param("stewardId")!;
-  stewardship.removeSteward(stewardId);
+  await stewardship.removeSteward(stewardId);
   return c.json({ removed: true });
 });
 
@@ -141,7 +154,7 @@ governanceRoutes.post("/stewards/sync", async (c) => {
   if (!stewardsConfig) {
     return c.json({ synced: 0, message: "No stewards.yaml found" });
   }
-  const count = stewardship.syncFromConfig(nestId, stewardsConfig);
+  const count = await stewardship.syncFromConfig(nestId, stewardsConfig);
   return c.json({ synced: count });
 });
 
@@ -159,7 +172,25 @@ governanceRoutes.get("/review-queue", async (c) => {
     offset,
   });
 
-  return c.json(result);
+  // Annotate each request with the caller's authoritative review capability
+  // (the SAME check approve/reject enforce — handles admin/owner/steward scope
+  // + separation-of-duties). The UI gates the Review button + queue off this
+  // instead of re-deriving steward scope client-side, which diverged for
+  // reviewer-stewards reaching the nest via public visibility (CU-wdqcpzudt3
+  // follow-up). Cached per node across rows.
+  const email = await getUserEmail(c);
+  const canReviewCache = new Map<string, boolean>();
+  const requests = [];
+  for (const r of result.requests) {
+    let canReview = canReviewCache.get(r.nodeId);
+    if (canReview === undefined) {
+      canReview = (await stewardship.canUserApprove(nestId, r.nodeId, email)).allowed;
+      canReviewCache.set(r.nodeId, canReview);
+    }
+    requests.push({ ...r, canReview });
+  }
+
+  return c.json({ ...result, requests });
 });
 
 // GET /nests/:nestId/external-edits
@@ -178,9 +209,18 @@ governanceRoutes.get("/external-edits", async (c) => {
 // Force a drift scan and return what was newly staged.
 governanceRoutes.post("/external-edits/scan", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const actor = getUserEmail(c);
+  const actor = await getUserEmail(c);
   const result = await externalEdits.scanNestForDrift(nestId, actor);
   return c.json(result);
+});
+
+// GET /nests/:nestId/activity
+// Nest-wide activity log — who did what across every node in the nest.
+governanceRoutes.get("/activity", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const limit = parseLimit(c.req.query("limit"));
+  const activity = await comments.getActivity({ nestId, limit });
+  return c.json({ activity });
 });
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -195,7 +235,7 @@ governanceNodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
   const nodeId = c.req.param("nodeId")!;
 
   const { stewards: resolved, fallbackToOwner, ownerEmail } =
-    stewardship.resolveStewardsWithFallback(nestId, nodeId);
+    await stewardship.resolveStewardsWithFallback(nestId, nodeId);
   return c.json({
     nodeId,
     stewards: resolved.map((r) => ({
@@ -215,13 +255,13 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
-  const allVersions = versions.getVersions(nestId, nodeId);
-  const approved = versions.getApprovedVersion(nestId, nodeId);
+  const allVersions = await versions.getVersions(nestId, nodeId);
+  const approved = await versions.getApprovedVersion(nestId, nodeId);
 
   // getVersions returns content:"" (bodies live on disk, not the table).
   // Reconstruct each version's body so the history panel can preview it
   // before restoring. Failures just leave content empty for that row.
-  const { versions: versionManager } = engineCache.get(nestId);
+  const { versions: versionManager } = await engineCache.get(nestId);
   const withContent = await Promise.all(
     allVersions.map(async (v) => {
       try {
@@ -245,8 +285,90 @@ governanceNodeRoutes.get("/:nodeId{.+}/reviews", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
-  const history = reviews.getReviewHistory(nestId, nodeId);
+  const history = await reviews.getReviewHistory(nestId, nodeId);
   return c.json({ reviews: history });
+});
+
+// GET /nests/:nestId/nodes/:nodeId/comments?status=open
+// List comments on a node. Open to anyone with nest-read access (a reviewer
+// must be able to read + leave comments without write permission).
+governanceNodeRoutes.get("/:nodeId{.+}/comments", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const status = c.req.query("status") as "open" | "resolved" | undefined;
+  const list = await comments.listComments(nestId, nodeId, {
+    status: status === "open" || status === "resolved" ? status : undefined,
+  });
+  return c.json({ comments: list });
+});
+
+// POST /nests/:nestId/nodes/:nodeId/comments
+// Leave a comment. Body: { body, version?, anchor?{start,end,text?}, parentId? }
+governanceNodeRoutes.post("/:nodeId{.+}/comments", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const body = await c.req.json<{
+    body?: string;
+    version?: number;
+    anchor?: { start?: number; end?: number; text?: string };
+    parentId?: string;
+  }>();
+  const author = await getUserEmail(c);
+  try {
+    const comment = await comments.createComment({
+      nestId,
+      nodeId,
+      author,
+      body: body.body ?? "",
+      version: body.version,
+      anchor: body.anchor,
+      parentId: body.parentId,
+    });
+    return c.json({ comment }, 201);
+  } catch (err) {
+    // Empty body / dangling parent are user errors, not 500s.
+    throw new ValidationError(
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+});
+
+// POST /nests/:nestId/nodes/:nodeId/comments/:commentId/resolve
+governanceNodeRoutes.post(
+  "/:nodeId{.+?}/comments/:commentId/resolve",
+  async (c) => {
+    const nestId = c.req.param("nestId")!;
+    const nodeId = c.req.param("nodeId")!;
+    const commentId = c.req.param("commentId")!;
+    const resolvedBy = await getUserEmail(c);
+    try {
+      const comment = await comments.resolveComment({
+        nestId,
+        nodeId,
+        commentId,
+        resolvedBy,
+      });
+      return c.json({ comment });
+    } catch (err: any) {
+      // Only the known user-errors map to 4xx; anything else (SQLite locked,
+      // I/O) must surface as a 500 via the global handler, not be masked as 404.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "Comment not found") return c.json({ error: msg }, 404);
+      if (msg === "Comment is already resolved")
+        return c.json({ error: msg }, 409);
+      throw err;
+    }
+  },
+);
+
+// GET /nests/:nestId/nodes/:nodeId/activity
+// Per-node activity log — who did what (comments + edits + reviews).
+governanceNodeRoutes.get("/:nodeId{.+}/activity", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const limit = parseLimit(c.req.query("limit"));
+  const activity = await comments.getActivity({ nestId, nodeId, limit });
+  return c.json({ activity });
 });
 
 // POST /nests/:nestId/nodes/:nodeId/submit-review
@@ -255,22 +377,23 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   const body = await c.req.json<{ note?: string; priority?: string }>();
 
-  const currentVersion = versions.getCurrentVersion(nestId, nodeId);
+  const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
   if (currentVersion === 0) {
     throw new ValidationError("Node has no versions to review");
   }
 
-  const userEmail = getUserEmail(c);
+  const userEmail = await getUserEmail(c);
 
   let request;
   try {
-    request = reviews.submitForReview({
+    request = await reviews.submitForReview({
       nestId,
       nodeId,
       version: currentVersion,
       requestedBy: userEmail,
       note: body.note,
       priority: body.priority as any,
+      baseUrl: requestBaseUrl(c.req.url),
     });
   } catch (err) {
     // The service throws a plain Error for duplicate submissions —
@@ -283,7 +406,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
     throw err;
   }
 
-  const resolved = stewardship.resolveStewardsForNode(nestId, nodeId);
+  const resolved = await stewardship.resolveStewardsForNode(nestId, nodeId);
 
   return c.json(
     {
@@ -304,17 +427,18 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
   const nodeId = c.req.param("nodeId")!;
   const body = await c.req.json<{ note?: string; override?: boolean }>();
 
-  const userEmail = getUserEmail(c);
+  const userEmail = await getUserEmail(c);
   const isAdmin = isSuperAdmin(userEmail);
 
   try {
     const request = await reviews.approve({
       nestId,
       nodeId,
-      version: versions.getCurrentVersion(nestId, nodeId),
+      version: await versions.getCurrentVersion(nestId, nodeId),
       approvedBy: userEmail,
       note: body.note,
       override: body.override && isAdmin,
+      baseUrl: requestBaseUrl(c.req.url),
     });
     return c.json({ review: request });
   } catch (err: any) {
@@ -332,15 +456,16 @@ governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
     throw new ValidationError("Rejection note is required");
   }
 
-  const userEmail = getUserEmail(c);
+  const userEmail = await getUserEmail(c);
 
   try {
-    const request = reviews.reject({
+    const request = await reviews.reject({
       nestId,
       nodeId,
-      version: versions.getCurrentVersion(nestId, nodeId),
+      version: await versions.getCurrentVersion(nestId, nodeId),
       rejectedBy: userEmail,
       note: body.note,
+      baseUrl: requestBaseUrl(c.req.url),
     });
     return c.json({ review: request });
   } catch (err: any) {
@@ -352,24 +477,24 @@ governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
 governanceNodeRoutes.get("/:nodeId{.+}/can-access", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const userEmail = getUserEmail(c);
-  return c.json(stewardship.canUserAccess(nestId, nodeId, userEmail));
+  const userEmail = await getUserEmail(c);
+  return c.json(await stewardship.canUserAccess(nestId, nodeId, userEmail));
 });
 
 // GET /nests/:nestId/nodes/:nodeId/can-approve
 governanceNodeRoutes.get("/:nodeId{.+}/can-approve", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const userEmail = getUserEmail(c);
-  return c.json(stewardship.canUserApprove(nestId, nodeId, userEmail));
+  const userEmail = await getUserEmail(c);
+  return c.json(await stewardship.canUserApprove(nestId, nodeId, userEmail));
 });
 
 // GET /nests/:nestId/nodes/:nodeId/can-edit
 governanceNodeRoutes.get("/:nodeId{.+}/can-edit", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const userEmail = getUserEmail(c);
-  return c.json(stewardship.canUserEdit(nestId, nodeId, userEmail));
+  const userEmail = await getUserEmail(c);
+  return c.json(await stewardship.canUserEdit(nestId, nodeId, userEmail));
 });
 
 // GET /nests/:nestId/nodes/:nodeId/external-edits
@@ -409,7 +534,7 @@ governanceNodeRoutes.post(
     const body = await c.req
       .json<{ comment?: string }>()
       .catch(() => ({}) as { comment?: string });
-    const actor = getUserEmail(c);
+    const actor = await getUserEmail(c);
     try {
       const result = await externalEdits.approveExternalEdit({
         nestId,
@@ -449,7 +574,7 @@ governanceNodeRoutes.post(
     if (!body.reason) {
       throw new ValidationError("Rejection reason is required");
     }
-    const actor = getUserEmail(c);
+    const actor = await getUserEmail(c);
     try {
       const result = await externalEdits.rejectExternalEdit({
         nestId,
@@ -473,8 +598,8 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
-  const userEmail = getUserEmail(c);
-  const request = reviews.cancelReview({
+  const userEmail = await getUserEmail(c);
+  const request = await reviews.cancelReview({
     nestId,
     nodeId,
     cancelledBy: userEmail,
@@ -485,11 +610,12 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
-function getUserEmail(c: any): string {
+async function getUserEmail(c: any): Promise<string> {
   const userId = c.get("userId");
   const db = getDb();
-  const user = db
-    .prepare("SELECT email FROM users WHERE id = ?")
-    .get(userId) as { email: string } | undefined;
+  const user = await db.get(
+    "SELECT email FROM users WHERE id = ?",
+    [userId],
+  ) as { email: string } | undefined;
   return user?.email || "anonymous@localhost";
 }

@@ -2,7 +2,7 @@
 import { serve } from "@hono/node-server";
 import { config } from "./config.js";
 import { createApp } from "./app.js";
-import { getDb } from "./db/client.js";
+import { initDb } from "./db/client.js";
 import { backfillNodeVersionsFromHistory } from "./db/backfill.js";
 import {
   validateLicense,
@@ -13,8 +13,9 @@ import { loadAccessConfig } from "./governance/access-service.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 
 async function main() {
-  // Initialize SQLite
-  const db = getDb();
+  // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
+  // when configured) and run migrations before anything touches the DB.
+  const db = await initDb();
 
   // One-shot: catch historic nests up where engine history.yaml ran
   // ahead of node_versions (pre-fix steward approvals). Gated by
@@ -49,6 +50,18 @@ async function main() {
 `);
   }
 
+  // One-click SSO hardening: the audience check is the cross-server replay
+  // guard, but it can only run when PUBLIC_BASE_URL is set. Warn loudly if the
+  // shared secret is configured without it — otherwise any validly-signed
+  // ticket would be accepted regardless of its intended audience.
+  if (config.OFFICIAL_COMMUNITY_SSO_SECRET && !config.PUBLIC_BASE_URL) {
+    console.warn(`
+      WARNING: OFFICIAL_COMMUNITY_SSO_SECRET is set but PUBLIC_BASE_URL is not.
+      One-click SSO will skip the audience check, weakening cross-server replay
+      protection. Set PUBLIC_BASE_URL to this server's public URL.
+    `);
+  }
+
   const app = createApp();
 
   // Periodic forceFresh revalidate (60s) so PromptOwl-side
@@ -57,7 +70,15 @@ async function main() {
 
   // Periodic drift scanner: detects out-of-band file edits and stages
   // them as suggestions for approval (bridge-function-spec Story 3.1).
-  const driftScanIntervalMs = Number(process.env.DRIFT_SCAN_INTERVAL_MS) || 30_000;
+  // Explicit parse so DRIFT_SCAN_INTERVAL_MS=0 actually disables the scanner
+  // (a plain `Number(...) || 30_000` would treat 0 as falsy and reset to the
+  // default — disabling is exactly what a GCS FUSE mount needs). Unset / empty
+  // / non-numeric falls back to the 30s default.
+  const driftRaw = process.env.DRIFT_SCAN_INTERVAL_MS;
+  const driftScanIntervalMs =
+    driftRaw != null && driftRaw !== "" && Number.isFinite(Number(driftRaw))
+      ? Number(driftRaw)
+      : 30_000;
   if (driftScanIntervalMs > 0) {
     startDriftScanner(driftScanIntervalMs);
   }
@@ -75,11 +96,17 @@ async function main() {
       ? "open (no auth — single-user / LAN only)"
       : "key (API key required on every request)";
 
+  const dbDesc =
+    db.dialect === "postgres"
+      ? `postgres (${config.CLOUD_SQL_CONNECTION_NAME ? `cloudsql ${config.CLOUD_SQL_CONNECTION_NAME}` : config.DATABASE_URL ? "DATABASE_URL" : `${config.DB_HOST || "localhost"}:${config.DB_PORT}/${config.DB_NAME}`})`
+      : `sqlite (${config.DATABASE_PATH})`;
+
   console.log(`
   ContextNest Community Server v0.1.0
   ────────────────────────────────────
   Port:      ${config.PORT}
   Data:      ${config.DATA_ROOT}
+  Database:  ${dbDesc}
   License:   ${license.valid ? `${license.tier}${license.org ? ` (${license.org})` : ""}` : "unlicensed (register at promptowl.ai)"}
   Auth:      ${authDesc}
   Telemetry: ${config.TELEMETRY_ENABLED ? "on" : "off"}
