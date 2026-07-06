@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+import { config } from "../src/config.js";
 
 const WEBHOOK = "https://hooks.slack.com/services/T000/B000/DIGEST";
 const sent: string[] = [];
@@ -73,5 +74,76 @@ describe("notification digests", () => {
     expect(sent.length).toBe(1);
     expect(sent[0]).not.toContain("updates:");
     expect(sent[0]).toContain("solo@acme.com");
+  });
+
+  it("caps the digest at DIGEST_LINE_CAP lines with an '…and K more' tail", async () => {
+    sent.length = 0;
+    // Widen the window so all 12 requests land in one burst deterministically.
+    process.env.NOTIFY_DEBOUNCE_MS = "400";
+    for (let i = 0; i < 12; i++) {
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/collaborators`,
+        { email: `u${i}@acme.com`, permission: "read" },
+        alice.apiKey,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 500));
+    process.env.NOTIFY_DEBOUNCE_MS = "60";
+
+    expect(sent.length).toBe(1);
+    expect(sent[0]).toContain("12 updates");
+    // 12 events, cap 10 → two lines truncated.
+    expect(sent[0]).toContain("…and 2 more");
+    expect(sent[0].split("\n").filter((l) => l.startsWith("• ")).length).toBe(10);
+  });
+
+  it("buffers each nest independently — one nest's burst never merges with another's", async () => {
+    sent.length = 0;
+    process.env.NOTIFY_DEBOUNCE_MS = "300";
+    const other = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Other Nest" },
+      alice.apiKey,
+    );
+    const otherId = other.data.nest.id;
+
+    // Burst on nest A (2 events) + a single event on nest B, all in one window.
+    await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: "a1@acme.com", permission: "read" }, alice.apiKey);
+    await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: "a2@acme.com", permission: "read" }, alice.apiKey);
+    await jsonRequest(app, "POST", `/nests/${otherId}/collaborators`, { email: "b1@acme.com", permission: "read" }, alice.apiKey);
+    await new Promise((r) => setTimeout(r, 400));
+    process.env.NOTIFY_DEBOUNCE_MS = "60";
+
+    expect(sent.length).toBe(2);
+    const digest = sent.find((s) => s.includes("2 updates"));
+    const single = sent.find((s) => !s.includes("updates:"));
+    expect(digest).toBeDefined();
+    expect(single).toBeDefined();
+    // Nest B's lone event stayed on its own, not swept into nest A's digest.
+    expect(digest).not.toContain("b1@acme.com");
+    expect(single).toContain("b1@acme.com");
+  });
+});
+
+describe("config.NOTIFY_DEBOUNCE_MS fallback", () => {
+  const original = process.env.NOTIFY_DEBOUNCE_MS;
+  afterAll(() => {
+    if (original === undefined) delete process.env.NOTIFY_DEBOUNCE_MS;
+    else process.env.NOTIFY_DEBOUNCE_MS = original;
+  });
+
+  it("defaults to 15000 for unset / non-numeric / negative, honours a valid value", () => {
+    delete process.env.NOTIFY_DEBOUNCE_MS;
+    expect(config.NOTIFY_DEBOUNCE_MS).toBe(15_000);
+    process.env.NOTIFY_DEBOUNCE_MS = "abc";
+    expect(config.NOTIFY_DEBOUNCE_MS).toBe(15_000);
+    process.env.NOTIFY_DEBOUNCE_MS = "-5";
+    expect(config.NOTIFY_DEBOUNCE_MS).toBe(15_000);
+    process.env.NOTIFY_DEBOUNCE_MS = "250";
+    expect(config.NOTIFY_DEBOUNCE_MS).toBe(250);
   });
 });

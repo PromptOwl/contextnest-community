@@ -18,11 +18,6 @@ import type { EmailEventDetails } from "./email-render.js";
 
 const DIGEST_LINE_CAP = 10;
 
-function debounceMs(): number {
-  const n = Number(process.env.NOTIFY_DEBOUNCE_MS);
-  return Number.isFinite(n) && n >= 0 ? n : 15_000;
-}
-
 // Per-nest buffer. Each buffered event keeps BOTH its Slack line and the
 // structured details the email connector renders — so a lone event still
 // produces a rich, single-event email while a burst collapses into a digest.
@@ -79,10 +74,13 @@ export async function notifyNestEvent(
 
   const buf = buffers.get(nestId);
   if (buf) {
+    // Fixed batching window, not a trailing-edge debounce: a later event in the
+    // burst joins the buffer but does NOT reset the timer, so a steady stream
+    // can't delay the digest indefinitely.
     buf.events.push({ line: message, details });
     return;
   }
-  const timer = setTimeout(() => void flush(nestId), debounceMs());
+  const timer = setTimeout(() => void flush(nestId), config.NOTIFY_DEBOUNCE_MS);
   timer.unref?.();
   buffers.set(nestId, { events: [{ line: message, details }], timer });
 }

@@ -46,6 +46,7 @@ beforeAll(async () => {
 afterAll(() => {
   vi.unstubAllGlobals();
   delete process.env.SLACK_WEBHOOK_URL;
+  delete process.env.NOTIFY_DEBOUNCE_MS;
   env.cleanup();
 });
 
@@ -118,6 +119,7 @@ describe("Slack connector — review lifecycle + mrkdwn escaping", () => {
   const settle = () => new Promise((r) => setTimeout(r, 50));
 
   beforeAll(async () => {
+    process.env.NOTIFY_DEBOUNCE_MS = "10"; // near-instant flush; block is self-sufficient
     process.env.SLACK_WEBHOOK_URL = LWEBHOOK;
     vi.stubGlobal("fetch", async (url: any, init?: any) => {
       const u = String(url);
@@ -154,11 +156,15 @@ tags:
         { email, permission: "write" }, admin.apiKey);
     }
     await jsonRequest(lapp, "POST", `/nests/${lnestId}/stewards/sync`, {}, admin.apiKey);
+    // Drain the collaborator-add notifications fired above so they can't leak
+    // into the first test's assertions via the digest buffer.
+    await settle();
   }, 30000);
 
   afterAll(() => {
     vi.unstubAllGlobals();
     delete process.env.SLACK_WEBHOOK_URL;
+    delete process.env.NOTIFY_DEBOUNCE_MS;
     lenv.cleanup();
   });
 
@@ -195,6 +201,10 @@ tags:
   it("approve posts a message with the document title", async () => {
     const id = await draft("Approve Me");
     await jsonRequest(lapp, "POST", `/nests/${lnestId}/nodes/${id}/submit-review`, {}, dev.apiKey);
+    // Drain the submit-review notification before asserting: otherwise the
+    // digest debounce can merge it with (or leak it ahead of) the approve
+    // event on this same nest.
+    await settle();
     lsent.length = 0;
     const res = await jsonRequest(lapp, "POST", `/nests/${lnestId}/nodes/${id}/approve`,
       { note: "lgtm" }, jane.apiKey);
@@ -209,6 +219,8 @@ tags:
   it("reject posts a message and escapes the rejection note", async () => {
     const id = await draft("Reject Me");
     await jsonRequest(lapp, "POST", `/nests/${lnestId}/nodes/${id}/submit-review`, {}, dev.apiKey);
+    // Drain the submit-review notification before asserting (see approve test).
+    await settle();
     lsent.length = 0;
     const res = await jsonRequest(lapp, "POST", `/nests/${lnestId}/nodes/${id}/reject`,
       { note: "<!here> missing section" }, jane.apiKey);
