@@ -429,6 +429,48 @@ export async function getServerStats() {
   return request<{ nests: number; documents: number; users: number }>("/stats");
 }
 
+// ─── Glossary definitions ──────────────────────────────────────────────
+
+export interface Definition {
+  id: string;
+  term: string;
+  definition: string;
+  linked_tag: string | null;
+  defined_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listDefinitions(nestId: string) {
+  return request<{ count: number; definitions: Definition[] }>(
+    `/nests/${nestId}/definitions`,
+  );
+}
+
+export async function upsertDefinition(
+  nestId: string,
+  data: {
+    term: string;
+    definition: string;
+    linked_tag?: string | null;
+    // The row being edited, when renaming/editing an existing definition.
+    // Scopes the upsert to that row so a rename can't overwrite a sibling
+    // that already owns the new term (server returns 409 instead).
+    editing_id?: string;
+  },
+) {
+  return request<{ definition: Definition }>(`/nests/${nestId}/definitions`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteDefinition(nestId: string, id: string) {
+  return request<{ deleted: boolean }>(
+    `/nests/${nestId}/definitions/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
 // Upload an image into the nest's assets folder. Multipart (not the JSON

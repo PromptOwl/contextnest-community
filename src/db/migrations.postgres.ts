@@ -40,6 +40,7 @@ const HISTORICAL_MIGRATIONS = [
   "009_lowercase_emails",
   "010_sso_used_jti",
   "011_comments",
+  "015_definitions",
   // 012 merges case-colliding SQLite user rows. Postgres can never have them:
   // the NOCASE-unique idx_users_email_nocase (lower(email)) exists from table
   // creation, so duplicates are rejected on insert and there's nothing to merge.
@@ -285,6 +286,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON comments(nest_id, node_id, status);
     CREATE INDEX IF NOT EXISTS idx_comments_thread
       ON comments(parent_id);
+
+    CREATE TABLE IF NOT EXISTS definitions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      term TEXT NOT NULL,
+      definition TEXT NOT NULL,
+      linked_tag TEXT,
+      defined_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    -- Case-insensitive uniqueness the portable way (SQLite side uses
+    -- COLLATE NOCASE; Postgres has no NOCASE collation).
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_definitions_term
+      ON definitions(nest_id, LOWER(term));
 
     -- node_deletions tombstones (migration 013). DELETE /nodes purges all other
     -- governance rows for the node; this is the only record that a doc was

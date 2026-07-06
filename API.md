@@ -562,6 +562,60 @@ suggestions ("proposed an edit", read from nest storage) + reviews
 
 ---
 
+## 8b. Glossary definitions
+
+A literal table-based ontology per nest: stewards/editors define and articulate
+terms — existing `#tags` or brand-new vocabulary — and external runtimes (quant
+analysis jobs, agents) pull them in real time. One row per `(nest, term)`,
+case-insensitive. Reads are read-tier; writes are write-tier.
+
+### GET `/nests/:nestId/definitions`
+List the whole glossary, ordered by term.
+```json
+{
+  "count": 1,
+  "definitions": [{
+    "id": "...",
+    "nest_id": "...",
+    "term": "CAC",
+    "definition": "Customer acquisition cost: S&M spend / new customers, 90d.",
+    "linked_tag": "#gtm",
+    "defined_by": "owner@acme.com",
+    "created_at": "...",
+    "updated_at": "..."
+  }]
+}
+```
+
+### GET `/nests/:nestId/definitions?term=CAC`
+Real-time single lookup — one indexed, case-insensitive query. `404` if the term
+isn't defined.
+```json
+{ "definition": { "id": "...", "term": "CAC", "definition": "...", "linked_tag": "#gtm", "defined_by": "...", "created_at": "...", "updated_at": "..." } }
+```
+
+### POST `/nests/:nestId/definitions` (write+)
+Upsert by term text (case-insensitive). New term → `201`; re-defining an existing
+term updates it in place → `200`.
+```json
+{ "term": "CAC", "definition": "...", "linked_tag": "gtm", "editing_id": "<id?>" }
+```
+- `term` required, ≤ 200 chars. `definition` required. Non-string `term`/`definition`/`linked_tag` → `400`.
+- `linked_tag`: omit = leave unchanged on update; `null`/`""` = clear; string = set (normalized to `#lowercase`).
+- `editing_id` (optional): the id of the row being edited. Scopes the upsert to
+  that row so a **rename replaces it in place** instead of overwriting whichever
+  row happens to own the new term. If the new term already belongs to a
+  **different** row → `409` (no data loss). Unknown `editing_id` → `404`. Omit it
+  for the plain add form and real-time writers (pure upsert-by-term).
+
+### DELETE `/nests/:nestId/definitions/:id` (write+)
+```json
+{ "deleted": true }
+```
+`404` if the id isn't in this nest.
+
+---
+
 ## 9. Query / Search (read-only consumers)
 
 These power LLM context retrieval. Open-mode friendly.
