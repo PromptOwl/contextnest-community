@@ -18,6 +18,7 @@ import {
   CornerDownRight,
   Clock3,
   Wrench,
+  Table2,
 } from "lucide-react";
 import {
   listEdges,
@@ -147,6 +148,7 @@ function TypeGlyph({ type }: { type?: string }) {
   if (type === "skill") return <Zap className="h-3.5 w-3.5 text-blue-500 shrink-0" />;
   if (type === "artifact") return <FileCode2 className="h-3.5 w-3.5 text-amber-500 shrink-0" />;
   if (type === "tool") return <Wrench className="h-3.5 w-3.5 text-teal-500 shrink-0" />;
+  if (type === "table") return <Table2 className="h-3.5 w-3.5 text-cyan-500 shrink-0" />;
   return <FileText className="h-3.5 w-3.5 text-slate-400 shrink-0" />;
 }
 

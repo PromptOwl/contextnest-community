@@ -1337,6 +1337,21 @@ export async function deleteConnector(nestId: string, id: string) {
   return request(`/nests/${nestId}/connectors/${id}`, { method: "DELETE" });
 }
 
+/** Deterministic table lookup — exact rows from a TABLE node. */
+export async function tableQuery(nestId: string, table: string, query: string) {
+  return request<{
+    table: string;
+    columns: string[];
+    rows: string[][];
+    matched: number;
+    returned: number;
+    total: number;
+  }>(`/nests/${nestId}/table-query`, {
+    method: "POST",
+    body: JSON.stringify({ table, query, include_drafts: true }),
+  });
+}
+
 /** Deterministic context assembly — what an agent run will actually read. */
 export async function queryContext(
   nestId: string,

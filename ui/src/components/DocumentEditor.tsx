@@ -28,6 +28,7 @@ import {
   Bot,
   Zap,
   Wrench,
+  Table2,
   Pencil,
   Users,
   Link as LinkIcon,
@@ -47,6 +48,7 @@ import {
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
+import { TableViewer } from "./TableViewer";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
@@ -228,7 +230,7 @@ export function DocumentEditor({
   // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
   // "document" = the normal markdown editor. Only meaningful while isNew.
   const [newType, setNewType] = useState<
-    "document" | "artifact" | "agent" | "skill" | "tool"
+    "document" | "artifact" | "agent" | "skill" | "tool" | "table"
   >("document");
   const isArtifactDraft = isNew && newType === "artifact";
   // Inline anchored comments (annotations) parked beside the doc. commentMode
@@ -1556,6 +1558,8 @@ export function DocumentEditor({
                       on: "bg-slate-500/15 text-slate-700 dark:text-slate-300" },
                     { value: "artifact", label: "Artifact", Icon: Code2,
                       on: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },
+                    { value: "table", label: "Table", Icon: Table2,
+                      on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300" },
                     ...(workflowPlaneEnabled
                       ? [
                           { value: "agent", label: "Agent", Icon: Bot,
@@ -1580,13 +1584,15 @@ export function DocumentEditor({
                           ? "Markdown document"
                           : value === "artifact"
                             ? "Hosted HTML artifact"
-                            : value === "tool"
-                              ? "Tool — the body is code an agent can call"
-                              : `${label} (runnable)`
+                            : value === "table"
+                              ? "Table — CSV fact store, queryable deterministically"
+                              : value === "tool"
+                                ? "Tool — the body is code an agent can call"
+                                : `${label} (runnable)`
                       }
                       onClick={() =>
                         setNewType(
-                          value as "document" | "artifact" | "agent" | "skill" | "tool",
+                          value as "document" | "artifact" | "agent" | "skill" | "tool" | "table",
                         )
                       }
                       className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${
@@ -1609,6 +1615,13 @@ export function DocumentEditor({
                 <p className="mt-1 text-[11px] text-muted-foreground">
                   The body is the instructions. Add flow edges from it in the
                   Workflows tab, then trigger a run.
+                </p>
+              )}
+              {newType === "table" && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  The body is CSV — header first, directives welcome
+                  (<code>sku:key, price:number, region</code>). Agents fetch
+                  exact rows with table-query instead of reading it whole.
                 </p>
               )}
               {newType === "tool" && (
@@ -1762,13 +1775,19 @@ export function DocumentEditor({
                 onMouseMove={isNew ? undefined : onDocMouseMove}
                 className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text"
               >
-                <DocumentViewer
-                  content={content}
-                  onWikiLinkClick={(title) =>
-                    handleWikiLinkClick(title, null)
-                  }
-                  previewFor={previewFor}
-                />
+                {nodeType === "table" && !isNew ? (
+                  <div className="p-4">
+                    <TableViewer nestId={nestId} nodeId={nodeId} csv={content} />
+                  </div>
+                ) : (
+                  <DocumentViewer
+                    content={content}
+                    onWikiLinkClick={(title) =>
+                      handleWikiLinkClick(title, null)
+                    }
+                    previewFor={previewFor}
+                  />
+                )}
               </div>
             ) : (
               <MarkdownEditor

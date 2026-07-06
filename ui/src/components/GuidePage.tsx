@@ -63,7 +63,7 @@ export function GuidePage({ onBack }: Props) {
           <dl className="space-y-2">
             {[
               ["Nest", "A vault of nodes — the unit of sharing, permissions, and governance."],
-              ["Node", "A versioned Markdown document. Types: document, artifact (hosted HTML), and with the workflow plane on: agent, skill (runnable) and tool (the body is code an agent can call)."],
+              ["Node", "A versioned Markdown document. Types: document, artifact (hosted HTML), table (CSV fact store, deterministically queryable), and with the workflow plane on: agent, skill (runnable) and tool (the body is code an agent can call)."],
               ["Edge", "A typed link. Flow edges (▶) are control: they decide what happens next, gated by conditions (always / if… judged / metric). The LLM never chooses control flow — it only fills content inside a step."],
               ["Run", "The one artifact every way of starting work converges on: a row saying “walk this agent's subgraph”. It is the queue (unclaimed = waiting), the audit log (steps append), and the receipt (closed with a verdict)."],
               ["Trigger", "Anything that writes a run row: the Run button (a person), a schedule (the clock), an inbound hook (the outside world — Slack, CI, anything that can POST)."],
@@ -134,6 +134,7 @@ export function GuidePage({ onBack }: Props) {
               <tbody className="font-mono">
                 {[
                   ["POST /nests/:id/context", "Deterministic retrieval — selector ([[Title]], #tag) + hops. The governed read."],
+                  ["POST /nests/:id/table-query", "Deterministic fact lookup on a table node: where col op value [and …] [select cols] [limit N]. Also an MCP tool (context_table_query)."],
                   ["POST /nests/:id/nodes · PATCH …/nodes/:n", "Create / write a node (new version; draft + review when stewarded). folder files it into a tree."],
                   ["POST …/nodes/:n/move · /revert · /watchers", "Relocate (history follows) · restore a version · tag people for notifications."],
                   ["GET/POST /nests/:id/edges · /edge-types", "The typed-edge graph (Canvas / Table)."],
