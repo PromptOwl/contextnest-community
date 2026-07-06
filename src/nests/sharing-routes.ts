@@ -7,6 +7,7 @@ import {
   getStewardRolesForUser,
 } from "../governance/stewardship-service.js";
 import { addCollaborator } from "./sharing-service.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 import type { NestCollaborator } from "../shared/types.js";
 
 export const sharingRoutes = new Hono<AuthEnv>();
@@ -56,6 +57,7 @@ sharingRoutes.post("/collaborators", async (c) => {
     // Enforce the escalation cap against the caller's own nest permission
     // (set by the access guard) — a write collaborator can't grant admin.
     callerPermission: c.get("nestPermission"),
+    baseUrl: requestBaseUrl(c.req.url),
   });
   return c.json({ collaborator: collab }, 201);
 });

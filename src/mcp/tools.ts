@@ -49,6 +49,9 @@ export interface McpToolContext {
   nestId: string;
   userId: string;
   userEmail: string;
+  /** Request origin, so review actions taken via MCP produce notification
+   *  emails with a working "Open document" link (no PUBLIC_BASE_URL needed). */
+  baseUrl?: string;
 }
 
 export const TOOL_DEFINITIONS = [
@@ -819,6 +822,7 @@ async function runTool(
           requestedBy: ctx.userEmail,
           note: args.note,
           priority: args.priority as any,
+          baseUrl: ctx.baseUrl,
         });
 
         const resolved = await stewardship.resolveStewardsForNode(
@@ -852,6 +856,7 @@ async function runTool(
           version: currentVersion,
           approvedBy: ctx.userEmail,
           note: args.note,
+          baseUrl: ctx.baseUrl,
         });
 
         return `Approved "${args.title}" v${currentVersion}. This version is now live for AI queries.${args.note ? `\nNote: ${args.note}` : ""}`;
@@ -876,6 +881,7 @@ async function runTool(
           version: currentVersion,
           rejectedBy: ctx.userEmail,
           note: args.note,
+          baseUrl: ctx.baseUrl,
         });
 
         return `Rejected "${args.title}" v${currentVersion}.\nReason: ${args.note}`;
