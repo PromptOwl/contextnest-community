@@ -34,6 +34,23 @@ let canonicalEnvLoaded: string | null = null;
 // env value (set directly, bypassing the /admin/settings validator) would
 // spam the log on every submit/approve/reject/add-collaborator.
 let slackUrlWarned = false;
+let emailFromWarned = false;
+let emailToWarned = false;
+
+/**
+ * Loose email shape gate for the notification envelope: something@something,
+ * no whitespace, no CR/LF. `\s` already excludes interior newlines; the extra
+ * CR/LF reject closes the JS quirk where a non-`m` `$` still matches before a
+ * single trailing "\n" (header-injection shape). Shared by config getters and
+ * the /admin/settings validator so env-set and UI-set values gate identically.
+ */
+export function isEmailish(v: string): boolean {
+  return /^[^\s@]+@[^\s@]+$/.test(v) && !/[\r\n]/.test(v);
+}
+/** Comma-separated recipient list where every entry is isEmailish(). */
+export function isEmailListish(v: string): boolean {
+  return v.split(",").every((e) => isEmailish(e.trim()));
+}
 if (
   !isTestRun &&
   canonicalEnvFile !== envFileLoaded &&
@@ -237,13 +254,43 @@ export const config = {
     }
     return raw;
   },
-  /** From address for notification emails. */
+  /**
+   * From address for notification emails. Shape-validated here (not only in
+   * the /admin/settings PATCH) so a value set directly via env/Docker can't
+   * reach nodemailer's envelope unchecked. Invalid = connector off.
+   */
   get NOTIFY_EMAIL_FROM(): string | null {
-    return process.env.NOTIFY_EMAIL_FROM?.trim() || null;
+    const raw = process.env.NOTIFY_EMAIL_FROM?.trim();
+    if (!raw) return null;
+    if (!isEmailish(raw)) {
+      if (!emailFromWarned) {
+        emailFromWarned = true;
+        console.warn(
+          "[config] NOTIFY_EMAIL_FROM rejected: must be a plain email address. Email notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
   },
-  /** Comma-separated recipient list for notification emails. */
+  /**
+   * Comma-separated recipient list for notification emails. Shape-validated
+   * here for the same env-bypass reason as NOTIFY_EMAIL_FROM. Invalid (any
+   * entry malformed) = connector off.
+   */
   get NOTIFY_EMAIL_TO(): string | null {
-    return process.env.NOTIFY_EMAIL_TO?.trim() || null;
+    const raw = process.env.NOTIFY_EMAIL_TO?.trim();
+    if (!raw) return null;
+    if (!isEmailListish(raw)) {
+      if (!emailToWarned) {
+        emailToWarned = true;
+        console.warn(
+          "[config] NOTIFY_EMAIL_TO rejected: must be a comma-separated list of email addresses. Email notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
   },
   /**
    * Optional Slack incoming-webhook URL for team notifications (review

@@ -30,7 +30,7 @@ import {
   type NestPermission,
 } from "./shared/access.js";
 import { AppError } from "./shared/errors.js";
-import { config } from "./config.js";
+import { config, isEmailish, isEmailListish } from "./config.js";
 import { getDb } from "./db/client.js";
 import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
@@ -363,18 +363,19 @@ export function createApp(): Hono<AuthEnv> {
         errors.push("smtp_url must be an smtp:// or smtps:// URL (or empty to disable)");
       else pending.push({ name: "SMTP_URL", value: v || null });
     }
-    // Loose shape check (something@something, no CR/LF) — these flow into
+    // Shape check (something@something, no CR/LF) — these flow into
     // nodemailer's envelope, so junk and header-injection shapes stop here.
-    const emailish = (v: string) => /^[^\s@]+@[^\s@]+$/.test(v);
+    // Same guard the config getters apply, so env-set and UI-set values gate
+    // identically.
     if ("notify_email_from" in body) {
       const v = String(body.notify_email_from ?? "").trim();
-      if (v && !emailish(v))
+      if (v && !isEmailish(v))
         errors.push("notify_email_from must be a plain email address");
       else pending.push({ name: "NOTIFY_EMAIL_FROM", value: v || null });
     }
     if ("notify_email_to" in body) {
       const v = String(body.notify_email_to ?? "").trim();
-      if (v && !v.split(",").every((e) => emailish(e.trim())))
+      if (v && !isEmailListish(v))
         errors.push("notify_email_to must be a comma-separated list of email addresses");
       else pending.push({ name: "NOTIFY_EMAIL_TO", value: v || null });
     }
