@@ -10,11 +10,12 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen, ScrollText, BookMarked } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen, ScrollText, BookMarked, Workflow } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
 import { DefinitionsPage } from "./components/DefinitionsPage";
+import { EdgeTypesPage } from "./components/EdgeTypesPage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -89,6 +90,13 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+    }
+  | {
+      page: "edge-types";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
     };
 
 // Runs the ?sso_error toast exactly once per page load (survives React
@@ -102,6 +110,7 @@ export default function App() {
     adminStatus,
     authenticated,
     isAdmin,
+    workflowPlaneEnabled,
     loading,
     error,
     logout,
@@ -199,9 +208,13 @@ export default function App() {
       setDeepLinkProbe({ status: "missing" });
       return;
     }
+    // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
+    // this effect first fires); the cancel guard drops the stale navigation.
+    let cancelled = false;
     (async () => {
       try {
         const { nest } = await getNest(nestId);
+        if (cancelled) return;
         setDeepLinkProbe({
           status: "ok",
           nestId: nest.id,
@@ -221,6 +234,25 @@ export default function App() {
           });
           return;
         }
+        // ?view=<sub> → land on a nest-scoped sub-page (shareable deep link).
+        // edge-types stays gated on the flag so a shared link can't reach a
+        // plane the server has disabled — it falls back to the nest view.
+        const sub = params.get("view");
+        const subPage =
+          sub === "graph" ? "ontology-graph"
+          : sub === "edge" && workflowPlaneEnabled ? "edge-types"
+          : sub === "definitions" ? "definitions"
+          : null;
+        if (subPage) {
+          setView({
+            page: subPage,
+            nestId: nest.id,
+            nestName: nest.name,
+            isOwner: false,
+            isAnonOwned: false,
+          });
+          return;
+        }
         setView({
           page: "nest",
           nestId: nest.id,
@@ -229,10 +261,13 @@ export default function App() {
           isAnonOwned: false,
         });
       } catch {
-        setDeepLinkProbe({ status: "missing" });
+        if (!cancelled) setDeepLinkProbe({ status: "missing" });
       }
     })();
-  }, [deepLinkProbe.status]);
+    return () => {
+      cancelled = true;
+    };
+  }, [deepLinkProbe.status, workflowPlaneEnabled]);
 
   // Keep the URL in sync with the current view so documents (and nests) are
   // shareable — paste the address bar and the recipient lands on the same doc.
@@ -247,12 +282,32 @@ export default function App() {
       params.set("nest", view.nestId);
       if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
       else params.delete("doc");
+      params.delete("view");
     } else if (view.page === "nest") {
       params.set("nest", view.nestId);
       params.delete("doc");
+      params.delete("view");
+    } else if (
+      // Nest-scoped sub-pages: keep ?nest and tag the sub-view so the address
+      // bar stays shareable instead of dropping the nest context.
+      view.page === "ontology-graph" ||
+      view.page === "edge-types" ||
+      view.page === "definitions"
+    ) {
+      params.set("nest", view.nestId);
+      params.delete("doc");
+      params.set(
+        "view",
+        view.page === "ontology-graph"
+          ? "graph"
+          : view.page === "edge-types"
+            ? "edge"
+            : "definitions",
+      );
     } else {
       params.delete("nest");
       params.delete("doc");
+      params.delete("view");
     }
     const qs = params.toString();
     const next =
@@ -533,6 +588,25 @@ export default function App() {
               </Button>
             )}
 
+            {view.page === "nest" && workflowPlaneEnabled && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setView({
+                    page: "edge-types",
+                    nestId: view.nestId,
+                    nestName: view.nestName,
+                    isOwner: view.isOwner,
+                    isAnonOwned: view.isAnonOwned,
+                  })
+                }
+              >
+                <Workflow className="h-3.5 w-3.5 mr-1" />
+                Edge Types
+              </Button>
+            )}
+
             {adminStatus?.me ? (
               <UserMenu
                 me={adminStatus.me}
@@ -734,6 +808,21 @@ export default function App() {
         })()}
         {view.page === "definitions" && (
           <DefinitionsPage
+            nestId={view.nestId}
+            nestName={view.nestName}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
+        )}
+        {view.page === "edge-types" && workflowPlaneEnabled && (
+          <EdgeTypesPage
             nestId={view.nestId}
             nestName={view.nestName}
             onBack={() =>

@@ -128,6 +128,7 @@ export async function getHealth() {
     auth_mode: string;
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
+    workflow_plane_enabled?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
@@ -141,6 +142,7 @@ export interface AdminSettings {
   telemetry_enabled: boolean;
   public_base_url: string;
   max_body_bytes: number;
+  workflow_plane_enabled: boolean;
   slack_webhook_url: string;
   smtp_url: string;
   notify_email_from: string;
@@ -468,6 +470,65 @@ export async function upsertDefinition(
 export async function deleteDefinition(nestId: string, id: string) {
   return request<{ deleted: boolean }>(
     `/nests/${nestId}/definitions/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+// ─── Edge-type registry ("turing" workflow plane) ───────────────────────
+// The vocabulary of connections: stewards articulate once what a relation
+// (`next`, `escalates-when`, …) MEANS; edges reference the registry. Every
+// route is feature-flagged server-side — 404 unless FEATURE_WORKFLOW_PLANE
+// / the "Workflow plane" admin toggle is on. Reads read-tier, writes write-tier.
+
+export interface EdgeTypeCondition {
+  /** Named parameters a conditional edge fills in (e.g. ["term","op","value"]). */
+  params: string[];
+  mode_default: "structured" | "nl" | "open";
+}
+
+export interface EdgeType {
+  id: string;
+  nest_id: string;
+  name: string;
+  description: string;
+  direction: "directed" | "undirected";
+  /** Flow types form the workflow DAG; non-flow are lineage/ownership. */
+  is_flow: boolean;
+  condition_schema: EdgeTypeCondition | null;
+  color: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listEdgeTypes(nestId: string) {
+  return request<{ count: number; edge_types: EdgeType[] }>(
+    `/nests/${nestId}/edge-types`,
+  );
+}
+
+export async function upsertEdgeType(
+  nestId: string,
+  data: {
+    name: string;
+    description: string;
+    direction?: "directed" | "undirected";
+    is_flow?: boolean;
+    // 6-digit hex (e.g. #16a34a) or null/"" to clear. Bad hex → server 400.
+    color?: string | null;
+    // Omit / null for a plain edge type; provide params to make it conditional.
+    condition_schema?: { params: string[]; mode_default?: EdgeTypeCondition["mode_default"] } | null;
+  },
+) {
+  return request<{ edge_type: EdgeType }>(`/nests/${nestId}/edge-types`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteEdgeType(nestId: string, id: string) {
+  return request<{ deleted: boolean }>(
+    `/nests/${nestId}/edge-types/${encodeURIComponent(id)}`,
     { method: "DELETE" },
   );
 }

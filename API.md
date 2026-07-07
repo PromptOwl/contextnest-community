@@ -616,6 +616,68 @@ term updates it in place → `200`.
 
 ---
 
+## 8c. Edge-type registry ("turing" workflow plane)
+
+The vocabulary of connections: the definitions-table move applied to relations.
+Stewards articulate once what `next` or `escalates-when` MEANS in a nest; edges
+then reference the registry. **Feature-flagged** — every route here `404`s
+unless `FEATURE_WORKFLOW_PLANE` is on (env var or the admin-settings toggle).
+Reads are read-tier; writes are write-tier. One row per `(nest, name)`,
+case-insensitive.
+
+On first touch a nest is lazily seeded with five stock types (attributed to the
+nest owner): `next`, `on-success`, `on-failure` (flow types, form the DAG),
+`depends-on`, `owned-by`.
+
+### GET `/nests/:nestId/edge-types`
+List the registry, ordered by name. Seeds the defaults if empty.
+```json
+{
+  "count": 5,
+  "edge_types": [{
+    "id": "...",
+    "nest_id": "...",
+    "name": "next",
+    "description": "Unconditional flow: after the source completes, run the target.",
+    "direction": "directed",
+    "is_flow": true,
+    "condition_schema": null,
+    "color": "#16a34a",
+    "created_by": "owner@acme.com",
+    "created_at": "...",
+    "updated_at": "..."
+  }]
+}
+```
+
+### POST `/nests/:nestId/edge-types` (write+)
+Upsert by name (case-insensitive). New name → `201`; re-defining an existing
+name updates it in place → `200`.
+```json
+{
+  "name": "escalates-when",
+  "description": "Conditional escalation on a metric guardrail.",
+  "direction": "directed",
+  "is_flow": true,
+  "color": "#f59e0b",
+  "condition_schema": { "params": ["term", "op", "value"], "mode_default": "structured" }
+}
+```
+- `name` required, ≤ 100 chars, `^[a-z0-9][a-z0-9-]*$` (alphanumeric-with-dashes). `description` required.
+- `direction`: `directed` (default) | `undirected`. Anything else → `400`.
+- `is_flow`: boolean, default `false`. Flow types form the workflow DAG.
+- `color`: optional 6-digit hex (e.g. `#16a34a`). A malformed color → `400` (not silently dropped).
+- `condition_schema`: optional `{ "params": [string…], "mode_default"?: "structured"|"nl"|"open" }`. Malformed → `400`. Stored normalized (`mode_default` defaults to `structured`).
+
+### DELETE `/nests/:nestId/edge-types/:id` (write+)
+```json
+{ "deleted": true }
+```
+`404` if the id isn't in this nest. `400` if edges still reference the type
+(delete those edges first — the DB enforces this with `ON DELETE RESTRICT`).
+
+---
+
 ## 9. Query / Search (read-only consumers)
 
 These power LLM context retrieval. Open-mode friendly.

@@ -13,6 +13,7 @@ import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
+import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
 import { definitionRoutes } from "./definitions/routes.js";
 import { assetRoutes } from "./nests/asset-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
@@ -190,6 +191,10 @@ export function createApp(): Hono<AuthEnv> {
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+      // Public feature flags the SPA needs before auth to decide what to
+      // render. Mirrors the server-side route gate so UI and API agree:
+      // flag off → the plane's routes 404 AND its UI stays hidden.
+      workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     }),
   );
@@ -305,6 +310,7 @@ export function createApp(): Hono<AuthEnv> {
     telemetry_enabled: config.TELEMETRY_ENABLED,
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
+    workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
     smtp_url: config.SMTP_URL ?? "",
     notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
@@ -349,6 +355,12 @@ export function createApp(): Hono<AuthEnv> {
     }
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
+    }
+    if ("workflow_plane_enabled" in body) {
+      pending.push({
+        name: "FEATURE_WORKFLOW_PLANE",
+        value: body.workflow_plane_enabled ? "true" : null,
+      });
     }
     if ("slack_webhook_url" in body) {
       const v = String(body.slack_webhook_url ?? "").trim();
@@ -768,6 +780,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
+  nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/definitions", definitionRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);

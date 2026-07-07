@@ -48,7 +48,7 @@ const TABS: { id: string; label: string; keys: (keyof AdminSettings)[] }[] = [
   {
     id: "advanced",
     label: "Advanced",
-    keys: ["telemetry_enabled", "max_body_bytes"],
+    keys: ["telemetry_enabled", "max_body_bytes", "workflow_plane_enabled"],
   },
 ];
 
@@ -218,11 +218,10 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                         onClick={() =>
                           !active && set({ promptowl_sign_in_gate: opt.value })
                         }
-                        className={`text-left rounded-lg border p-3 transition-colors ${
-                          active
+                        className={`text-left rounded-lg border p-3 transition-colors ${active
                             ? "border-primary bg-primary/5 ring-1 ring-primary"
                             : "hover:bg-muted/50"
-                        }`}
+                          }`}
                         aria-pressed={active}
                       >
                         <div className="text-sm font-medium">{opt.label}</div>
@@ -360,6 +359,30 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   bytes={draft.max_body_bytes}
                   onChange={(bytes) => set({ max_body_bytes: bytes })}
                 />
+              </CardContent>
+            </Card>
+
+            {/* Workflow plane ("turing" track) */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Workflow plane</CardTitle>
+                <CardDescription>
+                  Typed edges, an edge-type registry, and governed runs — the
+                  automation layer. Optional; off by default. Turning it on adds
+                  API surface and UI views but changes nothing until someone
+                  creates an edge.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.workflow_plane_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.workflow_plane_enabled}
+                    onCheckedChange={(v) => set({ workflow_plane_enabled: v })}
+                  />
+                </div>
               </CardContent>
             </Card>
           </TabsContent>

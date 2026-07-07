@@ -40,7 +40,6 @@ const HISTORICAL_MIGRATIONS = [
   "009_lowercase_emails",
   "010_sso_used_jti",
   "011_comments",
-  "015_definitions",
   // 012 merges case-colliding SQLite user rows. Postgres can never have them:
   // the NOCASE-unique idx_users_email_nocase (lower(email)) exists from table
   // creation, so duplicates are rejected on insert and there's nothing to merge.
@@ -49,6 +48,8 @@ const HISTORICAL_MIGRATIONS = [
   "012_merge_case_colliding_users",
   "013_node_deletion_tombstones",
   "014_api_events",
+  "015_definitions",
+  "016_workflow_edges",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -286,6 +287,45 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON comments(nest_id, node_id, status);
     CREATE INDEX IF NOT EXISTS idx_comments_thread
       ON comments(parent_id);
+
+    CREATE TABLE IF NOT EXISTS edge_types (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      direction TEXT NOT NULL DEFAULT 'directed'
+        CHECK(direction IN ('directed', 'undirected')),
+      is_flow INTEGER NOT NULL DEFAULT 0,
+      condition_schema TEXT,
+      color TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_types_name
+      ON edge_types(nest_id, LOWER(name));
+
+    CREATE TABLE IF NOT EXISTS edges (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      from_node TEXT NOT NULL,
+      to_node TEXT NOT NULL,
+      -- RESTRICT (not CASCADE): the app refuses to delete an edge type while
+      -- edges reference it; the DB backs that invariant instead of silently
+      -- cascade-deleting live edges if the app check is bypassed. Keep in
+      -- lockstep with migrations.ts.
+      type_id TEXT NOT NULL REFERENCES edge_types(id) ON DELETE RESTRICT,
+      condition_mode TEXT
+        CHECK(condition_mode IN ('structured', 'nl', 'open')),
+      condition TEXT,
+      metadata TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(nest_id, from_node);
+    CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(nest_id, to_node);
+    CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(nest_id, type_id);
 
     CREATE TABLE IF NOT EXISTS definitions (
       id TEXT PRIMARY KEY,
