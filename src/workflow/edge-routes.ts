@@ -20,6 +20,7 @@ import type { Querier } from "../db/adapter.js";
 import { engineCache } from "../nodes/engine.js";
 import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
+import { safeJson } from "../shared/json.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import {
   requireWorkflowPlane,
@@ -27,7 +28,7 @@ import {
   type EdgeTypeRow,
 } from "./edge-type-routes.js";
 
-interface EdgeRow {
+export interface EdgeRow {
   id: string;
   nest_id: string;
   from_node: string;
@@ -41,16 +42,7 @@ interface EdgeRow {
   updated_at: string;
 }
 
-const safeJson = (s: string | null): unknown => {
-  if (!s) return null;
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
-  }
-};
-
-function toResponse(e: EdgeRow, t: EdgeTypeRow) {
+export function toResponse(e: EdgeRow, t: EdgeTypeRow) {
   return {
     id: e.id,
     from_node: e.from_node,
@@ -72,7 +64,7 @@ function toResponse(e: EdgeRow, t: EdgeTypeRow) {
  * CAC. The table ships in the glossary PR — until both are merged, the
  * check degrades to shape-only (documented in the PR).
  */
-async function validateCondition(
+export async function validateCondition(
   nestId: string,
   mode: string | undefined,
   condition: unknown,
@@ -129,7 +121,7 @@ async function validateCondition(
  * INSERT run under one BEGIN IMMEDIATE lock — otherwise two concurrent creates
  * that each individually close a cycle could both pass this check.
  */
-async function assertNoFlowCycle(
+export async function assertNoFlowCycle(
   db: Querier,
   nestId: string,
   fromNode: string,

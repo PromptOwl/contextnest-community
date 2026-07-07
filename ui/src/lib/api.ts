@@ -532,6 +532,90 @@ export async function deleteEdgeType(nestId: string, id: string) {
     { method: "DELETE" },
   );
 }
+
+// ─── Runs ("turing" workflow plane) ─────────────────────────────────────
+// A nest's agent runs and their step traces, plus triggerRun (creates the run
+// record + bundle; the server never executes it — a runner does).
+// `inputs`/`trace`/`detail` come back null when the caller lacks write tier
+// (server-side redaction).
+
+export interface Run {
+  id: string;
+  nest_id: string;
+  agent_node: string;
+  triggered_by: string;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  inputs: unknown | null;
+  trace: unknown | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface RunStep {
+  seq: number;
+  node_id: string | null;
+  edge_id: string | null;
+  action: "read" | "write" | "branch" | "notify" | "external";
+  detail: unknown | null;
+  at: string;
+}
+
+export async function listRuns(
+  nestId: string,
+  opts?: { agent?: string; status?: string; limit?: number },
+) {
+  const params = new URLSearchParams();
+  if (opts?.agent) params.set("agent", opts.agent);
+  if (opts?.status) params.set("status", opts.status);
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  return request<{ count: number; runs: Run[] }>(
+    `/nests/${nestId}/runs${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export async function getRun(runId: string) {
+  return request<{ run: Run; steps: RunStep[] }>(
+    `/runs/${encodeURIComponent(runId)}`,
+  );
+}
+
+/** The executable bundle a trigger returns — handed to an external runner. */
+export interface RunBundle {
+  run_id: string;
+  agent: {
+    id: string;
+    title: string;
+    type: string;
+    schedule: unknown;
+    content: string;
+  };
+  edges: unknown[];
+  definitions: unknown[];
+  trace_hint: { retrieval: string; steps: string };
+}
+
+/**
+ * Trigger a run: creates the run record and returns the executable bundle.
+ * The server does NOT execute — an external runner must walk the bundle and
+ * report steps back. Write tier required. `agentNode` is a node id like
+ * `nodes/my-agent`; its slashes are preserved (the route matches `.+`), so
+ * don't encode the whole path.
+ */
+export async function triggerRun(
+  nestId: string,
+  agentNode: string,
+  inputs?: unknown,
+) {
+  const path = agentNode
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+  return request<RunBundle>(`/nests/${nestId}/run/${path}`, {
+    method: "POST",
+    body: JSON.stringify(inputs === undefined ? {} : { inputs }),
+  });
+}
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
 // Upload an image into the nest's assets folder. Multipart (not the JSON

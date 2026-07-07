@@ -233,9 +233,10 @@ describe("/runs/:id access control (outside the nest gate)", () => {
     );
     outsiderNestRunId = run.data.run_id;
 
-    // owner@acme has zero permission on stranger's nest.
+    // owner@acme has zero permission on stranger's nest. Mirroring the nest
+    // gate, "no permission at all" is 404 (hide the run's existence), not 403.
     const read = await jsonRequest(app, "GET", `/runs/${outsiderNestRunId}`, undefined, owner.apiKey);
-    expect(read.status).toBe(403);
+    expect(read.status).toBe(404);
     const step = await jsonRequest(
       app,
       "POST",
@@ -243,7 +244,7 @@ describe("/runs/:id access control (outside the nest gate)", () => {
       { action: "read" },
       owner.apiKey,
     );
-    expect(step.status).toBe(403);
+    expect(step.status).toBe(404);
   });
 
   it("a nest-scoped key is refused on a run in a DIFFERENT nest — even with permission there", async () => {
