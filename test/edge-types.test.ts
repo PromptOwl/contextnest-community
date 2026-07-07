@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+import { getDb } from "../src/db/client.js";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -213,5 +214,40 @@ describe("concurrency", () => {
     const list = await jsonRequest(app, "GET", `/nests/${upNest}/edge-types`, undefined, owner.apiKey);
     const matches = list.data.edge_types.filter((t: any) => t.name.toLowerCase() === "blocks");
     expect(matches.length).toBe(1);
+  });
+});
+
+describe("delete guard", () => {
+  // No edge-CRUD API yet (PR 2), so wire a raw edge row straight to the DB to
+  // exercise both the app-level in-use check and the ON DELETE RESTRICT that
+  // backs it. Confirms the guard actually refuses (400) instead of orphaning.
+  it("refuses to delete a type while an edge references it, then allows it once free", async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "DelGuard" }, owner.apiKey);
+    const dgNest = nest.data.nest.id;
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${dgNest}/edge-types`,
+      { name: "references", description: "x" },
+      owner.apiKey,
+    );
+    const typeId = created.data.edge_type.id;
+
+    const db = getDb();
+    await db.run(
+      `INSERT INTO edges
+         (id, nest_id, from_node, to_node, type_id, condition_mode, condition, metadata, created_by, created_at, updated_at)
+       VALUES (?, ?, 'nodes/a', 'nodes/b', ?, NULL, NULL, NULL, ?, ?, ?)`,
+      ["edge-delguard-1", dgNest, typeId, owner.email, "t", "t"],
+    );
+
+    const blocked = await jsonRequest(app, "DELETE", `/nests/${dgNest}/edge-types/${typeId}`, undefined, owner.apiKey);
+    expect(blocked.status).toBe(400);
+    expect(blocked.data.error).toMatch(/in use/i);
+
+    // Free the type → delete now succeeds.
+    await db.run("DELETE FROM edges WHERE id = ?", ["edge-delguard-1"]);
+    const ok = await jsonRequest(app, "DELETE", `/nests/${dgNest}/edge-types/${typeId}`, undefined, owner.apiKey);
+    expect(ok.status).toBe(200);
   });
 });
