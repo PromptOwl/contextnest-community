@@ -341,6 +341,28 @@ export const TOOL_DEFINITIONS = [
       required: ["email"],
     },
   },
+  {
+    name: "context_grant",
+    description:
+      "Share a SINGLE document or a FOLDER with a person (not the whole nest). The recipient can reach exactly that document (or everything under that folder) and nothing else. read = view, write = view+edit. Owner/admin only.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        email: { type: "string", description: "Email of the person to share with" },
+        target_type: {
+          type: "string",
+          description: "'document' to share one node, or 'folder' to share a path prefix",
+        },
+        target: {
+          type: "string",
+          description:
+            "Node id (e.g. nodes/win-loss-log) for a document, or a folder prefix (e.g. nodes/gtm/deals) for a folder",
+        },
+        role: { type: "string", description: "read (default) or write" },
+      },
+      required: ["email", "target_type", "target"],
+    },
+  },
 
   // ─── Unsynced Folder Tools ─────────────────────────────────────────
 
@@ -980,6 +1002,54 @@ async function runTool(
         return `Shared this nest with **${args.email}** as ${label}.`;
       } catch (err: any) {
         return `Failed to share nest: ${err.message}`;
+      }
+    }
+
+    case "context_grant": {
+      // Owner/admin only — same authority as steward/sharing management.
+      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userId))) {
+        return "You don't have permission to share documents in this nest (owner/admin only).";
+      }
+      const targetType = String(args.target_type || "");
+      const target = String(args.target || "").trim();
+      const role = (String(args.role || "read")) as "read" | "write";
+      if (!["document", "folder"].includes(targetType)) {
+        return "target_type must be 'document' or 'folder'.";
+      }
+      if (!target) return "target is required (a node id or folder prefix).";
+      if (!["read", "write"].includes(role)) return "role must be read or write.";
+      try {
+        const { createGrant } = await import("../governance/grants-service.js");
+        // Resolve the grantee — mint a placeholder invited user if unknown,
+        // same as collaborator/document sharing.
+        const db = (await import("../db/client.js")).getDb();
+        const { normalizeEmail } = await import("../shared/email.js");
+        const e = normalizeEmail(String(args.email || ""));
+        if (!e) return "email is required.";
+        let row = (await db.get("SELECT id FROM users WHERE LOWER(email) = ?", [e])) as
+          | { id: string }
+          | undefined;
+        if (!row) {
+          const { hashPassword } = await import("../auth/keys.js");
+          const { v4: uuid } = await import("uuid");
+          const id = uuid();
+          await db.run(
+            "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
+            [id, e, null, await hashPassword(uuid())],
+          );
+          row = { id };
+        }
+        await createGrant({
+          nestId: ctx.nestId,
+          targetType: targetType as any,
+          target,
+          userId: row.id,
+          role,
+          grantedBy: ctx.userEmail,
+        });
+        return `Shared ${targetType} \`${target}\` with **${args.email}** as ${role}.`;
+      } catch (err: any) {
+        return `Failed to share: ${err.message}`;
       }
     }
 

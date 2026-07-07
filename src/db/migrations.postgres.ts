@@ -50,6 +50,7 @@ const HISTORICAL_MIGRATIONS = [
   "014_api_events",
   "015_definitions",
   "016_workflow_edges",
+  "019_grants",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -287,6 +288,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON comments(nest_id, node_id, status);
     CREATE INDEX IF NOT EXISTS idx_comments_thread
       ON comments(parent_id);
+
+    CREATE TABLE IF NOT EXISTS grants (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      target_type TEXT NOT NULL CHECK(target_type IN ('document', 'folder')),
+      target TEXT NOT NULL,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK(role IN ('read', 'write')),
+      granted_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_unique
+      ON grants(nest_id, target_type, target, user_id);
+    CREATE INDEX IF NOT EXISTS idx_grants_user ON grants(nest_id, user_id);
 
     CREATE TABLE IF NOT EXISTS edge_types (
       id TEXT PRIMARY KEY,

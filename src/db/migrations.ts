@@ -720,6 +720,33 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("012_merge_case_colliding_users");
   }
 
+  // 019: document + folder sharing grants (CU-wdqcpzv656). A dedicated ACCESS
+  //   model, distinct from stewardship (which is REVIEW governance). One row =
+  //   "user has role on this document, or on everything under this folder
+  //   prefix". Lets an owner/admin share a single doc or a folder with a
+  //   person who isn't a nest-wide collaborator.
+  if (!hasMigration("019_grants")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS grants (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          target_type TEXT NOT NULL CHECK(target_type IN ('document', 'folder')),
+          target TEXT NOT NULL,        -- node id (document) or path prefix (folder)
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          role TEXT NOT NULL CHECK(role IN ('read', 'write')),
+          granted_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_unique
+          ON grants(nest_id, target_type, target, user_id);
+        CREATE INDEX IF NOT EXISTS idx_grants_user ON grants(nest_id, user_id);
+      `);
+    })();
+    recordMigration("019_grants");
+  }
+
   // 013: deletion tombstones (CU-wdqcpzv219). DELETE /nodes purges every
   //   governance row for the node (so slug reuse works), which left external
   //   sync consumers (GitHub/GitBook mirrors) no way to learn a doc was
