@@ -690,79 +690,6 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("011_comments");
   }
 
-  // 016: workflow plane foundations (CU-wdqcpzv34u, "turing" track). Typed
-  //   edges between nodes, with a steward-defined registry articulating what
-  //   each connection MEANS (the definitions-table move, applied to
-  //   relations). Feature-flagged: routes 404 unless FEATURE_WORKFLOW_PLANE
-  //   is on, but the schema ships so flipping the flag needs no migration.
-  //   Case-insensitive uniqueness via LOWER() (portable — NOT COLLATE
-  //   NOCASE; keep in lockstep with migrations.postgres.ts).
-  if (!hasMigration("016_workflow_edges")) {
-    db.transaction(() => {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS edge_types (
-          id TEXT PRIMARY KEY,
-          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-          name TEXT NOT NULL,
-          description TEXT NOT NULL,
-          direction TEXT NOT NULL DEFAULT 'directed'
-            CHECK(direction IN ('directed', 'undirected')),
-          is_flow INTEGER NOT NULL DEFAULT 0,   -- flow types form the DAG
-          condition_schema TEXT,                -- JSON template | NULL
-          color TEXT,
-          created_by TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_types_name
-          ON edge_types(nest_id, LOWER(name));
-
-        CREATE TABLE IF NOT EXISTS edges (
-          id TEXT PRIMARY KEY,
-          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-          from_node TEXT NOT NULL,
-          to_node TEXT NOT NULL,
-          type_id TEXT NOT NULL REFERENCES edge_types(id) ON DELETE CASCADE,
-          condition_mode TEXT
-            CHECK(condition_mode IN ('structured', 'nl', 'open')),
-          condition TEXT,
-          metadata TEXT,
-          created_by TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(nest_id, from_node);
-        CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(nest_id, to_node);
-        CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(nest_id, type_id);
-      `);
-    })();
-    recordMigration("016_workflow_edges");
-  }
-
-  // 015: glossary definitions (CU-wdqcpzv2eg). A literal table-based
-  //   ontology per nest: stewards define and articulate terms — existing
-  //   tags or brand-new ones — and external runtimes (quant analysis jobs,
-  //   agents) pull them in real time via GET /definitions?term=. One row
-  //   per (nest, term), case-insensitive.
-  if (!hasMigration("015_definitions")) {
-    db.transaction(() => {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS definitions (
-          id TEXT PRIMARY KEY,
-          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-          term TEXT NOT NULL,
-          definition TEXT NOT NULL,
-          linked_tag TEXT,               -- optional #tag this term maps to
-          defined_by TEXT NOT NULL,      -- email
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_definitions_term
-          ON definitions(nest_id, term COLLATE NOCASE);
-      `);
-    })();
-    recordMigration("015_definitions");
-  }
   // 012: merge case-colliding user rows that 009 deliberately left for manual
   //   reconciliation. 009 only builds the NOCASE-unique email index when the
   //   table is already clean; pre-existing collisions (e.g. Bob@x.com AND
@@ -842,6 +769,83 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("014_api_events");
   }
+
+  // 015: glossary definitions (CU-wdqcpzv2eg). A literal table-based
+  //   ontology per nest: stewards define and articulate terms — existing
+  //   tags or brand-new ones — and external runtimes (quant analysis jobs,
+  //   agents) pull them in real time via GET /definitions?term=. One row
+  //   per (nest, term), case-insensitive.
+  if (!hasMigration("015_definitions")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS definitions (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          term TEXT NOT NULL,
+          definition TEXT NOT NULL,
+          linked_tag TEXT,               -- optional #tag this term maps to
+          defined_by TEXT NOT NULL,      -- email
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_definitions_term
+          ON definitions(nest_id, term COLLATE NOCASE);
+      `);
+    })();
+    recordMigration("015_definitions");
+  }
+
+  // 016: workflow plane foundations (CU-wdqcpzv34u, "turing" track). Typed
+  //   edges between nodes, with a steward-defined registry articulating what
+  //   each connection MEANS (the definitions-table move, applied to
+  //   relations). Feature-flagged: routes 404 unless FEATURE_WORKFLOW_PLANE
+  //   is on, but the schema ships so flipping the flag needs no migration.
+  //   Case-insensitive uniqueness via LOWER() (portable — NOT COLLATE
+  //   NOCASE; keep in lockstep with migrations.postgres.ts).
+  if (!hasMigration("016_workflow_edges")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS edge_types (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL,
+          direction TEXT NOT NULL DEFAULT 'directed'
+            CHECK(direction IN ('directed', 'undirected')),
+          is_flow INTEGER NOT NULL DEFAULT 0,   -- flow types form the DAG
+          condition_schema TEXT,                -- JSON template | NULL
+          color TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_types_name
+          ON edge_types(nest_id, LOWER(name));
+
+        CREATE TABLE IF NOT EXISTS edges (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          from_node TEXT NOT NULL,
+          to_node TEXT NOT NULL,
+          -- RESTRICT (not CASCADE): the app refuses to delete an edge type
+          -- while edges reference it; the DB backs that invariant instead of
+          -- silently cascade-deleting live edges if the app check is bypassed.
+          type_id TEXT NOT NULL REFERENCES edge_types(id) ON DELETE RESTRICT,
+          condition_mode TEXT
+            CHECK(condition_mode IN ('structured', 'nl', 'open')),
+          condition TEXT,
+          metadata TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(nest_id, from_node);
+        CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(nest_id, to_node);
+        CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(nest_id, type_id);
+      `);
+    })();
+    recordMigration("016_workflow_edges");
+  }
 }
 
 /**
@@ -907,15 +911,15 @@ export function mergeCaseCollidingUsers(db: Database.Database): {
           WHERE LOWER(u.email) = ? AND u.id != ?`,
       )
       .all(le, ANON_USER_ID) as Array<{
-      id: string;
-      email: string;
-      is_invited: number;
-      is_admin: number;
-      name: string | null;
-      created_at: string;
-      keys: number;
-      sessions: number;
-    }>;
+        id: string;
+        email: string;
+        is_invited: number;
+        is_admin: number;
+        name: string | null;
+        created_at: string;
+        keys: number;
+        sessions: number;
+      }>;
     if (rows.length < 2) continue;
 
     // Winner: claimed account (is_invited=0) > placeholder; then has an active
