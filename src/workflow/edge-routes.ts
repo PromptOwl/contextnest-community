@@ -107,6 +107,9 @@ async function validateCondition(
         }
       } catch (err) {
         if (err instanceof ValidationError) throw err;
+        // Only tolerate the definitions table being absent (glossary PR not
+        // merged yet) — any other DB error is real and must surface.
+        if (!/no such table/i.test((err as Error)?.message ?? "")) throw err;
         /* definitions table not present on this deployment yet — shape-only */
       }
     }
@@ -155,7 +158,9 @@ async function assertNoFlowCycle(
         p = parent.get(p)!;
         path.push(p);
       }
-      path.reverse().push(fromNode);
+      // path is fromNode..toNode (BFS parent-walk); reverse to toNode..fromNode
+      // then close the loop with the new edge fromNode→toNode.
+      path.reverse().push(toNode);
       throw new ConflictError(
         `cycle: ${JSON.stringify(path)} — flow edges must form a DAG`,
       );
@@ -220,7 +225,9 @@ edgeRoutes.post("/", async (c) => {
 
   const db = getDb();
   const definedBy = await resolveCallerEmail(c.get("userId"));
-  await seedDefaultEdgeTypes(nestId, definedBy);
+  // Seed attributes to the nest owner (see edge-type-routes); definedBy is
+  // the caller, used only for this edge's created_by below.
+  await seedDefaultEdgeTypes(nestId);
 
   const type = (await db.get(
     "SELECT * FROM edge_types WHERE nest_id = ? AND (id = ? OR LOWER(name) = LOWER(?))",

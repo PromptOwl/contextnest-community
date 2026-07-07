@@ -193,7 +193,6 @@ queryRoutes.get("/graph", async (c) => {
   // Only edges whose BOTH endpoints are already in the caller-visible node
   // set — the graph's own access filtering stays authoritative.
   if (config.FEATURE_WORKFLOW_PLANE) {
-    const { getDb } = await import("../db/client.js");
     const rows = (await getDb().all(
       `SELECT e.from_node, e.to_node, e.condition_mode, t.name as type, t.color, t.is_flow
          FROM edges e JOIN edge_types t ON t.id = e.type_id

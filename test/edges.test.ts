@@ -129,9 +129,11 @@ describe("edge creation + validation", () => {
       type: "next",
     });
     expect(res.status).toBe(409);
-    expect(res.data.error).toContain("cycle");
-    expect(res.data.error).toContain("nodes/gamma");
-    expect(res.data.error).toContain("nodes/alpha");
+    // Names the exact closed cycle: alpha→beta→gamma (existing flow) then the
+    // proposed gamma→alpha edge closing back to alpha.
+    expect(res.data.error).toContain(
+      'cycle: ["nodes/alpha","nodes/beta","nodes/gamma","nodes/alpha"]',
+    );
   });
 
   it("allows cycles over NON-flow types (ownership isn't a DAG)", async () => {
