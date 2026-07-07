@@ -47,6 +47,9 @@ export interface AuthContextValue {
   adminStatus: AdminStatus | null;
   authenticated: boolean;
   isAdmin: boolean;
+  /** Public feature flag from /health — the server's route gate, so the UI
+   *  hides the workflow plane exactly when the API would 404 it. */
+  workflowPlaneEnabled: boolean;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -59,6 +62,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: PropsWithChildren) {
   const [authMode, setAuthMode] = useState<AuthMode>(null);
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [workflowPlaneEnabled, setWorkflowPlaneEnabled] = useState(false);
   const [adminStatus, setAdminStatus] = useState<AdminStatus | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -104,6 +108,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         const mode = h.auth_mode as AuthMode;
         setAuthMode(mode);
         setLogoUrl(h.logo_url ?? null);
+        setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
 
         const status = await api.getAdminStatus();
         if (cancelled) return;
@@ -239,6 +244,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         adminStatus,
         authenticated,
         isAdmin,
+        workflowPlaneEnabled,
         loading,
         error,
         refresh,

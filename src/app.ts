@@ -191,6 +191,10 @@ export function createApp(): Hono<AuthEnv> {
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+      // Public feature flags the SPA needs before auth to decide what to
+      // render. Mirrors the server-side route gate so UI and API agree:
+      // flag off → the plane's routes 404 AND its UI stays hidden.
+      workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     }),
   );

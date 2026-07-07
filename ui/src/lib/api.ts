@@ -128,6 +128,7 @@ export async function getHealth() {
     auth_mode: string;
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
+    workflow_plane_enabled?: boolean;
     suspended_reason?: string;
   }>("/health");
 }

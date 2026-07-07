@@ -110,6 +110,7 @@ export default function App() {
     adminStatus,
     authenticated,
     isAdmin,
+    workflowPlaneEnabled,
     loading,
     error,
     logout,
@@ -207,9 +208,13 @@ export default function App() {
       setDeepLinkProbe({ status: "missing" });
       return;
     }
+    // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
+    // this effect first fires); the cancel guard drops the stale navigation.
+    let cancelled = false;
     (async () => {
       try {
         const { nest } = await getNest(nestId);
+        if (cancelled) return;
         setDeepLinkProbe({
           status: "ok",
           nestId: nest.id,
@@ -230,10 +235,12 @@ export default function App() {
           return;
         }
         // ?view=<sub> → land on a nest-scoped sub-page (shareable deep link).
+        // edge-types stays gated on the flag so a shared link can't reach a
+        // plane the server has disabled — it falls back to the nest view.
         const sub = params.get("view");
         const subPage =
           sub === "graph" ? "ontology-graph"
-          : sub === "edge" ? "edge-types"
+          : sub === "edge" && workflowPlaneEnabled ? "edge-types"
           : sub === "definitions" ? "definitions"
           : null;
         if (subPage) {
@@ -254,10 +261,13 @@ export default function App() {
           isAnonOwned: false,
         });
       } catch {
-        setDeepLinkProbe({ status: "missing" });
+        if (!cancelled) setDeepLinkProbe({ status: "missing" });
       }
     })();
-  }, [deepLinkProbe.status]);
+    return () => {
+      cancelled = true;
+    };
+  }, [deepLinkProbe.status, workflowPlaneEnabled]);
 
   // Keep the URL in sync with the current view so documents (and nests) are
   // shareable — paste the address bar and the recipient lands on the same doc.
@@ -578,7 +588,7 @@ export default function App() {
               </Button>
             )}
 
-            {view.page === "nest" && serverSettings?.workflow_plane_enabled && (
+            {view.page === "nest" && workflowPlaneEnabled && (
               <Button
                 variant="outline"
                 size="sm"
@@ -811,7 +821,7 @@ export default function App() {
             }
           />
         )}
-        {view.page === "edge-types" && (
+        {view.page === "edge-types" && workflowPlaneEnabled && (
           <EdgeTypesPage
             nestId={view.nestId}
             nestName={view.nestName}
