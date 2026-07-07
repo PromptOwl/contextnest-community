@@ -401,9 +401,23 @@ export async function registerImportedDocuments(
   }
 
   let registered = 0;
-  for (const doc of docs) {
+  for (let doc of docs) {
     const nodeId = doc.id;
     if ((await versions.getCurrentVersion(nestId, nodeId)) > 0) continue; // already tracked
+
+    // Imported markdown often ships without a frontmatter `title:`, which
+    // would list the doc as untitled. Fall back to the filename (leaf of the
+    // node id) and persist it to disk BEFORE publish so the title sticks.
+    if (!doc.frontmatter?.title) {
+      const title = nodeId.split("/").pop() || nodeId;
+      doc = { ...doc, frontmatter: { ...doc.frontmatter, title } };
+      try {
+        await storage.writeDocument(nodeId, serializeDocument(doc));
+      } catch (err) {
+        console.error("import: failed to persist filename title", nodeId, err);
+      }
+    }
+
     const rawTags = Array.isArray(doc.frontmatter?.tags)
       ? doc.frontmatter.tags
       : [];
