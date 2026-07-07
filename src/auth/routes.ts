@@ -333,7 +333,10 @@ authRoutes.post("/login", async (c) => {
   // rely on the per-email key. Deploy behind a proxy that sets
   // x-forwarded-for to get real per-IP protection.
   const ip = clientIp(c);
-  const emailLower = body.email.toLowerCase();
+  // Normalize like every other path (register/invite/sso) — trim + lowercase.
+  // Login previously only lowercased, so a leading/trailing space from mobile
+  // autofill missed the LOWER(email) lookup → spurious "invalid credentials".
+  const emailLower = normalizeEmail(body.email);
   const hasIp = ip !== "unknown";
   const ipKey = `login:ip:${ip}`;
   const emailKey = `login:email:${emailLower}`;
@@ -343,7 +346,7 @@ authRoutes.post("/login", async (c) => {
 
   const db = getDb();
   const user = await db.get(
-    "SELECT id, email, name, password_hash, is_admin FROM users WHERE LOWER(email) = ?",
+    "SELECT id, email, name, password_hash, is_admin, is_invited FROM users WHERE LOWER(email) = ?",
     [emailLower],
   ) as
     | {
@@ -352,6 +355,7 @@ authRoutes.post("/login", async (c) => {
       name: string | null;
       password_hash: string;
       is_admin: number;
+      is_invited: number;
     }
     | undefined;
 
@@ -369,6 +373,20 @@ authRoutes.post("/login", async (c) => {
   console.log(`[auth] login OK — counter reset ip=${ip} email=${emailLower}`);
   if (hasIp) clear(ipKey);
   clear(emailKey);
+
+  // A first successful login is a real "claim" too — an invited teammate has
+  // now accessed the account, so clear is_invited. This clears the "Invited"
+  // badge and makes a later /auth/invite on this email return 409 instead of
+  // silently overwriting a working login (re-invite only refreshes the temp
+  // password of someone who has NOT logged in yet). Use Reset password to
+  // re-issue a credential for an already-active teammate.
+  if (user.is_invited === 1) {
+    try {
+      await db.run("UPDATE users SET is_invited = 0 WHERE id = ?", [user.id]);
+    } catch {
+      // best-effort; never block a valid login on this bookkeeping update
+    }
+  }
 
   // Legacy SHA-256 password? Silently upgrade to bcrypt on this successful
   // login so the DB migrates itself over time without forcing a reset.
@@ -809,7 +827,12 @@ authRoutes.post("/password", authMiddleware, async (c) => {
   }
 
   const newHash = await hashPassword(body.next);
-  await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [
+  // Clear is_invited: choosing your own password is the real "claim" moment for
+  // an invited teammate (invite no longer routes through /auth/register). This
+  // is what makes the /auth/invite 409 guard fire on a re-invite — otherwise a
+  // teammate who claimed via temp-password→change-password stays is_invited=1
+  // forever and a later re-invite would silently clobber their chosen password.
+  await db.run("UPDATE users SET password_hash = ?, is_invited = 0 WHERE id = ?", [
     newHash,
     userId,
   ]);
@@ -869,7 +892,6 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
       newHash,
       target.id,
     ]);
-    await tx.run("DELETE FROM api_keys WHERE user_id = ?", [target.id]);
   });
   await deleteAllSessionsForUser(target.id);
 
@@ -878,7 +900,7 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   return c.json({
     ok: true,
     email: target.email,
-    keys_revoked: true,
+    keys_revoked: false,
     // Plaintext returned ONCE, only when the server generated it.
     temporary_password: generated ?? undefined,
   });
@@ -974,48 +996,56 @@ authRoutes.post("/invite", async (c) => {
     );
   }
 
-  // Find or create user by email
-  let user = await db.get(
-    "SELECT id, email FROM users WHERE LOWER(email) = ?",
+  // Find user by email (case-insensitive).
+  const existing = await db.get(
+    "SELECT id, email, is_invited FROM users WHERE LOWER(email) = ?",
     [email],
-  ) as { id: string; email: string } | undefined;
+  ) as { id: string; email: string; is_invited: number } | undefined;
 
-  if (!user) {
-    const userId = uuid();
-    const placeholderHash = await hashPassword(uuid());
-    await db.run(
-      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-      [userId, email, null, placeholderHash],
+  // A fully-established user (one who claimed their own password) already has a
+  // working login — don't silently clobber it from the invite flow. Point the
+  // admin at Reset password instead.
+  if (existing && existing.is_invited === 0) {
+    return c.json(
+      {
+        error:
+          "A user with this email already exists. Use Reset password to issue them a new password.",
+      },
+      409,
     );
-    user = { id: userId, email };
   }
 
-  // Single api_key per user — if invitee already has one, we replace it
-  // so the admin can hand a fresh plaintext to the teammate. The prior
-  // key is invalidated atomically.
-  const apiKey = generateApiKey();
-  const keyId = uuid();
-  await db.transaction(async (tx) => {
-    await tx.run("DELETE FROM api_keys WHERE user_id = ?", [user!.id]);
-    await tx.run(
-      "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, label) VALUES (?, ?, ?, ?, ?)",
-      [
-        keyId,
-        user!.id,
-        hashApiKey(apiKey),
-        getKeyPrefix(apiKey),
-        body.label || "teammate",
-      ],
-    );
-  });
+  // Issue a PASSWORD, not an API key. The admin adds teammates so they can log
+  // in; teammates mint their own API keys (for CLI/MCP/Hootie) after signing in.
+  // Readable 16-char temporary password, returned ONCE for the admin to hand
+  // over. Re-inviting a not-yet-claimed user refreshes it (so "delete + re-add"
+  // / re-invite now produces a working credential).
+  const tempPassword = uuid().replace(/-/g, "").slice(0, 16);
+  const passwordHash = await hashPassword(tempPassword);
 
-  trackEvent("admin.invite", { adminId: callerId, email: body.email });
+  let userId: string;
+  if (existing) {
+    userId = existing.id;
+    await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [
+      passwordHash,
+      userId,
+    ]);
+  } else {
+    userId = uuid();
+    await db.run(
+      "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
+      [userId, email, null, passwordHash],
+    );
+  }
+
+  trackEvent("admin.invite", { adminId: callerId, email });
 
   return c.json(
     {
-      api_key: apiKey,
-      user: { id: user.id, email: user.email },
-      message: "Copy this key and share it securely — it won't be shown again.",
+      temporary_password: tempPassword,
+      user: { id: userId, email },
+      message:
+        "Share this temporary password securely. Your teammate signs in with their email + this password, then can change it and create their own API key.",
     },
     201,
   );

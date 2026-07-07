@@ -2,6 +2,11 @@ import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
 import { ValidationError, NotFoundError, LockedError } from "../shared/errors.js";
+// SECURITY: `:nodeId` params on these routes become filesystem paths in the
+// engine's storage layer (join(nestRoot, id + ".md"), no containment). A `../`
+// id is rejected up front by the assertSafeNodeId chokepoint mounted on
+// /nests/:nestId/nodes/:nodeId{.+} in app.ts — covers every node route across
+// this + the annotations + governance routers, so handlers here can trust nodeId.
 import { trackEvent } from "../telemetry/tracker.js";
 import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
@@ -62,10 +67,15 @@ nodeRoutes.post("/", async (c) => {
     tags?: string[];
     scope?: string;
     status?: string;
+    schedule?: string;
+    folder?: string;
   }>();
 
   if (!body.title || !body.content) {
     throw new ValidationError("title and content are required");
+  }
+  if (body.folder !== undefined && typeof body.folder !== "string") {
+    throw new ValidationError("folder must be a string path like \"gtm/deals\"");
   }
 
   const nestId = c.req.param("nestId")!;
@@ -79,6 +89,8 @@ nodeRoutes.post("/", async (c) => {
       tags: body.tags,
       scope: body.scope,
       status: body.status,
+      schedule: body.schedule,
+      folder: body.folder,
     },
     authorEmail,
   );
@@ -338,6 +350,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     status?: string;
     title?: string;
     changeNote?: string;
+    schedule?: string;
   }>();
 
   // Conflict detection via X-Base-Version header — REST-only contract.
@@ -371,6 +384,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       title: body.title,
       status: body.status,
       changeNote: body.changeNote,
+      schedule: body.schedule,
     },
     authorEmail,
   );
@@ -464,6 +478,16 @@ nodeRoutes.delete("/:nodeId{.+}", async (c) => {
     await tx.run(
       "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
       [nestId, derivedId],
+    );
+    // Deletion tombstone — the one record that survives the purge above, so
+    // GET /changes can tell external mirrors a doc was removed. Upsert:
+    // delete → recreate → delete again just refreshes the timestamp.
+    await tx.run(
+      `INSERT INTO node_deletions (nest_id, node_id, deleted_by, deleted_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(nest_id, node_id) DO UPDATE
+         SET deleted_by = excluded.deleted_by, deleted_at = excluded.deleted_at`,
+      [nestId, nodeId, await getUserEmail(c), new Date().toISOString()],
     );
   });
 
