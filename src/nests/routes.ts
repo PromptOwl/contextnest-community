@@ -114,7 +114,16 @@ nestRoutes.get("/", async (c) => {
         | undefined;
       owner_email = row?.email ?? null;
     }
-    return { ...n, permission, is_owner, owner_email, roles };
+    // Surface governance state so the dashboard card's "Ungoverned" badge
+    // reflects whether stewardship is actually on — not just anon-ownership.
+    return {
+      ...n,
+      permission,
+      is_owner,
+      owner_email,
+      roles,
+      stewardship_enabled: await isStewardshipEnabled(n.id),
+    };
   };
   // Dedupe by id; owner/shared rows win over public discovery row.
   const seen = new Set<string>();

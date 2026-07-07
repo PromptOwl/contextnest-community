@@ -26,6 +26,7 @@ import {
   listNodesForCallerByEmail,
 } from "../nodes/service.js";
 import { listThreads } from "../annotations/service.js";
+import { logTraceEvent } from "../telemetry/trace-log.js";
 
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
@@ -48,6 +49,9 @@ export interface McpToolContext {
   nestId: string;
   userId: string;
   userEmail: string;
+  /** Request origin, so review actions taken via MCP produce notification
+   *  emails with a working "Open document" link (no PUBLIC_BASE_URL needed). */
+  baseUrl?: string;
 }
 
 export const TOOL_DEFINITIONS = [
@@ -407,7 +411,38 @@ async function resolveLlmBody(
   }
 }
 
+/**
+ * Public entry for every MCP tool call. Logging lives HERE (not in the route
+ * wrapper) so it covers per-nest AND server-level MCP, and so a tool that
+ * throws still produces an audit row (status 500). Best-effort:
+ * `logTraceEvent` swallows its own errors and never alters tool behavior.
+ */
 export async function handleToolCall(
+  toolName: string,
+  args: Record<string, any>,
+  ctx: McpToolContext,
+): Promise<string> {
+  const started = Date.now();
+  let status = 200;
+  try {
+    return await runTool(toolName, args, ctx);
+  } catch (err) {
+    status = 500;
+    throw err;
+  } finally {
+    void logTraceEvent({
+      kind: "mcp",
+      tool: toolName,
+      nestId: ctx.nestId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      status,
+      durationMs: Date.now() - started,
+    });
+  }
+}
+
+async function runTool(
   toolName: string,
   args: Record<string, any>,
   ctx: McpToolContext,
@@ -809,6 +844,7 @@ export async function handleToolCall(
           requestedBy: ctx.userEmail,
           note: args.note,
           priority: args.priority as any,
+          baseUrl: ctx.baseUrl,
         });
 
         const resolved = await stewardship.resolveStewardsForNode(
@@ -842,6 +878,7 @@ export async function handleToolCall(
           version: currentVersion,
           approvedBy: ctx.userEmail,
           note: args.note,
+          baseUrl: ctx.baseUrl,
         });
 
         return `Approved "${args.title}" v${currentVersion}. This version is now live for AI queries.${args.note ? `\nNote: ${args.note}` : ""}`;
@@ -866,6 +903,7 @@ export async function handleToolCall(
           version: currentVersion,
           rejectedBy: ctx.userEmail,
           note: args.note,
+          baseUrl: ctx.baseUrl,
         });
 
         return `Rejected "${args.title}" v${currentVersion}.\nReason: ${args.note}`;

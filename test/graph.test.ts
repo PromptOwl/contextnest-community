@@ -123,6 +123,54 @@ describe("graph: ontology endpoint", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Slug-form wikilink resolution
+//
+// The editor inserts links as `[[<bare-slug>|Title]]` (slugFromNodeId), and
+// some as the full `[[nodes/<slug>|Title]]` path — NOT the title. The graph
+// must resolve those the way the client does (id, title, OR bare slug), or a
+// real link renders no edge and its source looks like a false orphan.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("graph: slug-form wikilink resolution", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Slugs" }, owner.apiKey);
+    nestId = nest.data.nest.id;
+
+    // Alpha links to Beta by bare slug and to Gamma by full path — both with a
+    // |display alias, exactly as the editor writes them.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Alpha", content: "See [[beta|Beta]] and [[nodes/gamma|Gamma]].", tags: [] },
+      owner.apiKey,
+    );
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Beta", content: "Body." }, owner.apiKey);
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Gamma", content: "Body." }, owner.apiKey);
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("resolves bare-slug and full-path link forms to edges", async () => {
+    const { data } = await jsonRequest(app, "GET", `/nests/${nestId}/graph`, undefined, owner.apiKey);
+    const edgeKeys = data.links.map((l: any) => `${l.source}->${l.target}`);
+    expect(edgeKeys).toContain("nodes/alpha->nodes/beta");
+    expect(edgeKeys).toContain("nodes/alpha->nodes/gamma");
+    // Alpha has outbound edges → not a false orphan.
+    const orphanIds = data.signals.orphans.map((n: any) => n.id);
+    expect(orphanIds).not.toContain("nodes/alpha");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Steward-identity masking (CU-wdqcpzujc4 security fix)
 //
 // Steward emails are write+ only — same rule as the collaborators roster — so a

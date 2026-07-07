@@ -10,8 +10,12 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen, ScrollText, BookMarked, Workflow } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
+import { AgentDocsPage } from "./components/AgentDocsPage";
+import { ActivityTracePage } from "./components/ActivityTracePage";
+import { DefinitionsPage } from "./components/DefinitionsPage";
+import { EdgeTypesPage } from "./components/EdgeTypesPage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -71,8 +75,24 @@ type View =
     }
   | { page: "teammates" }
   | { page: "settings" }
+  | { page: "trace" }
+  | { page: "docs" }
   | {
       page: "ontology-graph";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    }
+  | {
+      page: "definitions";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    }
+  | {
+      page: "edge-types";
       nestId: string;
       nestName: string;
       isOwner: boolean;
@@ -90,6 +110,7 @@ export default function App() {
     adminStatus,
     authenticated,
     isAdmin,
+    workflowPlaneEnabled,
     loading,
     error,
     logout,
@@ -187,9 +208,13 @@ export default function App() {
       setDeepLinkProbe({ status: "missing" });
       return;
     }
+    // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
+    // this effect first fires); the cancel guard drops the stale navigation.
+    let cancelled = false;
     (async () => {
       try {
         const { nest } = await getNest(nestId);
+        if (cancelled) return;
         setDeepLinkProbe({
           status: "ok",
           nestId: nest.id,
@@ -209,6 +234,25 @@ export default function App() {
           });
           return;
         }
+        // ?view=<sub> → land on a nest-scoped sub-page (shareable deep link).
+        // edge-types stays gated on the flag so a shared link can't reach a
+        // plane the server has disabled — it falls back to the nest view.
+        const sub = params.get("view");
+        const subPage =
+          sub === "graph" ? "ontology-graph"
+          : sub === "edge" && workflowPlaneEnabled ? "edge-types"
+          : sub === "definitions" ? "definitions"
+          : null;
+        if (subPage) {
+          setView({
+            page: subPage,
+            nestId: nest.id,
+            nestName: nest.name,
+            isOwner: false,
+            isAnonOwned: false,
+          });
+          return;
+        }
         setView({
           page: "nest",
           nestId: nest.id,
@@ -217,10 +261,13 @@ export default function App() {
           isAnonOwned: false,
         });
       } catch {
-        setDeepLinkProbe({ status: "missing" });
+        if (!cancelled) setDeepLinkProbe({ status: "missing" });
       }
     })();
-  }, [deepLinkProbe.status]);
+    return () => {
+      cancelled = true;
+    };
+  }, [deepLinkProbe.status, workflowPlaneEnabled]);
 
   // Keep the URL in sync with the current view so documents (and nests) are
   // shareable — paste the address bar and the recipient lands on the same doc.
@@ -235,19 +282,41 @@ export default function App() {
       params.set("nest", view.nestId);
       if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
       else params.delete("doc");
+      params.delete("view");
     } else if (view.page === "nest") {
       params.set("nest", view.nestId);
       params.delete("doc");
+      params.delete("view");
+    } else if (
+      // Nest-scoped sub-pages: keep ?nest and tag the sub-view so the address
+      // bar stays shareable instead of dropping the nest context.
+      view.page === "ontology-graph" ||
+      view.page === "edge-types" ||
+      view.page === "definitions"
+    ) {
+      params.set("nest", view.nestId);
+      params.delete("doc");
+      params.set(
+        "view",
+        view.page === "ontology-graph"
+          ? "graph"
+          : view.page === "edge-types"
+            ? "edge"
+            : "definitions",
+      );
     } else {
       params.delete("nest");
       params.delete("doc");
+      params.delete("view");
     }
     const qs = params.toString();
     const next =
       window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
-    if (next !== current) window.history.replaceState({}, "", next);
+    if (next !== current) {
+      window.history.replaceState({}, "", next);
+    }
   }, [view, deepLinkProbe.status]);
 
   // One-click PromptOwl SSO (GET /auth/sso) bounces back to "/?sso_error=<code>"
@@ -469,6 +538,18 @@ export default function App() {
               </span>
             )}
 
+            {view.page !== "docs" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setView({ page: "docs" })}
+                title="API, MCP & CLI docs for agents"
+              >
+                <BookOpen className="h-3.5 w-3.5 mr-1" />
+                Docs
+              </Button>
+            )}
+
             {view.page === "nest" && (
               <Button
                 variant="outline"
@@ -488,12 +569,51 @@ export default function App() {
               </Button>
             )}
 
+            {view.page === "nest" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setView({
+                    page: "definitions",
+                    nestId: view.nestId,
+                    nestName: view.nestName,
+                    isOwner: view.isOwner,
+                    isAnonOwned: view.isAnonOwned,
+                  })
+                }
+              >
+                <BookMarked className="h-3.5 w-3.5 mr-1" />
+                Definitions
+              </Button>
+            )}
+
+            {view.page === "nest" && workflowPlaneEnabled && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setView({
+                    page: "edge-types",
+                    nestId: view.nestId,
+                    nestName: view.nestName,
+                    isOwner: view.isOwner,
+                    isAnonOwned: view.isAnonOwned,
+                  })
+                }
+              >
+                <Workflow className="h-3.5 w-3.5 mr-1" />
+                Edge Types
+              </Button>
+            )}
+
             {adminStatus?.me ? (
               <UserMenu
                 me={adminStatus.me}
                 isAdmin={isAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
                 onSettings={() => setView({ page: "settings" })}
+                onTrace={() => setView({ page: "trace" })}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
               />
@@ -686,6 +806,36 @@ export default function App() {
             />
           );
         })()}
+        {view.page === "definitions" && (
+          <DefinitionsPage
+            nestId={view.nestId}
+            nestName={view.nestName}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
+        )}
+        {view.page === "edge-types" && workflowPlaneEnabled && (
+          <EdgeTypesPage
+            nestId={view.nestId}
+            nestName={view.nestName}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
+        )}
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}
@@ -696,6 +846,12 @@ export default function App() {
             settings={serverSettings}
             onUpdate={updateServerSettings}
           />
+        )}
+        {view.page === "trace" && (
+          <ActivityTracePage onBack={() => setView({ page: "dashboard" })} />
+        )}
+        {view.page === "docs" && (
+          <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}
         {view.page === "ontology-graph" && (
           <OntologyGraphView
@@ -730,6 +886,7 @@ interface UserMenuProps {
   isAdmin: boolean;
   onTeammates: () => void;
   onSettings: () => void;
+  onTrace: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
 }
@@ -739,6 +896,7 @@ function UserMenu({
   isAdmin,
   onTeammates,
   onSettings,
+  onTrace,
   onChangePassword,
   onLogout,
 }: UserMenuProps) {
@@ -796,6 +954,10 @@ function UserMenu({
             <DropdownMenuItem onSelect={onSettings} className="cursor-pointer">
               <Shield className="h-3.5 w-3.5 mr-2" />
               Server settings
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onTrace} className="cursor-pointer">
+              <ScrollText className="h-3.5 w-3.5 mr-2" />
+              Activity trace
             </DropdownMenuItem>
           </>
         )}
