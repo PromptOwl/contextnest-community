@@ -139,13 +139,18 @@ export async function listNodesForCaller(
   let accessible = await filterAccessible(nestId, userId, userEmail, documents);
 
   // Share grants: a caller with NO nest-wide permission sees exactly the
-  // documents their grants cover (one shared doc, or a shared folder's
-  // contents) — never the whole list. Overrides filterAccessible's
-  // "stewardship off → return everything" default for grant-only callers.
-  if ((await resolveNestPermission(nestId, userId)) === "none") {
+  // documents their grants cover — never the whole list. filterAccessible's
+  // stewardship-OFF path returns the entire nest (open read), which must NOT
+  // apply to a non-member, so narrow it to their grant-covered docs. With
+  // stewardship ON, filterAccessible already restricted to
+  // steward-accessible + grant-covered, so there's nothing to narrow.
+  if (
+    (await resolveNestPermission(nestId, userId)) === "none" &&
+    !(await isStewardshipEnabled(nestId))
+  ) {
     const grants = await listUserGrants(nestId, userId);
     accessible = grants.length
-      ? accessible.filter((d) => grantCoversNode(grants, d.id))
+      ? documents.filter((d) => grantCoversNode(grants, d.id))
       : accessible;
   }
   const publicReader = await isPublicReader(nestId, userId);

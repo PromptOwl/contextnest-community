@@ -605,6 +605,16 @@ export function createApp(): Hono<AuthEnv> {
     // routes — a grant on one doc never opens the rest of the nest.
     // targetTail is the path under /nodes/, i.e. the node id + any subresource
     // (versions, comments, annotations) — the same prefix a grant covers.
+    // Retrieval/query routes (context, query, search, export) are READ-tier:
+    // the body is a query, not a mutation — same class as GET /search &
+    // /export. A doc/folder grantee may use them; the handler scopes every
+    // result to their granted docs via filterAccessible, exactly like the node
+    // list. Deliberately NOT graph/publish (nest-write) or changes/overview
+    // (whole-nest views). parts.length===2 pins the exact /nests/:id/<route>.
+    const isReadQuery =
+      parts.length === 2 &&
+      ["context", "query", "search", "export"].includes(parts[1]);
+
     let grantRole: "read" | "write" | null = null;
     let grantNestVisible = false;
     if (permission === "none") {
@@ -627,6 +637,11 @@ export function createApp(): Hono<AuthEnv> {
       ) {
         // GET /nests/:id/nodes (the list) — allowed for grantees; the handler
         // (listNodesForCaller) filters to only the nodes they're granted.
+        grantNestVisible = await hasAnyGrant(nestId, userId);
+      } else if (isReadQuery) {
+        // Retrieval routes — a grantee may query/search/context/export; the
+        // handler's filterAccessible scopes every result to their grants, so
+        // they can never read past what they were shared (same as the list).
         grantNestVisible = await hasAnyGrant(nestId, userId);
       }
       if (!grantRole && !grantNestVisible) {
@@ -713,7 +728,8 @@ export function createApp(): Hono<AuthEnv> {
       c.req.method !== "GET" &&
       !isStewardActionPath &&
       !isCommentAction &&
-      !isAnnotationAction
+      !isAnnotationAction &&
+      !isReadQuery
     ) {
       required = "write";
     }
