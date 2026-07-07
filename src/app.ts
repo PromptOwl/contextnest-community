@@ -14,6 +14,7 @@ import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
+import { edgeRoutes } from "./workflow/edge-routes.js";
 import { definitionRoutes } from "./definitions/routes.js";
 import { assetRoutes } from "./nests/asset-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
@@ -781,6 +782,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
+  nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/definitions", definitionRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
