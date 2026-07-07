@@ -16,8 +16,10 @@ import { Hono } from "hono";
 import { v4 as uuid } from "uuid";
 import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
+import type { Querier } from "../db/adapter.js";
 import { engineCache } from "../nodes/engine.js";
 import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import {
   requireWorkflowPlane,
@@ -121,8 +123,14 @@ async function validateCondition(
   return { mode, stored: condition };
 }
 
-/** Reject a new flow edge that would close a cycle; names the path. */
+/**
+ * Reject a new flow edge that would close a cycle; names the path. Takes the
+ * query handle (a tx) so the read of existing flow edges and the caller's
+ * INSERT run under one BEGIN IMMEDIATE lock — otherwise two concurrent creates
+ * that each individually close a cycle could both pass this check.
+ */
 async function assertNoFlowCycle(
+  db: Querier,
   nestId: string,
   fromNode: string,
   toNode: string,
@@ -132,7 +140,6 @@ async function assertNoFlowCycle(
       `cycle: ["${fromNode}","${toNode}"] — flow edges must form a DAG`,
     );
   }
-  const db = getDb();
   const rows = (await db.all(
     `SELECT e.from_node, e.to_node FROM edges e
        JOIN edge_types t ON t.id = e.type_id
@@ -226,11 +233,17 @@ edgeRoutes.post("/", requireWorkflowPlane, async (c) => {
   if (!fromNode || !toNode || !typeRef) {
     throw new ValidationError("from_node, to_node, and type are required");
   }
+  // Body-supplied ids skip the URL-param containment guard in app.ts, and
+  // storage.readDocument below joins them into a filesystem path with no
+  // containment check of its own — a `..` segment would escape the nest vault
+  // and read another tenant's file. This is that chokepoint for this route.
+  assertSafeNodeId(fromNode);
+  assertSafeNodeId(toNode);
 
   const db = getDb();
-  const definedBy = await resolveCallerEmail(c.get("userId"));
-  // Seed attributes to the nest owner (see edge-type-routes); definedBy is
-  // the caller, used only for this edge's created_by below.
+  const createdBy = await resolveCallerEmail(c.get("userId"));
+  // Seed attributes to the nest owner (see edge-type-routes); createdBy is
+  // the caller, populating this edge's created_by column below.
   await seedDefaultEdgeTypes(nestId);
 
   const type = (await db.get(
@@ -258,9 +271,6 @@ edgeRoutes.post("/", requireWorkflowPlane, async (c) => {
     body.condition_mode as string | undefined,
     body.condition,
   );
-  if (type.is_flow) {
-    await assertNoFlowCycle(nestId, fromNode, toNode);
-  }
   const metadata =
     body.metadata === undefined || body.metadata === null
       ? null
@@ -268,12 +278,20 @@ edgeRoutes.post("/", requireWorkflowPlane, async (c) => {
 
   const now = new Date().toISOString();
   const id = uuid();
-  await db.run(
-    `INSERT INTO edges
-       (id, nest_id, from_node, to_node, type_id, condition_mode, condition, metadata, created_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, nestId, fromNode, toNode, type.id, mode, stored, metadata, definedBy, now, now],
-  );
+  // Cycle check + insert under one BEGIN IMMEDIATE lock so concurrent flow
+  // creates can't each pass the DAG guard against the pre-request graph and
+  // both land, closing a cycle.
+  await db.transaction(async (tx) => {
+    if (type.is_flow) {
+      await assertNoFlowCycle(tx, nestId, fromNode, toNode);
+    }
+    await tx.run(
+      `INSERT INTO edges
+         (id, nest_id, from_node, to_node, type_id, condition_mode, condition, metadata, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, nestId, fromNode, toNode, type.id, mode, stored, metadata, createdBy, now, now],
+    );
+  });
   const row = (await db.get("SELECT * FROM edges WHERE id = ?", [id])) as EdgeRow;
   return c.json({ edge: toResponse(row, type) }, 201);
 });

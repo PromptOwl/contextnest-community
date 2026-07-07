@@ -85,6 +85,18 @@ describe("edge creation + validation", () => {
     expect(badNode.data.error).toContain("nodes/ghost");
   });
 
+  it("rejects path-traversal node ids before they reach storage", async () => {
+    // `..` must be caught by assertSafeNodeId (400), not fall through to
+    // storage.readDocument where it could escape the nest vault.
+    const traversal = await mkEdge({
+      from_node: "../other-nest/nodes/secret",
+      to_node: "nodes/beta",
+      type: "next",
+    });
+    expect(traversal.status).toBe(400);
+    expect(traversal.data.error).toContain("traversal");
+  });
+
   it("carries conditions per mode; junk shapes 400", async () => {
     // Define a conditional type first.
     await jsonRequest(
