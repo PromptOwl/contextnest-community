@@ -14,7 +14,7 @@ import {
   forceCollide,
   type SimulationNodeDatum,
 } from "d3-force";
-import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check } from "lucide-react";
+import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, FolderTree } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
 import { Button } from "./ui/button";
 
@@ -24,7 +24,7 @@ interface Props {
   onBack: () => void;
 }
 
-type Kind = "doc" | "steward" | "tag" | "root";
+type Kind = "doc" | "steward" | "tag" | "root" | "folder";
 interface GNode extends SimulationNodeDatum {
   id: string;
   name: string;
@@ -35,7 +35,7 @@ interface GNode extends SimulationNodeDatum {
 interface GLink {
   source: string | GNode;
   target: string | GNode;
-  kind: "link" | "tag" | "steward";
+  kind: "link" | "tag" | "steward" | "structure";
 }
 
 const COLORS: Record<Kind, string> = {
@@ -43,10 +43,17 @@ const COLORS: Record<Kind, string> = {
   steward: "#16a34a",
   tag: "#f59e0b",
   root: "#64748b",
+  folder: "#a855f7",
 };
 
 function linkStroke(kind: GLink["kind"]): string {
-  return kind === "steward" ? "#16a34a66" : kind === "tag" ? "#f59e0b66" : "#94a3b8aa";
+  return kind === "steward"
+    ? "#16a34a66"
+    : kind === "tag"
+      ? "#f59e0b66"
+      : kind === "structure"
+        ? "#a855f766"
+        : "#94a3b8aa";
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -95,7 +102,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
   const [graph, setGraph] = useState<NestGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [layers, setLayers] = useState({ links: true, stewardship: true, categories: true });
+  const [layers, setLayers] = useState({ links: true, stewardship: true, categories: true, structure: true });
   const [selected, setSelected] = useState<GNode | null>(null);
   // Traversal depth for the highlighted neighborhood AND the copyable
   // query — the same number feeds the server's `hops` param, so what you
@@ -273,6 +280,47 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
     }
     if (layers.links) for (const l of graph.links) links.push({ ...l, kind: "link" });
 
+    // The nest root — shared by the Structure layer (below) and nest-scope
+    // stewardship. Added at most once regardless of which layer needs it.
+    const ensureRoot = () => {
+      if (!nodes.some((n) => n.id === "root:nest"))
+        nodes.push({ id: "root:nest", name: nestName, kind: "root", color: COLORS.root, val: 4 });
+    };
+
+    // ── Structure layer: nest → (folder →)* doc, so the whole nest reads as
+    // one connected tree even when docs share no wikilinks, and subfolder
+    // paths (engine ids `nodes/<a>/<b>/<slug>`) nest visibly under the root. ──
+    if (layers.structure) {
+      ensureRoot();
+      const seenStruct = new Set<string>();
+      const addStruct = (source: string, target: string) => {
+        const key = `${source}~>${target}`;
+        if (seenStruct.has(key)) return;
+        seenStruct.add(key);
+        links.push({ source, target, kind: "structure" });
+      };
+      const seenFolder = new Set<string>();
+      for (const n of graph.nodes) {
+        const parts = n.id.split("/").filter(Boolean);
+        // Drop the leading `nodes/` container and the filename slug; the middle
+        // segments are the folder chain.
+        const dirs = parts[0] === "nodes" ? parts.slice(1, -1) : parts.slice(0, -1);
+        let prev = "root:nest";
+        let acc = "";
+        for (const seg of dirs) {
+          acc = acc ? `${acc}/${seg}` : seg;
+          const fid = `folder:${acc}`;
+          if (!seenFolder.has(fid)) {
+            seenFolder.add(fid);
+            nodes.push({ id: fid, name: seg, kind: "folder", color: COLORS.folder, val: 2 });
+          }
+          addStruct(prev, fid);
+          prev = fid;
+        }
+        addStruct(prev, n.id);
+      }
+    }
+
     if (layers.categories) {
       for (const t of graph.tags)
         nodes.push({ id: `tag:${t.name}`, name: `#${t.name}`, kind: "tag", color: COLORS.tag, val: 1 + Math.min(t.count, 4) });
@@ -306,7 +354,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           links.push({ source: from, target: "root:nest", kind: "steward" });
         }
       }
-      if (needRoot) nodes.push({ id: "root:nest", name: nestName, kind: "root", color: COLORS.root, val: 4 });
+      if (needRoot) ensureRoot();
     }
 
     const present = new Set(nodes.map((n) => n.id));
@@ -386,6 +434,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
         <div className="flex items-center gap-3 text-sm">
           {(
             [
+              ["structure", "Structure", FolderTree],
               ["links", "Links", Link2],
               ["stewardship", "Stewardship", Users],
               ["categories", "Categories", Tag],
@@ -559,6 +608,8 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           )}
 
           <div className="text-xs text-muted-foreground space-y-1">
+            <Legend color={COLORS.root} label="Nest" />
+            <Legend color={COLORS.folder} label="Folder" />
             <Legend color={COLORS.doc} label="Document" />
             <Legend color="#ef4444" label="Orphan document" />
             <Legend color={COLORS.tag} label="Category / tag" />
