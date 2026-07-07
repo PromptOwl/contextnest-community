@@ -176,10 +176,14 @@ async function assertNoFlowCycle(
 }
 
 export const edgeRoutes = new Hono<AuthEnv>();
-edgeRoutes.use("*", requireWorkflowPlane);
+// Gate every route on the feature flag PER ROUTE, not via `use("*", …)`: this
+// router mounts under `/nests/:nestId/edges`, and a wildcard middleware there
+// flattens to `/nests/:nestId/edges/*` — a path with BOTH a `:label` and a `*`,
+// which the app's LinearRouter (chosen for multi-segment node ids) rejects with
+// UnsupportedPathError, wedging the whole app. Mirrors edge-type-routes.
 
 // GET /nests/:nestId/edges?type=<name|id>&node=<id>
-edgeRoutes.get("/", async (c) => {
+edgeRoutes.get("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const db = getDb();
   const typeFilter = c.req.query("type")?.trim();
@@ -213,7 +217,7 @@ edgeRoutes.get("/", async (c) => {
 });
 
 // POST /nests/:nestId/edges
-edgeRoutes.post("/", async (c) => {
+edgeRoutes.post("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const body = await c.req.json<Record<string, unknown>>();
   const fromNode = typeof body.from_node === "string" ? body.from_node.trim() : "";
@@ -275,7 +279,7 @@ edgeRoutes.post("/", async (c) => {
 });
 
 // DELETE /nests/:nestId/edges/:id
-edgeRoutes.delete("/:id", async (c) => {
+edgeRoutes.delete("/:id", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const id = c.req.param("id")!;
   const db = getDb();

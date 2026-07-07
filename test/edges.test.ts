@@ -35,6 +35,16 @@ beforeAll(async () => {
       owner.apiKey,
     );
   }
+  // Structured conditions validate their `term` against the glossary when the
+  // definitions table is present (it is), so define CAC up front — otherwise
+  // the structured-edge case below is correctly rejected as an undefined term.
+  await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/definitions`,
+    { term: "CAC", definition: "Customer acquisition cost." },
+    owner.apiKey,
+  );
 });
 
 afterAll(() => {
@@ -94,9 +104,11 @@ describe("edge creation + validation", () => {
     expect(ok.status).toBe(201);
     expect(ok.data.edge.condition).toEqual({ term: "CAC", op: ">", value: 500 });
 
+    // beta→owner-doc (not alpha→gamma): keep this flow edge off the
+    // alpha→beta→gamma spine so it can't shortcut the cycle test below.
     const nl = await mkEdge({
-      from_node: "nodes/alpha",
-      to_node: "nodes/gamma",
+      from_node: "nodes/beta",
+      to_node: "nodes/owner-doc",
       type: "escalates-when",
       condition_mode: "nl",
       condition: "if we lost on price rather than product",
