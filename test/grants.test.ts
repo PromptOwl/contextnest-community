@@ -69,6 +69,23 @@ describe("managing grants", () => {
       expect(res.status).toBe(400);
     }
   });
+
+  it("rejects a bare-root folder target (would share the whole nest)", async () => {
+    // Every node id is `nodes/…`, so a folder grant on the `nodes` root would
+    // match ALL of them. Reject it (and its trailing-slash spelling) so a
+    // scoped share can't silently become nest-wide.
+    for (const target of ["nodes", "nodes/"]) {
+      const res = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/grants`,
+        { target_type: "folder", target, email: guest.email, role: "read" },
+        owner.apiKey,
+      );
+      expect(res.status).toBe(400);
+    }
+    // (A legit subfolder grant is exercised in the folder-grant block below.)
+  });
 });
 
 describe("document grant — access is scoped to exactly that doc", () => {
