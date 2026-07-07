@@ -229,6 +229,23 @@ export default function App() {
           });
           return;
         }
+        // ?view=<sub> → land on a nest-scoped sub-page (shareable deep link).
+        const sub = params.get("view");
+        const subPage =
+          sub === "graph" ? "ontology-graph"
+          : sub === "edge" ? "edge-types"
+          : sub === "definitions" ? "definitions"
+          : null;
+        if (subPage) {
+          setView({
+            page: subPage,
+            nestId: nest.id,
+            nestName: nest.name,
+            isOwner: false,
+            isAnonOwned: false,
+          });
+          return;
+        }
         setView({
           page: "nest",
           nestId: nest.id,
@@ -255,12 +272,32 @@ export default function App() {
       params.set("nest", view.nestId);
       if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
       else params.delete("doc");
+      params.delete("view");
     } else if (view.page === "nest") {
       params.set("nest", view.nestId);
       params.delete("doc");
+      params.delete("view");
+    } else if (
+      // Nest-scoped sub-pages: keep ?nest and tag the sub-view so the address
+      // bar stays shareable instead of dropping the nest context.
+      view.page === "ontology-graph" ||
+      view.page === "edge-types" ||
+      view.page === "definitions"
+    ) {
+      params.set("nest", view.nestId);
+      params.delete("doc");
+      params.set(
+        "view",
+        view.page === "ontology-graph"
+          ? "graph"
+          : view.page === "edge-types"
+            ? "edge"
+            : "definitions",
+      );
     } else {
       params.delete("nest");
       params.delete("doc");
+      params.delete("view");
     }
     const qs = params.toString();
     const next =
