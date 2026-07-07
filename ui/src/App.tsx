@@ -10,11 +10,12 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen, ScrollText, BookMarked } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen, ScrollText, BookMarked, Workflow } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
 import { DefinitionsPage } from "./components/DefinitionsPage";
+import { EdgeTypesPage } from "./components/EdgeTypesPage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -85,6 +86,13 @@ type View =
     }
   | {
       page: "definitions";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    }
+  | {
+      page: "edge-types";
       nestId: string;
       nestName: string;
       isOwner: boolean;
@@ -533,6 +541,25 @@ export default function App() {
               </Button>
             )}
 
+            {view.page === "nest" && serverSettings?.workflow_plane_enabled && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setView({
+                    page: "edge-types",
+                    nestId: view.nestId,
+                    nestName: view.nestName,
+                    isOwner: view.isOwner,
+                    isAnonOwned: view.isAnonOwned,
+                  })
+                }
+              >
+                <Workflow className="h-3.5 w-3.5 mr-1" />
+                Edge Types
+              </Button>
+            )}
+
             {adminStatus?.me ? (
               <UserMenu
                 me={adminStatus.me}
@@ -734,6 +761,21 @@ export default function App() {
         })()}
         {view.page === "definitions" && (
           <DefinitionsPage
+            nestId={view.nestId}
+            nestName={view.nestName}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
+        )}
+        {view.page === "edge-types" && (
+          <EdgeTypesPage
             nestId={view.nestId}
             nestName={view.nestName}
             onBack={() =>
