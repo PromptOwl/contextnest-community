@@ -21,6 +21,7 @@ import {
 import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
+import TiptapImage from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
@@ -144,6 +145,7 @@ import {
   Quote,
   Code,
   Link as LinkIcon,
+  ImagePlus,
   FileText,
   Undo,
   Redo,
@@ -213,6 +215,9 @@ interface MarkdownEditorProps {
   currentNodeId?: string;
   /** Toolbar "Link to document" button calls this. Parent shows the picker. */
   onRequestDocLink?: () => void;
+  /** Toolbar "Image" button: upload the picked file, resolve to its URL.
+   *  Omit to hide the button (e.g. contexts with no asset storage). */
+  onUploadImage?: (file: File) => Promise<string>;
   /** Click on a `[[Title]]` decoration inside the editor. */
   onWikiLinkClick?: (title: string, id: string | null) => void;
   /** Click on an `@name` decoration. */
@@ -234,6 +239,7 @@ export const MarkdownEditor = forwardRef<
     nestId,
     currentNodeId,
     onRequestDocLink,
+    onUploadImage,
     onWikiLinkClick,
     onMentionClick,
     placeholder = "Start writing...",
@@ -339,6 +345,9 @@ export const MarkdownEditor = forwardRef<
       }),
       TaskList,
       TaskItem.configure({ nested: true }),
+      // Inline images — required for tiptap-markdown to round-trip ![alt](url)
+      // instead of dropping it. Rendering constrained via editor-styles.css.
+      TiptapImage.configure({ inline: false, allowBase64: false }),
       // `==text==` highlight. multicolor lets the color marks set a bg.
       Highlight.configure({ multicolor: true }),
       // Text color mark (in-editor + HTML export). Note: plain markdown has
@@ -943,6 +952,7 @@ export const MarkdownEditor = forwardRef<
             editor={editor}
             onLink={setLink}
             onRequestDocLink={onRequestDocLink}
+            onUploadImage={onUploadImage}
             previewing={previewing}
             onTogglePreview={() => setPreviewing((p) => !p)}
           />
@@ -1436,15 +1446,36 @@ function Toolbar({
   editor,
   onLink,
   onRequestDocLink,
+  onUploadImage,
   previewing,
   onTogglePreview,
 }: {
   editor: Editor;
   onLink: () => void;
   onRequestDocLink?: () => void;
+  onUploadImage?: (file: File) => Promise<string>;
   previewing: boolean;
   onTogglePreview: () => void;
 }) {
+  // Hidden file input driven by the Image toolbar button.
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const pickImage = () => imageInputRef.current?.click();
+  const onImagePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file || !onUploadImage) return;
+    try {
+      const url = await onUploadImage(file);
+      editor
+        .chain()
+        .focus()
+        .setImage({ src: url, alt: file.name.replace(/\.[^.]+$/, "") })
+        .run();
+    } catch (err: any) {
+      // Surface via the browser-native path — the editor has no toast scope.
+      alert(err?.message || "Image upload failed");
+    }
+  };
   // In preview mode every formatting affordance is irrelevant — collapse
   // the toolbar to just the toggle so the user has one obvious way back
   // to editing.
@@ -1587,6 +1618,20 @@ function Toolbar({
         >
           <FileText className="h-3.5 w-3.5" />
         </ToolbarButton>
+      )}
+      {onUploadImage && (
+        <>
+          <ToolbarButton onClick={pickImage} title="Insert image (uploads to this nest)">
+            <ImagePlus className="h-3.5 w-3.5" />
+          </ToolbarButton>
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp"
+            className="hidden"
+            onChange={onImagePicked}
+          />
+        </>
       )}
 
       <Divider />

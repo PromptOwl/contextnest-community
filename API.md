@@ -8,7 +8,7 @@ Default port: `3838` (override via `PORT` env)
 Two methods, evaluated in order:
 
 1. **Cookie session** — `cnst_session=<id>` (set by `/auth/login` and `/auth/register`). Browser default.
-2. **Bearer API key** — `Authorization: Bearer cnst_<token>` (issued by `/auth/keys` or `/auth/invite`). Use for Postman / external tools.
+2. **Bearer API key** — `Authorization: Bearer cnst_<token>` (issued by `/auth/keys`). Use for Postman / external tools.
 
 Anonymous open mode (`AUTH_MODE=open`) bypasses auth on most read endpoints.
 
@@ -74,19 +74,22 @@ Revoke a key.
 ```
 
 ### POST `/auth/invite` (admin only)
-Creates an invited user + fresh API key, returns the plaintext key for the admin to hand off.
+Creates an invited user and returns a **temporary password** (once) for the admin to hand off. No API key is minted — teammates sign in with the temp password, then mint their own key from the Connect modal.
 ```json
-{ "email": "teammate@x.com", "label": "designer" }
+{ "email": "teammate@x.com" }
 ```
-- New email → user row with `is_invited = 1` and a random placeholder password (claimable by the teammate via `/auth/register`).
-- Existing email → reuses user, replaces api_key.
+- New email → user row with `is_invited = 1` and a temporary password.
+- Existing, not-yet-claimed email (`is_invited = 1`, hasn't logged in) → refreshes the temp password.
+- Existing, claimed email (has logged in or set their own password, `is_invited = 0`) → `409`; use Reset password instead.
+
+`is_invited` clears to `0` on the teammate's first successful login (or when they set their own password).
 
 Response (201):
 ```json
 {
-  "api_key": "cnst_...",
+  "temporary_password": "...",
   "user": { "id": "...", "email": "..." },
-  "message": "Copy this key and share it securely — it won't be shown again."
+  "message": "Share this temporary password securely — it won't be shown again."
 }
 ```
 
@@ -115,7 +118,7 @@ In-platform password reset — **no email server**. Provide a password, or omit 
 ```json
 { "password": "optional, min 8 chars" }
 ```
-Response: `{ "ok": true, "email": "...", "keys_revoked": true, "temporary_password": "<only when generated>" }`. Also revokes the user's API keys + sessions (covers the compromised-account case). The hash is never returned.
+Response: `{ "ok": true, "email": "...", "keys_revoked": false, "temporary_password": "<only when generated>" }`. Invalidates the user's sessions but **keeps their API keys** (a reset shouldn't break a teammate's CLI/MCP). Revoke a key separately (`DELETE /auth/keys/:keyId`) if it may be compromised. The hash is never returned.
 
 ### DELETE `/auth/users/:userId` (admin only)
 Removes a user — revokes api_keys, sessions, steward rows, and collaborator grants, then deletes the account. `400` if you target yourself; `409` if the user still owns nests (transfer/delete them first). Authored docs on disk are unaffected.
@@ -275,10 +278,12 @@ Lists all readable docs.
     "author": "...",
     "created_at": "...",
     "updated_at": "...",
-    "content": "# md body"
+    "content": "# md body",
+    "schedule": "0 6 * * *"
   }]
 }
 ```
+- `schedule` is present only on runnable nodes (`type` `agent`/`skill`); omitted otherwise.
 
 ### POST `/nests/:nestId/nodes`
 ```json
@@ -288,10 +293,14 @@ Lists all readable docs.
   "tags": ["api", "v2"],
   "type": "document",
   "scope": "team",
-  "status": "draft"
+  "status": "draft",
+  "folder": "gtm/deals",
+  "schedule": "0 6 * * *"
 }
 ```
 - Slug derived from title → `nodes/<slug>`.
+- Optional `folder` (string) nests the doc → `nodes/<folder>/<slug>`. Each `/`-separated segment is slugified independently (so `../` or absolute paths can't escape the vault); empty segments drop. Max 8 levels deep; each segment (and the title slug) max 100 chars — otherwise `400`.
+- Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Auto-syncs tag index for steward resolution.
 
@@ -316,10 +325,12 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
   "title": "...",
   "content": "...",
   "tags": ["..."],
-  "changeNote": "fixed typo"
+  "changeNote": "fixed typo",
+  "schedule": "0 7 * * *"
 }
 ```
 Requires nest write permission.
+- `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
@@ -551,6 +562,60 @@ suggestions ("proposed an edit", read from nest storage) + reviews
 
 ---
 
+## 8b. Glossary definitions
+
+A literal table-based ontology per nest: stewards/editors define and articulate
+terms — existing `#tags` or brand-new vocabulary — and external runtimes (quant
+analysis jobs, agents) pull them in real time. One row per `(nest, term)`,
+case-insensitive. Reads are read-tier; writes are write-tier.
+
+### GET `/nests/:nestId/definitions`
+List the whole glossary, ordered by term.
+```json
+{
+  "count": 1,
+  "definitions": [{
+    "id": "...",
+    "nest_id": "...",
+    "term": "CAC",
+    "definition": "Customer acquisition cost: S&M spend / new customers, 90d.",
+    "linked_tag": "#gtm",
+    "defined_by": "owner@acme.com",
+    "created_at": "...",
+    "updated_at": "..."
+  }]
+}
+```
+
+### GET `/nests/:nestId/definitions?term=CAC`
+Real-time single lookup — one indexed, case-insensitive query. `404` if the term
+isn't defined.
+```json
+{ "definition": { "id": "...", "term": "CAC", "definition": "...", "linked_tag": "#gtm", "defined_by": "...", "created_at": "...", "updated_at": "..." } }
+```
+
+### POST `/nests/:nestId/definitions` (write+)
+Upsert by term text (case-insensitive). New term → `201`; re-defining an existing
+term updates it in place → `200`.
+```json
+{ "term": "CAC", "definition": "...", "linked_tag": "gtm", "editing_id": "<id?>" }
+```
+- `term` required, ≤ 200 chars. `definition` required. Non-string `term`/`definition`/`linked_tag` → `400`.
+- `linked_tag`: omit = leave unchanged on update; `null`/`""` = clear; string = set (normalized to `#lowercase`).
+- `editing_id` (optional): the id of the row being edited. Scopes the upsert to
+  that row so a **rename replaces it in place** instead of overwriting whichever
+  row happens to own the new term. If the new term already belongs to a
+  **different** row → `409` (no data loss). Unknown `editing_id` → `404`. Omit it
+  for the plain add form and real-time writers (pure upsert-by-term).
+
+### DELETE `/nests/:nestId/definitions/:id` (write+)
+```json
+{ "deleted": true }
+```
+`404` if the id isn't in this nest.
+
+---
+
 ## 9. Query / Search (read-only consumers)
 
 These power LLM context retrieval. Open-mode friendly.
@@ -708,6 +773,33 @@ Notes:
   `truncated: true` and `totalNodes` set; `signals` are still computed over the
   full set so the gap numbers stay accurate.
 
+### GET `/nests/:nestId/runnables` (read+)
+Orchestrator surface: every **runnable** node (`type` `agent` or `skill`) with its
+`schedule` and body in one call, so an external scheduler can connect, discover
+what to run and when, and pull the prompt/skill content. Reuses the same
+per-caller gating as the node list (`listNodesForCaller`), so stewardship and the
+public-reader approved-only rule apply — a read-tier orchestrator key only ever
+sees **approved** agent/skill definitions; unapproved drafts are omitted.
+
+```json
+{
+  "count": 1,
+  "runnables": [{
+    "id": "nodes/nightly-digest-agent",
+    "title": "Nightly Digest Agent",
+    "type": "agent",
+    "schedule": "0 6 * * *",
+    "status": "published",
+    "tags": ["#ops"],
+    "updated_at": "...",
+    "content": "# Agent\n\n..."
+  }]
+}
+```
+- `schedule` is `null` when the node carries no schedule.
+- Filtering to runnable types happens before the per-node governance/version
+  enrichment, so cost scales with the number of runnables, not total nest size.
+
 ### POST `/nests/:nestId/publish`
 Publishes the nest (snapshots + index).
 
@@ -723,6 +815,70 @@ Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same 
 - `context_sync_folder` — mirrors `POST /nests/unsynced/sync`. Args: `name` (folder path relative to `DATA_ROOT`).
 
 Both reuse the same `listUnsyncedFolders` / `syncUnsyncedFolder` service functions the REST routes call, so a single fix lands in both surfaces.
+
+---
+
+## 10. Admin / operator
+
+### GET `/admin/trace` (server-admin only)
+Operator activity trail — one newest-first row per API request and per MCP tool call, so the server admin has a single place to audit what every client and agent did. Server-admin only: the license admin, or a `super_admin` in `access.yaml` (open mode: always allowed). Everyone else gets `403`. Cross-tenant data; not scoped to a nest.
+
+Rows are best-effort fire-and-forget writes to the `api_events` table (a broken trace table never fails a real request) on a rolling **14-day** retention window. API rows come from a global request-logging middleware; MCP rows are logged inside `handleToolCall`, so both per-nest and server-level tool calls — including ones that throw — are captured.
+
+Query params (all optional):
+- `kind` — `api` or `mcp`. Omit for both.
+- `user` — substring match on caller email, or exact user id.
+- `nest` — filter to a single nest id.
+- `limit` — page size, clamped to `1..1000` (default `25`). Non-numeric values fall back to the default rather than erroring.
+- `offset` — rows to skip for pagination (default `0`). The UI pages in blocks of 25 (`offset = page * 25`).
+
+`total` is the full filtered row count (independent of `limit`/`offset`), so the client can render a pager. `count` is the number of rows on the current page.
+
+Response (200):
+```json
+{
+  "count": 2,
+  "total": 137,
+  "limit": 25,
+  "offset": 0,
+  "events": [
+    {
+      "id": 412,
+      "ts": "2026-07-03T13:58:44.812Z",
+      "kind": "mcp",
+      "method": null,
+      "path": null,
+      "tool": "context_overview",
+      "nest_id": "nest_abc",
+      "user_id": "usr_123",
+      "caller": "alice@acme.com",
+      "status": 200,
+      "duration_ms": 14
+    },
+    {
+      "id": 411,
+      "ts": "2026-07-03T13:58:44.790Z",
+      "kind": "api",
+      "method": "POST",
+      "path": "/nests/nest_abc/nodes",
+      "tool": null,
+      "nest_id": "nest_abc",
+      "user_id": "usr_123",
+      "caller": "alice@acme.com",
+      "status": 201,
+      "duration_ms": 23
+    }
+  ]
+}
+```
+- `kind` — `api` (HTTP request) or `mcp` (tool call).
+- `method` / `path` — set on `api` rows; `null` on `mcp` rows.
+- `tool` — set on `mcp` rows; `null` on `api` rows.
+- `caller` — resolved caller email (from the row's stored email or a join on `user_id`).
+- `status` — HTTP status for `api` rows; `200` (success) / `500` (threw) for `mcp` rows.
+- `duration_ms` — wall-clock duration of the call.
+
+Surfaced in the UI under the user menu → **Activity trace** (`ActivityTracePage`), with kind/user filters, 25-per-page pagination, and a refresh button.
 
 ---
 

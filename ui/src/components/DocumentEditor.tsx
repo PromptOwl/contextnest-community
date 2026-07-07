@@ -32,6 +32,7 @@ import {
   GitCompare,
   ChevronDown,
   Check,
+  Copy,
 } from "lucide-react";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { toast } from "sonner";
@@ -152,8 +153,14 @@ export function DocumentEditor({
   >([]);
 
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
+  // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
+  // moving an existing doc is a rename with backlink fallout, handled elsewhere.
+  const [folder, setFolder] = useState("");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState<string[]>([]);
+  // Orchestrator schedule (free-form cron/interval). Only meaningful for
+  // runnable node types (agent/skill); ignored/hidden otherwise. "" = none.
+  const [schedule, setSchedule] = useState("");
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
   // as markdown — once loaded we hand off to ArtifactViewer (see below).
   const [nodeType, setNodeType] = useState<string | null>(null);
@@ -215,8 +222,31 @@ export function DocumentEditor({
   const [rawMode, setRawMode] = useState(false);
   // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
   // "document" = the normal markdown editor. Only meaningful while isNew.
-  const [newType, setNewType] = useState<"document" | "artifact">("document");
+  const [newType, setNewType] = useState<
+    "document" | "artifact" | "agent" | "skill"
+  >("document");
   const isArtifactDraft = isNew && newType === "artifact";
+  // Runnable = orchestrator-facing node (agent/skill) that carries a schedule.
+  // For a new node it's the picked kind; for an existing one it's the loaded
+  // type. Drives whether the schedule field shows and is sent on save.
+  const isRunnable = isNew
+    ? newType === "agent" || newType === "skill"
+    : nodeType === "agent" || nodeType === "skill";
+  // Orchestrator fetch URL for this nest's runnable nodes — shown inline on
+  // agent/skill nodes so the user sees how an external scheduler pulls them.
+  const serverOrigin =
+    typeof window !== "undefined" ? window.location.origin : "";
+  const runnablesUrl = `${serverOrigin}/nests/${nestId}/runnables`;
+  const [copiedRunnables, setCopiedRunnables] = useState(false);
+  const copyRunnablesUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(runnablesUrl);
+      setCopiedRunnables(true);
+      setTimeout(() => setCopiedRunnables(false), 1500);
+    } catch {
+      /* clipboard blocked — no-op */
+    }
+  };
   // Inline anchored comments (annotations) parked beside the doc. commentMode
   // forces the rendered read view + highlight overlay even for editors, so
   // select-to-comment and painted highlights are reachable without TipTap
@@ -224,6 +254,8 @@ export function DocumentEditor({
   const [commentMode, setCommentMode] = useState(false);
   const [pendingAnchor, setPendingAnchor] = useState<api.AnnotationAnchor | null>(null);
   const [selPopover, setSelPopover] = useState<{ x: number; y: number } | null>(null);
+  // Anchor snapshotted at mouseup (selection is live then); consumed on click.
+  const stagedAnchorRef = useRef<api.AnnotationAnchor | null>(null);
   const docViewRef = useRef<HTMLDivElement | null>(null);
   const [anchoredThreads, setAnchoredThreads] = useState<api.AnnotationThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -231,8 +263,12 @@ export function DocumentEditor({
   const pendingFocusRef = useRef<string | null>(null);
 
   // Read the current selection inside the rendered doc and, if non-empty,
-  // surface a floating "Comment" button at the selection. Building the anchor
-  // is deferred to the click so we don't compute on every mouseup.
+  // surface a floating "Comment" button at the selection. We build the anchor
+  // HERE (mouseup), while the selection is guaranteed live, and stash it in
+  // stagedAnchorRef — the button click just consumes it. Deferring the build
+  // to the click loses selections the browser collapses over interactive/
+  // structured nodes (links render as <a>/<button>, headings as block
+  // elements), which is why the button used to do nothing on those.
   const onDocMouseUp = useCallback(() => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
@@ -249,39 +285,25 @@ export function DocumentEditor({
       setSelPopover(null);
       return;
     }
-    const rect = range.getBoundingClientRect();
-    // Anchor the button just above the selection (viewport/fixed coords).
-    setSelPopover({ x: rect.left + rect.width / 2, y: rect.top });
-  }, []);
 
-  // Turn the live selection into a resilient anchor: quote + up to 250c of
-  // surrounding rendered text + a best-effort source line hint.
-  //
-  // Offsets come from the actual selection Range — NOT String.indexOf — so that
-  // selecting the 2nd/3rd occurrence of a repeated phrase anchors to that exact
-  // spot. We measure against the same flat text the read side builds (raw text
-  // nodes concatenated in order, which is what Range.toString() yields), so the
-  // `before` tail that anchor-highlight.ts#locate uses to disambiguate matches.
-  const stageAnchorFromSelection = useCallback(() => {
-    const sel = window.getSelection();
-    const container = docViewRef.current;
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !container) return;
-    const range = sel.getRangeAt(0);
-    if (!container.contains(range.commonAncestorContainer)) return;
-
-    // Global char offset of a (node, offset) boundary within the container's
-    // flattened text: length of the text from container start up to that point.
+    // Turn the live selection into a resilient anchor: quote + up to 250c of
+    // surrounding rendered text + a best-effort source line hint.
+    //
+    // Offsets come from the actual selection Range — NOT String.indexOf — so
+    // that selecting the 2nd/3rd occurrence of a repeated phrase anchors to
+    // that exact spot. We measure against the same flat text the read side
+    // builds (raw text nodes concatenated in order, which is what
+    // Range.toString() yields), so the `before` tail that
+    // anchor-highlight.ts#locate uses to disambiguate matches stays consistent.
     const offsetOf = (node: Node, nodeOffset: number): number => {
       const r = document.createRange();
       r.setStart(container, 0);
       r.setEnd(node, nodeOffset);
       return r.toString().length;
     };
-
     const contents = document.createRange();
     contents.selectNodeContents(container);
     const full = contents.toString();
-
     let start = offsetOf(range.startContainer, range.startOffset);
     let end = offsetOf(range.endContainer, range.endOffset);
     if (start > end) [start, end] = [end, start];
@@ -289,17 +311,31 @@ export function DocumentEditor({
     // quote and its context stay consistent with the flattened text.
     while (start < end && /\s/.test(full[start])) start++;
     while (end > start && /\s/.test(full[end - 1])) end--;
-
     const quote = full.slice(start, end);
-    if (!quote) return;
+    if (!quote) {
+      setSelPopover(null);
+      return;
+    }
     const before = full.slice(Math.max(0, start - 250), start);
     const after = full.slice(end, end + 250);
     const srcIdx = content.indexOf(quote);
     const line = srcIdx >= 0 ? content.slice(0, srcIdx).split("\n").length : undefined;
-    setPendingAnchor({ quote, before, after, line });
-    setSelPopover(null);
-    sel.removeAllRanges();
+    stagedAnchorRef.current = { quote, before, after, line };
+
+    const rect = range.getBoundingClientRect();
+    // Anchor the button just above the selection (viewport/fixed coords).
+    setSelPopover({ x: rect.left + rect.width / 2, y: rect.top });
   }, [content]);
+
+  // Consume the anchor snapshotted at mouseup (selection was live then) and
+  // pin the pending comment to it.
+  const stageAnchorFromSelection = useCallback(() => {
+    const anchor = stagedAnchorRef.current;
+    if (!anchor) return;
+    setPendingAnchor(anchor);
+    setSelPopover(null);
+    window.getSelection()?.removeAllRanges();
+  }, []);
 
   // Rebuild the painted comment highlights whenever the doc text or the set
   // of anchored threads changes (and only in the rendered, non-diff view).
@@ -444,10 +480,12 @@ export function DocumentEditor({
     title: string;
     content: string;
     tags: string[];
+    schedule: string;
   }>({
     title: isNew && initialTitle ? initialTitle : "",
     content: "",
     tags: [],
+    schedule: "",
   });
 
   // Title as it was last LOADED from the server — only updated by loadNode,
@@ -464,7 +502,9 @@ export function DocumentEditor({
     Array<{ id: string; title: string; content?: string; tags?: string[] }>
   >([]);
   useEffect(() => {
-    if (isNew || loading) return;
+    // New docs need the list too — the folder picker derives its
+    // suggestions from existing node ids.
+    if (loading) return;
     let cancelled = false;
     (async () => {
       try {
@@ -487,6 +527,35 @@ export function DocumentEditor({
       cancelled = true;
     };
   }, [isNew, loading, nestId]);
+
+  // Every folder prefix in use (ids minus the nodes/ root and the leaf),
+  // so the folder picker suggests existing paths at each depth.
+  const folderOptions = useMemo(() => {
+    const opts = new Set<string>();
+    for (const n of nestNodes) {
+      const rel = n.id.startsWith("nodes/") ? n.id.slice(6) : n.id;
+      const segs = rel.split("/").slice(0, -1);
+      for (let i = 1; i <= segs.length; i++) opts.add(segs.slice(0, i).join("/"));
+    }
+    return [...opts].sort();
+  }, [nestNodes]);
+
+  // Folder path this doc lives under (id minus the "nodes/" root and the leaf
+  // slug), prettified for the header breadcrumb so users see where a nested
+  // doc sits. Empty for new docs and docs directly under nodes/.
+  const folderSegments = useMemo(() => {
+    if (isNew || !nodeId) return [];
+    const rel = nodeId.startsWith("nodes/") ? nodeId.slice(6) : nodeId;
+    return rel
+      .split("/")
+      .slice(0, -1)
+      .map((seg) =>
+        seg
+          .split("-")
+          .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+          .join(" "),
+      );
+  }, [isNew, nodeId]);
 
   // Docs in this nest that wiki-link to this one ("what links here").
   const backlinks = useMemo(
@@ -597,6 +666,9 @@ export function DocumentEditor({
       setContent(loadedContent);
       setTags(loadedTags);
       setNodeType(node?.type ?? null);
+      const loadedSchedule =
+        node?.schedule == null ? "" : String(node.schedule);
+      setSchedule(loadedSchedule);
       setBaseVersion(node?.version);
       setStatus(node?.status ?? null);
       setPendingChange((node as any)?.pendingChange ?? null);
@@ -607,6 +679,7 @@ export function DocumentEditor({
         title: loadedTitle,
         content: loadedContent,
         tags: loadedTags,
+        schedule: loadedSchedule,
       };
       loadedTitleRef.current = loadedTitle;
       setTouched(false);
@@ -652,7 +725,6 @@ export function DocumentEditor({
     // Always reopen compare in the default Source view, and reset on exit.
     setDiffRendered(false);
   }, []);
-
   // A pending-review doc is LOCKED: the server rejects edits/deletes with
   // 423 while a review is open (nodes/routes). Plain drafts stay editable —
   // only status==='pending_review' locks, so the editor flows normally until
@@ -681,8 +753,9 @@ export function DocumentEditor({
     for (let i = 0; i < tags.length; i++) {
       if (tags[i] !== snap.tags[i]) return true;
     }
+    if (schedule.trim() !== snap.schedule.trim()) return true;
     return false;
-  }, [touched, title, content, tags]);
+  }, [touched, title, content, tags, schedule]);
 
   const addTag = useCallback(() => {
     // Split on whitespace/comma; strip leading "#" (stored bare).
@@ -712,10 +785,23 @@ export function DocumentEditor({
     const payload = { title: title.trim(), content, tags };
     let savedId: string | undefined;
     if (isNew) {
-      const res = await api.createNode(nestId, { ...payload, type: newType });
+      const res = await api.createNode(nestId, {
+        ...payload,
+        type: newType,
+        ...(folder.trim() ? { folder: folder.trim() } : {}),
+        // schedule is server-rejected on non-runnable types, so only send it
+        // for agent/skill drafts.
+        ...(isRunnable ? { schedule: schedule.trim() } : {}),
+      });
       savedId = (res as any)?.node?.id;
     } else {
-      const res = await api.updateNode(nestId, nodeId, payload, baseVersion);
+      const res = await api.updateNode(
+        nestId,
+        nodeId,
+        // Only runnable nodes accept schedule; "" clears it server-side.
+        isRunnable ? { ...payload, schedule: schedule.trim() } : payload,
+        baseVersion,
+      );
       // Engine bumps version on publish; pick it up so next save's X-Base-Version matches.
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
@@ -726,6 +812,7 @@ export function DocumentEditor({
       title: payload.title,
       content,
       tags: [...tags],
+      schedule: schedule.trim(),
     };
     setTouched(false);
     return { ok: true, savedId };
@@ -877,9 +964,9 @@ export function DocumentEditor({
   // remounts DocumentViewer→MarkdownEditor and loses the caret/reflows.
   // Read-only sessions (view-only / locked / reviewer) keep the rendered view.
   useEffect(() => {
-    if (loading || mode === "edit") return;
+    if (loading || mode === "edit" || commentMode) return;
     if (!isViewOnly && !isLocked && !isReviewerOnly) setMode("edit");
-  }, [loading, isViewOnly, isLocked, isReviewerOnly, mode]);
+  }, [loading, isViewOnly, isLocked, isReviewerOnly, mode, commentMode]);
 
   // A doc can become locked while already in edit mode (e.g. the user just
   // submitted it for review). Kick back to read-only view so the editor
@@ -990,6 +1077,18 @@ export function DocumentEditor({
                 >
                   {entry.title}
                 </button>
+              </Fragment>
+            ))}
+            {/* Folder path (nested docs only) so the location is visible. */}
+            {folderSegments.map((seg, i) => (
+              <Fragment key={`folder-${i}`}>
+                <span className="text-muted-foreground shrink-0">›</span>
+                <span
+                  className="text-sm text-muted-foreground truncate max-w-[160px]"
+                  title={seg}
+                >
+                  {seg}
+                </span>
               </Fragment>
             ))}
             <span className="text-muted-foreground shrink-0">›</span>
@@ -1139,23 +1238,27 @@ export function DocumentEditor({
           >
             <Code2 className="h-4 w-4" />
           </Button>
-          {/* Write/review affordances hidden for public reader.
-              Copy link + Share nest collapsed into an overflow menu to keep
-              the header uncluttered; primary actions (Publish/Save) stay inline. */}
+          {/* Visible document-share action — copies the deep link the App's
+              ?nest=&doc= probe understands. Promoted out of the overflow menu
+              so sharing a single document is discoverable. */}
+          {!isNew && (
+            <Button
+              variant="outline"
+              size="sm"
+              title="Copy a shareable link to this document"
+              data-testid="document-editor-copy-link"
+              onClick={() => {
+                const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
+                navigator.clipboard.writeText(url);
+                toast.success("Link copied — recipient needs access to this nest");
+              }}
+            >
+              <LinkIcon className="h-4 w-4 mr-1" /> Share
+            </Button>
+          )}
+          {/* Share-nest (collaborators / visibility) stays in the overflow. */}
           {(() => {
             const moreActions: OverflowAction[] = [];
-            if (!isNew)
-              moreActions.push({
-                label: "Copy link",
-                icon: LinkIcon,
-                testId: "document-editor-copy-link",
-                onSelect: () => {
-                  // Deep link the App's ?nest=&doc= probe understands.
-                  const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
-                  navigator.clipboard.writeText(url);
-                  toast.success("Link copied — recipient needs access to this nest");
-                },
-              });
             if (canShare)
               moreActions.push({
                 label: "Share nest",
@@ -1163,13 +1266,13 @@ export function DocumentEditor({
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
               });
-            return (
+            return moreActions.length ? (
               <OverflowMenu
                 actions={moreActions}
                 variant="outline"
                 testId="document-editor-more"
               />
-            );
+            ) : null;
           })()}
         </div>
       </div>
@@ -1293,6 +1396,29 @@ export function DocumentEditor({
             </Alert>
           )}
 
+          {/* Folder (create-only): files the doc under nodes/<path>/ */}
+          {isNew && (
+            <div>
+              <label className="block mb-1 text-sm font-medium">Folder</label>
+              <Input
+                list="document-editor-folder-options"
+                value={folder}
+                onChange={(e) => {
+                  setFolder(e.target.value);
+                  setTouched(true);
+                }}
+                placeholder='Optional — e.g. "gtm/deals" to nest this document'
+                disabled={fieldsDisabled}
+                data-testid="document-editor-folder-input"
+              />
+              <datalist id="document-editor-folder-options">
+                {folderOptions.map((f) => (
+                  <option key={f} value={f} />
+                ))}
+              </datalist>
+            </div>
+          )}
+
           {/* Tags */}
           <div>
             <label className="block mb-1 text-sm font-medium">Tags</label>
@@ -1396,24 +1522,110 @@ export function DocumentEditor({
               );
             })()}
 
-          {/* New-document kind: markdown document vs hosted HTML artifact.
-              Only offered while authoring a new node; existing artifacts open
-              straight into the ArtifactViewer (handled above). */}
-          {isNew && !isViewOnly && (
-            <div className="max-w-[240px]">
-              <label className="block text-sm font-medium mb-1">Type</label>
-              <Select
-                value={newType}
-                onValueChange={(v) => setNewType(v as "document" | "artifact")}
-              >
-                <SelectTrigger data-testid="document-editor-type">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="document">Document (markdown)</SelectItem>
-                  <SelectItem value="artifact">Artifact (hosted HTML)</SelectItem>
-                </SelectContent>
-              </Select>
+          {/* Type + Schedule share one row: Type (new-doc kind) on the left,
+              Schedule (runnable orchestrator hint) on the right. Each takes half
+              when both show; a lone field spans the row. Existing artifacts open
+              straight into the ArtifactViewer (handled above), so Type is
+              create-only; Schedule shows for any agent/skill node. */}
+          {!isViewOnly && (isNew || isRunnable) && (
+            <div className="flex flex-col sm:flex-row gap-4 w-full">
+              {isNew && (
+                <div className="flex-1 min-w-0">
+                  <label className="block text-sm font-medium mb-1">Type</label>
+                  <Select
+                    value={newType}
+                    onValueChange={(v) =>
+                      setNewType(
+                        v as "document" | "artifact" | "agent" | "skill",
+                      )
+                    }
+                  >
+                    <SelectTrigger data-testid="document-editor-type">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="document">
+                        Document (markdown)
+                      </SelectItem>
+                      <SelectItem value="artifact">
+                        Artifact (hosted HTML)
+                      </SelectItem>
+                      <SelectItem value="agent">Agent (runnable)</SelectItem>
+                      <SelectItem value="skill">Skill (runnable)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
+              {isRunnable && (
+                <div className="flex-1 min-w-0">
+                  <label
+                    htmlFor="document-editor-schedule"
+                    className="block text-sm font-medium mb-1"
+                  >
+                    Schedule{" "}
+                    <span className="font-normal text-muted-foreground">
+                      (cron / interval — optional)
+                    </span>
+                  </label>
+                  <input
+                    id="document-editor-schedule"
+                    data-testid="document-editor-schedule"
+                    type="text"
+                    value={schedule}
+                    placeholder="e.g. 0 6 * * *  or  @daily"
+                    onChange={(e) => {
+                      setSchedule(e.target.value);
+                      setTouched(true);
+                      scheduleAutosave();
+                    }}
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Opaque to this server — an external orchestrator parses it
+                    and runs the{" "}
+                    {newType === "skill" || nodeType === "skill"
+                      ? "skill"
+                      : "agent"}
+                    . Leave blank for none.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Runnable-node discovery hint: where an orchestrator fetches this
+              node (+ every other agent/skill in the nest). Shown for agent/skill
+              nodes, including read-only viewers, so the API surface is
+              discoverable from the doc itself. */}
+          {isRunnable && (
+            <div className="w-full rounded-md border border-dashed bg-muted/40 px-3 py-2.5">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <span className="text-xs font-medium text-muted-foreground">
+                  Orchestrator fetch — this {nodeType === "skill" || newType === "skill" ? "skill" : "agent"} appears here
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 shrink-0"
+                  onClick={copyRunnablesUrl}
+                  title="Copy URL"
+                >
+                  {copiedRunnables ? (
+                    <Check className="h-3 w-3 text-green-600" />
+                  ) : (
+                    <Copy className="h-3 w-3" />
+                  )}
+                </Button>
+              </div>
+              <code className="block text-[11px] font-mono break-all text-foreground/80">
+                GET {runnablesUrl}
+              </code>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Returns every runnable node (approved agent/skill) with its
+                schedule + content, so an external scheduler can discover what to
+                run and when.
+              </p>
             </div>
           )}
 
@@ -1583,6 +1795,10 @@ export function DocumentEditor({
                 currentNodeId={isNew ? undefined : nodeId}
                 editable={!fieldsDisabled}
                 onRequestDocLink={() => setShowDocPicker(true)}
+                onUploadImage={async (file) => {
+                  const { url } = await api.uploadAsset(nestId, file);
+                  return url;
+                }}
                 onWikiLinkClick={handleWikiLinkClick}
                 placeholder="Start writing..."
               />

@@ -11,7 +11,6 @@ import { isSuperAdmin } from "./access-service.js";
 import { ConflictError, ValidationError } from "../shared/errors.js";
 import { buildTitleMap } from "./title-resolver.js";
 import { resolveNestPermission } from "../shared/access.js";
-import { isLicenseAdminEmail } from "../auth/license.js";
 import { nestAllowsSelfApprove } from "../nests/service.js";
 import { config } from "../config.js";
 import {
@@ -603,13 +602,23 @@ export interface PermissionResult {
 /**
  * Can this user manage the steward roster (assign/remove/sync)? Single
  * authority shared by REST (app.ts), MCP, and any other caller so the rule
- * lives in one place. Only the server admin governs stewards:
+ * lives in one place. Stewards are governed by:
  *   - open mode has no real auth — everyone is effectively owner
  *   - the license/server admin, or an access.yaml super_admin
+ *   - the nest owner or an admin collaborator on THIS nest — so an owner can
+ *     delegate people-management (collaborators AND stewards) by granting
+ *     admin, instead of every roster change routing through the server admin
  */
-export function canManageStewards(userEmail: string): boolean {
+export async function canManageStewards(
+  nestId: string,
+  userId: string,
+): Promise<boolean> {
   if (config.AUTH_MODE === "open") return true;
-  return isLicenseAdminEmail(userEmail) || isSuperAdmin(userEmail);
+  // resolveNestPermission already folds the license admin and access.yaml
+  // super_admins into nest-level "admin", so one lookup covers server admins,
+  // the nest owner, and admin collaborators — no separate email round-trip.
+  const perm = await resolveNestPermission(nestId, userId);
+  return perm === "owner" || perm === "admin";
 }
 
 /**

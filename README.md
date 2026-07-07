@@ -89,6 +89,8 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 | Feature | Community Edition | Enterprise |
 |---|:---:|:---:|
 | Self-hosted context server | ✅ | ✅ |
+| SQLite or PostgreSQL / Cloud SQL backend | ✅ | ✅ |
+| Configurable nest storage (external / GCS volume mount) | ✅ | ✅ |
 | Markdown + YAML frontmatter vaults | ✅ | ✅ |
 | Import existing folder / vault | ✅ | ✅ |
 | Markdown rendering + wiki cross-linking | ✅ | ✅ |
@@ -109,6 +111,17 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 | Priority support and SLA | — | ✅ |
 
 For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <https://promptowl.ai/contextnest/>.
+
+## What's new in 1.6.0
+
+- **PostgreSQL / Cloud SQL backend** — run the server on PostgreSQL alongside SQLite via an async DB adapter, so metadata survives on Cloud Run and other deployments where local disk isn't durable. Supports the Cloud SQL Auth Proxy (unix socket) and TCP + TLS. New `DB_*` env vars (`DB_DRIVER`, `DATABASE_URL`, `CLOUD_SQL_CONNECTION_NAME`, `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME`, `DB_POOL_MAX`, `DB_SSL`, `DB_SSL_CA`); SQLite stays the default when nothing is configured. See [CONFIGURATION.md](./CONFIGURATION.md).
+- **Configurable `NEST_STORAGE_ROOT`** — store nest vault files (markdown + version history) outside `DATA_ROOT` — e.g. on a Cloud Storage (GCS) volume mount — while the database stays on `DATA_ROOT`. Defaults to `<DATA_ROOT>/nests`, so existing deployments are unchanged. On a GCS FUSE mount, set `DRIFT_SCAN_INTERVAL_MS=0` and run a single instance.
+- **Security fix** — the admin guard on `/admin/settings` (GET/PATCH) is now correctly awaited; without it a non-admin could read or change server-wide settings in key mode.
+- **AdminLoginModal respects `PROMPTOWL_SIGN_IN_GATE`** — the "Sign in with PromptOwl" affordance follows the configured gate (`open` / `admin-only` / `disabled`).
+- **Drift scanner toggle** — `DRIFT_SCAN_INTERVAL_MS=0` now actually disables the drift scanner (previously reset to the 30s default).
+- **Safer folder sync** — unsynced-folder detection no longer treats a configured nest storage root as a sync candidate, preventing accidental duplication/removal of live nests when `NEST_STORAGE_ROOT` is nested under `DATA_ROOT`.
+
+Full history in [CHANGELOG.md](./CHANGELOG.md).
 
 ## What's new in 1.3.0
 
