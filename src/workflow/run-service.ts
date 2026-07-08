@@ -16,7 +16,8 @@
 import { v4 as uuid } from "uuid";
 import type { NestStorage } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
-import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.js";
+import { config } from "../config.js";
+import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { safeJson } from "../shared/json.js";
 
 export const RUNNABLE_TYPES = ["agent", "skill"];
@@ -33,6 +34,8 @@ export interface RunRow {
   trace: string | null;
   started_at: string;
   finished_at: string | null;
+  parent_run_id: string | null;
+  depth: number;
 }
 
 /** Flow-edge subgraph reachable from the agent node (BFS, directed). */
@@ -110,6 +113,82 @@ export async function referencedDefinitions(
   }
 }
 
+/**
+ * Sub-agent recursion guard (FEATURE_SUBAGENT_RUNS). Given a claimed parent
+ * run, validate it and return {depth}. Enforces:
+ *   - parent exists, same nest, still running (can't graft onto a closed run)
+ *   - depth ≤ SUBAGENT_MAX_DEPTH (finite tree = haltable)
+ *   - re-entrancy: the child agent isn't already anywhere in the ancestor
+ *     chain (agent A→B→A would loop forever; the per-nest flow DAG guard
+ *     can't see across run boundaries, so this is the cross-run cycle check)
+ *   - fan-out ≤ SUBAGENT_MAX_CHILDREN (depth bounds height, this bounds width)
+ * Gated: with the flag off, ANY parent_run_id is rejected. Throws
+ * ValidationError / NotFoundError / ForbiddenError / ConflictError.
+ */
+export async function resolveParentRun(
+  nestId: string,
+  parentRunId: string,
+  childAgent: string,
+): Promise<{ depth: number }> {
+  if (!config.FEATURE_SUBAGENT_RUNS) {
+    throw new ValidationError(
+      "Sub-agent runs are not enabled on this server (FEATURE_SUBAGENT_RUNS).",
+    );
+  }
+  const db = getDb();
+  const seen = new Set<string>();
+  let cursor: string | null = parentRunId;
+  let parentDepth = -1;
+  // Walk the ancestor chain to the root, collecting agent_nodes. The depth
+  // cap also bounds this walk, so a corrupted chain can't loop unbounded.
+  for (let i = 0; i <= config.SUBAGENT_MAX_DEPTH + 1; i++) {
+    if (!cursor) break;
+    const row = (await db.get(
+      "SELECT id, nest_id, agent_node, status, depth, parent_run_id FROM runs WHERE id = ?",
+      [cursor],
+    )) as
+      | { id: string; nest_id: string; agent_node: string; status: string; depth: number; parent_run_id: string | null }
+      | undefined;
+    if (!row) throw new NotFoundError(`Parent run not found: ${cursor}`);
+    if (row.nest_id !== nestId) {
+      // Never let a parent in another nest pull a child into this one.
+      throw new ForbiddenError("Parent run belongs to a different nest");
+    }
+    if (cursor === parentRunId && row.status !== "running") {
+      throw new ConflictError(
+        `Parent run is ${row.status} — cannot spawn a sub-agent under a closed run`,
+      );
+    }
+    if (row.agent_node === childAgent || seen.has(childAgent)) {
+      throw new ConflictError(
+        `re-entrancy: "${childAgent}" is already running in this call chain — sub-agent recursion must be acyclic`,
+      );
+    }
+    seen.add(row.agent_node);
+    if (cursor === parentRunId) parentDepth = row.depth;
+    cursor = row.parent_run_id;
+  }
+  const depth = parentDepth + 1;
+  if (depth > config.SUBAGENT_MAX_DEPTH) {
+    throw new ForbiddenError(
+      `sub-agent depth ${depth} exceeds the limit of ${config.SUBAGENT_MAX_DEPTH}`,
+    );
+  }
+  // Depth bounds tree HEIGHT; this bounds WIDTH. Without it, a parent could
+  // spawn unbounded siblings (each passes the per-chain checks) — a fork bomb
+  // of DB rows and per-spawn work. Together they cap total tree size.
+  const kids = (await db.get(
+    "SELECT COUNT(*) as c FROM runs WHERE parent_run_id = ?",
+    [parentRunId],
+  )) as { c: number };
+  if (kids.c >= config.SUBAGENT_MAX_CHILDREN) {
+    throw new ForbiddenError(
+      `parent run already has ${kids.c} children (limit ${config.SUBAGENT_MAX_CHILDREN})`,
+    );
+  }
+  return { depth };
+}
+
 /** Load one run row (no permission check — the caller gates). */
 export async function loadRun(runId: string): Promise<RunRow | undefined> {
   return (await getDb().get("SELECT * FROM runs WHERE id = ?", [runId])) as
@@ -119,6 +198,8 @@ export async function loadRun(runId: string): Promise<RunRow | undefined> {
 
 export interface RunBundle {
   run_id: string;
+  parent_run_id: string | null;
+  depth: number;
   agent: {
     id: string;
     title: string;
@@ -142,6 +223,7 @@ export async function triggerRun(opts: {
   inputs: unknown;
   triggeredBy: string;
   storage: NestStorage;
+  parentRunId?: unknown;
 }): Promise<RunBundle> {
   const { nestId, agentNode, inputs, triggeredBy, storage } = opts;
   let doc;
@@ -157,13 +239,26 @@ export async function triggerRun(opts: {
     );
   }
 
+  // Sub-agent (nested) run? Validate the parent chain before creating anything
+  // — the guard bounds depth, fan-out, and cross-run cycles (and is the flag
+  // gate). A plain top-level run leaves parent null / depth 0.
+  let parentRunId: string | null = null;
+  let depth = 0;
+  if (opts.parentRunId !== undefined && opts.parentRunId !== null) {
+    if (typeof opts.parentRunId !== "string") {
+      throw new ValidationError("parent_run_id must be a string");
+    }
+    ({ depth } = await resolveParentRun(nestId, opts.parentRunId, agentNode));
+    parentRunId = opts.parentRunId;
+  }
+
   const edges = await flowSubgraph(nestId, agentNode);
   const definitions = await referencedDefinitions(nestId, edges);
 
   const id = `run_${uuid()}`;
   await getDb().run(
-    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at)
-     VALUES (?, ?, ?, ?, 'running', ?, ?)`,
+    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth)
+     VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`,
     [
       id,
       nestId,
@@ -171,11 +266,15 @@ export async function triggerRun(opts: {
       triggeredBy,
       inputs === undefined ? null : JSON.stringify(inputs),
       new Date().toISOString(),
+      parentRunId,
+      depth,
     ],
   );
 
   return {
     run_id: id,
+    parent_run_id: parentRunId,
+    depth,
     agent: {
       id: agentNode,
       title: String(doc.frontmatter.title ?? agentNode),

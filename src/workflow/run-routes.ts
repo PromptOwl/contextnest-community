@@ -17,7 +17,7 @@ import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { config } from "../config.js";
-import { AppError, NotFoundError, ForbiddenError, ConflictError, ValidationError } from "../shared/errors.js";
+import { AppError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { isSuspended, getSuspensionReason, getCurrentLicense } from "../auth/license.js";
@@ -32,7 +32,6 @@ import {
   listRuns,
   type RunRow,
 } from "./run-service.js";
-import { getDb } from "../db/client.js";
 
 // ─── Nest-scoped routes: trigger + list ─────────────────────────────────
 
@@ -44,80 +43,6 @@ export const runTriggerRoutes = new Hono<AuthEnv>();
 // LinearRouter (chosen for multi-segment node ids) rejects with
 // UnsupportedPathError, wedging the WHOLE app on the first request. Mirrors the
 // same fix in edge-routes / edge-type-routes.
-
-/**
- * Sub-agent recursion guard (FEATURE_SUBAGENT_RUNS). Given a claimed parent
- * run, validate it and return {depth, ancestors}. Enforces:
- *   - parent exists, same nest, still running (can't graft onto a closed run)
- *   - depth ≤ SUBAGENT_MAX_DEPTH (finite tree = haltable)
- *   - re-entrancy: the child agent isn't already anywhere in the ancestor
- *     chain (agent A→B→A would loop forever; the per-nest flow DAG guard
- *     can't see across run boundaries, so this is the cross-run cycle check)
- * The whole thing is gated: with the flag off, ANY parent_run_id is rejected.
- */
-async function resolveParentRun(
-  nestId: string,
-  parentRunId: string,
-  childAgent: string,
-): Promise<{ depth: number }> {
-  if (!config.FEATURE_SUBAGENT_RUNS) {
-    throw new ValidationError(
-      "Sub-agent runs are not enabled on this server (FEATURE_SUBAGENT_RUNS).",
-    );
-  }
-  const db = getDb();
-  const seen = new Set<string>();
-  let cursor: string | null = parentRunId;
-  let parentDepth = -1;
-  // Walk the ancestor chain to the root, collecting agent_nodes. The depth
-  // cap also bounds this walk, so a corrupted chain can't loop unbounded.
-  for (let i = 0; i <= config.SUBAGENT_MAX_DEPTH + 1; i++) {
-    if (!cursor) break;
-    const row = (await db.get(
-      "SELECT id, nest_id, agent_node, status, depth, parent_run_id FROM runs WHERE id = ?",
-      [cursor],
-    )) as
-      | { id: string; nest_id: string; agent_node: string; status: string; depth: number; parent_run_id: string | null }
-      | undefined;
-    if (!row) throw new NotFoundError(`Parent run not found: ${cursor}`);
-    if (row.nest_id !== nestId) {
-      // Never let a parent in another nest pull a child into this one.
-      throw new ForbiddenError("Parent run belongs to a different nest");
-    }
-    if (cursor === parentRunId && row.status !== "running") {
-      throw new ConflictError(
-        `Parent run is ${row.status} — cannot spawn a sub-agent under a closed run`,
-      );
-    }
-    if (row.agent_node === childAgent || seen.has(childAgent)) {
-      throw new ConflictError(
-        `re-entrancy: "${childAgent}" is already running in this call chain — sub-agent recursion must be acyclic`,
-      );
-    }
-    seen.add(row.agent_node);
-    if (cursor === parentRunId) parentDepth = row.depth;
-    cursor = row.parent_run_id;
-  }
-  const depth = parentDepth + 1;
-  if (depth > config.SUBAGENT_MAX_DEPTH) {
-    throw new ForbiddenError(
-      `sub-agent depth ${depth} exceeds the limit of ${config.SUBAGENT_MAX_DEPTH}`,
-    );
-  }
-  // Depth bounds tree HEIGHT; this bounds WIDTH. Without it, a parent could
-  // spawn unbounded siblings (each passes the per-chain checks) — a fork bomb
-  // of DB rows and per-spawn work. Together they cap total tree size.
-  const kids = (await db.get(
-    "SELECT COUNT(*) as c FROM runs WHERE parent_run_id = ?",
-    [parentRunId],
-  )) as { c: number };
-  if (kids.c >= config.SUBAGENT_MAX_CHILDREN) {
-    throw new ForbiddenError(
-      `parent run already has ${kids.c} children (limit ${config.SUBAGENT_MAX_CHILDREN})`,
-    );
-  }
-  return { depth };
-}
 
 // POST /nests/:nestId/run/:agentNode{.+}
 runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
@@ -143,6 +68,7 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
     inputs: body.inputs,
     triggeredBy,
     storage,
+    parentRunId: body.parent_run_id,
   });
   return c.json(bundle, 201);
 });

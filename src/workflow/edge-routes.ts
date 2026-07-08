@@ -19,7 +19,6 @@ import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
 import { engineCache } from "../nodes/engine.js";
 import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.js";
-import { assertSafeNodeId } from "../shared/node-id.js";
 import { safeJson } from "../shared/json.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
