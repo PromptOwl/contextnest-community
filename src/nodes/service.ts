@@ -17,7 +17,8 @@ import {
   resolveCallerEmail,
   filterAccessible,
 } from "../governance/access-guard.js";
-import { isPublicReader } from "../shared/access.js";
+import { isPublicReader, resolveNestPermission } from "../shared/access.js";
+import { listUserGrants, grantCoversNode } from "../governance/grants-service.js";
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import { ANON_USER_ID } from "../shared/constants.js";
@@ -135,7 +136,23 @@ export async function listNodesForCaller(
   }
 
   const userEmail = await resolveCallerEmail(userId);
-  const accessible = await filterAccessible(nestId, userId, userEmail, documents);
+  let accessible = await filterAccessible(nestId, userId, userEmail, documents);
+
+  // Share grants: a caller with NO nest-wide permission sees exactly the
+  // documents their grants cover — never the whole list. filterAccessible's
+  // stewardship-OFF path returns the entire nest (open read), which must NOT
+  // apply to a non-member, so narrow it to their grant-covered docs. With
+  // stewardship ON, filterAccessible already restricted to
+  // steward-accessible + grant-covered, so there's nothing to narrow.
+  if (
+    (await resolveNestPermission(nestId, userId)) === "none" &&
+    !(await isStewardshipEnabled(nestId))
+  ) {
+    const grants = await listUserGrants(nestId, userId);
+    accessible = grants.length
+      ? documents.filter((d) => grantCoversNode(grants, d.id))
+      : accessible;
+  }
   const publicReader = await isPublicReader(nestId, userId);
 
   const enriched = await Promise.all(
@@ -384,9 +401,23 @@ export async function registerImportedDocuments(
   }
 
   let registered = 0;
-  for (const doc of docs) {
+  for (let doc of docs) {
     const nodeId = doc.id;
     if ((await versions.getCurrentVersion(nestId, nodeId)) > 0) continue; // already tracked
+
+    // Imported markdown often ships without a frontmatter `title:`, which
+    // would list the doc as untitled. Fall back to the filename (leaf of the
+    // node id) and persist it to disk BEFORE publish so the title sticks.
+    if (!doc.frontmatter?.title) {
+      const title = nodeId.split("/").pop() || nodeId;
+      doc = { ...doc, frontmatter: { ...doc.frontmatter, title } };
+      try {
+        await storage.writeDocument(nodeId, serializeDocument(doc));
+      } catch (err) {
+        console.error("import: failed to persist filename title", nodeId, err);
+      }
+    }
+
     const rawTags = Array.isArray(doc.frontmatter?.tags)
       ? doc.frontmatter.tags
       : [];

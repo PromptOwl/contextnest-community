@@ -5,14 +5,25 @@ import { cors } from "hono/cors";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
+import { grantRoutes } from "./nests/grant-routes.js";
 import { listNests, listSharedNests } from "./nests/service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import { resolveStewardsForNode } from "./governance/stewardship-service.js";
+import { resolveNodeGrant, hasAnyGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
+import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
+import { edgeRoutes } from "./workflow/edge-routes.js";
+import {
+  runTriggerRoutes,
+  runListRoutes,
+  runDetailRoutes,
+} from "./workflow/run-routes.js";
+import { definitionRoutes } from "./definitions/routes.js";
+import { assetRoutes } from "./nests/asset-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
 import { isSuperAdmin } from "./governance/access-service.js";
 import {
@@ -29,7 +40,7 @@ import {
   type NestPermission,
 } from "./shared/access.js";
 import { AppError } from "./shared/errors.js";
-import { config } from "./config.js";
+import { config, isEmailish, isEmailListish } from "./config.js";
 import { getDb } from "./db/client.js";
 import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
@@ -188,6 +199,14 @@ export function createApp(): Hono<AuthEnv> {
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+      // Public feature flags the SPA needs before auth to decide what to
+      // render. Mirrors the server-side route gate so UI and API agree:
+      // flag off → the plane's routes 404 AND its UI stays hidden.
+      workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+      // Sub-agent runs gate its own recursion surface separately (env-only,
+      // must clear a security review — NOT a UI toggle). Exposed read-only so
+      // the Runs page shows the "spawn sub-agent" option only when it's live.
+      subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     }),
   );
@@ -303,7 +322,12 @@ export function createApp(): Hono<AuthEnv> {
     telemetry_enabled: config.TELEMETRY_ENABLED,
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
+    workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+    subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
+    smtp_url: config.SMTP_URL ?? "",
+    notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
+    notify_email_to: config.NOTIFY_EMAIL_TO ?? "",
   });
 
   app.get("/admin/settings", async (c) => {
@@ -345,6 +369,33 @@ export function createApp(): Hono<AuthEnv> {
     if ("telemetry_enabled" in body) {
       pending.push({ name: "TELEMETRY_ENABLED", value: body.telemetry_enabled ? "true" : "false" });
     }
+    if ("workflow_plane_enabled" in body) {
+      pending.push({
+        name: "FEATURE_WORKFLOW_PLANE",
+        value: body.workflow_plane_enabled ? "true" : null,
+      });
+    }
+    if ("subagent_runs_enabled" in body) {
+      // Depends on the plane: enabling recursion without the plane's run routes
+      // is inert (they'd 404). Honour the plane state THIS request sets, so a
+      // single patch can turn both on together. This flag opens a recursion
+      // surface — it's gated separately by design and should only be flipped
+      // after the security review the feature ships behind.
+      const planeOn =
+        "workflow_plane_enabled" in body
+          ? !!body.workflow_plane_enabled
+          : config.FEATURE_WORKFLOW_PLANE;
+      if (body.subagent_runs_enabled && !planeOn) {
+        errors.push(
+          "subagent_runs_enabled requires workflow_plane_enabled to be on",
+        );
+      } else {
+        pending.push({
+          name: "FEATURE_SUBAGENT_RUNS",
+          value: body.subagent_runs_enabled ? "true" : null,
+        });
+      }
+    }
     if ("slack_webhook_url" in body) {
       const v = String(body.slack_webhook_url ?? "").trim();
       // Empty clears (connector off). A webhook URL carries an implicit
@@ -352,6 +403,28 @@ export function createApp(): Hono<AuthEnv> {
       if (v && !/^https:\/\//i.test(v))
         errors.push("slack_webhook_url must be an https:// URL (or empty to disable)");
       else pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
+    }
+    if ("smtp_url" in body) {
+      const v = String(body.smtp_url ?? "").trim();
+      if (v && !/^smtps?:\/\//i.test(v))
+        errors.push("smtp_url must be an smtp:// or smtps:// URL (or empty to disable)");
+      else pending.push({ name: "SMTP_URL", value: v || null });
+    }
+    // Shape check (something@something, no CR/LF) — these flow into
+    // nodemailer's envelope, so junk and header-injection shapes stop here.
+    // Same guard the config getters apply, so env-set and UI-set values gate
+    // identically.
+    if ("notify_email_from" in body) {
+      const v = String(body.notify_email_from ?? "").trim();
+      if (v && !isEmailish(v))
+        errors.push("notify_email_from must be a plain email address");
+      else pending.push({ name: "NOTIFY_EMAIL_FROM", value: v || null });
+    }
+    if ("notify_email_to" in body) {
+      const v = String(body.notify_email_to ?? "").trim();
+      if (v && !isEmailListish(v))
+        errors.push("notify_email_to must be a comma-separated list of email addresses");
+      else pending.push({ name: "NOTIFY_EMAIL_TO", value: v || null });
     }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);
@@ -453,6 +526,10 @@ export function createApp(): Hono<AuthEnv> {
       users: usersRow.c,
     });
   });
+
+  // === Runner-facing run detail routes (turing) ===
+  app.use("/runs/*", flexAuthMiddleware);
+  app.route("/runs", runDetailRoutes);
 
   // === Agent entry point: /llms.txt (public manual), /index (person nest
   // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
@@ -556,8 +633,55 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     const permission = await resolveNestPermission(nestId, userId);
+
+    // Document/folder share grant: a caller BELOW nest access may still reach
+    // a specific granted node (or a bare nest read, so a shared-doc deep link
+    // loads the nest shell). Scoped strictly to the granted node's own
+    // routes — a grant on one doc never opens the rest of the nest.
+    // targetTail is the path under /nodes/, i.e. the node id + any subresource
+    // (versions, comments, annotations) — the same prefix a grant covers.
+    // Retrieval/query routes (context, query, search, export) are READ-tier:
+    // the body is a query, not a mutation — same class as GET /search &
+    // /export. A doc/folder grantee may use them; the handler scopes every
+    // result to their granted docs via filterAccessible, exactly like the node
+    // list. Deliberately NOT graph/publish (nest-write) or changes/overview
+    // (whole-nest views). parts.length===2 pins the exact /nests/:id/<route>.
+    const isReadQuery =
+      parts.length === 2 &&
+      ["context", "query", "search", "export"].includes(parts[1]);
+
+    let grantRole: "read" | "write" | null = null;
+    let grantNestVisible = false;
     if (permission === "none") {
-      return c.json({ error: "Nest not found" }, 404);
+      if (parts[1] === "nodes" && parts.length >= 3) {
+        let targetTail = parts.slice(2).join("/");
+        try {
+          targetTail = decodeURIComponent(targetTail);
+        } catch {
+          /* malformed escape — resolve as-is */
+        }
+        grantRole = await resolveNodeGrant(nestId, userId, targetTail);
+      } else if (parts.length === 1 && c.req.method === "GET") {
+        // GET /nests/:id (bare) — let a grantee see the nest name so a shared
+        // link resolves; the node LIST stays filtered to their grants.
+        grantNestVisible = await hasAnyGrant(nestId, userId);
+      } else if (
+        parts[1] === "nodes" &&
+        parts.length === 2 &&
+        c.req.method === "GET"
+      ) {
+        // GET /nests/:id/nodes (the list) — allowed for grantees; the handler
+        // (listNodesForCaller) filters to only the nodes they're granted.
+        grantNestVisible = await hasAnyGrant(nestId, userId);
+      } else if (isReadQuery) {
+        // Retrieval routes — a grantee may query/search/context/export; the
+        // handler's filterAccessible scopes every result to their grants, so
+        // they can never read past what they were shared (same as the list).
+        grantNestVisible = await hasAnyGrant(nestId, userId);
+      }
+      if (!grantRole && !grantNestVisible) {
+        return c.json({ error: "Nest not found" }, 404);
+      }
     }
 
     let required: NestPermission = "read";
@@ -639,7 +763,8 @@ export function createApp(): Hono<AuthEnv> {
       c.req.method !== "GET" &&
       !isStewardActionPath &&
       !isCommentAction &&
-      !isAnnotationAction
+      !isAnnotationAction &&
+      !isReadQuery
     ) {
       required = "write";
     }
@@ -686,9 +811,20 @@ export function createApp(): Hono<AuthEnv> {
       }
     }
 
+    // A share grant on the targeted node counts toward the requirement, but
+    // only for that node's routes (grantRole is null elsewhere) and never for
+    // nest-management routes. grantNestVisible (bare nest read / filtered list)
+    // satisfies the read requirement without conferring write.
+    const grantLevel = grantRole
+      ? permissionLevel(grantRole)
+      : grantNestVisible
+        ? permissionLevel("read")
+        : 0;
+    const effectiveLevel = Math.max(permissionLevel(permission), grantLevel);
+
     if (
       !stewardEditorBypass &&
-      permissionLevel(permission) < permissionLevel(required)
+      effectiveLevel < permissionLevel(required)
     ) {
       return c.json(
         {
@@ -700,7 +836,12 @@ export function createApp(): Hono<AuthEnv> {
       );
     }
 
-    c.set("nestPermission", permission);
+    // Downstream sees the grant role when the caller is acting purely via a
+    // grant (nest permission "none") — so node handlers treat them correctly.
+    c.set(
+      "nestPermission",
+      permission === "none" && grantRole ? grantRole : permission,
+    );
     return next();
   });
 
@@ -741,6 +882,13 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/nodes", nodeRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
+  nestsApp.route("/:nestId/grants", grantRoutes);
+  nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
+  nestsApp.route("/:nestId/edges", edgeRoutes);
+  nestsApp.route("/:nestId/run", runTriggerRoutes);
+  nestsApp.route("/:nestId/runs", runListRoutes);
+  nestsApp.route("/:nestId/definitions", definitionRoutes);
+  nestsApp.route("/:nestId/assets", assetRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);

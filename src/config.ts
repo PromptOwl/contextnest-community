@@ -34,6 +34,23 @@ let canonicalEnvLoaded: string | null = null;
 // env value (set directly, bypassing the /admin/settings validator) would
 // spam the log on every submit/approve/reject/add-collaborator.
 let slackUrlWarned = false;
+let emailFromWarned = false;
+let emailToWarned = false;
+
+/**
+ * Loose email shape gate for the notification envelope: something@something,
+ * no whitespace, no CR/LF. `\s` already excludes interior newlines; the extra
+ * CR/LF reject closes the JS quirk where a non-`m` `$` still matches before a
+ * single trailing "\n" (header-injection shape). Shared by config getters and
+ * the /admin/settings validator so env-set and UI-set values gate identically.
+ */
+export function isEmailish(v: string): boolean {
+  return /^[^\s@]+@[^\s@]+$/.test(v) && !/[\r\n]/.test(v);
+}
+/** Comma-separated recipient list where every entry is isEmailish(). */
+export function isEmailListish(v: string): boolean {
+  return v.split(",").every((e) => isEmailish(e.trim()));
+}
 if (
   !isTestRun &&
   canonicalEnvFile !== envFileLoaded &&
@@ -215,11 +232,103 @@ export const config = {
     }
     return raw;
   },
+  /**
+   * Workflow plane ("turing" track): typed edges, edge-type registry, runs.
+   * OFF by default — an optional feature an admin turns on (env or Settings).
+   * This flag is also the future license-tier hook: gating a paid tier here
+   * is a one-line change because every plane route checks it per request.
+   */
+  get FEATURE_WORKFLOW_PLANE(): boolean {
+    return process.env.FEATURE_WORKFLOW_PLANE === "true";
+  },
+  /**
+   * Sub-agent runs: lets a run spawn nested runs (an external runner calling
+   * back into POST /run for a child agent). Gated SEPARATELY from the base
+   * plane because recursion is the risky surface — unbounded fan-out,
+   * re-entrancy, resource exhaustion. Off by default; must clear a security
+   * review before an operator turns it on. Requires FEATURE_WORKFLOW_PLANE too.
+   */
+  get FEATURE_SUBAGENT_RUNS(): boolean {
+    return process.env.FEATURE_SUBAGENT_RUNS === "true";
+  },
+  /** Hard ceiling on sub-agent nesting depth — keeps the call tree finite
+   *  (haltable / statically bounded). Clamped to [1, 32]. */
+  get SUBAGENT_MAX_DEPTH(): number {
+    const n = parseInt(process.env.SUBAGENT_MAX_DEPTH || "8", 10);
+    return Number.isFinite(n) ? Math.min(32, Math.max(1, n)) : 8;
+  },
+  /** Max direct children a single run may spawn. Depth bounds the tree's
+   *  height; this bounds its width — together they cap total size so a
+   *  runner can't fork-bomb the DB. Clamped to [1, 128]. */
+  get SUBAGENT_MAX_CHILDREN(): number {
+    const n = parseInt(process.env.SUBAGENT_MAX_CHILDREN || "16", 10);
+    return Number.isFinite(n) ? Math.min(128, Math.max(1, n)) : 16;
+  },
+  /** Max steps a single run may accumulate — bounds a runaway/hostile
+   *  runner's step log. Clamped to [10, 100000]. */
+  get RUN_MAX_STEPS(): number {
+    const n = parseInt(process.env.RUN_MAX_STEPS || "10000", 10);
+    return Number.isFinite(n) ? Math.min(100000, Math.max(10, n)) : 10000;
+  },
   get AUTH_MODE(): "open" | "key" {
     // Default is "key" — requires an explicit AUTH_MODE=open to run
     // without authentication. Safer default for public deployments;
     // local/dev users opt in explicitly.
     return (process.env.AUTH_MODE || "key") as "open" | "key";
+  },
+  /**
+   * Optional SMTP connection URL for email notifications, e.g.
+   * smtps://user:pass@smtp.example.com:465. smtp:// or smtps:// only.
+   * Empty/unset = email connector off. Requires NOTIFY_EMAIL_FROM/_TO.
+   */
+  get SMTP_URL(): string | null {
+    const raw = process.env.SMTP_URL?.trim();
+    if (!raw) return null;
+    if (!/^smtps?:\/\//i.test(raw)) {
+      console.warn(
+        "[config] SMTP_URL rejected: must be an smtp:// or smtps:// URL. Email notifications disabled.",
+      );
+      return null;
+    }
+    return raw;
+  },
+  /**
+   * From address for notification emails. Shape-validated here (not only in
+   * the /admin/settings PATCH) so a value set directly via env/Docker can't
+   * reach nodemailer's envelope unchecked. Invalid = connector off.
+   */
+  get NOTIFY_EMAIL_FROM(): string | null {
+    const raw = process.env.NOTIFY_EMAIL_FROM?.trim();
+    if (!raw) return null;
+    if (!isEmailish(raw)) {
+      if (!emailFromWarned) {
+        emailFromWarned = true;
+        console.warn(
+          "[config] NOTIFY_EMAIL_FROM rejected: must be a plain email address. Email notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
+  },
+  /**
+   * Comma-separated recipient list for notification emails. Shape-validated
+   * here for the same env-bypass reason as NOTIFY_EMAIL_FROM. Invalid (any
+   * entry malformed) = connector off.
+   */
+  get NOTIFY_EMAIL_TO(): string | null {
+    const raw = process.env.NOTIFY_EMAIL_TO?.trim();
+    if (!raw) return null;
+    if (!isEmailListish(raw)) {
+      if (!emailToWarned) {
+        emailToWarned = true;
+        console.warn(
+          "[config] NOTIFY_EMAIL_TO rejected: must be a comma-separated list of email addresses. Email notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
   },
   /**
    * Optional Slack incoming-webhook URL for team notifications (review
@@ -240,6 +349,20 @@ export const config = {
       return null;
     }
     return raw;
+  },
+  /**
+   * Per-nest notification digest window in milliseconds. A burst of governance
+   * events on one nest inside this window collapses into a single digest
+   * message instead of one post per event. Empty / non-numeric / negative /
+   * unset → 15000 (15s).
+   */
+  get NOTIFY_DEBOUNCE_MS(): number {
+    // Guard empty-but-set (NOTIFY_DEBOUNCE_MS=) first: Number("") is 0, not
+    // NaN, so it would otherwise yield a 0ms window instead of the default.
+    const raw = process.env.NOTIFY_DEBOUNCE_MS?.trim();
+    if (!raw) return 15_000;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 15_000;
   },
   /**
    * CORS origin allowlist. Comma-separated list of origins or "*".

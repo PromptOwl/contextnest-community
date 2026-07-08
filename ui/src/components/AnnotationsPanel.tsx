@@ -217,9 +217,9 @@ export function AnnotationsPanel({
               commenting
                 ? undefined
                 : (e) => {
-                  e.preventDefault();
-                  onSetCommentMode?.(true);
-                }
+                    e.preventDefault();
+                    onSetCommentMode?.(true);
+                  }
             }
             onFocus={commenting ? undefined : () => onSetCommentMode?.(true)}
             placeholder={
@@ -230,10 +230,11 @@ export function AnnotationsPanel({
                 : "Turn on comment mode to comment…"
             }
             rows={2}
-            className={`w-full rounded-md border px-3 py-2 text-sm resize-y ${commenting
-              ? "border-input bg-background"
-              : "border-dashed border-input bg-muted/50 text-muted-foreground cursor-pointer"
-              }`}
+            className={`w-full rounded-md border px-3 py-2 text-sm resize-y ${
+              commenting
+                ? "border-input bg-background"
+                : "border-dashed border-input bg-muted/50 text-muted-foreground cursor-pointer"
+            }`}
             data-testid="annotations-new"
           />
           {commenting && (
@@ -261,19 +262,21 @@ export function AnnotationsPanel({
                 ref={(el) => {
                   itemRefs.current[t.id] = el;
                 }}
-                className={`rounded-md border p-3 transition-shadow ${activeThreadId === t.id
-                  ? "border-amber-400 ring-2 ring-amber-300/60"
-                  : t.status === "resolved"
-                    ? "border-emerald-200 bg-emerald-50/40 dark:bg-emerald-950/20"
-                    : "border-border"
-                  }`}
+                className={`rounded-md border p-3 transition-shadow ${
+                  activeThreadId === t.id
+                    ? "border-amber-400 ring-2 ring-amber-300/60"
+                    : t.status === "resolved"
+                      ? "border-emerald-200 bg-emerald-50/40 dark:bg-emerald-950/20"
+                      : "border-border"
+                }`}
               >
                 <div className="flex items-center justify-between mb-2">
                   <span
-                    className={`text-[10px] px-1.5 py-0.5 rounded ${t.status === "resolved"
-                      ? "bg-emerald-100 text-emerald-800"
-                      : "bg-amber-100 text-amber-800"
-                      }`}
+                    className={`text-[10px] px-1.5 py-0.5 rounded ${
+                      t.status === "resolved"
+                        ? "bg-emerald-100 text-emerald-800"
+                        : "bg-amber-100 text-amber-800"
+                    }`}
                   >
                     {t.status}
                   </span>
@@ -293,7 +296,7 @@ export function AnnotationsPanel({
                 )}
 
                 {/* First comment is the thread root; the rest are replies,
-                  nested under it with a connector rail. */}
+                    nested under it with a connector rail. */}
                 {t.comments.length > 0 && (
                   <div className="text-sm">
                     <div className="text-xs text-muted-foreground">

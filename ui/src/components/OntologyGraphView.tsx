@@ -14,7 +14,7 @@ import {
   forceCollide,
   type SimulationNodeDatum,
 } from "d3-force";
-import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check } from "lucide-react";
+import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, FolderTree } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
 import { Button } from "./ui/button";
 
@@ -24,7 +24,7 @@ interface Props {
   onBack: () => void;
 }
 
-type Kind = "doc" | "steward" | "tag" | "root";
+type Kind = "doc" | "steward" | "tag" | "root" | "folder";
 interface GNode extends SimulationNodeDatum {
   id: string;
   name: string;
@@ -35,7 +35,7 @@ interface GNode extends SimulationNodeDatum {
 interface GLink {
   source: string | GNode;
   target: string | GNode;
-  kind: "link" | "tag" | "steward";
+  kind: "link" | "tag" | "steward" | "structure";
 }
 
 const COLORS: Record<Kind, string> = {
@@ -43,10 +43,17 @@ const COLORS: Record<Kind, string> = {
   steward: "#16a34a",
   tag: "#f59e0b",
   root: "#64748b",
+  folder: "#a855f7",
 };
 
 function linkStroke(kind: GLink["kind"]): string {
-  return kind === "steward" ? "#16a34a66" : kind === "tag" ? "#f59e0b66" : "#94a3b8aa";
+  return kind === "steward"
+    ? "#16a34a66"
+    : kind === "tag"
+      ? "#f59e0b66"
+      : kind === "structure"
+        ? "#a855f766"
+        : "#94a3b8aa";
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -95,7 +102,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
   const [graph, setGraph] = useState<NestGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [layers, setLayers] = useState({ links: true, stewardship: true, categories: true });
+  const [layers, setLayers] = useState({ links: true, stewardship: true, categories: true, structure: true });
   const [selected, setSelected] = useState<GNode | null>(null);
   // Traversal depth for the highlighted neighborhood AND the copyable
   // query — the same number feeds the server's `hops` param, so what you
@@ -107,13 +114,21 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
   const [size, setSize] = useState({ w: 800, h: 560 });
   const [sim, setSim] = useState<{ nodes: GNode[]; links: GLink[] }>({ nodes: [], links: [] });
 
-  // ── Pan / zoom ──
+  // ── Pan / zoom + node drag ──
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1 });
-  const drag = useRef<{ active: boolean; px: number; py: number }>({
-    active: false,
-    px: 0,
-    py: 0,
-  });
+  const [panning, setPanning] = useState(false);
+  // One gesture at a time: either panning the canvas or dragging a node.
+  const drag = useRef<
+    | { mode: "pan"; px: number; py: number }
+    | { mode: "node"; node: GNode; moved: boolean }
+    | null
+  >(null);
+
+  // client px → world coords (undo pan + zoom), for node dragging.
+  const toWorld = (clientX: number, clientY: number) => {
+    const r = svgRef.current!.getBoundingClientRect();
+    return { x: (clientX - r.left - view.x) / view.k, y: (clientY - r.top - view.y) / view.k };
+  };
 
   // Fit the laid-out graph into the viewport (centred, padded). Used on first
   // layout and via the Fit button so a large graph never spills off-screen.
@@ -166,20 +181,46 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
     // browser's default ctrl+wheel zooms the whole page instead of the graph.
   }, [size.w, size.h, loading, error]);
 
+  // Pointer down on empty canvas → pan. Capture on the svg so moves keep
+  // routing here even when the cursor leaves a node during a drag.
   const onPanStart = (e: ReactPointerEvent) => {
-    drag.current = { active: true, px: e.clientX, py: e.clientY };
-    (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    svgRef.current?.setPointerCapture?.(e.pointerId);
+    drag.current = { mode: "pan", px: e.clientX, py: e.clientY };
+    setPanning(true);
+  };
+  // Pointer down on a node → drag that node (stops the pan from also starting).
+  const onNodeDown = (e: ReactPointerEvent, n: GNode) => {
+    e.stopPropagation();
+    svgRef.current?.setPointerCapture?.(e.pointerId);
+    drag.current = { mode: "node", node: n, moved: false };
   };
   const onPanMove = (e: ReactPointerEvent) => {
-    if (!drag.current.active) return;
-    const dx = e.clientX - drag.current.px;
-    const dy = e.clientY - drag.current.py;
-    drag.current.px = e.clientX;
-    drag.current.py = e.clientY;
-    setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+    const d = drag.current;
+    if (!d) return;
+    if (d.mode === "pan") {
+      const dx = e.clientX - d.px;
+      const dy = e.clientY - d.py;
+      d.px = e.clientX;
+      d.py = e.clientY;
+      setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+    } else {
+      d.moved = true;
+      const p = toWorld(e.clientX, e.clientY);
+      d.node.x = p.x;
+      d.node.y = p.y;
+      // Lines reference the same node objects, so a new array ref re-renders both.
+      setSim((s) => ({ ...s, nodes: s.nodes.slice() }));
+    }
   };
-  const onPanEnd = () => {
-    drag.current.active = false;
+  const onPanEnd = (e: ReactPointerEvent) => {
+    const d = drag.current;
+    svgRef.current?.releasePointerCapture?.(e.pointerId);
+    // A node press that never moved is a click → toggle selection.
+    if (d?.mode === "node" && !d.moved) {
+      setSelected((cur) => (cur?.id === d.node.id ? null : d.node));
+    }
+    drag.current = null;
+    setPanning(false);
   };
 
   useEffect(() => {
@@ -239,6 +280,47 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
     }
     if (layers.links) for (const l of graph.links) links.push({ ...l, kind: "link" });
 
+    // The nest root — shared by the Structure layer (below) and nest-scope
+    // stewardship. Added at most once regardless of which layer needs it.
+    const ensureRoot = () => {
+      if (!nodes.some((n) => n.id === "root:nest"))
+        nodes.push({ id: "root:nest", name: nestName, kind: "root", color: COLORS.root, val: 4 });
+    };
+
+    // ── Structure layer: nest → (folder →)* doc, so the whole nest reads as
+    // one connected tree even when docs share no wikilinks, and subfolder
+    // paths (engine ids `nodes/<a>/<b>/<slug>`) nest visibly under the root. ──
+    if (layers.structure) {
+      ensureRoot();
+      const seenStruct = new Set<string>();
+      const addStruct = (source: string, target: string) => {
+        const key = `${source}~>${target}`;
+        if (seenStruct.has(key)) return;
+        seenStruct.add(key);
+        links.push({ source, target, kind: "structure" });
+      };
+      const seenFolder = new Set<string>();
+      for (const n of graph.nodes) {
+        const parts = n.id.split("/").filter(Boolean);
+        // Drop the leading `nodes/` container and the filename slug; the middle
+        // segments are the folder chain.
+        const dirs = parts[0] === "nodes" ? parts.slice(1, -1) : parts.slice(0, -1);
+        let prev = "root:nest";
+        let acc = "";
+        for (const seg of dirs) {
+          acc = acc ? `${acc}/${seg}` : seg;
+          const fid = `folder:${acc}`;
+          if (!seenFolder.has(fid)) {
+            seenFolder.add(fid);
+            nodes.push({ id: fid, name: seg, kind: "folder", color: COLORS.folder, val: 2 });
+          }
+          addStruct(prev, fid);
+          prev = fid;
+        }
+        addStruct(prev, n.id);
+      }
+    }
+
     if (layers.categories) {
       for (const t of graph.tags)
         nodes.push({ id: `tag:${t.name}`, name: `#${t.name}`, kind: "tag", color: COLORS.tag, val: 1 + Math.min(t.count, 4) });
@@ -272,7 +354,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           links.push({ source: from, target: "root:nest", kind: "steward" });
         }
       }
-      if (needRoot) nodes.push({ id: "root:nest", name: nestName, kind: "root", color: COLORS.root, val: 4 });
+      if (needRoot) ensureRoot();
     }
 
     const present = new Set(nodes.map((n) => n.id));
@@ -352,6 +434,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
         <div className="flex items-center gap-3 text-sm">
           {(
             [
+              ["structure", "Structure", FolderTree],
               ["links", "Links", Link2],
               ["stewardship", "Stewardship", Users],
               ["categories", "Categories", Tag],
@@ -367,6 +450,14 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
               {label}
             </label>
           ))}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setView({ x: 0, y: 0, k: 1 })}
+            title="Reset pan & zoom"
+          >
+            Reset view
+          </Button>
         </div>
       </div>
 
@@ -392,24 +483,19 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           )}
           {!loading && !error && (
             <>
+              {/* Pan handlers live on the svg itself: dragging empty canvas
+                  pans, node presses stopPropagation and drag their node. */}
               <svg
                 ref={svgRef}
                 width={size.w}
                 height={size.h}
                 className="block touch-none"
+                style={{ cursor: panning ? "grabbing" : "grab" }}
+                onPointerDown={onPanStart}
+                onPointerMove={onPanMove}
+                onPointerUp={onPanEnd}
+                onPointerLeave={onPanEnd}
               >
-                {/* Background pan surface — dragging here pans; node clicks
-                    sit above it and aren't intercepted. */}
-                <rect
-                  width={size.w}
-                  height={size.h}
-                  fill="transparent"
-                  style={{ cursor: drag.current.active ? "grabbing" : "grab" }}
-                  onPointerDown={onPanStart}
-                  onPointerMove={onPanMove}
-                  onPointerUp={onPanEnd}
-                  onPointerLeave={onPanEnd}
-                />
                 <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
                   <g>
                     {sim.links.map((l, i) => {
@@ -440,10 +526,8 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
                         <g
                           key={n.id}
                           transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
-                          onClick={() =>
-                            setSelected((cur) => (cur?.id === n.id ? null : n))
-                          }
-                          style={{ cursor: "pointer" }}
+                          onPointerDown={(e) => onNodeDown(e, n)}
+                          style={{ cursor: "grab" }}
                           opacity={inHood ? 1 : 0.25}
                         >
                           <circle
@@ -524,6 +608,8 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
           )}
 
           <div className="text-xs text-muted-foreground space-y-1">
+            <Legend color={COLORS.root} label="Nest" />
+            <Legend color={COLORS.folder} label="Folder" />
             <Legend color={COLORS.doc} label="Document" />
             <Legend color="#ef4444" label="Orphan document" />
             <Legend color={COLORS.tag} label="Category / tag" />

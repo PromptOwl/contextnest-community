@@ -47,9 +47,20 @@ export interface AuthContextValue {
   adminStatus: AdminStatus | null;
   authenticated: boolean;
   isAdmin: boolean;
+  /** Public feature flag from /health — the server's route gate, so the UI
+   *  hides the workflow plane exactly when the API would 404 it. */
+  workflowPlaneEnabled: boolean;
+  /** Public feature flag from /health — sub-agent (nested) runs. Gated
+   *  separately from the plane; when off the UI hides the "spawn sub-agent"
+   *  option exactly when the API would reject a parent_run_id (400). */
+  subagentRunsEnabled: boolean;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
+  /** Re-read the public feature flags from /health and update them live —
+   *  call after an admin toggles a flag in Settings so gated UI (workflow
+   *  plane, sub-agent runs) reacts without a full page reload. */
+  refreshHealth: () => Promise<void>;
   loginSuccess: (user?: LoginSuccessUser) => void;
   logout: () => Promise<void>;
 }
@@ -59,6 +70,8 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: PropsWithChildren) {
   const [authMode, setAuthMode] = useState<AuthMode>(null);
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [workflowPlaneEnabled, setWorkflowPlaneEnabled] = useState(false);
+  const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
   const [adminStatus, setAdminStatus] = useState<AdminStatus | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -76,6 +89,17 @@ export function AuthProvider({ children }: PropsWithChildren) {
     },
     [],
   );
+
+  const refreshHealth = useCallback(async () => {
+    try {
+      const h = await api.getHealth();
+      setLogoUrl(h.logo_url ?? null);
+      setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+      setSubagentRunsEnabled(!!h.subagent_runs_enabled);
+    } catch {
+      /* keep the last-known flags on a transient health failure */
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     const mySeq = ++seqRef.current;
@@ -104,6 +128,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         const mode = h.auth_mode as AuthMode;
         setAuthMode(mode);
         setLogoUrl(h.logo_url ?? null);
+        setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+        setSubagentRunsEnabled(!!h.subagent_runs_enabled);
 
         const status = await api.getAdminStatus();
         if (cancelled) return;
@@ -239,9 +265,12 @@ export function AuthProvider({ children }: PropsWithChildren) {
         adminStatus,
         authenticated,
         isAdmin,
+        workflowPlaneEnabled,
+        subagentRunsEnabled,
         loading,
         error,
         refresh,
+        refreshHealth,
         loginSuccess,
         logout,
       }}

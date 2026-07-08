@@ -48,6 +48,11 @@ const HISTORICAL_MIGRATIONS = [
   "012_merge_case_colliding_users",
   "013_node_deletion_tombstones",
   "014_api_events",
+  "015_definitions",
+  "016_workflow_edges",
+  "017_workflow_runs",
+  "018_subagent_runs",
+  "019_grants",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -286,6 +291,75 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_comments_thread
       ON comments(parent_id);
 
+    CREATE TABLE IF NOT EXISTS grants (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      target_type TEXT NOT NULL CHECK(target_type IN ('document', 'folder')),
+      target TEXT NOT NULL,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK(role IN ('read', 'write')),
+      granted_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_unique
+      ON grants(nest_id, target_type, target, user_id);
+    CREATE INDEX IF NOT EXISTS idx_grants_user ON grants(nest_id, user_id);
+
+    CREATE TABLE IF NOT EXISTS edge_types (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      direction TEXT NOT NULL DEFAULT 'directed'
+        CHECK(direction IN ('directed', 'undirected')),
+      is_flow INTEGER NOT NULL DEFAULT 0,
+      condition_schema TEXT,
+      color TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_types_name
+      ON edge_types(nest_id, LOWER(name));
+
+    CREATE TABLE IF NOT EXISTS edges (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      from_node TEXT NOT NULL,
+      to_node TEXT NOT NULL,
+      -- RESTRICT (not CASCADE): the app refuses to delete an edge type while
+      -- edges reference it; the DB backs that invariant instead of silently
+      -- cascade-deleting live edges if the app check is bypassed. Keep in
+      -- lockstep with migrations.ts.
+      type_id TEXT NOT NULL REFERENCES edge_types(id) ON DELETE RESTRICT,
+      condition_mode TEXT
+        CHECK(condition_mode IN ('structured', 'nl', 'open')),
+      condition TEXT,
+      metadata TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(nest_id, from_node);
+    CREATE INDEX IF NOT EXISTS idx_edges_to   ON edges(nest_id, to_node);
+    CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(nest_id, type_id);
+
+    CREATE TABLE IF NOT EXISTS definitions (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      term TEXT NOT NULL,
+      definition TEXT NOT NULL,
+      linked_tag TEXT,
+      defined_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    -- Case-insensitive uniqueness the portable way (SQLite side uses
+    -- COLLATE NOCASE; Postgres has no NOCASE collation).
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_definitions_term
+      ON definitions(nest_id, LOWER(term));
+
     -- node_deletions tombstones (migration 013). DELETE /nodes purges all other
     -- governance rows for the node; this is the only record that a doc was
     -- removed, read by GET /nests/:id/changes. One row per (nest, node); a
@@ -317,6 +391,36 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       duration_ms INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_api_events_ts ON api_events(ts);
+
+    CREATE TABLE IF NOT EXISTS runs (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      agent_node TEXT NOT NULL,
+      triggered_by TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running'
+        CHECK(status IN ('running', 'succeeded', 'failed', 'cancelled')),
+      inputs TEXT,
+      trace TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_runs_nest ON runs(nest_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_runs_agent ON runs(nest_id, agent_node);
+
+    CREATE TABLE IF NOT EXISTS run_steps (
+      id SERIAL PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      node_id TEXT,
+      edge_id TEXT,
+      action TEXT NOT NULL,
+      detail TEXT,
+      at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS depth INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,
