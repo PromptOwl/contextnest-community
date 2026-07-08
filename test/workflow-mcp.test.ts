@@ -153,6 +153,17 @@ describe("execute the graph via MCP (runner contract)", () => {
     expect(pairs).toContain("nodes/weekly-log→nodes/escalation-playbook");
   });
 
+  it("rejects a path-traversal agent id (cross-tenant read guard on the MCP sink)", async () => {
+    // The REST route runs untrusted node ids through assertSafeNodeId before
+    // storage.readDocument; workflow_run must get the same guard or a
+    // `../otherNest/nodes/secret` agent id reads another tenant's file. The
+    // check lives in triggerRun so both surfaces are covered.
+    const msg = await callToolExpectingError("workflow_run", {
+      agent: "../nodes/secret",
+    });
+    expect(msg).toContain("node id");
+  });
+
   it("appends monotonic steps", async () => {
     const s1 = JSON.parse(
       await callTool("workflow_run_step", {

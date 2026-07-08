@@ -67,8 +67,10 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `MAX_BODY_BYTES` | `10485760` (10 MB) | Reject requests whose `Content-Length` exceeds this. Prevents giant-payload DoS. |
 | `LOGO_URL` | _(unset)_ | Custom logo shown in the UI header + login screen. Must start with `https://`, `http://`, or `data:image/` — other schemes (`file://`, relative, `javascript:`) are rejected with a warning and the bundled icon is used. |
 | `FEATURE_WORKFLOW_PLANE` | _(unset — off)_ | Enables the workflow plane: typed edges, edge-type registry, governed runs. Optional feature; also toggleable from Settings. |
-| `FEATURE_SUBAGENT_RUNS` | _(unset — off)_ | Lets runs spawn nested sub-agent runs (recursion). Gated separately from the plane; requires `FEATURE_WORKFLOW_PLANE`. |
-| `SUBAGENT_MAX_DEPTH` | `8` | Max sub-agent nesting depth (clamped 1..32) — bounds the call tree so it stays finite/haltable. |
+| `FEATURE_SUBAGENT_RUNS` | _(unset — off)_ | Lets runs spawn nested sub-agent runs (recursion). Gated separately from the plane; requires `FEATURE_WORKFLOW_PLANE`. Also toggleable from Settings → Advanced (turning the plane off forces this off too). Opens a recursion surface — enable only after reviewing the depth/fan-out caps. |
+| `SUBAGENT_MAX_DEPTH` | `8` | Max sub-agent nesting depth (clamped 1..32) — bounds the call tree's HEIGHT so it stays finite/haltable. |
+| `SUBAGENT_MAX_CHILDREN` | `16` | Max direct children a single run may spawn (clamped 1..128) — bounds the call tree's WIDTH. Together with `SUBAGENT_MAX_DEPTH` this caps total tree size so a runner can't fork-bomb the DB. |
+| `RUN_MAX_STEPS` | `10000` | Max steps a single run may accumulate (clamped 10..100000) — bounds a runaway/hostile runner's step log. |
 | `SLACK_WEBHOOK_URL` | _(unset — connector off)_ | Slack incoming-webhook URL for governance-event notifications (review submitted/approved/rejected, collaborator added). `https://` only — the URL embeds a secret. Also editable from Settings in the UI. |
 | `SMTP_URL` | _(unset — connector off)_ | SMTP connection URL for email notifications (`smtp://` or `smtps://`, credentials inline). Requires `NOTIFY_EMAIL_FROM` and `NOTIFY_EMAIL_TO`. Also editable from Settings. |
 | `NOTIFY_EMAIL_FROM` | _(unset)_ | From address for notification emails. |

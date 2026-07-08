@@ -18,6 +18,7 @@ import type { NestStorage } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from "../shared/errors.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
 import { safeJson } from "../shared/json.js";
 
 export const RUNNABLE_TYPES = ["agent", "skill"];
@@ -136,11 +137,10 @@ export async function resolveParentRun(
     );
   }
   const db = getDb();
-  const seen = new Set<string>();
   let cursor: string | null = parentRunId;
   let parentDepth = -1;
-  // Walk the ancestor chain to the root, collecting agent_nodes. The depth
-  // cap also bounds this walk, so a corrupted chain can't loop unbounded.
+  // Walk the ancestor chain to the root. The depth cap also bounds this walk,
+  // so a corrupted chain can't loop unbounded.
   for (let i = 0; i <= config.SUBAGENT_MAX_DEPTH + 1; i++) {
     if (!cursor) break;
     const row = (await db.get(
@@ -149,22 +149,27 @@ export async function resolveParentRun(
     )) as
       | { id: string; nest_id: string; agent_node: string; status: string; depth: number; parent_run_id: string | null }
       | undefined;
-    if (!row) throw new NotFoundError(`Parent run not found: ${cursor}`);
-    if (row.nest_id !== nestId) {
-      // Never let a parent in another nest pull a child into this one.
-      throw new ForbiddenError("Parent run belongs to a different nest");
+    // Cross-nest parent and nonexistent parent BOTH surface as 404: never let a
+    // write-tier caller use the status code as an oracle for whether an
+    // arbitrary run id exists in some other nest (same posture as
+    // loadRunWithPermission / loadNestRun).
+    if (!row || row.nest_id !== nestId) {
+      throw new NotFoundError(`Parent run not found: ${cursor}`);
     }
     if (cursor === parentRunId && row.status !== "running") {
       throw new ConflictError(
         `Parent run is ${row.status} — cannot spawn a sub-agent under a closed run`,
       );
     }
-    if (row.agent_node === childAgent || seen.has(childAgent)) {
+    // Re-entrancy: the child agent must not appear anywhere in the ancestor
+    // chain (agent A→B→A would loop forever; the per-nest flow DAG guard can't
+    // see across run boundaries). Each ancestor's own agent_node is checked as
+    // we walk, so a separate "seen" set would be redundant.
+    if (row.agent_node === childAgent) {
       throw new ConflictError(
         `re-entrancy: "${childAgent}" is already running in this call chain — sub-agent recursion must be acyclic`,
       );
     }
-    seen.add(row.agent_node);
     if (cursor === parentRunId) parentDepth = row.depth;
     cursor = row.parent_run_id;
   }
@@ -174,18 +179,11 @@ export async function resolveParentRun(
       `sub-agent depth ${depth} exceeds the limit of ${config.SUBAGENT_MAX_DEPTH}`,
     );
   }
-  // Depth bounds tree HEIGHT; this bounds WIDTH. Without it, a parent could
-  // spawn unbounded siblings (each passes the per-chain checks) — a fork bomb
-  // of DB rows and per-spawn work. Together they cap total tree size.
-  const kids = (await db.get(
-    "SELECT COUNT(*) as c FROM runs WHERE parent_run_id = ?",
-    [parentRunId],
-  )) as { c: number };
-  if (kids.c >= config.SUBAGENT_MAX_CHILDREN) {
-    throw new ForbiddenError(
-      `parent run already has ${kids.c} children (limit ${config.SUBAGENT_MAX_CHILDREN})`,
-    );
-  }
+  // The fan-out cap (SUBAGENT_MAX_CHILDREN) that bounds tree WIDTH is enforced
+  // in triggerRun, inside the same transaction as the child INSERT — counting
+  // here would be a TOCTOU check (concurrent spawns could both pass it before
+  // either row lands). Depth and re-entrancy above are chain-shape invariants
+  // that don't race with sibling inserts, so they stay here.
   return { depth };
 }
 
@@ -225,7 +223,13 @@ export async function triggerRun(opts: {
   storage: NestStorage;
   parentRunId?: unknown;
 }): Promise<RunBundle> {
-  const { nestId, agentNode, inputs, triggeredBy, storage } = opts;
+  const { nestId, inputs, triggeredBy, storage } = opts;
+  // SECURITY: agentNode is caller-supplied and untrusted (the MCP workflow_run
+  // tool passes `args.agent` straight through). Validate containment BEFORE it
+  // reaches storage.readDocument — the same chokepoint the REST route and edge
+  // creation use — or a `../otherNest/nodes/secret` id reads another tenant's
+  // file. Doing it here covers every surface, not just REST. (See node-id.ts.)
+  const agentNode = assertSafeNodeId(opts.agentNode);
   let doc;
   try {
     doc = await storage.readDocument(agentNode);
@@ -256,20 +260,44 @@ export async function triggerRun(opts: {
   const definitions = await referencedDefinitions(nestId, edges);
 
   const id = `run_${uuid()}`;
-  await getDb().run(
-    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth)
-     VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`,
-    [
-      id,
-      nestId,
-      agentNode,
-      triggeredBy,
-      inputs === undefined ? null : JSON.stringify(inputs),
-      new Date().toISOString(),
-      parentRunId,
-      depth,
-    ],
-  );
+  const db = getDb();
+  await db.transaction(async (tx) => {
+    // Fan-out cap, enforced atomically against concurrent sibling spawns.
+    // Depth bounds the tree's HEIGHT; this bounds its WIDTH — together they cap
+    // total tree size so a runner can't fork-bomb the DB. The count+INSERT must
+    // be one atomic unit or two concurrent children can both read the same
+    // pre-insert count and both pass. On Postgres, lock the parent row first
+    // (FOR UPDATE) so those two transactions serialise; SQLite already
+    // serialises writers (BEGIN IMMEDIATE), so the pair is atomic there.
+    if (parentRunId) {
+      if (db.dialect === "postgres") {
+        await tx.get("SELECT id FROM runs WHERE id = ? FOR UPDATE", [parentRunId]);
+      }
+      const kids = (await tx.get(
+        "SELECT COUNT(*) as c FROM runs WHERE parent_run_id = ?",
+        [parentRunId],
+      )) as { c: number | string };
+      if (Number(kids.c) >= config.SUBAGENT_MAX_CHILDREN) {
+        throw new ForbiddenError(
+          `parent run already has ${kids.c} children (limit ${config.SUBAGENT_MAX_CHILDREN})`,
+        );
+      }
+    }
+    await tx.run(
+      `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth)
+       VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`,
+      [
+        id,
+        nestId,
+        agentNode,
+        triggeredBy,
+        inputs === undefined ? null : JSON.stringify(inputs),
+        new Date().toISOString(),
+        parentRunId,
+        depth,
+      ],
+    );
+  });
 
   return {
     run_id: id,
@@ -300,7 +328,9 @@ const STEP_ACTIONS = ["read", "write", "branch", "notify", "external"];
  * status-recheck + max + insert must be atomic. Re-reading status inside the
  * tx closes the window where a concurrent close could terminate the run after
  * the caller's earlier read — a step must never land on a closed run. A
- * UNIQUE(run_id, seq) index (migration 017) backstops the seq assignment.
+ * UNIQUE(run_id, seq) index (migration 017) backstops the seq assignment. The
+ * per-run step count is capped at RUN_MAX_STEPS (checked inside the same tx) so
+ * a runaway runner can't grow one run's trace without bound.
  * Throws ValidationError / ConflictError.
  */
 export async function appendRunStep(
@@ -336,7 +366,15 @@ export async function appendRunStep(
       "SELECT MAX(seq) as m FROM run_steps WHERE run_id = ?",
       [runId],
     )) as { m: number | null };
-    seq = (last.m ?? 0) + 1;
+    seq = (Number(last.m) || 0) + 1;
+    // Hard cap on the step log so a runaway/hostile runner can't grow a single
+    // run's trace unbounded. Checked inside the tx alongside the seq assignment
+    // so the bound holds under concurrent appends.
+    if (seq > config.RUN_MAX_STEPS) {
+      throw new ConflictError(
+        `Run has reached the step limit of ${config.RUN_MAX_STEPS} — no more steps can be appended`,
+      );
+    }
     await tx.run(
       `INSERT INTO run_steps (run_id, seq, node_id, edge_id, action, detail, at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,

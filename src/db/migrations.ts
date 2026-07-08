@@ -921,6 +921,7 @@ export function runMigrations(db: Database.Database): void {
       db.exec(`
         ALTER TABLE runs ADD COLUMN parent_run_id TEXT;
         ALTER TABLE runs ADD COLUMN depth INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
       `);
     })();
     recordMigration("018_subagent_runs");
