@@ -50,6 +50,7 @@ const HISTORICAL_MIGRATIONS = [
   "014_api_events",
   "015_definitions",
   "016_workflow_edges",
+  "017_workflow_runs",
   "019_grants",
 ];
 
@@ -389,6 +390,33 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       duration_ms INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_api_events_ts ON api_events(ts);
+
+    CREATE TABLE IF NOT EXISTS runs (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      agent_node TEXT NOT NULL,
+      triggered_by TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'running'
+        CHECK(status IN ('running', 'succeeded', 'failed', 'cancelled')),
+      inputs TEXT,
+      trace TEXT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_runs_nest ON runs(nest_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_runs_agent ON runs(nest_id, agent_node);
+
+    CREATE TABLE IF NOT EXISTS run_steps (
+      id SERIAL PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      seq INTEGER NOT NULL,
+      node_id TEXT,
+      edge_id TEXT,
+      action TEXT NOT NULL,
+      detail TEXT,
+      at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

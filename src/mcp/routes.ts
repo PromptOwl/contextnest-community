@@ -5,7 +5,9 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
 import { TOOL_DEFINITIONS, handleToolCall } from "./tools.js";
+import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import { config } from "../config.js";
 import { z } from "zod";
 
 export const mcpRoutes = new Hono<AuthEnv>();
@@ -28,7 +30,15 @@ function createMcpServerForNest(
     { capabilities: { tools: {} } },
   );
 
-  for (const tool of TOOL_DEFINITIONS) {
+  // Advertise the workflow-plane tools only when the flag is on — the same
+  // gate the REST requireWorkflowPlane middleware applies. config is read per
+  // request (the server is rebuilt per call), so toggling the flag at runtime
+  // takes effect immediately.
+  const toolDefs = config.FEATURE_WORKFLOW_PLANE
+    ? [...TOOL_DEFINITIONS, ...WORKFLOW_TOOL_DEFINITIONS]
+    : TOOL_DEFINITIONS;
+
+  for (const tool of toolDefs) {
     const props = (tool.inputSchema as any).properties || {};
     const required = (tool.inputSchema as any).required || [];
     const shape: Record<string, z.ZodTypeAny> = {};

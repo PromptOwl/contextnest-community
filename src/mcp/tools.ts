@@ -27,6 +27,7 @@ import {
 } from "../nodes/service.js";
 import { listThreads } from "../annotations/service.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
+import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 
 /** Upper bound on caller-set traversal depth — real graphs terminate long
  *  before this; the cap just fences a misbehaving client from a runaway query. */
@@ -1088,6 +1089,13 @@ async function runTool(
     }
 
     default:
+      // Workflow-plane tools are registered only when FEATURE_WORKFLOW_PLANE
+      // is on (mcp/routes.ts); they share the run/edge service layer with the
+      // REST routes. Delegate here so trace logging in handleToolCall still
+      // wraps them.
+      if (isWorkflowTool(toolName)) {
+        return runWorkflowTool(toolName, args, ctx);
+      }
       return `Unknown tool: ${toolName}`;
   }
 }

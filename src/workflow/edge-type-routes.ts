@@ -15,6 +15,7 @@ import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
+import { safeJson } from "../shared/json.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 
 export const requireWorkflowPlane = async (c: any, next: any) => {
@@ -89,7 +90,7 @@ export async function seedDefaultEdgeTypes(nestId: string): Promise<void> {
   }
 }
 
-function parseConditionSchema(raw: unknown): string | null {
+export function parseConditionSchema(raw: unknown): string | null {
   if (raw === undefined || raw === null || raw === "") return null;
   const obj = typeof raw === "string" ? safeJson(raw) : raw;
   if (
@@ -111,15 +112,7 @@ function parseConditionSchema(raw: unknown): string | null {
   return JSON.stringify({ params: (obj as any).params, mode_default: mode ?? "structured" });
 }
 
-function safeJson(s: string): unknown {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
-  }
-}
-
-const toResponse = (r: EdgeTypeRow) => ({
+export const edgeTypeToResponse = (r: EdgeTypeRow) => ({
   ...r,
   is_flow: !!r.is_flow,
   condition_schema: r.condition_schema ? safeJson(r.condition_schema) : null,
@@ -141,7 +134,7 @@ edgeTypeRoutes.get("/", requireWorkflowPlane, async (c) => {
     "SELECT * FROM edge_types WHERE nest_id = ? ORDER BY LOWER(name)",
     [nestId],
   )) as EdgeTypeRow[];
-  return c.json({ count: rows.length, edge_types: rows.map(toResponse) });
+  return c.json({ count: rows.length, edge_types: rows.map(edgeTypeToResponse) });
 });
 
 // POST /nests/:nestId/edge-types — upsert by name (case-insensitive), the
@@ -209,7 +202,7 @@ edgeTypeRoutes.post("/", requireWorkflowPlane, async (c) => {
     "SELECT * FROM edge_types WHERE nest_id = ? AND LOWER(name) = LOWER(?)",
     [nestId, name],
   )) as EdgeTypeRow;
-  return c.json({ edge_type: toResponse(row) }, created ? 201 : 200);
+  return c.json({ edge_type: edgeTypeToResponse(row) }, created ? 201 : 200);
 });
 
 // DELETE /nests/:nestId/edge-types/:id — refuses while edges reference it,

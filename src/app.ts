@@ -17,6 +17,11 @@ import { queryRoutes } from "./nodes/query-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
 import { edgeRoutes } from "./workflow/edge-routes.js";
+import {
+  runTriggerRoutes,
+  runListRoutes,
+  runDetailRoutes,
+} from "./workflow/run-routes.js";
 import { definitionRoutes } from "./definitions/routes.js";
 import { assetRoutes } from "./nests/asset-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
@@ -496,6 +501,10 @@ export function createApp(): Hono<AuthEnv> {
     });
   });
 
+  // === Runner-facing run detail routes (turing) ===
+  app.use("/runs/*", flexAuthMiddleware);
+  app.route("/runs", runDetailRoutes);
+
   // === Agent entry point: /llms.txt (public manual), /index (person nest
   // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
   app.route("/llms.txt", llmsTxtRoutes);
@@ -850,6 +859,8 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/grants", grantRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
+  nestsApp.route("/:nestId/run", runTriggerRoutes);
+  nestsApp.route("/:nestId/runs", runListRoutes);
   nestsApp.route("/:nestId/definitions", definitionRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);

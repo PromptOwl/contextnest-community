@@ -867,6 +867,34 @@ Publishes the nest (snapshots + index).
 
 ---
 
+## 9b. Workflow plane ("turing")
+
+**Feature-flagged — every route below `404`s unless `FEATURE_WORKFLOW_PLANE=true`** (Settings → Workflow plane). Typed edges, an edge-type registry, and governed runs. Full contract in [`WORKFLOW_PLANE.md`](./WORKFLOW_PLANE.md). Reads are read-tier, mutations write-tier via the standard nest gate.
+
+### Edge types — the vocabulary of relations
+
+- `GET /nests/:nestId/edge-types` (read) — list the registry. Seeds the five stock flow types (`next`, `on-success`, `on-failure`, `depends-on`, `owned-by`) on first touch.
+- `POST /nests/:nestId/edge-types` (write) — upsert by name (case-insensitive). Body: `{ name, description, direction?, is_flow?, condition_schema?, color? }`. `name` is a slug (`^[a-z0-9][a-z0-9-]*$`); `is_flow` types are DAG-validated; `condition_schema` is `{ params: string[], mode_default? }`. `201` on create, `200` on update.
+- `DELETE /nests/:nestId/edge-types/:id` (write) — refused (`400`) while any edge references it.
+
+### Edges — typed, condition-carrying links
+
+- `GET /nests/:nestId/edges?type=<name|id>&node=<id>` (read) — list, optionally filtered by edge type and/or an endpoint node.
+- `POST /nests/:nestId/edges` (write) — Body: `{ from_node, to_node, type, condition_mode?, condition?, metadata? }`. Both endpoints must be real nodes in the nest; `type` must exist in the registry. `condition_mode` ∈ `structured | nl | open` (`structured` predicates whose `term` must resolve against the glossary). Creating a flow edge that would close a cycle → `409` naming the path.
+- `DELETE /nests/:nestId/edges/:id` (write).
+
+### Runs — the operational trace (server never executes)
+
+- `POST /nests/:nestId/run/:agentNode` (write) — trigger a run. Body: `{ inputs? }`. Returns `201` with the executable **bundle**: `{ run_id, agent{content,…}, edges[<reachable flow subgraph>], definitions[], trace_hint }`. `triggered_by` is derived from auth, never client-supplied. Only `agent`/`skill` nodes are runnable (else `400`).
+- `POST /runs/:id/steps` (write) — append one step. Body: `{ action: read|write|branch|notify|external, node_id?, edge_id?, detail? }`. `seq` is server-assigned (monotonic, atomic); any client `seq` is ignored. `409` if the run is already terminal.
+- `PATCH /runs/:id` (write) — close/update. Body: `{ status: running|succeeded|failed|cancelled, trace? }`. Compare-and-swap on `status='running'`: a second close → `409` ("terminal is final").
+- `GET /runs/:id` (read) — full trace `{ run, steps[] }`. Freeform payloads (`run.inputs`, `run.trace`, `steps[].detail`) are redacted to `null` below write tier.
+- `GET /nests/:nestId/runs?agent=&status=&limit=` (read) — run history, newest first (same read-tier redaction).
+
+> The `/runs/:id*` family mounts outside the per-nest gate, so it re-checks nest-scope keys, suspension and license itself before any write — the same guarantees the `/nests/:nestId/*` gate provides.
+
+---
+
 ## 9. MCP
 
 ### `/nests/:nestId/mcp/*`
@@ -877,6 +905,20 @@ Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same 
 - `context_sync_folder` — mirrors `POST /nests/unsynced/sync`. Args: `name` (folder path relative to `DATA_ROOT`).
 
 Both reuse the same `listUnsyncedFolders` / `syncUnsyncedFolder` service functions the REST routes call, so a single fix lands in both surfaces.
+
+### Workflow-plane tools (only advertised when `FEATURE_WORKFLOW_PLANE=true`)
+
+Let an MCP agent **build and execute** governed workflows without leaving the tool surface. Each shares the exact service/validator code its REST counterpart uses (run-service, edge-routes, edge-type-routes), so the two surfaces can't drift. Write tools require write tier on the nest; run-detail tools additionally scope the `run_id` to the MCP nest.
+
+Build:
+- `workflow_edge_types_list` / `workflow_edge_type_upsert` / `workflow_edge_type_delete` — mirror the `/edge-types` routes.
+- `workflow_edges_list` / `workflow_edge_create` / `workflow_edge_delete` — mirror the `/edges` routes (DAG cycle guard + condition validation included).
+
+Execute (the runner contract — the agent IS the runner):
+- `workflow_run` — trigger; returns the executable bundle (agent body + reachable subgraph + definitions + `run_id`).
+- `workflow_run_step` — append a step (server-assigned `seq`).
+- `workflow_run_close` — close with a terminal status (`409`-equivalent conflict on a second close).
+- `workflow_run_get` / `workflow_runs_list` — read traces/history (freeform payloads redacted below write tier).
 
 ---
 

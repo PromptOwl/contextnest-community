@@ -10,12 +10,13 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen, ScrollText, BookMarked, Workflow } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen, ScrollText, BookMarked, Workflow, Activity } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
 import { DefinitionsPage } from "./components/DefinitionsPage";
 import { EdgeTypesPage } from "./components/EdgeTypesPage";
+import { RunsPage } from "./components/RunsPage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -93,6 +94,13 @@ type View =
     }
   | {
       page: "edge-types";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    }
+  | {
+      page: "runs";
       nestId: string;
       nestName: string;
       isOwner: boolean;
@@ -241,6 +249,7 @@ export default function App() {
         const subPage =
           sub === "graph" ? "ontology-graph"
           : sub === "edge" && workflowPlaneEnabled ? "edge-types"
+          : sub === "runs" && workflowPlaneEnabled ? "runs"
           : sub === "definitions" ? "definitions"
           : null;
         if (subPage) {
@@ -292,6 +301,7 @@ export default function App() {
       // bar stays shareable instead of dropping the nest context.
       view.page === "ontology-graph" ||
       view.page === "edge-types" ||
+      view.page === "runs" ||
       view.page === "definitions"
     ) {
       params.set("nest", view.nestId);
@@ -302,7 +312,9 @@ export default function App() {
           ? "graph"
           : view.page === "edge-types"
             ? "edge"
-            : "definitions",
+            : view.page === "runs"
+              ? "runs"
+              : "definitions",
       );
     } else {
       params.delete("nest");
@@ -607,6 +619,25 @@ export default function App() {
               </Button>
             )}
 
+            {view.page === "nest" && workflowPlaneEnabled && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setView({
+                    page: "runs",
+                    nestId: view.nestId,
+                    nestName: view.nestName,
+                    isOwner: view.isOwner,
+                    isAnonOwned: view.isAnonOwned,
+                  })
+                }
+              >
+                <Activity className="h-3.5 w-3.5 mr-1" />
+                Runs
+              </Button>
+            )}
+
             {adminStatus?.me ? (
               <UserMenu
                 me={adminStatus.me}
@@ -823,6 +854,21 @@ export default function App() {
         )}
         {view.page === "edge-types" && workflowPlaneEnabled && (
           <EdgeTypesPage
+            nestId={view.nestId}
+            nestName={view.nestName}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
+        )}
+        {view.page === "runs" && workflowPlaneEnabled && (
+          <RunsPage
             nestId={view.nestId}
             nestName={view.nestName}
             onBack={() =>
