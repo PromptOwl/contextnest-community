@@ -616,6 +616,20 @@ export async function triggerRun(
     body: JSON.stringify(inputs === undefined ? {} : { inputs }),
   });
 }
+
+/** A runnable node (type agent/skill) — powers the trigger picker. */
+export interface Runnable {
+  id: string;
+  title: string;
+  type: string;
+}
+
+/** Every runnable node (agent/skill) in the nest, filtered server-side. */
+export async function listRunnables(nestId: string) {
+  return request<{ count: number; runnables: Runnable[] }>(
+    `/nests/${nestId}/runnables`,
+  );
+}
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
 // Upload an image into the nest's assets folder. Multipart (not the JSON

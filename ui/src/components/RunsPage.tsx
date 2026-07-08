@@ -99,6 +99,15 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
   const [triggerAgent, setTriggerAgent] = useState("");
   const [triggerInputs, setTriggerInputs] = useState("");
   const [triggering, setTriggering] = useState(false);
+  // Runnable nodes (agent/skill) for the trigger picker — filtered server-side.
+  const [runnables, setRunnables] = useState<api.Runnable[]>([]);
+
+  useEffect(() => {
+    api
+      .listRunnables(nestId)
+      .then(({ runnables }) => setRunnables(runnables))
+      .catch(() => {});
+  }, [nestId]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -141,7 +150,7 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
   const submitTrigger = async () => {
     const agent = triggerAgent.trim();
     if (!agent) {
-      toast.error("Enter an agent/skill node id (e.g. nodes/my-agent)");
+      toast.error("Select an agent or skill node");
       return;
     }
     let inputs: unknown;
@@ -207,6 +216,14 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
             <div>
               <div className="text-xs text-muted-foreground">Status</div>
               <StatusBadge status={run.status} />
+              {run.status === "running" && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Waiting for an external runner. The server never executes —{" "}
+                  <span className="font-mono">running</span> means the run is
+                  seeded and unclaimed until a runner walks the bundle and
+                  reports steps back.
+                </p>
+              )}
             </div>
             <div>
               <div className="text-xs text-muted-foreground">Triggered by</div>
@@ -340,14 +357,27 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
           </p>
           <div className="space-y-1">
             <label className="text-xs text-muted-foreground">
-              Agent / skill node id
+              Agent / skill node
             </label>
-            <Input
-              value={triggerAgent}
-              onChange={(e) => setTriggerAgent(e.target.value)}
-              placeholder="nodes/my-agent"
-              className="w-full max-w-[420px] font-mono"
-            />
+            {runnables.length === 0 ? (
+              <p className="text-xs text-muted-foreground italic">
+                No skills or agents added for this nest.
+              </p>
+            ) : (
+              <Select value={triggerAgent} onValueChange={setTriggerAgent}>
+                <SelectTrigger className="w-full max-w-[420px]">
+                  <SelectValue placeholder="Select an agent or skill node…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {runnables.map((n) => (
+                    <SelectItem key={n.id} value={n.id}>
+                      {n.title}
+                      <span className="text-muted-foreground"> · {n.type}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
           </div>
           <div className="space-y-1">
             <label className="text-xs text-muted-foreground">
