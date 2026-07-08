@@ -1,5 +1,50 @@
 # @promptowl/contextnest-community
 
+## 1.9.0
+
+### Minor Changes
+
+- v1.9.0 — the workflow plane (typed edges, edge-type registry, governed runs, sub-agent runs), an email connector with per-nest digests, glossary definitions, markdown image uploads, and a unified document/folder sharing model.
+
+  ### Workflow plane ("turing" track)
+
+  - **Typed edges + edge-type registry** (`src/workflow/edge-routes.ts`, `src/workflow/edge-type-routes.ts`, `ui/src/components/EdgeTypesPage.tsx`) — a steward-articulated vocabulary of relations (`next`, `on-failure`, `derives-from`…). Flow edges (`is_flow`) participate in control flow and are DAG-validated; cycles are rejected with a 409 naming the path. Edge conditions run in three modes: `structured` (JSON predicate, a `term` resolves against the definitions glossary), `nl` (LLM-judged at execution, rationale logged), and `open`. Whole plane is off by default behind `FEATURE_WORKFLOW_PLANE`; every plane route 404s until enabled.
+  - **Governed runs** (`src/workflow/run-routes.ts`, `src/workflow/run-service.ts`, `ui/src/components/RunsPage.tsx`) — the server never executes; external runners do. `POST /nests/:id/run/:agent` returns the complete executable bundle (agent node instructions, reachable flow-edge subgraph with conditions and referenced glossary definitions, and a `run_id`) in one round-trip. Steps are logged via `POST /runs/:id/steps` with server-assigned monotonic `seq`; terminal state is final (further steps/PATCH 409). Runs are replayable — recorded deterministic reads reproduce the identical read-set.
+  - **Sub-agent runs** (`src/workflow/run-service.ts`, `test/subagent-runs.test.ts`) — a run can spawn nested runs via `parent_run_id`, gated separately behind `FEATURE_SUBAGENT_RUNS` because recursion is the risky surface. Bounded by `SUBAGENT_MAX_DEPTH` (height, clamped 1..32, default 8), `SUBAGENT_MAX_CHILDREN` (width, default 16), and `RUN_MAX_STEPS` (default 10000) so a runner can't fork-bomb the DB. Turning the plane off forces sub-agent runs off too.
+  - **Workflow MCP tools** (`src/mcp/workflow-tools.ts`) — build + execute tools thread request origin into the plane so agents can drive edges and runs over MCP.
+
+  ### Email connector + notification digests
+
+  - **SMTP governance notifications** (`src/notify/email.ts`, `src/notify/email-render.ts`) — structured HTML notifications for review/approval/share events over `smtp://`/`smtps://` (nodemailer 9.0.3, exact pin). Requires `SMTP_URL` + `NOTIFY_EMAIL_FROM` + `NOTIFY_EMAIL_TO`; empty = off; also configurable in Settings.
+  - **Per-nest digests** (`src/notify/notify.ts`) — events buffer per nest for `NOTIFY_DEBOUNCE_MS` (default 15000) so bursts (e.g. sharing a nest with a whole team) collapse into a single message instead of one per event.
+
+  ### Glossary definitions
+
+  - **Table-based ontology + real-time lookup** (`src/definitions/routes.ts`, `ui/src/components/DefinitionsPage.tsx`) — per-nest glossary of defined terms with a rename-collision guard and transaction-scoped reads; terms resolve inside structured edge conditions.
+
+  ### Document authoring
+
+  - **Images in markdown docs** (`src/nests/asset-routes.ts`, `ui/src/components/MarkdownEditor/MarkdownEditor.tsx`) — per-nest asset upload, serving, and editor insert.
+  - **Ontology graph structure layer** (`ui/src/components/OntologyGraphView.tsx`, `src/nodes/graph-service.ts`) — nest + folder structure surfaced in the ontology view; slug-form wikilinks resolve into edges.
+  - **Tabbed server settings** (`ui/src/components/SettingsPage.tsx`) — server settings reorganized into tabs with a single global save.
+
+  ### Sharing & governance
+
+  - **Unified document/folder sharing (grants model)** (`src/governance/grants-service.ts`, `src/nests/grant-routes.ts`) — one grants model for humans and agents; grants are honored under stewardship and on retrieval routes.
+
+  ### Fixes
+
+  - **Reject bare-root folder share targets** (`src/nests/grant-routes.ts`) — a bare-root folder target would have shared the whole nest.
+  - **Imported document title derived from filename** (`src/governance/title-resolver.ts`, `test/import-nest.test.ts`).
+  - **Edge traversal hardened** — node-id traversal guarded and the DAG check made atomic; edge flag gated per-route (not via `use("*")`) to unwedge the router; corrected seed call, cycle-path 409, and term-validation catch.
+  - **Workflow-plane UI gated on the server feature flag for all users** (`ui/src/App.tsx`) so plane surfaces stay hidden until enabled.
+  - **Shareable deep-link params for nest sub-pages** (`ui/src/App.tsx`); inline version diff in the governance diff viewer (`ui/src/components/governance/DiffViewer.tsx`).
+  - **Notification hardening** — digest email line breaks preserved; empty `NOTIFY_DEBOUNCE_MS` guarded; admin-set SMTP timeout query param no longer duplicated; email envelope fields validated at the config boundary.
+
+  ### Configuration & docs
+
+  - New `FEATURE_WORKFLOW_PLANE`, `FEATURE_SUBAGENT_RUNS`, `SUBAGENT_MAX_DEPTH`, `SUBAGENT_MAX_CHILDREN`, `RUN_MAX_STEPS`, `SMTP_URL`, `NOTIFY_EMAIL_FROM`, `NOTIFY_EMAIL_TO`, and `NOTIFY_DEBOUNCE_MS` documented in `.env.example` and `CONFIGURATION.md`; `API.md` updated for the new endpoints; new `WORKFLOW_PLANE.md` documents the runner contract and guardrails.
+
 ## 1.8.0
 
 ### Minor Changes
