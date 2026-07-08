@@ -16,8 +16,11 @@ import { Hono } from "hono";
 import { v4 as uuid } from "uuid";
 import type { AuthEnv } from "../auth/middleware.js";
 import { getDb } from "../db/client.js";
+import type { Querier } from "../db/adapter.js";
 import { engineCache } from "../nodes/engine.js";
 import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
+import { safeJson } from "../shared/json.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import {
@@ -26,7 +29,7 @@ import {
   type EdgeTypeRow,
 } from "./edge-type-routes.js";
 
-interface EdgeRow {
+export interface EdgeRow {
   id: string;
   nest_id: string;
   from_node: string;
@@ -40,16 +43,7 @@ interface EdgeRow {
   updated_at: string;
 }
 
-const safeJson = (s: string | null): unknown => {
-  if (!s) return null;
-  try {
-    return JSON.parse(s);
-  } catch {
-    return null;
-  }
-};
-
-function toResponse(e: EdgeRow, t: EdgeTypeRow) {
+export function toResponse(e: EdgeRow, t: EdgeTypeRow) {
   return {
     id: e.id,
     from_node: e.from_node,
@@ -71,7 +65,7 @@ function toResponse(e: EdgeRow, t: EdgeTypeRow) {
  * CAC. The table ships in the glossary PR — until both are merged, the
  * check degrades to shape-only (documented in the PR).
  */
-async function validateCondition(
+export async function validateCondition(
   nestId: string,
   mode: string | undefined,
   condition: unknown,
@@ -108,6 +102,9 @@ async function validateCondition(
         }
       } catch (err) {
         if (err instanceof ValidationError) throw err;
+        // Only tolerate the definitions table being absent (glossary PR not
+        // merged yet) — any other DB error is real and must surface.
+        if (!/no such table/i.test((err as Error)?.message ?? "")) throw err;
         /* definitions table not present on this deployment yet — shape-only */
       }
     }
@@ -119,8 +116,14 @@ async function validateCondition(
   return { mode, stored: condition };
 }
 
-/** Reject a new flow edge that would close a cycle; names the path. */
-async function assertNoFlowCycle(
+/**
+ * Reject a new flow edge that would close a cycle; names the path. Takes the
+ * query handle (a tx) so the read of existing flow edges and the caller's
+ * INSERT run under one BEGIN IMMEDIATE lock — otherwise two concurrent creates
+ * that each individually close a cycle could both pass this check.
+ */
+export async function assertNoFlowCycle(
+  db: Querier,
   nestId: string,
   fromNode: string,
   toNode: string,
@@ -130,7 +133,6 @@ async function assertNoFlowCycle(
       `cycle: ["${fromNode}","${toNode}"] — flow edges must form a DAG`,
     );
   }
-  const db = getDb();
   const rows = (await db.all(
     `SELECT e.from_node, e.to_node FROM edges e
        JOIN edge_types t ON t.id = e.type_id
@@ -156,7 +158,9 @@ async function assertNoFlowCycle(
         p = parent.get(p)!;
         path.push(p);
       }
-      path.reverse().push(fromNode);
+      // path is fromNode..toNode (BFS parent-walk); reverse to toNode..fromNode
+      // then close the loop with the new edge fromNode→toNode.
+      path.reverse().push(toNode);
       throw new ConflictError(
         `cycle: ${JSON.stringify(path)} — flow edges must form a DAG`,
       );
@@ -172,10 +176,14 @@ async function assertNoFlowCycle(
 }
 
 export const edgeRoutes = new Hono<AuthEnv>();
-edgeRoutes.use("*", requireWorkflowPlane);
+// Gate every route on the feature flag PER ROUTE, not via `use("*", …)`: this
+// router mounts under `/nests/:nestId/edges`, and a wildcard middleware there
+// flattens to `/nests/:nestId/edges/*` — a path with BOTH a `:label` and a `*`,
+// which the app's LinearRouter (chosen for multi-segment node ids) rejects with
+// UnsupportedPathError, wedging the whole app. Mirrors edge-type-routes.
 
 // GET /nests/:nestId/edges?type=<name|id>&node=<id>
-edgeRoutes.get("/", async (c) => {
+edgeRoutes.get("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const db = getDb();
   const typeFilter = c.req.query("type")?.trim();
@@ -209,7 +217,7 @@ edgeRoutes.get("/", async (c) => {
 });
 
 // POST /nests/:nestId/edges
-edgeRoutes.post("/", async (c) => {
+edgeRoutes.post("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const body = await c.req.json<Record<string, unknown>>();
   const fromRaw = typeof body.from_node === "string" ? body.from_node.trim() : "";
@@ -224,8 +232,10 @@ edgeRoutes.post("/", async (c) => {
   const toNode = assertSafeNodeId(toRaw);
 
   const db = getDb();
-  const definedBy = await resolveCallerEmail(c.get("userId"));
-  await seedDefaultEdgeTypes(nestId, definedBy);
+  const createdBy = await resolveCallerEmail(c.get("userId"));
+  // Seed attributes to the nest owner (see edge-type-routes); createdBy is
+  // the caller, populating this edge's created_by column below.
+  await seedDefaultEdgeTypes(nestId);
 
   const type = (await db.get(
     "SELECT * FROM edge_types WHERE nest_id = ? AND (id = ? OR LOWER(name) = LOWER(?))",
@@ -252,9 +262,6 @@ edgeRoutes.post("/", async (c) => {
     body.condition_mode as string | undefined,
     body.condition,
   );
-  if (type.is_flow) {
-    await assertNoFlowCycle(nestId, fromNode, toNode);
-  }
   const metadata =
     body.metadata === undefined || body.metadata === null
       ? null
@@ -262,18 +269,26 @@ edgeRoutes.post("/", async (c) => {
 
   const now = new Date().toISOString();
   const id = uuid();
-  await db.run(
-    `INSERT INTO edges
-       (id, nest_id, from_node, to_node, type_id, condition_mode, condition, metadata, created_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, nestId, fromNode, toNode, type.id, mode, stored, metadata, definedBy, now, now],
-  );
+  // Cycle check + insert under one BEGIN IMMEDIATE lock so concurrent flow
+  // creates can't each pass the DAG guard against the pre-request graph and
+  // both land, closing a cycle.
+  await db.transaction(async (tx) => {
+    if (type.is_flow) {
+      await assertNoFlowCycle(tx, nestId, fromNode, toNode);
+    }
+    await tx.run(
+      `INSERT INTO edges
+         (id, nest_id, from_node, to_node, type_id, condition_mode, condition, metadata, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, nestId, fromNode, toNode, type.id, mode, stored, metadata, createdBy, now, now],
+    );
+  });
   const row = (await db.get("SELECT * FROM edges WHERE id = ?", [id])) as EdgeRow;
   return c.json({ edge: toResponse(row, type) }, 201);
 });
 
 // DELETE /nests/:nestId/edges/:id
-edgeRoutes.delete("/:id", async (c) => {
+edgeRoutes.delete("/:id", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const id = c.req.param("id")!;
   const db = getDb();

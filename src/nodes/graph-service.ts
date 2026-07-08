@@ -85,6 +85,14 @@ const MAX_GRAPH_NODES = 150;
 
 const WIKILINK_RE = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
+/** Bare slug of an engine id/target: the part after the last "/". Engine ids
+ *  are `nodes/<slug>`; the editor inserts links as `[[<slug>|Title]]` (bare
+ *  slug), so slug resolution is needed alongside id/title. */
+function bareSlug(idOrTarget: string): string {
+  const idx = idOrTarget.lastIndexOf("/");
+  return idx >= 0 ? idOrTarget.slice(idx + 1) : idOrTarget;
+}
+
 /** Extract the raw [[target]] strings (ignoring |display aliases) from a body. */
 export function extractWikiTargets(body: string): string[] {
   const out: string[] = [];
@@ -118,12 +126,17 @@ export async function buildNestGraph(
 
   const idSet = new Set(accessible.map((d) => d.id));
   const titleToId = new Map<string, string>();
+  // Bare-slug → id, so the editor's `[[<slug>|Title]]` link form resolves
+  // (mirrors the client's backlink resolution: id, title, OR bare slug).
+  const slugToId = new Map<string, string>();
   for (const d of accessible) {
     const t = (d.frontmatter?.title || "").toLowerCase().trim();
     // First occurrence wins — duplicate case-folded titles are ambiguous, so
     // don't let a later doc silently steal title-based incoming links (which
     // would make the earlier doc look like a false orphan).
     if (t && !titleToId.has(t)) titleToId.set(t, d.id);
+    const slug = bareSlug(d.id).toLowerCase();
+    if (slug && !slugToId.has(slug)) slugToId.set(slug, d.id);
   }
 
   const allNodes: GraphNode[] = accessible.map((d) => ({
@@ -137,9 +150,12 @@ export async function buildNestGraph(
   const seen = new Set<string>();
   for (const d of accessible) {
     for (const raw of extractWikiTargets(d.body || "")) {
+      const norm = raw.toLowerCase().trim();
+      // Resolve by exact id, then title, then bare slug (the form the editor
+      // actually writes) — matching the client's wiki-link resolution.
       const targetId = idSet.has(raw)
         ? raw
-        : titleToId.get(raw.toLowerCase().trim());
+        : titleToId.get(norm) ?? slugToId.get(bareSlug(raw).toLowerCase());
       if (!targetId || targetId === d.id) continue;
       const key = `${d.id}->${targetId}`;
       if (seen.has(key)) continue;

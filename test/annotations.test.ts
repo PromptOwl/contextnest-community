@@ -255,6 +255,62 @@ describe("annotations: hosted artifact + threaded comments", () => {
     expect(list.data.threads).toHaveLength(1);
   });
 
+  // Regression: node ids are multi-segment paths ("nodes/<folder>/<slug>").
+  // A foldered artifact's id has 2+ slashes, and the greedy /:nodeId{.+} param
+  // used to let the bare node catch-all shadow /hosted + /annotations, so
+  // opening any document inside a folder 404'd ("Node not found: …/hosted").
+  it("serves /hosted + threads /annotations for an artifact inside a folder", async () => {
+    const foldered = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Nested Deck", content: HTML, type: "artifact", folder: "campaigns/q3" },
+      alice.apiKey,
+    );
+    const fid = foldered.data.node.id;
+    expect(fid).toBe("nodes/campaigns/q3/nested-deck"); // 3 slashes
+
+    // /hosted must render the HTML, not fall through to the bare catch-all.
+    const hosted = await app.request(`/nests/${nestId}/nodes/${fid}/hosted`, {
+      headers: { Authorization: `Bearer ${alice.apiKey}` },
+    });
+    expect(hosted.status).toBe(200);
+    expect(await hosted.text()).toContain("Slide 3");
+
+    // /annotations must return the (empty) thread list, not "Node not found".
+    const empty = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${fid}/annotations`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(empty.status).toBe(200);
+    expect(empty.data.threads).toEqual([]);
+
+    // Create + reply so the /annotations/:threadId/comments suffix is exercised
+    // for a foldered id too (it must beat governance's greedy /:nodeId/comments).
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${fid}/annotations`,
+      { body: "note on nested deck" },
+      alice.apiKey,
+    );
+    expect(created.status).toBe(201);
+    const threadId = created.data.thread.id;
+
+    const replied = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${fid}/annotations/${threadId}/comments`,
+      { body: "reply on nested deck" },
+      alice.apiKey,
+    );
+    expect(replied.status).toBe(200);
+    expect(replied.data.thread.comments).toHaveLength(2);
+  });
+
   it("projects threads into a derived node the nest can pull", async () => {
     const nodes = await jsonRequest(
       app,
@@ -607,5 +663,39 @@ describe("annotations: thread scope is enforced (no cross-node hijack)", () => {
     // And B's thread is untouched.
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${artB}/annotations`, undefined, alice.apiKey);
     expect(list.data.threads[0].status).toBe("open");
+  });
+});
+
+describe("annotations: per-nest comment counts (document-list sorting)", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let alice: { apiKey: string; userId: string; email: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("open");
+    alice = await registerUser(app, "alice@acme.com", "Alice");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Sortable" }, alice.apiKey);
+    nestId = nest.data.nest.id;
+
+    // Two docs: "Popular" gets 2 comment threads, "Quiet" gets none.
+    const popular = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Popular", content: "# Popular\n\nlots to say" }, alice.apiKey);
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, { title: "Quiet", content: "# Quiet" }, alice.apiKey);
+
+    for (const body of ["first note", "second note"]) {
+      await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${popular.data.node.id}/annotations`, { body }, alice.apiKey);
+    }
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("returns per-node comment counts for the nest", async () => {
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}/comment-counts`, undefined, alice.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.counts["nodes/popular"].count).toBe(2);
+    expect(res.data.counts["nodes/popular"].lastAt).toBeTruthy();
+    // A node with no comments simply isn't in the map.
+    expect(res.data.counts["nodes/quiet"]).toBeUndefined();
   });
 });

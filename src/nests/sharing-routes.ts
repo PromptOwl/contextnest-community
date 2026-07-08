@@ -7,6 +7,7 @@ import {
   getStewardRolesForUser,
 } from "../governance/stewardship-service.js";
 import { addCollaborator } from "./sharing-service.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 import type { NestCollaborator } from "../shared/types.js";
 
 export const sharingRoutes = new Hono<AuthEnv>();
@@ -56,6 +57,7 @@ sharingRoutes.post("/collaborators", async (c) => {
     // Enforce the escalation cap against the caller's own nest permission
     // (set by the access guard) — a write collaborator can't grant admin.
     callerPermission: c.get("nestPermission"),
+    baseUrl: requestBaseUrl(c.req.url),
   });
   return c.json({ collaborator: collab }, 201);
 });
@@ -108,9 +110,21 @@ sharingRoutes.patch("/visibility", async (c) => {
   }
 
   const db = getDb();
-  await db.run("UPDATE nests SET visibility = ? WHERE id = ?", [
+  const nestId = c.req.param("nestId")!;
+  const result = await db.run("UPDATE nests SET visibility = ? WHERE id = ?", [
     body.visibility,
-    c.req.param("nestId")!,
+    nestId,
   ]);
-  return c.json({ visibility: body.visibility });
+  // A zero-row update means the nest id didn't resolve — report it instead of
+  // echoing success, which previously let the UI flip to a state the DB never
+  // took (the "made it private but it still shows public" symptom).
+  if (result.changes === 0) {
+    throw new NotFoundError("Nest not found");
+  }
+  // Re-read the persisted value so the client reconciles against the DB truth,
+  // not the value it sent.
+  const row = (await db.get("SELECT visibility FROM nests WHERE id = ?", [
+    nestId,
+  ])) as { visibility: string };
+  return c.json({ visibility: row.visibility });
 });

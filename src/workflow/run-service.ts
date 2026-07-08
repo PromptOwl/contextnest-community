@@ -1,0 +1,345 @@
+/**
+ * Run service — the executable core of the workflow plane ("turing" track),
+ * shared by the REST routes (src/workflow/run-routes.ts) and the MCP tools
+ * (src/mcp/workflow-tools.ts) so the two surfaces can't drift.
+ *
+ * The server never executes anything: `triggerRun` hands an external runner
+ * the full bundle (agent body + reachable flow subgraph + referenced glossary
+ * definitions), and the runner reports back via `appendRunStep`/`closeRun`.
+ *
+ * These functions are permission-agnostic — every caller resolves the nest,
+ * the caller's read/write tier, suspension and license BEFORE calling in. The
+ * REST side does it in loadRunWithPermission + the nestsApp gate; the MCP side
+ * does it in workflow-tools. Keeping auth in the callers keeps this module a
+ * pure data layer.
+ */
+import { v4 as uuid } from "uuid";
+import type { NestStorage } from "@promptowl/contextnest-engine";
+import { getDb } from "../db/client.js";
+import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.js";
+import { safeJson } from "../shared/json.js";
+
+export const RUNNABLE_TYPES = ["agent", "skill"];
+
+export { safeJson };
+
+export interface RunRow {
+  id: string;
+  nest_id: string;
+  agent_node: string;
+  triggered_by: string;
+  status: string;
+  inputs: string | null;
+  trace: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+/** Flow-edge subgraph reachable from the agent node (BFS, directed). */
+export async function flowSubgraph(nestId: string, agentNode: string) {
+  const db = getDb();
+  const rows = (await db.all(
+    `SELECT e.id, e.from_node, e.to_node, e.condition_mode, e.condition, e.metadata,
+            t.name as type_name, t.color as type_color
+       FROM edges e JOIN edge_types t ON t.id = e.type_id
+      WHERE e.nest_id = ? AND t.is_flow = 1`,
+    [nestId],
+  )) as Array<{
+    id: string; from_node: string; to_node: string;
+    condition_mode: string | null; condition: string | null; metadata: string | null;
+    type_name: string; type_color: string | null;
+  }>;
+  const byFrom = new Map<string, typeof rows>();
+  for (const r of rows) {
+    if (!byFrom.has(r.from_node)) byFrom.set(r.from_node, []);
+    byFrom.get(r.from_node)!.push(r);
+  }
+  const seen = new Set([agentNode]);
+  const queue = [agentNode];
+  const edges: typeof rows = [];
+  while (queue.length) {
+    const cur = queue.shift()!;
+    for (const e of byFrom.get(cur) ?? []) {
+      edges.push(e);
+      if (!seen.has(e.to_node)) {
+        seen.add(e.to_node);
+        queue.push(e.to_node);
+      }
+    }
+  }
+  return edges.map((e) => ({
+    id: e.id,
+    from_node: e.from_node,
+    to_node: e.to_node,
+    type: { name: e.type_name, color: e.type_color },
+    condition_mode: e.condition_mode,
+    condition:
+      e.condition_mode === "structured" ? safeJson(e.condition) : e.condition,
+    metadata: safeJson(e.metadata),
+  }));
+}
+
+/** Definitions referenced by structured conditions in the bundle. */
+export async function referencedDefinitions(
+  nestId: string,
+  edges: Array<{ condition_mode: string | null; condition: unknown }>,
+) {
+  const terms = new Set<string>();
+  for (const e of edges) {
+    if (e.condition_mode === "structured" && e.condition && typeof e.condition === "object") {
+      const t = (e.condition as any).term;
+      if (typeof t === "string" && t.trim()) terms.add(t.trim());
+    }
+  }
+  if (!terms.size) return [];
+  try {
+    const db = getDb();
+    // One batched lookup rather than a SELECT per term — the trigger path is
+    // what an external runner blocks on, so keep it a single round-trip.
+    const list = [...terms];
+    const placeholders = list.map(() => "LOWER(?)").join(", ");
+    const rows = (await db.all(
+      `SELECT term, definition, linked_tag FROM definitions
+        WHERE nest_id = ? AND LOWER(term) IN (${placeholders})`,
+      [nestId, ...list],
+    )) as unknown[];
+    return rows;
+  } catch {
+    /* definitions table not on this deployment yet — bundle ships without */
+    return [];
+  }
+}
+
+/** Load one run row (no permission check — the caller gates). */
+export async function loadRun(runId: string): Promise<RunRow | undefined> {
+  return (await getDb().get("SELECT * FROM runs WHERE id = ?", [runId])) as
+    | RunRow
+    | undefined;
+}
+
+export interface RunBundle {
+  run_id: string;
+  agent: {
+    id: string;
+    title: string;
+    type: string;
+    schedule: unknown;
+    content: string;
+  };
+  edges: Awaited<ReturnType<typeof flowSubgraph>>;
+  definitions: unknown[];
+  trace_hint: { retrieval: string; steps: string };
+}
+
+/**
+ * Create a run record and return the executable bundle in one shot.
+ * `triggeredBy` MUST be derived from auth by the caller (never client-supplied)
+ * — it's the accountability field. Throws NotFoundError / ValidationError.
+ */
+export async function triggerRun(opts: {
+  nestId: string;
+  agentNode: string;
+  inputs: unknown;
+  triggeredBy: string;
+  storage: NestStorage;
+}): Promise<RunBundle> {
+  const { nestId, agentNode, inputs, triggeredBy, storage } = opts;
+  let doc;
+  try {
+    doc = await storage.readDocument(agentNode);
+  } catch {
+    throw new NotFoundError(`Agent node not found: ${agentNode}`);
+  }
+  const nodeType = (doc.frontmatter.type as string) || "document";
+  if (!RUNNABLE_TYPES.includes(nodeType)) {
+    throw new ValidationError(
+      `"${agentNode}" is type "${nodeType}" — only agent/skill nodes are runnable`,
+    );
+  }
+
+  const edges = await flowSubgraph(nestId, agentNode);
+  const definitions = await referencedDefinitions(nestId, edges);
+
+  const id = `run_${uuid()}`;
+  await getDb().run(
+    `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at)
+     VALUES (?, ?, ?, ?, 'running', ?, ?)`,
+    [
+      id,
+      nestId,
+      agentNode,
+      triggeredBy,
+      inputs === undefined ? null : JSON.stringify(inputs),
+      new Date().toISOString(),
+    ],
+  );
+
+  return {
+    run_id: id,
+    agent: {
+      id: agentNode,
+      title: String(doc.frontmatter.title ?? agentNode),
+      type: nodeType,
+      schedule: (doc.frontmatter.metadata as any)?.schedule ?? null,
+      content: doc.body || "",
+    },
+    edges,
+    definitions,
+    trace_hint: {
+      retrieval:
+        "POST /context is deterministic — record selector+hops per read so the run replays to the identical read-set",
+      steps: "POST /runs/{run_id}/steps per action; PATCH /runs/{run_id} to close",
+    },
+  };
+}
+
+const STEP_ACTIONS = ["read", "write", "branch", "notify", "external"];
+
+/**
+ * Append a step to a run. seq is server-assigned inside a transaction (never
+ * client-supplied): the ordered trace is what replay depends on, so
+ * status-recheck + max + insert must be atomic. Re-reading status inside the
+ * tx closes the window where a concurrent close could terminate the run after
+ * the caller's earlier read — a step must never land on a closed run. A
+ * UNIQUE(run_id, seq) index (migration 017) backstops the seq assignment.
+ * Throws ValidationError / ConflictError.
+ */
+export async function appendRunStep(
+  runId: string,
+  input: { action?: unknown; node_id?: unknown; edge_id?: unknown; detail?: unknown },
+): Promise<{ seq: number }> {
+  if (typeof input.action !== "string" || !input.action.trim()) {
+    throw new ValidationError("action is required (read|write|branch|notify|external)");
+  }
+  const action = input.action.trim();
+  if (!STEP_ACTIONS.includes(action)) {
+    throw new ValidationError(
+      "action must be read | write | branch | notify | external",
+    );
+  }
+  const nodeId = typeof input.node_id === "string" ? input.node_id : null;
+  const edgeId = typeof input.edge_id === "string" ? input.edge_id : null;
+  const detail = input.detail === undefined ? null : JSON.stringify(input.detail);
+
+  const db = getDb();
+  let seq = 0;
+  await db.transaction(async (tx) => {
+    const cur = (await tx.get("SELECT status FROM runs WHERE id = ?", [runId])) as
+      | { status: string }
+      | undefined;
+    if (!cur) throw new NotFoundError("Run not found");
+    if (cur.status !== "running") {
+      throw new ConflictError(
+        `Run is ${cur.status} — steps can't be appended`,
+      );
+    }
+    const last = (await tx.get(
+      "SELECT MAX(seq) as m FROM run_steps WHERE run_id = ?",
+      [runId],
+    )) as { m: number | null };
+    seq = (last.m ?? 0) + 1;
+    await tx.run(
+      `INSERT INTO run_steps (run_id, seq, node_id, edge_id, action, detail, at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [runId, seq, nodeId, edgeId, action, detail, new Date().toISOString()],
+    );
+  });
+  return { seq };
+}
+
+const RUN_STATUSES = ["running", "succeeded", "failed", "cancelled"];
+
+/**
+ * Close or update a run's status/trace. Compare-and-swap on `status =
+ * 'running'` means two concurrent closers can't both win: exactly one mutates
+ * the row, the loser gets a ConflictError instead of a silent last-write-wins.
+ * "Terminal is final." Throws ValidationError / NotFoundError / ConflictError.
+ */
+export async function closeRun(
+  runId: string,
+  input: { status?: unknown; trace?: unknown },
+): Promise<{ status: string }> {
+  const status = input.status;
+  if (typeof status !== "string" || !RUN_STATUSES.includes(status)) {
+    throw new ValidationError("status must be running | succeeded | failed | cancelled");
+  }
+  const terminal = status !== "running";
+  const res = await getDb().run(
+    `UPDATE runs SET status = ?, trace = COALESCE(?, trace), finished_at = ?
+      WHERE id = ? AND status = 'running'`,
+    [
+      status,
+      input.trace === undefined ? null : JSON.stringify(input.trace),
+      terminal ? new Date().toISOString() : null,
+      runId,
+    ],
+  );
+  if (res.changes === 0) {
+    // Either the run doesn't exist or it's already terminal. Disambiguate so
+    // the caller returns the right 404-vs-409.
+    const run = await loadRun(runId);
+    if (!run) throw new NotFoundError("Run not found");
+    throw new ConflictError("Run already terminal — status can't be changed");
+  }
+  return { status };
+}
+
+/**
+ * Full trace for one run. `canSeeDetail` (write tier) gates the freeform
+ * payloads — run inputs, run trace, and each step's detail — same redaction
+ * posture across REST and MCP. Below it, those null out but existence, agent,
+ * status, timing and step order stay visible.
+ */
+export async function getRunTrace(
+  run: RunRow,
+  opts: { canSeeDetail: boolean },
+): Promise<{ run: unknown; steps: unknown[] }> {
+  const { canSeeDetail } = opts;
+  const steps = (await getDb().all(
+    "SELECT seq, node_id, edge_id, action, detail, at FROM run_steps WHERE run_id = ? ORDER BY seq",
+    [run.id],
+  )) as Array<{
+    seq: number; node_id: string | null; edge_id: string | null;
+    action: string; detail: string | null; at: string;
+  }>;
+  return {
+    run: {
+      ...run,
+      inputs: canSeeDetail ? safeJson(run.inputs) : null,
+      trace: canSeeDetail ? safeJson(run.trace) : null,
+    },
+    steps: steps.map((s) => ({
+      ...s,
+      detail: canSeeDetail ? safeJson(s.detail) : null,
+    })),
+  };
+}
+
+/** List runs for a nest, filtered by agent/status, redacted below write tier. */
+export async function listRuns(
+  nestId: string,
+  opts: { agent?: string; status?: string; limit?: number; canSeeDetail: boolean },
+): Promise<{ count: number; runs: unknown[] }> {
+  const db = getDb();
+  let sql = "SELECT * FROM runs WHERE nest_id = ?";
+  const args: unknown[] = [nestId];
+  if (opts.agent) {
+    sql += " AND agent_node = ?";
+    args.push(opts.agent);
+  }
+  if (opts.status) {
+    sql += " AND status = ?";
+    args.push(opts.status);
+  }
+  sql += " ORDER BY started_at DESC LIMIT ?";
+  args.push(Math.min(Math.max(Number(opts.limit) || 50, 1), 500));
+  const rows = (await db.all(sql, args as any)) as RunRow[];
+  return {
+    count: rows.length,
+    runs: rows.map((r) => ({
+      ...r,
+      inputs: opts.canSeeDetail ? safeJson(r.inputs) : null,
+      trace: opts.canSeeDetail ? safeJson(r.trace) : null,
+    })),
+  };
+}

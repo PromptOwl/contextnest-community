@@ -128,6 +128,7 @@ export async function getHealth() {
     auth_mode: string;
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
+    workflow_plane_enabled?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
@@ -142,6 +143,10 @@ export interface AdminSettings {
   public_base_url: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
+  slack_webhook_url: string;
+  smtp_url: string;
+  notify_email_from: string;
+  notify_email_to: string;
 }
 
 export async function getAdminSettings() {
@@ -213,14 +218,14 @@ export async function listTeammates() {
   }>("/auth/teammates");
 }
 
-export async function inviteTeammate(email: string, label?: string) {
+export async function inviteTeammate(email: string) {
   return request<{
-    api_key: string;
+    temporary_password: string;
     user: { id: string; email: string };
     message: string;
   }>("/auth/invite", {
     method: "POST",
-    body: JSON.stringify({ email, label }),
+    body: JSON.stringify({ email }),
   });
 }
 
@@ -231,6 +236,30 @@ export async function changePassword(current: string, next: string) {
     method: "POST",
     body: JSON.stringify({ current, next }),
   });
+}
+
+// Superadmin activity trace — API + MCP call rows, newest first, paginated.
+export async function getAdminTrace(params: {
+  kind?: "api" | "mcp";
+  user?: string;
+  nest?: string;
+  limit?: number;
+  offset?: number;
+} = {}) {
+  const qs = new URLSearchParams();
+  if (params.kind) qs.set("kind", params.kind);
+  if (params.user) qs.set("user", params.user);
+  if (params.nest) qs.set("nest", params.nest);
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return request<{
+    count: number;
+    total: number;
+    limit: number;
+    offset: number;
+    events: any[];
+  }>(`/admin/trace${suffix}`);
 }
 
 // Admin removes a user entirely — revokes all access and deletes them.
@@ -402,10 +431,231 @@ export async function getServerStats() {
   return request<{ nests: number; documents: number; users: number }>("/stats");
 }
 
+// ─── Glossary definitions ──────────────────────────────────────────────
+
+export interface Definition {
+  id: string;
+  term: string;
+  definition: string;
+  linked_tag: string | null;
+  defined_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listDefinitions(nestId: string) {
+  return request<{ count: number; definitions: Definition[] }>(
+    `/nests/${nestId}/definitions`,
+  );
+}
+
+export async function upsertDefinition(
+  nestId: string,
+  data: {
+    term: string;
+    definition: string;
+    linked_tag?: string | null;
+    // The row being edited, when renaming/editing an existing definition.
+    // Scopes the upsert to that row so a rename can't overwrite a sibling
+    // that already owns the new term (server returns 409 instead).
+    editing_id?: string;
+  },
+) {
+  return request<{ definition: Definition }>(`/nests/${nestId}/definitions`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteDefinition(nestId: string, id: string) {
+  return request<{ deleted: boolean }>(
+    `/nests/${nestId}/definitions/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+// ─── Edge-type registry ("turing" workflow plane) ───────────────────────
+// The vocabulary of connections: stewards articulate once what a relation
+// (`next`, `escalates-when`, …) MEANS; edges reference the registry. Every
+// route is feature-flagged server-side — 404 unless FEATURE_WORKFLOW_PLANE
+// / the "Workflow plane" admin toggle is on. Reads read-tier, writes write-tier.
+
+export interface EdgeTypeCondition {
+  /** Named parameters a conditional edge fills in (e.g. ["term","op","value"]). */
+  params: string[];
+  mode_default: "structured" | "nl" | "open";
+}
+
+export interface EdgeType {
+  id: string;
+  nest_id: string;
+  name: string;
+  description: string;
+  direction: "directed" | "undirected";
+  /** Flow types form the workflow DAG; non-flow are lineage/ownership. */
+  is_flow: boolean;
+  condition_schema: EdgeTypeCondition | null;
+  color: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listEdgeTypes(nestId: string) {
+  return request<{ count: number; edge_types: EdgeType[] }>(
+    `/nests/${nestId}/edge-types`,
+  );
+}
+
+export async function upsertEdgeType(
+  nestId: string,
+  data: {
+    name: string;
+    description: string;
+    direction?: "directed" | "undirected";
+    is_flow?: boolean;
+    // 6-digit hex (e.g. #16a34a) or null/"" to clear. Bad hex → server 400.
+    color?: string | null;
+    // Omit / null for a plain edge type; provide params to make it conditional.
+    condition_schema?: { params: string[]; mode_default?: EdgeTypeCondition["mode_default"] } | null;
+  },
+) {
+  return request<{ edge_type: EdgeType }>(`/nests/${nestId}/edge-types`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteEdgeType(nestId: string, id: string) {
+  return request<{ deleted: boolean }>(
+    `/nests/${nestId}/edge-types/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+// ─── Runs ("turing" workflow plane) ─────────────────────────────────────
+// A nest's agent runs and their step traces, plus triggerRun (creates the run
+// record + bundle; the server never executes it — a runner does).
+// `inputs`/`trace`/`detail` come back null when the caller lacks write tier
+// (server-side redaction).
+
+export interface Run {
+  id: string;
+  nest_id: string;
+  agent_node: string;
+  triggered_by: string;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  inputs: unknown | null;
+  trace: unknown | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface RunStep {
+  seq: number;
+  node_id: string | null;
+  edge_id: string | null;
+  action: "read" | "write" | "branch" | "notify" | "external";
+  detail: unknown | null;
+  at: string;
+}
+
+export async function listRuns(
+  nestId: string,
+  opts?: { agent?: string; status?: string; limit?: number },
+) {
+  const params = new URLSearchParams();
+  if (opts?.agent) params.set("agent", opts.agent);
+  if (opts?.status) params.set("status", opts.status);
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  return request<{ count: number; runs: Run[] }>(
+    `/nests/${nestId}/runs${qs ? `?${qs}` : ""}`,
+  );
+}
+
+export async function getRun(runId: string) {
+  return request<{ run: Run; steps: RunStep[] }>(
+    `/runs/${encodeURIComponent(runId)}`,
+  );
+}
+
+/** The executable bundle a trigger returns — handed to an external runner. */
+export interface RunBundle {
+  run_id: string;
+  agent: {
+    id: string;
+    title: string;
+    type: string;
+    schedule: unknown;
+    content: string;
+  };
+  edges: unknown[];
+  definitions: unknown[];
+  trace_hint: { retrieval: string; steps: string };
+}
+
+/**
+ * Trigger a run: creates the run record and returns the executable bundle.
+ * The server does NOT execute — an external runner must walk the bundle and
+ * report steps back. Write tier required. `agentNode` is a node id like
+ * `nodes/my-agent`; its slashes are preserved (the route matches `.+`), so
+ * don't encode the whole path.
+ */
+export async function triggerRun(
+  nestId: string,
+  agentNode: string,
+  inputs?: unknown,
+) {
+  const path = agentNode
+    .split("/")
+    .map((seg) => encodeURIComponent(seg))
+    .join("/");
+  return request<RunBundle>(`/nests/${nestId}/run/${path}`, {
+    method: "POST",
+    body: JSON.stringify(inputs === undefined ? {} : { inputs }),
+  });
+}
+
+/** A runnable node (type agent/skill) — powers the trigger picker. */
+export interface Runnable {
+  id: string;
+  title: string;
+  type: string;
+}
+
+/** Every runnable node (agent/skill) in the nest, filtered server-side. */
+export async function listRunnables(nestId: string) {
+  return request<{ count: number; runnables: Runnable[] }>(
+    `/nests/${nestId}/runnables`,
+  );
+}
 // ─── Nodes ──────────────────────────────────────────────────────────────
+
+// Upload an image into the nest's assets folder. Multipart (not the JSON
+// request() helper) — the browser sets the boundary content-type itself.
+export async function uploadAsset(nestId: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`/nests/${nestId}/assets`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Upload failed: ${res.status}`);
+  return data as { file: string; url: string; markdown: string };
+}
 
 export async function listNodes(nestId: string) {
   return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
+}
+
+/** Per-node comment (annotation thread) counts for sorting the document list. */
+export async function getCommentCounts(nestId: string) {
+  return request<{
+    counts: Record<string, { count: number; lastAt: string | null }>;
+  }>(`/nests/${nestId}/comment-counts`);
 }
 
 export async function getNode(nestId: string, nodeId: string) {
@@ -414,7 +664,15 @@ export async function getNode(nestId: string, nodeId: string) {
 
 export async function createNode(
   nestId: string,
-  data: { title: string; content: string; tags?: string[]; type?: string },
+  data: {
+    title: string;
+    content: string;
+    tags?: string[];
+    type?: string;
+    folder?: string;
+    /** Orchestrator schedule — runnable types (agent/skill) only. */
+    schedule?: string;
+  },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
     method: "POST",
@@ -425,7 +683,14 @@ export async function createNode(
 export async function updateNode(
   nestId: string,
   nodeId: string,
-  data: { content?: string; tags?: string[]; title?: string; changeNote?: string },
+  data: {
+    content?: string;
+    tags?: string[];
+    title?: string;
+    changeNote?: string;
+    /** Runnable types (agent/skill) only; "" clears it. */
+    schedule?: string;
+  },
   baseVersion?: number,
 ) {
   const headers: Record<string, string> = {};

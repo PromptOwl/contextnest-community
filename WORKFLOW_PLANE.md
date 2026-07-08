@@ -37,15 +37,42 @@ workflow like this:
    retrieval is what makes a run replayable: re-issuing the recorded reads
    reproduces the identical read-set.
 4. **Step** — `POST /runs/{run_id}/steps` after every action:
-   `{seq?, action: read|write|branch|notify|external, node_id?, edge_id?, detail?}`.
-   For `branch` steps include the evaluated condition, the result, and (NL
-   mode) the rationale.
+   `{action: read|write|branch|notify|external, node_id?, edge_id?, detail?}`.
+   `seq` is assigned server-side (monotonic per run) and returned in the
+   response — any client-supplied `seq` is ignored. For `branch` steps include
+   the evaluated condition, the result, and (NL mode) the rationale.
 5. **Close** — `PATCH /runs/{run_id}` with
    `{status: succeeded|failed|cancelled, trace?: {…totals}}`. Terminal is
    final: further steps or PATCHes 409.
 
 Run history: `GET /nests/{nest}/runs?agent=&status=` · full trace:
-`GET /runs/{run_id}` (step `detail` is redacted below write tier).
+`GET /runs/{run_id}`. Below write tier the freeform payloads — run `inputs`,
+run `trace`, and each step's `detail` — are redacted to `null`; a read-tier
+caller still sees the run's existence, agent, status, timing and step order.
+
+## MCP tools
+
+The same build-and-execute surface is available to MCP agents on any nest's
+`/mcp` endpoint (advertised only when the flag is on). Each tool calls the same
+service/validator code as its REST route, so behaviour can't drift.
+
+- **Build** — `workflow_edge_types_list` · `workflow_edge_type_upsert` ·
+  `workflow_edge_type_delete` · `workflow_edges_list` · `workflow_edge_create`
+  (DAG cycle guard + condition validation) · `workflow_edge_delete`.
+- **Execute** (the agent is the runner) — `workflow_run` (→ bundle + run_id) ·
+  `workflow_run_step` · `workflow_run_close` · `workflow_run_get` ·
+  `workflow_runs_list`.
+
+Write tools need write tier; run-detail tools scope the `run_id` to the caller's
+nest. Redaction matches the REST read tier.
+
+## UI
+
+A read-only **Runs** tab (nest header, shown when the flag is on) lists a nest's
+runs with status/agent filters and opens a trace viewer — steps in order, branch
+decisions, and inputs/trace/detail shown when the viewer has write access
+(redacted otherwise). The server still never executes; the UI observes runs that
+external runners produced.
 
 ## Guardrails
 
@@ -57,5 +84,5 @@ Run history: `GET /nests/{nest}/runs?agent=&status=` · full trace:
   every branch decision.
 
 *The full design (contracts, condition semantics, prototypes) lives in the
-Governed Workflow Plane PRD. `/llms.txt` integration and MCP run tools follow
+Governed Workflow Plane PRD. `/llms.txt` advertisement of these tools follows
 once the agent-entrypoint PR lands.*
