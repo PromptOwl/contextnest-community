@@ -57,6 +57,11 @@ export const WORKFLOW_TOOL_DEFINITIONS = [
       properties: {
         agent: { type: "string", description: "Node id of the agent/skill to run" },
         inputs: { type: "object", description: "Optional caller inputs recorded on the run" },
+        parent_run_id: {
+          type: "string",
+          description:
+            "Optional: spawn this as a sub-agent run under a still-running parent (FEATURE_SUBAGENT_RUNS). Bounded by depth/fan-out and guarded against re-entrancy.",
+        },
       },
       required: ["agent"],
     },
@@ -243,6 +248,7 @@ export async function runWorkflowTool(
         inputs: args.inputs,
         triggeredBy,
         storage: ctx.storage,
+        parentRunId: args.parent_run_id,
       });
       return json(bundle);
     }

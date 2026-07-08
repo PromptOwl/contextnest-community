@@ -19,9 +19,9 @@ import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
 import { engineCache } from "../nodes/engine.js";
 import { ValidationError, NotFoundError, ConflictError } from "../shared/errors.js";
-import { assertSafeNodeId } from "../shared/node-id.js";
 import { safeJson } from "../shared/json.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
 import {
   requireWorkflowPlane,
   seedDefaultEdgeTypes,
@@ -219,18 +219,16 @@ edgeRoutes.get("/", requireWorkflowPlane, async (c) => {
 edgeRoutes.post("/", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
   const body = await c.req.json<Record<string, unknown>>();
-  const fromNode = typeof body.from_node === "string" ? body.from_node.trim() : "";
-  const toNode = typeof body.to_node === "string" ? body.to_node.trim() : "";
+  const fromRaw = typeof body.from_node === "string" ? body.from_node.trim() : "";
+  const toRaw = typeof body.to_node === "string" ? body.to_node.trim() : "";
   const typeRef = typeof body.type === "string" ? body.type.trim() : "";
-  if (!fromNode || !toNode || !typeRef) {
+  if (!fromRaw || !toRaw || !typeRef) {
     throw new ValidationError("from_node, to_node, and type are required");
   }
-  // Body-supplied ids skip the URL-param containment guard in app.ts, and
-  // storage.readDocument below joins them into a filesystem path with no
-  // containment check of its own — a `..` segment would escape the nest vault
-  // and read another tenant's file. This is that chokepoint for this route.
-  assertSafeNodeId(fromNode);
-  assertSafeNodeId(toNode);
+  // SECURITY: node ids feed storage.readDocument below — reject traversal so a
+  // caller can't probe/reference another nest's files. (src/shared/node-id.ts)
+  const fromNode = assertSafeNodeId(fromRaw);
+  const toNode = assertSafeNodeId(toRaw);
 
   const db = getDb();
   const createdBy = await resolveCallerEmail(c.get("userId"));

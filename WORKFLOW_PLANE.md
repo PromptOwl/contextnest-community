@@ -28,7 +28,10 @@ workflow like this:
    response is the complete executable bundle: the agent/skill node's
    instructions, the flow-edge subgraph reachable from it (with conditions and
    referenced glossary definitions), and a `run_id`. One round-trip; no
-   discovery calls needed.
+   discovery calls needed. Optional body: `inputs` (recorded on the run) and
+   `parent_run_id` — set the latter to spawn this as a **sub-agent run** nested
+   under a still-running parent (requires `FEATURE_SUBAGENT_RUNS`; the response
+   carries `parent_run_id` and `depth`). See Guardrails for the recursion caps.
 2. **Walk** — start at the agent node. For each outgoing flow edge, evaluate
    its condition per mode: `structured` deterministically; `nl`/`open` by
    judgment (record the rationale). Follow edges whose conditions hold.
@@ -76,9 +79,23 @@ external runners produced.
 
 ## Guardrails
 
-- Sub-Turing by design: flow graphs are DAGs; there are no unbounded loops to
-  audit. Schedules (agent `schedule` field) provide iteration; the graph
-  provides branching; the nest provides memory.
+- Sub-Turing by design: within a run, flow graphs are DAGs; there are no
+  unbounded loops to audit. Schedules (agent `schedule` field) provide
+  iteration; the graph provides branching; the nest provides memory.
+- Bounded recursion (`FEATURE_SUBAGENT_RUNS`, off by default, gated separately
+  from the plane): a run may spawn nested sub-agent runs via `parent_run_id`,
+  but the call tree stays finite and haltable. The trigger validates the parent
+  chain and rejects anything that would break that bound —
+  - **depth** capped at `SUBAGENT_MAX_DEPTH` (tree height) → 403;
+  - **fan-out** capped at `SUBAGENT_MAX_CHILDREN` per run (tree width),
+    enforced atomically with the child insert so concurrent spawns can't
+    overrun it → 403;
+  - **re-entrancy** rejected — an agent already anywhere in the ancestor chain
+    can't reappear (the per-run DAG guard can't see across run boundaries) →
+    409;
+  - a closed or cross-nest/unknown parent is refused (409 / 404).
+  Per-run step logs are independently capped at `RUN_MAX_STEPS`. Until the flag
+  is on, any `parent_run_id` is rejected (400) and none of this surface is live.
 - Everything is governed: edge types, edges, and the agent nodes themselves
   are versioned and steward-reviewable; runs record who triggered what and
   every branch decision.

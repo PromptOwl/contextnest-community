@@ -129,6 +129,7 @@ export async function getHealth() {
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
     workflow_plane_enabled?: boolean;
+    subagent_runs_enabled?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
@@ -143,6 +144,7 @@ export interface AdminSettings {
   public_base_url: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
+  subagent_runs_enabled: boolean;
   slack_webhook_url: string;
   smtp_url: string;
   notify_email_from: string;
@@ -549,6 +551,10 @@ export interface Run {
   trace: unknown | null;
   started_at: string;
   finished_at: string | null;
+  /** Sub-agent runs: the run that spawned this one (null = top-level), and its
+   * depth in the call tree (0 = top-level). Present once migration 018 ran. */
+  parent_run_id: string | null;
+  depth: number;
 }
 
 export interface RunStep {
@@ -583,6 +589,8 @@ export async function getRun(runId: string) {
 /** The executable bundle a trigger returns — handed to an external runner. */
 export interface RunBundle {
   run_id: string;
+  parent_run_id: string | null;
+  depth: number;
   agent: {
     id: string;
     title: string;
@@ -601,19 +609,27 @@ export interface RunBundle {
  * report steps back. Write tier required. `agentNode` is a node id like
  * `nodes/my-agent`; its slashes are preserved (the route matches `.+`), so
  * don't encode the whole path.
+ *
+ * Pass `parentRunId` to spawn this as a SUB-AGENT run nested under a still-
+ * running parent (requires FEATURE_SUBAGENT_RUNS; the server rejects it with a
+ * 400 when the flag is off, and bounds depth/fan-out/re-entrancy when on).
  */
 export async function triggerRun(
   nestId: string,
   agentNode: string,
   inputs?: unknown,
+  parentRunId?: string | null,
 ) {
   const path = agentNode
     .split("/")
     .map((seg) => encodeURIComponent(seg))
     .join("/");
+  const body: { inputs?: unknown; parent_run_id?: string } = {};
+  if (inputs !== undefined) body.inputs = inputs;
+  if (parentRunId) body.parent_run_id = parentRunId;
   return request<RunBundle>(`/nests/${nestId}/run/${path}`, {
     method: "POST",
-    body: JSON.stringify(inputs === undefined ? {} : { inputs }),
+    body: JSON.stringify(body),
   });
 }
 

@@ -51,6 +51,7 @@ const HISTORICAL_MIGRATIONS = [
   "015_definitions",
   "016_workflow_edges",
   "017_workflow_runs",
+  "018_subagent_runs",
   "019_grants",
 ];
 
@@ -417,6 +418,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       at TEXT NOT NULL
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_run_steps ON run_steps(run_id, seq);
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
+    ALTER TABLE runs ADD COLUMN IF NOT EXISTS depth INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

@@ -10,7 +10,7 @@
  * when the "Workflow plane" admin toggle is on. `inputs`/`trace`/`detail`
  * arrive null when the caller lacks write tier — the server redacts them.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Activity, Loader2, Play } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -30,6 +30,9 @@ import type { Run, RunStep } from "../lib/api";
 interface Props {
   nestId: string;
   nestName: string;
+  /** FEATURE_SUBAGENT_RUNS (from /health). Gates the "spawn sub-agent" option
+   *  and the call-tree columns; off → this page behaves as before. */
+  subagentEnabled: boolean;
   onBack: () => void;
 }
 
@@ -80,7 +83,7 @@ function RedactableJson({ value }: { value: unknown | null }) {
   );
 }
 
-export function RunsPage({ nestId, nestName, onBack }: Props) {
+export function RunsPage({ nestId, nestName, subagentEnabled, onBack }: Props) {
   const [rows, setRows] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -98,9 +101,14 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
   const [showTrigger, setShowTrigger] = useState(false);
   const [triggerAgent, setTriggerAgent] = useState("");
   const [triggerInputs, setTriggerInputs] = useState("");
+  // Optional parent run — set to spawn the new run as a sub-agent (nested)
+  // under a still-running parent. "" = a plain top-level run.
+  const [triggerParent, setTriggerParent] = useState<string>("");
   const [triggering, setTriggering] = useState(false);
   // Runnable nodes (agent/skill) for the trigger picker — filtered server-side.
   const [runnables, setRunnables] = useState<api.Runnable[]>([]);
+  // Still-running runs — the candidate parents for a sub-agent spawn.
+  const [runningRuns, setRunningRuns] = useState<Run[]>([]);
 
   useEffect(() => {
     api
@@ -108,6 +116,28 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
       .then(({ runnables }) => setRunnables(runnables))
       .catch(() => {});
   }, [nestId]);
+
+  // Map a run's agent_node id to its document title (agent/skill nodes are the
+  // runnables we already fetched). Falls back to the raw id if it's not found
+  // (e.g. the node was deleted after the run was created).
+  const titleFor = useCallback(
+    (nodeId: string) => runnables.find((n) => n.id === nodeId)?.title ?? nodeId,
+    [runnables],
+  );
+
+  const loadRunning = useCallback(async () => {
+    if (!subagentEnabled) return;
+    try {
+      const { runs } = await api.listRuns(nestId, { status: "running" });
+      setRunningRuns(runs);
+    } catch {
+      /* non-fatal — the parent picker just stays empty */
+    }
+  }, [nestId, subagentEnabled]);
+
+  useEffect(() => {
+    loadRunning();
+  }, [loadRunning]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -142,6 +172,35 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
     }
   }, []);
 
+  // Open a run by id (used by the parent-run link in the detail view). Keeps
+  // the current detail mounted while the parent's trace loads.
+  const openRunById = useCallback(async (id: string) => {
+    setDetail(null);
+    setDetailLoading(true);
+    try {
+      const d = await api.getRun(id);
+      setSelected(d.run);
+      setDetail(d);
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to load run trace");
+    } finally {
+      setDetailLoading(false);
+    }
+  }, []);
+
+  // "Spawn sub-agent under this run": preset the trigger form's parent to a
+  // running run and open it. Ensure the run is in the picker's option list
+  // even if the running-runs fetch hasn't refreshed yet.
+  const spawnSubagent = (run: Run) => {
+    setRunningRuns((prev) =>
+      prev.some((r) => r.id === run.id) ? prev : [run, ...prev],
+    );
+    setTriggerParent(run.id);
+    setSelected(null);
+    setDetail(null);
+    setShowTrigger(true);
+  };
+
   const closeRun = () => {
     setSelected(null);
     setDetail(null);
@@ -164,14 +223,23 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
     }
     setTriggering(true);
     try {
-      const bundle = await api.triggerRun(nestId, agent, inputs);
+      const bundle = await api.triggerRun(
+        nestId,
+        agent,
+        inputs,
+        triggerParent || undefined,
+      );
       toast.success(
-        `Run ${bundle.run_id} created. The server does not execute — hand the bundle to a runner.`,
+        bundle.parent_run_id
+          ? `Sub-agent run ${bundle.run_id} created (depth ${bundle.depth}). Hand the bundle to a runner.`
+          : `Run ${bundle.run_id} created. The server does not execute — hand the bundle to a runner.`,
       );
       setShowTrigger(false);
       setTriggerAgent("");
       setTriggerInputs("");
+      setTriggerParent("");
       await load();
+      loadRunning();
       // Jump straight to the new run's (empty) trace.
       openRun({
         id: bundle.run_id,
@@ -183,6 +251,8 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
         trace: null,
         started_at: new Date().toISOString(),
         finished_at: null,
+        parent_run_id: bundle.parent_run_id,
+        depth: bundle.depth,
       });
     } catch (e: any) {
       toast.error(e?.message || "Failed to trigger run");
@@ -190,6 +260,43 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
       setTriggering(false);
     }
   };
+
+  // Order the flat run list into a call tree: each sub-agent row rendered
+  // directly under its parent and indented by its position IN THE DISPLAYED
+  // tree (not its absolute depth) so the shape reads top-down. A row whose
+  // parent isn't on this page (filtered out) falls back to a root — it still
+  // carries its depth badge so it's recognisably a sub-agent. Roots newest
+  // first (matches the old flat order); children in spawn order under each.
+  const treeRows = useMemo(() => {
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const kids = new Map<string, Run[]>();
+    const roots: Run[] = [];
+    for (const r of rows) {
+      const p = r.parent_run_id;
+      if (p && byId.has(p)) {
+        (kids.get(p) ?? kids.set(p, []).get(p)!).push(r);
+      } else {
+        roots.push(r);
+      }
+    }
+    const desc = (a: Run, b: Run) => b.started_at.localeCompare(a.started_at);
+    const asc = (a: Run, b: Run) => a.started_at.localeCompare(b.started_at);
+    roots.sort(desc);
+    const out: Array<{ run: Run; level: number }> = [];
+    const seen = new Set<string>();
+    const visit = (r: Run, level: number) => {
+      if (seen.has(r.id)) return; // guard against any accidental cycle
+      seen.add(r.id);
+      out.push({ run: r, level });
+      const cs = kids.get(r.id);
+      if (cs) {
+        cs.sort(asc);
+        for (const c of cs) visit(c, level + 1);
+      }
+    };
+    for (const r of roots) visit(r, 0);
+    return out;
+  }, [rows]);
 
   // ── Detail view ──────────────────────────────────────────────────────
   if (selected) {
@@ -202,8 +309,19 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
           </Button>
           <h1 className="text-lg font-semibold flex items-center gap-2">
             <Activity className="h-4 w-4 text-muted-foreground" />
-            Run · {run.agent_node}
+            Run · {titleFor(run.agent_node)}
           </h1>
+          {subagentEnabled && run.status === "running" && (
+            <div className="ml-auto">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => spawnSubagent(run)}
+              >
+                <Play className="h-3.5 w-3.5 mr-1" /> Spawn sub-agent
+              </Button>
+            </div>
+          )}
         </div>
 
         {/* Run meta */}
@@ -211,7 +329,10 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
           <div className="grid gap-3 sm:grid-cols-2 text-sm">
             <div>
               <div className="text-xs text-muted-foreground">Agent</div>
-              <div className="font-mono">{run.agent_node}</div>
+              <div className="font-medium">{titleFor(run.agent_node)}</div>
+              <div className="font-mono text-[11px] text-muted-foreground break-all">
+                {run.agent_node}
+              </div>
             </div>
             <div>
               <div className="text-xs text-muted-foreground">Status</div>
@@ -233,6 +354,38 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
               <div className="text-xs text-muted-foreground">Run ID</div>
               <div className="font-mono text-xs break-all">{run.id}</div>
             </div>
+            {(run.parent_run_id || (run.depth ?? 0) > 0) && (
+              <>
+                <div>
+                  <div className="text-xs text-muted-foreground">
+                    Parent run
+                  </div>
+                  {run.parent_run_id ? (
+                    <button
+                      type="button"
+                      onClick={() => openRunById(run.parent_run_id!)}
+                      className="font-mono text-xs text-primary underline underline-offset-2 break-all text-left"
+                    >
+                      {run.parent_run_id}
+                    </button>
+                  ) : (
+                    <div>—</div>
+                  )}
+                </div>
+                <div>
+                  <div className="text-xs text-muted-foreground">
+                    Depth in call tree
+                  </div>
+                  <div>
+                    {run.depth ?? 0}
+                    <span className="text-muted-foreground">
+                      {" "}
+                      (sub-agent run)
+                    </span>
+                  </div>
+                </div>
+              </>
+            )}
             <div>
               <div className="text-xs text-muted-foreground">Started</div>
               <div>{fmt(run.started_at)}</div>
@@ -332,7 +485,10 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setShowTrigger((v) => !v)}
+            onClick={() => {
+              setTriggerParent("");
+              setShowTrigger((v) => !v);
+            }}
           >
             <Play className="h-3.5 w-3.5 mr-1" /> Trigger run
           </Button>
@@ -379,6 +535,38 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
               </Select>
             )}
           </div>
+          {subagentEnabled && (
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground">
+                Parent run (optional — spawn as a sub-agent)
+              </label>
+              <Select
+                value={triggerParent || "none"}
+                onValueChange={(v) => setTriggerParent(v === "none" ? "" : v)}
+              >
+                <SelectTrigger className="w-full max-w-[420px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">— None (top-level run)</SelectItem>
+                  {runningRuns.map((r) => (
+                    <SelectItem key={r.id} value={r.id}>
+                      {titleFor(r.agent_node)}
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · {r.id.slice(0, 14)}…
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">
+                Nests the new run under a still-running parent. Bounded by depth,
+                fan-out and re-entrancy caps — a cycle or an over-deep/over-wide
+                tree is rejected server-side.
+              </p>
+            </div>
+          )}
           <div className="space-y-1">
             <label className="text-xs text-muted-foreground">
               Inputs (optional JSON)
@@ -474,14 +662,37 @@ export function RunsPage({ nestId, nestName, onBack }: Props) {
               </tr>
             )}
             {!loading &&
-              rows.map((r) => (
+              treeRows.map(({ run: r, level }) => (
                 <tr
                   key={r.id}
                   onClick={() => openRun(r)}
                   className="border-t border-border align-top cursor-pointer hover:bg-accent/50 [&>td]:px-3 [&>td]:py-2"
                 >
-                  <td className="font-mono font-medium whitespace-nowrap">
-                    {r.agent_node}
+                  <td className="whitespace-nowrap">
+                    <span
+                      className="font-medium"
+                      style={{
+                        paddingLeft: `${Math.min(level, 6) * 18}px`,
+                      }}
+                    >
+                      {level > 0 && (
+                        <span className="text-muted-foreground">↳ </span>
+                      )}
+                      {titleFor(r.agent_node)}
+                    </span>
+                    {(r.depth ?? 0) > 0 && (
+                      <Badge variant="neutral" className="ml-2">
+                        sub · d{r.depth}
+                      </Badge>
+                    )}
+                    <div
+                      className="font-mono text-[11px] text-muted-foreground"
+                      style={{
+                        paddingLeft: `${Math.min(level, 6) * 18}px`,
+                      }}
+                    >
+                      {r.agent_node}
+                    </div>
                   </td>
                   <td className="whitespace-nowrap">
                     <StatusBadge status={r.status} />

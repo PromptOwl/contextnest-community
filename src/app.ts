@@ -203,6 +203,10 @@ export function createApp(): Hono<AuthEnv> {
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
       workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+      // Sub-agent runs gate its own recursion surface separately (env-only,
+      // must clear a security review — NOT a UI toggle). Exposed read-only so
+      // the Runs page shows the "spawn sub-agent" option only when it's live.
+      subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     }),
   );
@@ -319,6 +323,7 @@ export function createApp(): Hono<AuthEnv> {
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+    subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
     smtp_url: config.SMTP_URL ?? "",
     notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
@@ -369,6 +374,27 @@ export function createApp(): Hono<AuthEnv> {
         name: "FEATURE_WORKFLOW_PLANE",
         value: body.workflow_plane_enabled ? "true" : null,
       });
+    }
+    if ("subagent_runs_enabled" in body) {
+      // Depends on the plane: enabling recursion without the plane's run routes
+      // is inert (they'd 404). Honour the plane state THIS request sets, so a
+      // single patch can turn both on together. This flag opens a recursion
+      // surface — it's gated separately by design and should only be flipped
+      // after the security review the feature ships behind.
+      const planeOn =
+        "workflow_plane_enabled" in body
+          ? !!body.workflow_plane_enabled
+          : config.FEATURE_WORKFLOW_PLANE;
+      if (body.subagent_runs_enabled && !planeOn) {
+        errors.push(
+          "subagent_runs_enabled requires workflow_plane_enabled to be on",
+        );
+      } else {
+        pending.push({
+          name: "FEATURE_SUBAGENT_RUNS",
+          value: body.subagent_runs_enabled ? "true" : null,
+        });
+      }
     }
     if ("slack_webhook_url" in body) {
       const v = String(body.slack_webhook_url ?? "").trim();

@@ -21,6 +21,7 @@ import { AppError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { isSuspended, getSuspensionReason, getCurrentLicense } from "../auth/license.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
 import {
   loadRun,
@@ -46,10 +47,13 @@ export const runTriggerRoutes = new Hono<AuthEnv>();
 // POST /nests/:nestId/run/:agentNode{.+}
 runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
   const nestId = c.req.param("nestId")!;
-  const agentNode = c.req.param("agentNode")!;
+  // SECURITY: the catch-all param can carry `../` — validate before it reaches
+  // storage.readDocument, or a caller with write on nest A reads nest B's
+  // agent bodies via `..%2FB%2Fnodes%2Fsecret`. (See src/shared/node-id.ts.)
+  const agentNode = assertSafeNodeId(c.req.param("agentNode")!);
   const body = await c.req
-    .json<{ inputs?: unknown }>()
-    .catch(() => ({}) as { inputs?: unknown });
+    .json<{ inputs?: unknown; parent_run_id?: unknown }>()
+    .catch(() => ({}) as { inputs?: unknown; parent_run_id?: unknown });
 
   const { storage } = await engineCache.get(nestId);
   // Derived from auth, never client-supplied — this is the accountability
@@ -64,6 +68,7 @@ runTriggerRoutes.post("/:agentNode{.+}", requireWorkflowPlane, async (c) => {
     inputs: body.inputs,
     triggeredBy,
     storage,
+    parentRunId: body.parent_run_id,
   });
   return c.json(bundle, 201);
 });

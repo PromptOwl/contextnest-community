@@ -26,6 +26,8 @@ const SETTING_ENV = [
   "LOGO_URL",
   "PUBLIC_BASE_URL",
   "MAX_BODY_BYTES",
+  "FEATURE_WORKFLOW_PLANE",
+  "FEATURE_SUBAGENT_RUNS",
 ];
 
 beforeEach(() => {
@@ -140,6 +142,58 @@ describe("/admin/settings — validation", () => {
       app, "PATCH", "/admin/settings", { max_body_bytes: 999 * 1024 * 1024 }, admin.apiKey,
     );
     expect(tooBig.status).toBe(400);
+  });
+
+  it("rejects enabling sub-agent runs while the workflow plane is off", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { subagent_runs_enabled: true },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/workflow_plane_enabled/);
+
+    // Nothing applied — the flag stays off.
+    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(after.data.subagent_runs_enabled).toBe(false);
+  });
+
+  it("enables plane + sub-agent runs together in one PATCH and persists both", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { workflow_plane_enabled: true, subagent_runs_enabled: true },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.settings.workflow_plane_enabled).toBe(true);
+    expect(res.data.settings.subagent_runs_enabled).toBe(true);
+
+    const envFile = join(env.dataDir, ".env");
+    const contents = readFileSync(envFile, "utf8");
+    expect(contents).toMatch(/FEATURE_WORKFLOW_PLANE=true/);
+    expect(contents).toMatch(/FEATURE_SUBAGENT_RUNS=true/);
+
+    // And it can be turned back off (null clears the line → falls to default).
+    const off = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { subagent_runs_enabled: false },
+      admin.apiKey,
+    );
+    expect(off.status).toBe(200);
+    expect(off.data.settings.subagent_runs_enabled).toBe(false);
+    expect(readFileSync(envFile, "utf8")).not.toMatch(/FEATURE_SUBAGENT_RUNS=true/);
   });
 
   it("applies NOTHING when one field of a multi-field PATCH is invalid", async () => {

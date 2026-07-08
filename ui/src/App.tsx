@@ -119,6 +119,8 @@ export default function App() {
     authenticated,
     isAdmin,
     workflowPlaneEnabled,
+    subagentRunsEnabled,
+    refreshHealth,
     loading,
     error,
     logout,
@@ -160,13 +162,19 @@ export default function App() {
     try {
       const res = await updateAdminSettings(patch);
       setServerSettings(res.settings);
+      // Feature flags gate other views (workflow-plane nav, sub-agent picker)
+      // off the /health-sourced AuthContext state, not serverSettings. Re-read
+      // health so those toggles take effect live, without a page reload.
+      if ("workflow_plane_enabled" in patch || "subagent_runs_enabled" in patch) {
+        await refreshHealth();
+      }
       toast.success("Settings saved");
     } catch (e: any) {
       toast.error(e?.message || "Failed to save settings");
       // Re-sync from server so the UI reflects the true state.
       getAdminSettings().then(setServerSettings).catch(() => {});
     }
-  }, []);
+  }, [refreshHealth]);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
   const [showQuickOpen, setShowQuickOpen] = useState(false);
 
@@ -871,6 +879,7 @@ export default function App() {
           <RunsPage
             nestId={view.nestId}
             nestName={view.nestName}
+            subagentEnabled={subagentRunsEnabled}
             onBack={() =>
               setView({
                 page: "nest",

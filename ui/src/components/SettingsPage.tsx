@@ -48,7 +48,12 @@ const TABS: { id: string; label: string; keys: (keyof AdminSettings)[] }[] = [
   {
     id: "advanced",
     label: "Advanced",
-    keys: ["telemetry_enabled", "max_body_bytes", "workflow_plane_enabled"],
+    keys: [
+      "telemetry_enabled",
+      "max_body_bytes",
+      "workflow_plane_enabled",
+      "subagent_runs_enabled",
+    ],
   },
 ];
 
@@ -380,7 +385,49 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   </span>
                   <Switch
                     checked={draft.workflow_plane_enabled}
-                    onCheckedChange={(v) => set({ workflow_plane_enabled: v })}
+                    onCheckedChange={(v) =>
+                      set({
+                        workflow_plane_enabled: v,
+                        // Turning the plane off makes sub-agent runs inert; keep
+                        // the two consistent so the server never sees the
+                        // dependent-flag-without-parent state.
+                        ...(v ? {} : { subagent_runs_enabled: false }),
+                      })
+                    }
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Sub-agent runs (recursion) — gated separately from the plane */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Sub-agent runs (recursion)
+                </CardTitle>
+                <CardDescription>
+                  Lets a run spawn nested sub-agent runs (a call tree). Bounded
+                  by depth, fan-out and re-entrancy caps so the tree stays
+                  finite. This opens a recursion surface — enable it only after
+                  reviewing the caps for your deployment. Requires the workflow
+                  plane.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.subagent_runs_enabled ? "On" : "Off"}
+                    {!draft.workflow_plane_enabled && (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · enable the workflow plane first
+                      </span>
+                    )}
+                  </span>
+                  <Switch
+                    checked={draft.subagent_runs_enabled}
+                    disabled={!draft.workflow_plane_enabled}
+                    onCheckedChange={(v) => set({ subagent_runs_enabled: v })}
                   />
                 </div>
               </CardContent>
