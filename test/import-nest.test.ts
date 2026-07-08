@@ -244,4 +244,36 @@ describe("imported vault: discovery + registration", () => {
     expect(typeof data.node.title).toBe("string");
     expect(data.node.title).toBe("123");
   });
+
+  it("titles a frontmatter-less file from its filename; a frontmatter title still wins", async () => {
+    const files: FileEntry[] = [
+      { path: "guides/getting-started.md", content: "# Heading\n\nbody" },
+      { path: "a/b/c/deep-notes.md", content: "no frontmatter, nested" },
+      mdFile("with-fm.md", "title: Explicit FM Title", "body"),
+    ];
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Title From Filename", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    const nestId = data.nest.id;
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    const byId = Object.fromEntries(
+      list.data.nodes.map((n: any) => [n.id, n.title]),
+    );
+    // Filename (leaf of the id), NOT the "# Heading" or an empty string.
+    expect(byId["guides/getting-started"]).toBe("getting-started");
+    expect(byId["a/b/c/deep-notes"]).toBe("deep-notes");
+    // Explicit frontmatter title is untouched.
+    expect(byId["with-fm"]).toBe("Explicit FM Title");
+  });
 });

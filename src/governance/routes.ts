@@ -9,6 +9,7 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError, ConflictError } from "../shared/errors.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
@@ -392,6 +393,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
       requestedBy: userEmail,
       note: body.note,
       priority: body.priority as any,
+      baseUrl: requestBaseUrl(c.req.url),
     });
   } catch (err) {
     // The service throws a plain Error for duplicate submissions —
@@ -436,6 +438,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
       approvedBy: userEmail,
       note: body.note,
       override: body.override && isAdmin,
+      baseUrl: requestBaseUrl(c.req.url),
     });
     return c.json({ review: request });
   } catch (err: any) {
@@ -462,6 +465,7 @@ governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
       version: await versions.getCurrentVersion(nestId, nodeId),
       rejectedBy: userEmail,
       note: body.note,
+      baseUrl: requestBaseUrl(c.req.url),
     });
     return c.json({ review: request });
   } catch (err: any) {
