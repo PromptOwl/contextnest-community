@@ -9,7 +9,9 @@ import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helper
 import { withTimeouts } from "../src/notify/email.js";
 
 const sendMail = vi.fn(async () => ({ messageId: "test" }));
-const createTransport = vi.fn(() => ({ sendMail }));
+const verify = vi.fn(async () => true);
+const close = vi.fn();
+const createTransport = vi.fn(() => ({ sendMail, verify, close }));
 vi.mock("nodemailer", () => ({ default: { createTransport } }));
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -187,6 +189,49 @@ describe("admin settings validation", () => {
     process.env.SMTP_URL = "smtps://user:pass@smtp.test:465";
     process.env.NOTIFY_EMAIL_FROM = "nest@test.local";
     process.env.NOTIFY_EMAIL_TO = "team@test.local";
+  });
+
+  it("verifies SMTP credentials before saving — blocks a save when connect/auth fails", async () => {
+    const openApp = await createTestApp("open");
+    verify.mockClear();
+    close.mockClear();
+    verify.mockRejectedValueOnce(new Error("Invalid login: 535 auth failed"));
+    const bad = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      smtp_url: "smtps://user:wrongpass@smtp.test:465",
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.data.error).toMatch(/SMTP connection failed/i);
+    expect(bad.data.error).toMatch(/535 auth failed/);
+    // Verify ran on the supplied URL and the throwaway transporter was closed.
+    expect(verify).toHaveBeenCalled();
+    expect(close).toHaveBeenCalled();
+    // Nothing persisted — the live SMTP_URL is unchanged.
+    expect(process.env.SMTP_URL).toBe("smtps://user:pass@smtp.test:465");
+  });
+
+  it("saves a new SMTP URL once verify() succeeds", async () => {
+    const openApp = await createTestApp("open");
+    verify.mockClear();
+    verify.mockResolvedValueOnce(true);
+    const ok = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      smtp_url: "smtps://user:pass@smtp.verified:465",
+    });
+    expect(ok.status).toBe(200);
+    expect(verify).toHaveBeenCalled();
+    expect(ok.data.settings.smtp_url).toBe("smtps://user:pass@smtp.verified:465");
+    // Restore the shared fixture URL for the remaining tests.
+    process.env.SMTP_URL = "smtps://user:pass@smtp.test:465";
+  });
+
+  it("skips verify when the SMTP URL is cleared (disabling the connector)", async () => {
+    const openApp = await createTestApp("open");
+    verify.mockClear();
+    const off = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      smtp_url: "",
+    });
+    expect(off.status).toBe(200);
+    expect(verify).not.toHaveBeenCalled();
+    process.env.SMTP_URL = "smtps://user:pass@smtp.test:465";
   });
 
   it("rejects a malformed notify_email_from / notify_email_to", async () => {

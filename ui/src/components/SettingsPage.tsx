@@ -112,12 +112,18 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
   // load, and after a successful save — which clears the dirty state).
   const [draft, setDraft] = useState<AdminSettings | null>(settings);
   const [saving, setSaving] = useState(false);
+  // Error from the last failed save (shape validation or SMTP verify), shown
+  // inline near the fields. Cleared on the next edit or a successful save.
+  const [saveError, setSaveError] = useState<string | null>(null);
   useEffect(() => {
     if (settings) setDraft(settings);
   }, [settings]);
 
-  const set = (patch: Partial<AdminSettings>) =>
+  const set = (patch: Partial<AdminSettings>) => {
     setDraft((d) => (d ? { ...d, ...patch } : d));
+    // Any edit invalidates a prior save error — let the admin retry cleanly.
+    setSaveError(null);
+  };
 
   // null and "" are equivalent for the nullable string fields (backend stores
   // "" as null), so normalize before comparing to avoid a phantom dirty state.
@@ -136,8 +142,14 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
     const patch: Partial<AdminSettings> = {};
     for (const k of dirtyKeys) (patch as Record<string, unknown>)[k] = draft[k];
     setSaving(true);
+    setSaveError(null);
     try {
       await onUpdate(patch);
+    } catch (e: any) {
+      // Surface the server's reason inline (near the notification fields) so
+      // the admin sees exactly why the save was blocked, and keep the draft so
+      // the values stay put for correction.
+      setSaveError(e?.message || "Failed to save settings");
     } finally {
       setSaving(false);
     }
@@ -179,6 +191,15 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
           </div>
         )}
       </div>
+
+      {saveError && (
+        <div
+          role="alert"
+          className="mb-4 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          {saveError}
+        </div>
+      )}
 
       {!draft ? (
         <div className="flex items-center gap-2 text-sm text-muted-foreground py-10">
