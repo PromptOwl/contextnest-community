@@ -52,7 +52,7 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
-import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory, DiffViewer } from "./governance";
+import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
 import { unifiedDiff } from "./governance/diff-util";
 import {
   DropdownMenu,
@@ -1940,39 +1940,25 @@ export function DocumentEditor({
       )}
 
       {showVersions && !isNew && (
-        <Dialog open onOpenChange={(o) => !o && setShowVersions(false)}>
-          <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-hidden flex flex-col">
-            <DialogHeader>
-              <DialogTitle>{title || nodeId}</DialogTitle>
-            </DialogHeader>
-            {versionData ? (
-              <VersionHistory
-                className="flex-1 min-h-0 overflow-hidden"
-                versions={versionData.versions}
-                currentVersion={versionData.currentVersion}
-                approvedVersion={versionData.approvedVersion}
-                onRestore={
-                  isViewOnly
-                    ? undefined
-                    : async (v) => {
-                      try {
-                        await api.revertToVersion(nestId, nodeId, v);
-                        toast.success(`Reverted to version ${v}`);
-                        await Promise.all([loadNode(), loadVersions()]);
-                      } catch (e: any) {
-                        toast.error(e?.message || "Revert failed");
-                      }
-                    }
+        <VersionHistoryModal
+          open
+          onClose={() => setShowVersions(false)}
+          title={title || nodeId}
+          versionData={versionData}
+          onRestore={
+            isViewOnly
+              ? undefined
+              : async (v) => {
+                try {
+                  await api.revertToVersion(nestId, nodeId, v);
+                  toast.success(`Reverted to version ${v}`);
+                  await Promise.all([loadNode(), loadVersions()]);
+                } catch (e: any) {
+                  toast.error(e?.message || "Revert failed");
                 }
-              />
-            ) : (
-              <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                Loading versions…
-              </div>
-            )}
-          </DialogContent>
-        </Dialog>
+              }
+          }
+        />
       )}
 
       {!isNew && (
