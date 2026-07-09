@@ -13,8 +13,9 @@ export function LicenseSetupPage({ onActivated }: Props) {
   const [key, setKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Set when the key validated but did NOT persist to disk — the operator must
-  // see this before continuing, or they'll lose the key on the next restart.
+  // Set when the key validated but did NOT persist to the database — the
+  // operator must see this before continuing, or they'll lose the key on the
+  // next restart.
   const [warning, setWarning] = useState<string | null>(null);
 
   const handleInstall = async () => {
@@ -91,7 +92,7 @@ export function LicenseSetupPage({ onActivated }: Props) {
                 className="text-sm rounded-md border border-amber-300 bg-amber-50 text-amber-800 p-3 space-y-1"
                 data-testid="license-setup-warning"
               >
-                <p className="font-medium">License not saved to disk</p>
+                <p className="font-medium">License not saved</p>
                 <p>{warning}</p>
               </div>
             )}

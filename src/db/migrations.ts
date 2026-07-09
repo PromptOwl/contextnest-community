@@ -926,6 +926,30 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("018_subagent_runs");
   }
+
+  // 020: server_settings — durable store for runtime-mutable server config (the
+  //   admin Settings page values + the installed license key). Replaces writing
+  //   these to a .env file under DATA_ROOT, which was lost on every Cloud Run
+  //   rebuild (the container filesystem is ephemeral) and never shared across
+  //   horizontally scaled instances. Loaded into process.env at boot.
+  //     value        — the effective setting; NULL = explicitly cleared (tombstone)
+  //     env_at_write — the deploy-env value in effect when the row was written,
+  //                    so a redeploy that CHANGES the env is detected and takes
+  //                    precedence (operator intent) while an unchanged env lets
+  //                    the stored UI edit win. See db/settings.ts.
+  if (!hasMigration("020_server_settings")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS server_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT,
+          env_at_write TEXT,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+      recordMigration("020_server_settings");
+    })();
+  }
 }
 
 /**
