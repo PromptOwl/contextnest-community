@@ -1115,10 +1115,10 @@ export function DocumentEditor({
               variant="outline"
               onClick={() => setShowSubmitModal(true)}
               data-testid="document-editor-submit"
-              title="With stewardship on, &quot;publishing&quot; in this nest means submitting for steward approval."
+              title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
             >
               <Send className="h-4 w-4 mr-2" />
-              Publish (requires approval)
+              Publish
             </Button>
           )}
           {!isViewOnly && canReviewHere && (
@@ -1152,19 +1152,6 @@ export function DocumentEditor({
                 Start Editing
               </Button>
             )
-          )}
-          {/* Version history — opens modal w/ highlighted diffs (CU-wdqcpztgwn).
-              Icon-only; lives next to the overflow menu in the header. */}
-          {!isNew && (
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={openVersions}
-              title="Version history"
-              data-testid="document-editor-history"
-            >
-              <History className="h-4 w-4" />
-            </Button>
           )}
           {/* Compare ▾ — pick a past version; the doc area renders an
               ever-present current↔vN diff inline (no modal). */}
@@ -1227,42 +1214,44 @@ export function DocumentEditor({
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-          {/* Raw markdown source toggle — view/edit the underlying .md. */}
-          <Button
-            variant={rawMode ? "secondary" : "outline"}
-            size="icon"
-            onClick={() => setRawMode((v) => !v)}
-            title={rawMode ? "Rich editor" : "Markdown source"}
-            aria-pressed={rawMode}
-            data-testid="document-editor-markdown-toggle"
-          >
-            <Code2 className="h-4 w-4" />
-          </Button>
-          {/* Visible document-share action — copies the deep link the App's
-              ?nest=&doc= probe understands. Promoted out of the overflow menu
-              so sharing a single document is discoverable. */}
-          {!isNew && (
-            <Button
-              variant="outline"
-              size="sm"
-              title="Copy a shareable link to this document"
-              data-testid="document-editor-copy-link"
-              onClick={() => {
-                const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
-                navigator.clipboard.writeText(url);
-                toast.success("Link copied — recipient needs access to this nest");
-              }}
-            >
-              <LinkIcon className="h-4 w-4 mr-1" /> Share
-            </Button>
-          )}
-          {/* Share-nest (collaborators / visibility) stays in the overflow. */}
+          {/* Secondary actions collapse into one ⋮ menu to keep the header
+              uncluttered. Grouped by use: version history + markdown-source
+              view toggle, then sharing (copy link, share nest). Compare stays
+              a visible button because it carries active "Comparing vN" state
+              the flat menu can't surface. */}
           {(() => {
             const moreActions: OverflowAction[] = [];
+            if (!isNew)
+              moreActions.push({
+                label: "Version history",
+                icon: History,
+                testId: "document-editor-history",
+                onSelect: openVersions,
+              });
+            moreActions.push({
+              // Toggle: the label names the mode you switch TO.
+              label: rawMode ? "Rich editor" : "Markdown source",
+              icon: Code2,
+              testId: "document-editor-markdown-toggle",
+              onSelect: () => setRawMode((v) => !v),
+            });
+            if (!isNew)
+              moreActions.push({
+                label: "Copy link",
+                icon: LinkIcon,
+                separatorBefore: true,
+                testId: "document-editor-copy-link",
+                onSelect: () => {
+                  const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
+                  navigator.clipboard.writeText(url);
+                  toast.success("Link copied — recipient needs access to this nest");
+                },
+              });
             if (canShare)
               moreActions.push({
                 label: "Share nest",
                 icon: Users,
+                separatorBefore: !isNew ? false : true,
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
               });
