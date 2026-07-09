@@ -9,7 +9,7 @@
  * write-tier; read-only viewers see the table and get a toast if they edit.
  */
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Workflow, Loader2, Plus, Trash2, Pencil } from "lucide-react";
+import { ArrowLeft, Workflow, Loader2, Trash2, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -143,6 +143,10 @@ export function EdgeTypesPage({ nestId, nestName, onBack }: Props) {
       toast.error(e?.message || "Delete failed");
     }
   };
+
+  // Guards the submit button so an empty click can't fire the "required"
+  // toast at a spot where a "+" button reads as "open a form".
+  const canSave = !!name.trim() && !!description.trim();
 
   return (
     <div className="space-y-4">
@@ -296,7 +300,7 @@ export function EdgeTypesPage({ nestId, nestName, onBack }: Props) {
               Cancel
             </Button>
           )}
-          <Button size="sm" onClick={save} disabled={saving}>
+          <Button size="sm" onClick={save} disabled={saving || !canSave}>
             {saving ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : editingId ? (
@@ -304,9 +308,7 @@ export function EdgeTypesPage({ nestId, nestName, onBack }: Props) {
                 <Pencil className="h-3.5 w-3.5 mr-1" /> Update
               </>
             ) : (
-              <>
-                <Plus className="h-3.5 w-3.5 mr-1" /> Define edge type
-              </>
+              "Define edge type"
             )}
           </Button>
         </div>
