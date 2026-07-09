@@ -17,6 +17,7 @@ import { config } from "../config.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { safeJson } from "../shared/json.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
+import { assertFlowGraphAcyclic } from "./flow-graph.js";
 
 export const requireWorkflowPlane = async (c: any, next: any) => {
   if (!config.FEATURE_WORKFLOW_PLANE) {
@@ -179,9 +180,15 @@ edgeTypeRoutes.post("/", requireWorkflowPlane, async (c) => {
   let created = false;
   await db.transaction(async (tx) => {
     const existing = (await tx.get(
-      "SELECT id FROM edge_types WHERE nest_id = ? AND LOWER(name) = LOWER(?)",
+      "SELECT id, is_flow FROM edge_types WHERE nest_id = ? AND LOWER(name) = LOWER(?)",
       [nestId, name],
-    )) as { id: string } | undefined;
+    )) as { id: string; is_flow: number } | undefined;
+    // Flipping an existing non-flow type to flow can turn edges that never
+    // passed the per-edge cycle guard into a cyclic flow graph. Re-validate
+    // the whole would-be flow graph before persisting the flip.
+    if (existing && !existing.is_flow && isFlow) {
+      await assertFlowGraphAcyclic(nestId, existing.id);
+    }
     if (existing) {
       await tx.run(
         `UPDATE edge_types SET name = ?, description = ?, direction = ?, is_flow = ?,

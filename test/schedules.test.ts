@@ -1,0 +1,205 @@
+/**
+ * Workflow-plane schedules: CRUD on /nests/:id/schedules plus the scheduler
+ * tick that turns due schedules into run rows (which a polling runner then
+ * executes — the server never runs anything itself).
+ */
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+
+let env: ReturnType<typeof setupTestEnv>;
+let app: any;
+let alice: { apiKey: string; userId: string; email: string };
+let nestId: string;
+
+beforeAll(async () => {
+  process.env.FEATURE_WORKFLOW_PLANE = "true";
+  env = setupTestEnv();
+  app = await createTestApp("key");
+  alice = await registerUser(app, "alice@acme.com", "Alice");
+  const nest = await jsonRequest(app, "POST", "/nests", { name: "Sched" }, alice.apiKey);
+  nestId = nest.data.nest.id;
+  await jsonRequest(
+    app, "POST", `/nests/${nestId}/nodes`,
+    { title: "Digest Agent", content: "# Digest instructions", type: "agent" },
+    alice.apiKey,
+  );
+  await jsonRequest(
+    app, "POST", `/nests/${nestId}/nodes`,
+    { title: "Plain Doc", content: "# Not runnable" },
+    alice.apiKey,
+  );
+});
+
+afterAll(() => {
+  delete process.env.FEATURE_WORKFLOW_PLANE;
+  env.cleanup();
+});
+
+describe("schedule CRUD", () => {
+  let scheduleId: string;
+
+  it("creates a schedule for an agent node", async () => {
+    const res = await jsonRequest(
+      app, "POST", `/nests/${nestId}/schedules`,
+      { agent_node: "nodes/digest-agent", every_minutes: 60 },
+      alice.apiKey,
+    );
+    expect(res.status).toBe(201);
+    expect(res.data.schedule.enabled).toBe(true);
+    expect(res.data.schedule.every_minutes).toBe(60);
+    scheduleId = res.data.schedule.id;
+  });
+
+  it("refuses a second schedule for the same agent (409)", async () => {
+    const res = await jsonRequest(
+      app, "POST", `/nests/${nestId}/schedules`,
+      { agent_node: "nodes/digest-agent", every_minutes: 15 },
+      alice.apiKey,
+    );
+    expect(res.status).toBe(409);
+  });
+
+  it("refuses non-runnable nodes (400) and unknown nodes (404)", async () => {
+    const doc = await jsonRequest(
+      app, "POST", `/nests/${nestId}/schedules`,
+      { agent_node: "nodes/plain-doc", every_minutes: 60 },
+      alice.apiKey,
+    );
+    expect(doc.status).toBe(400);
+    const ghost = await jsonRequest(
+      app, "POST", `/nests/${nestId}/schedules`,
+      { agent_node: "nodes/ghost", every_minutes: 60 },
+      alice.apiKey,
+    );
+    expect(ghost.status).toBe(404);
+  });
+
+  it("bounds every_minutes (400 below 5 or non-integer)", async () => {
+    for (const bad of [1, 0, -5, 2.5, "soon"]) {
+      const res = await jsonRequest(
+        app, "POST", `/nests/${nestId}/schedules`,
+        { agent_node: "nodes/digest-agent", every_minutes: bad },
+        alice.apiKey,
+      );
+      expect(res.status, `every_minutes=${bad}`).toBeGreaterThanOrEqual(400);
+    }
+  });
+
+  it("lists, patches, and disables", async () => {
+    const list = await jsonRequest(
+      app, "GET", `/nests/${nestId}/schedules`, undefined, alice.apiKey,
+    );
+    expect(list.status).toBe(200);
+    expect(list.data.count).toBe(1);
+    expect(list.data.schedules[0].next_due_at).toBeTruthy();
+
+    const patched = await jsonRequest(
+      app, "PATCH", `/nests/${nestId}/schedules/${scheduleId}`,
+      { every_minutes: 15, enabled: false }, alice.apiKey,
+    );
+    expect(patched.status).toBe(200);
+    expect(patched.data.schedule.every_minutes).toBe(15);
+    expect(patched.data.schedule.enabled).toBe(false);
+    expect(patched.data.schedule.next_due_at).toBeNull();
+  });
+});
+
+describe("scheduler tick", () => {
+  it("fires a due schedule into a run row, then respects the interval", async () => {
+    const { schedulerTick } = await import("../src/workflow/scheduler.js");
+
+    // Re-enable the schedule created above.
+    const list = await jsonRequest(
+      app, "GET", `/nests/${nestId}/schedules`, undefined, alice.apiKey,
+    );
+    const sched = list.data.schedules[0];
+    await jsonRequest(
+      app, "PATCH", `/nests/${nestId}/schedules/${sched.id}`,
+      { enabled: true }, alice.apiKey,
+    );
+
+    const t0 = Date.now();
+    const first = await schedulerTick(t0);
+    expect(first.length).toBe(1);
+
+    // Same instant again: not due (interval hasn't elapsed).
+    const again = await schedulerTick(t0 + 60_000);
+    expect(again.length).toBe(0);
+
+    // The created run is visible, running, and attributed to the schedule.
+    const runs = await jsonRequest(
+      app, "GET", `/nests/${nestId}/runs`, undefined, alice.apiKey,
+    );
+    expect(runs.status).toBe(200);
+    const run = runs.data.runs.find((r: any) => r.id === first[0]);
+    expect(run).toBeTruthy();
+    expect(run.agent_node).toBe("nodes/digest-agent");
+    expect(run.status).toBe("running");
+    expect(run.triggered_by).toBe(`schedule:${alice.email}`);
+
+    // After the interval elapses it fires again.
+    const later = await schedulerTick(t0 + 16 * 60_000);
+    expect(later.length).toBe(1);
+  });
+
+  it("scheduled runs are claimable: unclaimed list + bundle re-hand", async () => {
+    const unclaimed = await jsonRequest(
+      app, "GET", `/nests/${nestId}/runs?unclaimed=true`, undefined, alice.apiKey,
+    );
+    expect(unclaimed.status).toBe(200);
+    expect(unclaimed.data.count).toBeGreaterThanOrEqual(1);
+    const runId = unclaimed.data.runs[0].id;
+
+    const bundle = await jsonRequest(
+      app, "GET", `/runs/${runId}/bundle`, undefined, alice.apiKey,
+    );
+    expect(bundle.status).toBe(200);
+    expect(bundle.data.run_id).toBe(runId);
+    expect(bundle.data.agent.id).toBe("nodes/digest-agent");
+    expect(bundle.data.agent.content).toContain("Digest instructions");
+    expect(bundle.data.env).toBeDefined();
+
+    // Fetching the bundle IS the claim — the run leaves the queue and a
+    // second poller gets 409 instead of double-executing.
+    const after = await jsonRequest(
+      app, "GET", `/nests/${nestId}/runs?unclaimed=true`, undefined, alice.apiKey,
+    );
+    expect(after.data.runs.map((r: any) => r.id)).not.toContain(runId);
+    const again = await jsonRequest(
+      app, "GET", `/runs/${runId}/bundle`, undefined, alice.apiKey,
+    );
+    expect(again.status).toBe(409);
+  });
+
+  it("stop-after bound: auto-pauses when max_runs is reached", async () => {
+    const { schedulerTick } = await import("../src/workflow/scheduler.js");
+    await jsonRequest(
+      app, "POST", `/nests/${nestId}/nodes`,
+      { title: "Bounded Agent", content: "# go", type: "agent" }, alice.apiKey,
+    );
+    const created = await jsonRequest(
+      app, "POST", `/nests/${nestId}/schedules`,
+      { agent_node: "nodes/bounded-agent", every_minutes: 5, max_runs: 2 },
+      alice.apiKey,
+    );
+    expect(created.status).toBe(201);
+    expect(created.data.schedule.max_runs).toBe(2);
+
+    const base = Date.now() + 60 * 60_000; // clear of earlier intervals
+    const fired = (await schedulerTick(base)).length
+      + (await schedulerTick(base + 6 * 60_000)).length
+      + (await schedulerTick(base + 12 * 60_000)).length
+      + (await schedulerTick(base + 18 * 60_000)).length;
+    // Both bounded (2) and the still-enabled unbounded schedule fire; the
+    // bounded one must stop contributing after 2.
+    const list = await jsonRequest(
+      app, "GET", `/nests/${nestId}/schedules`, undefined, alice.apiKey,
+    );
+    const bounded = list.data.schedules.find(
+      (x: any) => x.agent_node === "nodes/bounded-agent",
+    );
+    expect(bounded.runs_created).toBe(2);
+    expect(bounded.enabled).toBe(false);
+    expect(fired).toBeGreaterThanOrEqual(2);
+  });
+});

@@ -12,6 +12,8 @@ import {
 import { startTelemetryLoop, trackEvent } from "./telemetry/tracker.js";
 import { loadAccessConfig } from "./governance/access-service.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
+import { startScheduler } from "./workflow/scheduler.js";
+import { sweepStale } from "./shared/rate-limit.js";
 
 async function main() {
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
@@ -161,6 +163,13 @@ ${config.AUTH_MODE === "key" ? `
   }
 
   serve({ fetch: app.fetch, port: config.PORT });
+
+  // Workflow-plane interval schedules → run rows (no-op unless the flag is on).
+  startScheduler();
+
+  // Rate-limit bucket GC — bounded keys can still accumulate across a long
+  // uptime; sweep expired buckets every 10 minutes.
+  setInterval(() => sweepStale(), 10 * 60_000).unref?.();
 }
 
 main().catch((err) => {

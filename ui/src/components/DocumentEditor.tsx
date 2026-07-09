@@ -22,6 +22,13 @@ import {
   AlertCircle,
   Send,
   X,
+  FolderOpen,
+  FolderPlus,
+  FileText,
+  Bot,
+  Zap,
+  Wrench,
+  Table2,
   Pencil,
   Users,
   Link as LinkIcon,
@@ -42,6 +49,7 @@ import {
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
+import { TableViewer } from "./TableViewer";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
@@ -112,6 +120,8 @@ interface DocumentEditorProps {
   onCreateDocument?: (nestId: string, title: string) => void;
   /** Pre-fill title when nodeId === "new" (wiki-create flow). */
   initialTitle?: string;
+  /** Pre-file a NEW doc into this folder (folder-tree + buttons). */
+  initialFolder?: string;
   /** Prior wiki-link hops, oldest first; rendered as clickable chips. */
   breadcrumb?: BreadcrumbEntry[];
   /** Jump to ancestor at `index`; drops entries after it. */
@@ -122,6 +132,7 @@ export function DocumentEditor({
   nestId,
   nestName,
   nodeId,
+  initialFolder,
   isOwner = false,
   onBack,
   onSaved,
@@ -133,7 +144,7 @@ export function DocumentEditor({
   onJumpBreadcrumb,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
-  const { adminStatus, isAdmin } = useAuth();
+  const { adminStatus, isAdmin, workflowPlaneEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
   // you're reading it" instead of bouncing back to the nest. Same dialog
@@ -155,7 +166,7 @@ export function DocumentEditor({
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
   // moving an existing doc is a rename with backlink fallout, handled elsewhere.
-  const [folder, setFolder] = useState("");
+  const [folder, setFolder] = useState(initialFolder ?? "");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState<string[]>([]);
   // Orchestrator schedule (free-form cron/interval). Only meaningful for
@@ -223,7 +234,7 @@ export function DocumentEditor({
   // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
   // "document" = the normal markdown editor. Only meaningful while isNew.
   const [newType, setNewType] = useState<
-    "document" | "artifact" | "agent" | "skill"
+    "document" | "artifact" | "agent" | "skill" | "tool" | "table"
   >("document");
   const isArtifactDraft = isNew && newType === "artifact";
   // Runnable = orchestrator-facing node (agent/skill) that carries a schedule.
@@ -1419,26 +1430,80 @@ export function DocumentEditor({
             </Alert>
           )}
 
-          {/* Folder (create-only): files the doc under nodes/<path>/ */}
+          {/* Folder (create-only): files the doc under nodes/<path>/.
+              Breadcrumbed selector — walk into existing folders level by
+              level or add a new subfolder at the current level; no raw path
+              typing. */}
           {isNew && (
             <div>
               <label className="block mb-1 text-sm font-medium">Folder</label>
-              <Input
-                list="document-editor-folder-options"
-                value={folder}
-                onChange={(e) => {
-                  setFolder(e.target.value);
-                  setTouched(true);
-                }}
-                placeholder='Optional — e.g. "gtm/deals" to nest this document'
-                disabled={fieldsDisabled}
+              <div
+                className="flex items-center flex-wrap gap-1 rounded-md border px-2 py-1.5 min-h-9"
                 data-testid="document-editor-folder-input"
-              />
-              <datalist id="document-editor-folder-options">
-                {folderOptions.map((f) => (
-                  <option key={f} value={f} />
-                ))}
-              </datalist>
+              >
+                <button
+                  type="button"
+                  disabled={fieldsDisabled}
+                  onClick={() => {
+                    setFolder("");
+                    setTouched(true);
+                  }}
+                  className={`text-sm rounded px-1.5 py-0.5 ${
+                    folder ? "text-primary hover:bg-muted" : "font-medium bg-muted"
+                  }`}
+                  title="File directly under the nest root"
+                >
+                  Root
+                </button>
+                {folder.split("/").filter(Boolean).map((seg, i, arr) => {
+                  const path = arr.slice(0, i + 1).join("/");
+                  const isLast = i === arr.length - 1;
+                  return (
+                    <span key={path} className="flex items-center gap-1">
+                      <span className="text-muted-foreground/50 text-sm">/</span>
+                      <button
+                        type="button"
+                        disabled={fieldsDisabled}
+                        onClick={() => {
+                          setFolder(path);
+                          setTouched(true);
+                        }}
+                        className={`text-sm rounded px-1.5 py-0.5 ${
+                          isLast
+                            ? "font-medium bg-muted"
+                            : "text-primary hover:bg-muted"
+                        }`}
+                        title={`Scope to ${path}`}
+                      >
+                        {seg}
+                      </button>
+                    </span>
+                  );
+                })}
+                <FolderStepPicker
+                  folder={folder}
+                  folderOptions={folderOptions}
+                  disabled={fieldsDisabled}
+                  onPick={(next) => {
+                    setFolder(next);
+                    setTouched(true);
+                  }}
+                />
+                {folder && (
+                  <button
+                    type="button"
+                    disabled={fieldsDisabled}
+                    onClick={() => {
+                      setFolder("");
+                      setTouched(true);
+                    }}
+                    className="ml-auto text-muted-foreground hover:text-foreground"
+                    title="Clear folder (file under the nest root)"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -1545,38 +1610,105 @@ export function DocumentEditor({
               );
             })()}
 
-          {/* Type + Schedule share one row: Type (new-doc kind) on the left,
-              Schedule (runnable orchestrator hint) on the right. Each takes half
-              when both show; a lone field spans the row. Existing artifacts open
-              straight into the ArtifactViewer (handled above), so Type is
-              create-only; Schedule shows for any agent/skill node. */}
+          {/* Type + Schedule share one row: Type (new-doc kind, icon segmented
+              control) on the left, Schedule (runnable orchestrator hint) on the
+              right. Each takes half when both show; a lone field spans the row.
+              Existing artifacts open straight into the ArtifactViewer (handled
+              above), so Type is create-only; Schedule shows for any agent/skill
+              node. */}
           {!isViewOnly && (isNew || isRunnable) && (
             <div className="flex flex-col sm:flex-row gap-4 w-full">
               {isNew && (
                 <div className="flex-1 min-w-0">
-                  <label className="block text-sm font-medium mb-1">Type</label>
-                  <Select
-                    value={newType}
-                    onValueChange={(v) =>
-                      setNewType(
-                        v as "document" | "artifact" | "agent" | "skill",
-                      )
-                    }
-                  >
-                    <SelectTrigger data-testid="document-editor-type">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="document">
-                        Document (markdown)
-                      </SelectItem>
-                      <SelectItem value="artifact">
-                        Artifact (hosted HTML)
-                      </SelectItem>
-                      <SelectItem value="agent">Agent (runnable)</SelectItem>
-                      <SelectItem value="skill">Skill (runnable)</SelectItem>
-                    </SelectContent>
-                  </Select>
+              <label className="block text-sm font-medium mb-1">Type</label>
+              {/* Icon segmented control, not a dropdown: all choices are
+                  visible at once and carry the same type color language as
+                  the list icons (document slate / artifact amber / agent
+                  violet / skill blue). Runnable types only when the workflow
+                  plane is on. */}
+              <div
+                className="inline-flex rounded-md border overflow-hidden"
+                role="radiogroup"
+                data-testid="document-editor-type"
+              >
+                {(
+                  [
+                    { value: "document", label: "Document", Icon: FileText,
+                      on: "bg-slate-500/15 text-slate-700 dark:text-slate-300" },
+                    { value: "artifact", label: "Artifact", Icon: Code2,
+                      on: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },
+                    { value: "table", label: "Table", Icon: Table2,
+                      on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300" },
+                    ...(workflowPlaneEnabled
+                      ? [
+                          { value: "agent", label: "Agent", Icon: Bot,
+                            on: "bg-violet-500/15 text-violet-700 dark:text-violet-300" },
+                          { value: "skill", label: "Skill", Icon: Zap,
+                            on: "bg-blue-500/15 text-blue-700 dark:text-blue-300" },
+                          { value: "tool", label: "Tool", Icon: Wrench,
+                            on: "bg-teal-500/15 text-teal-700 dark:text-teal-300" },
+                        ]
+                      : []),
+                  ] as const
+                ).map(({ value, label, Icon, on }, i) => {
+                  const active = newType === value;
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      title={
+                        value === "document"
+                          ? "Markdown document"
+                          : value === "artifact"
+                            ? "Hosted HTML artifact"
+                            : value === "table"
+                              ? "Table — CSV fact store, queryable deterministically"
+                              : value === "tool"
+                                ? "Tool — the body is code an agent can call"
+                                : `${label} (runnable)`
+                      }
+                      onClick={() =>
+                        setNewType(
+                          value as "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+                        )
+                      }
+                      className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${
+                        i > 0 ? "border-l" : ""
+                      } ${active ? `${on} font-medium` : "text-muted-foreground hover:bg-muted/60"}`}
+                      data-testid={`document-editor-type-${value}`}
+                    >
+                      <Icon className="h-4 w-4" />
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              {newType === "artifact" && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Hosted HTML — the body is served as a sandboxed page.
+                </p>
+              )}
+              {(newType === "agent" || newType === "skill") && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  The body is the instructions. Add flow edges from it in the
+                  Workflows tab, then trigger a run.
+                </p>
+              )}
+              {newType === "table" && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  The body is CSV — header first, directives welcome
+                  (<code>sku:key, price:number, region</code>). Agents fetch
+                  exact rows with table-query instead of reading it whole.
+                </p>
+              )}
+              {newType === "tool" && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  The body is code. Wire it to an agent on the canvas and the
+                  runner ships it (plus the nest's env vars) in the run bundle.
+                </p>
+              )}
                 </div>
               )}
 
@@ -1794,13 +1926,19 @@ export function DocumentEditor({
                 onMouseMove={isNew ? undefined : onDocMouseMove}
                 className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text"
               >
-                <DocumentViewer
-                  content={content}
-                  onWikiLinkClick={(title) =>
-                    handleWikiLinkClick(title, null)
-                  }
-                  previewFor={previewFor}
-                />
+                {nodeType === "table" && !isNew ? (
+                  <div className="p-4">
+                    <TableViewer nestId={nestId} nodeId={nodeId} csv={content} />
+                  </div>
+                ) : (
+                  <DocumentViewer
+                    content={content}
+                    onWikiLinkClick={(title) =>
+                      handleWikiLinkClick(title, null)
+                    }
+                    previewFor={previewFor}
+                  />
+                )}
               </div>
             ) : (
               <MarkdownEditor
@@ -2099,5 +2237,100 @@ function StatusBadge({ status }: { status: string }) {
     >
       {info.label}
     </span>
+  );
+}
+
+/**
+ * Step-wise folder chooser for the create-form breadcrumb: lists existing
+ * subfolders of the current path (derived from sibling doc ids) and takes a
+ * new-subfolder name inline. Descending and creating both go through onPick
+ * with the full new path — the breadcrumb above renders the result.
+ */
+function FolderStepPicker({
+  folder,
+  folderOptions,
+  disabled,
+  onPick,
+}: {
+  folder: string;
+  folderOptions: string[];
+  disabled?: boolean;
+  onPick: (next: string) => void;
+}) {
+  const [newName, setNewName] = useState("");
+  const children = useMemo(() => {
+    const kids = new Set<string>();
+    for (const f of folderOptions) {
+      if (folder) {
+        if (f === folder || !f.startsWith(`${folder}/`)) continue;
+        kids.add(f.slice(folder.length + 1).split("/")[0]);
+      } else {
+        kids.add(f.split("/")[0]);
+      }
+    }
+    return [...kids].sort();
+  }, [folder, folderOptions]);
+
+  const commitNew = () => {
+    // Slashes would smuggle extra depth past the picker; fold them away.
+    const seg = newName.trim().replace(/\/+/g, "-");
+    if (!seg) return;
+    onPick(folder ? `${folder}/${seg}` : seg);
+    setNewName("");
+  };
+
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-6 px-1.5 text-muted-foreground"
+          disabled={disabled}
+          title="Open a subfolder or create a new one"
+          data-testid="folder-step-picker"
+        >
+          <ChevronDown className="h-3.5 w-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-56">
+        {children.length > 0 && (
+          <>
+            <DropdownMenuLabel>
+              {folder ? "Subfolders" : "Existing folders"}
+            </DropdownMenuLabel>
+            {children.map((k) => (
+              <DropdownMenuItem
+                key={k}
+                onSelect={() => onPick(folder ? `${folder}/${k}` : k)}
+              >
+                <FolderOpen className="h-3.5 w-3.5 mr-2 text-blue-500" />
+                {k}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+          </>
+        )}
+        <div
+          className="flex items-center gap-1.5 px-2 py-1.5"
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          <FolderPlus className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+          <Input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitNew();
+              }
+            }}
+            placeholder="New subfolder…"
+            className="h-7 text-sm"
+          />
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

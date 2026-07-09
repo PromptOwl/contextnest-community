@@ -7,6 +7,7 @@ import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { listNests, listSharedNests } from "./nests/service.js";
+import { getReviewQueue } from "./governance/review-service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import { resolveStewardsForNode } from "./governance/stewardship-service.js";
@@ -22,6 +23,14 @@ import {
   runListRoutes,
   runDetailRoutes,
 } from "./workflow/run-routes.js";
+import { scheduleRoutes } from "./workflow/schedule-routes.js";
+import { envRoutes } from "./workflow/env-routes.js";
+import { connectorRoutes } from "./notify/connector-routes.js";
+import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
+import {
+  listNotifications,
+  markNotificationsRead,
+} from "./governance/notify-service.js";
 import { definitionRoutes } from "./definitions/routes.js";
 import { assetRoutes } from "./nests/asset-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
@@ -55,7 +64,7 @@ import { persistSetting } from "./db/settings.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 // Resolve UI static files. In built mode this file lives at dist/index.js,
 // so siblings of __dirname include dist/web3. In dev (`tsx src/index.ts`)
@@ -63,6 +72,17 @@ import { existsSync } from "node:fs";
 // (vite build output) so `npm run dev` serves the freshly-built bundle.
 // serveStatic wants a path relative to CWD.
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+// Built mode puts this file at dist/app.js, dev at src/app.ts — package.json
+// is one level up from either.
+const SERVICE_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"))
+      .version as string;
+  } catch {
+    return "unknown";
+  }
+})();
 const UI_DIR_CANDIDATES = [
   join(HERE, "web3"),
   join(process.cwd(), "dist", "web3"),
@@ -123,15 +143,14 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 });
 
 export function createApp(): Hono<AuthEnv> {
-  // LinearRouter, not the default RegExpRouter. Node ids are multi-segment
-  // paths ("nodes/<folder>/<slug>") captured by greedy `/:nodeId{.+}` params.
-  // RegExpRouter merges all same-method routes into one automaton and, for a
-  // node id spanning >1 segment, lets the bare `/:nodeId{.+}` catch-all win
-  // over suffix routes like `/:nodeId{.+}/hosted` or `/versions` — so opening
-  // a foldered artifact 404s ("Node not found: …/hosted"). LinearRouter matches
-  // in registration order with correct per-route backtracking, so the suffix
-  // routes (mounted first) match regardless of id depth. Route count is small
-  // and QPS low, so the linear scan cost is negligible here.
+  // LinearRouter, not the default SmartRouter — parity with upstream
+  // development (bb96ca8), which hit the same bug class this branch fixed
+  // structurally: greedy `/:nodeId{.+}` params vs suffix routes. SmartRouter
+  // picks RegExpRouter (catch-all shadows suffix routes) or, when any route
+  // pattern is unsupported, silently falls back to TrieRouter (suffix routes
+  // dead for ids nested 3+ segments). LinearRouter matches in registration
+  // order with per-route backtracking, so mount order = specificity order and
+  // both failure modes disappear. Route count is small; the scan is cheap.
   const app = new Hono<AuthEnv>({ router: new LinearRouter() });
 
   // Hono request logger disabled — keep terminal clean. Re-enable by
@@ -196,9 +215,12 @@ export function createApp(): Hono<AuthEnv> {
     c.json({
       status: isSuspended() ? "suspended" : "ok",
       service: "contextnest-community",
-      version: "0.1.0",
+      version: SERVICE_VERSION,
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
+      // Presence only, never the value: lets the UI stop prompting for a
+      // runner key once the server-wide one exists.
+      runner_key_configured: !!process.env.ANTHROPIC_API_KEY,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
       // Manual (email/password) sign-in mode (open | invite-only | disabled).
       // The login page reads this to show/hide the credential form, and to
@@ -330,6 +352,10 @@ export function createApp(): Hono<AuthEnv> {
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+    // Server-wide runner default. NEVER the value — masked tail only.
+    anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
+      ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
+      : null,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
     smtp_url: config.SMTP_URL ?? "",
     notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
@@ -386,6 +412,16 @@ export function createApp(): Hono<AuthEnv> {
         name: "FEATURE_WORKFLOW_PLANE",
         value: body.workflow_plane_enabled ? "true" : null,
       });
+    }
+    if ("anthropic_api_key" in body) {
+      const v = body.anthropic_api_key;
+      if (v === null || v === "") {
+        pending.push({ name: "ANTHROPIC_API_KEY", value: null });
+      } else if (typeof v !== "string" || !v.trim().startsWith("sk-")) {
+        errors.push("anthropic_api_key must start with sk- (or null to clear)");
+      } else {
+        pending.push({ name: "ANTHROPIC_API_KEY", value: v.trim() });
+      }
     }
     if ("subagent_runs_enabled" in body) {
       // Depends on the plane: enabling recursion without the plane's run routes
@@ -542,6 +578,59 @@ export function createApp(): Hono<AuthEnv> {
 
   // GET /stats — dashboard summary counts: nests visible to caller,
   // documents across those nests, total users on the server. Uses
+  // ─── My Work — cross-nest inbox of things that need this person ──────────
+  // The dashboard shows this above the nest list: reviews/approvals waiting on
+  // you across every nest you can act in. Reuses the governance review queue
+  // (an agent's write-back lands here too, once the runner submits governed
+  // changes). flexAuth so it works in open mode and with a key.
+  app.use("/me/*", flexAuthMiddleware);
+  app.get("/me/work", async (c) => {
+    const userId = c.get("userId");
+    const me = await resolveCallerEmail(userId);
+    const nestName = new Map<string, string>();
+    for (const n of [
+      ...(await listNests(userId)),
+      ...(await listSharedNests(userId)),
+    ])
+      nestName.set(n.id, n.name ?? n.id);
+
+    const { requests } = await getReviewQueue({ status: "pending", limit: 200 });
+    const toItem = (r: (typeof requests)[number]) => ({
+      type: "review" as const,
+      nest_id: r.nestId,
+      nest_name: nestName.get(r.nestId)!,
+      node_id: r.nodeId,
+      title: r.title || r.nodeId,
+      requested_by: r.requestedBy,
+      requested_at: r.requestedAt,
+      priority: r.priority,
+    });
+    const mine = requests.filter((r) => nestName.has(r.nestId));
+    const byNewest = (a: { requested_at: string }, b: { requested_at: string }) =>
+      a.requested_at < b.requested_at ? 1 : -1;
+    // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
+    const items = mine.filter((r) => r.requestedBy !== me).map(toItem).sort(byNewest);
+    const waiting = mine.filter((r) => r.requestedBy === me).map(toItem).sort(byNewest);
+    // Watcher notifications (HITL tags) ride along so the inbox is one call.
+    const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });
+    return c.json({ items, waiting, notifications });
+  });
+
+  // Watcher notifications — read + mark-read (auth via the /me/* middleware).
+  app.get("/me/notifications", async (c) => {
+    const me = await resolveCallerEmail(c.get("userId"));
+    const unreadOnly = c.req.query("unread") === "true";
+    return c.json({ notifications: await listNotifications(me, { unreadOnly }) });
+  });
+  app.post("/me/notifications/read", async (c) => {
+    const me = await resolveCallerEmail(c.get("userId"));
+    const body = await c.req
+      .json<{ ids?: string[] | "all" }>()
+      .catch(() => ({}) as { ids?: string[] | "all" });
+    await markNotificationsRead(me, body.ids === "all" ? "all" : body.ids ?? []);
+    return c.json({ ok: true });
+  });
+
   // flexAuthMiddleware so it works without auth in open mode and with
   // a Bearer/cookie in key mode.
   app.use("/stats", flexAuthMiddleware);
@@ -582,6 +671,10 @@ export function createApp(): Hono<AuthEnv> {
   // === Runner-facing run detail routes (turing) ===
   app.use("/runs/*", flexAuthMiddleware);
   app.route("/runs", runDetailRoutes);
+  // Inbound trigger hooks — public by design: the unguessable token in the
+  // path is the capability; presets add platform signature verification on
+  // top (see workflow/hook-routes.ts).
+  app.route("/hooks", hookFireRoutes);
 
   // === Agent entry point: /llms.txt (public manual), /index (person nest
   // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
@@ -811,6 +904,11 @@ export function createApp(): Hono<AuthEnv> {
       required = c.req.method === "GET" || c.req.method === "POST"
         ? "write"
         : "admin";
+    } else if (parts[1] === "hooks") {
+      // Hook rows carry trigger capability (the token fires runs, which is
+      // a write-tier action) — reading the list must not be a read-tier
+      // privilege escalation.
+      required = "write";
     } else if (
       c.req.method !== "GET" &&
       !isStewardActionPath &&
@@ -822,22 +920,24 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     // Editor steward bypass for nest-read callers: PATCH/DELETE (and the
-    // POST .../revert action) allowed when an editor row covers the node;
-    // POST to create a node allowed only for nest-scope editors.
-    const isNodeRevert =
+    // POST .../revert and .../move actions) allowed when an editor row
+    // covers the node; POST to create a node allowed only for nest-scope
+    // editors.
+    const isNodeAction =
       c.req.method === "POST" &&
       parts.length >= 4 &&
-      parts[parts.length - 1] === "revert";
+      (parts[parts.length - 1] === "revert" ||
+        parts[parts.length - 1] === "move");
     let stewardEditorBypass = false;
     if (required === "write" && permission === "read" && parts[1] === "nodes") {
       const userEmail = await resolveCallerEmail(userId);
       if (
         parts.length >= 3 &&
-        (c.req.method === "PATCH" || c.req.method === "DELETE" || isNodeRevert)
+        (c.req.method === "PATCH" || c.req.method === "DELETE" || isNodeAction)
       ) {
-        // Revert path carries a trailing /revert segment — drop it to
-        // recover the node id; PATCH/DELETE take the id as-is.
-        const idParts = isNodeRevert ? parts.slice(2, -1) : parts.slice(2);
+        // Action paths carry a trailing /revert or /move segment — drop it
+        // to recover the node id; PATCH/DELETE take the id as-is.
+        const idParts = isNodeAction ? parts.slice(2, -1) : parts.slice(2);
         const rawNodeId = idParts.join("/");
         let nodeId = rawNodeId;
         try {
@@ -939,6 +1039,10 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
+  nestsApp.route("/:nestId/schedules", scheduleRoutes);
+  nestsApp.route("/:nestId/env", envRoutes);
+  nestsApp.route("/:nestId/connectors", connectorRoutes);
+  nestsApp.route("/:nestId/hooks", hookNestRoutes);
   nestsApp.route("/:nestId/definitions", definitionRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
@@ -946,8 +1050,26 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/nests", nestsApp);
 
   // ─── Dashboard UI (static files served from the bundled dist/web3 dir) ──
-  app.use("/assets/*", serveStatic({ root: UI_DIR_REL }));
-  app.get("*", serveStatic({ root: UI_DIR_REL, path: "index.html" }));
+  // Hashed asset files are content-addressed — safe to cache forever.
+  app.use(
+    "/assets/*",
+    serveStatic({
+      root: UI_DIR_REL,
+      onFound: (_p, c) =>
+        c.header("Cache-Control", "public, max-age=31536000, immutable"),
+    }),
+  );
+  // index.html is NOT hashed and points at the current bundle — it must never
+  // be cached, or a browser keeps loading a stale bundle after every deploy
+  // (the workflow-plane UI "not showing up" bug). Always revalidate.
+  app.get(
+    "*",
+    serveStatic({
+      root: UI_DIR_REL,
+      path: "index.html",
+      onFound: (_p, c) => c.header("Cache-Control", "no-cache"),
+    }),
+  );
 
   // Error handler — translate common low-level errors into messages
   // the UI can show as-is so users don't see "Internal server error"

@@ -24,7 +24,9 @@ import type { AdminSettings, SignInGate, ManualSignIn } from "../lib/api";
 interface SettingsPageProps {
   onBack: () => void;
   settings: AdminSettings | null;
-  onUpdate: (patch: Partial<AdminSettings>) => void | Promise<void>;
+  onUpdate: (
+    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
+  ) => void | Promise<void>;
 }
 
 const GATE_OPTIONS: { value: SignInGate; label: string; hint: string }[] = [
@@ -88,6 +90,40 @@ function TextField({
       onChange={(e) => onChange(e.target.value)}
       className="flex-1"
     />
+  );
+}
+
+/** Write-only secret input (e.g. the Anthropic key): local state + explicit
+ *  Save so a partial value is never sent. Not part of the settings draft — the
+ *  server only ever returns it masked. */
+function SecretField({
+  placeholder,
+  onSave,
+}: {
+  placeholder?: string;
+  onSave: (v: string) => void;
+}) {
+  const [v, setV] = useState("");
+  return (
+    <div className="flex items-center gap-2">
+      <Input
+        type="password"
+        value={v}
+        placeholder={placeholder}
+        onChange={(e) => setV(e.target.value)}
+        className="flex-1"
+      />
+      <Button
+        size="sm"
+        disabled={!v.trim()}
+        onClick={() => {
+          onSave(v.trim());
+          setV("");
+        }}
+      >
+        Save
+      </Button>
+    </div>
   );
 }
 
@@ -364,6 +400,41 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   placeholder="https://example.com/logo.svg"
                   onChange={(v) => set({ logo_url: v })}
                 />
+              </CardContent>
+            </Card>
+
+            {/* Anthropic API key — server-wide runner/LLM key. Write-only
+                (masked); saved immediately via SecretField, not staged in the
+                draft. A nest's Tool environment can override it per nest. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Anthropic API key</CardTitle>
+                <CardDescription>
+                  The server-wide model key. Runners pick it up automatically
+                  (every nest, unless a nest overrides it in its Tool
+                  environment). No key, no LLM calls. Stored server-side; shown
+                  masked.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="text-xs text-muted-foreground mb-2">
+                  {settings?.anthropic_api_key_masked
+                    ? `Current: ${settings.anthropic_api_key_masked}`
+                    : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
+                </div>
+                <SecretField
+                  placeholder="sk-ant-… (paste to set or replace)"
+                  onSave={(v) => onUpdate({ anthropic_api_key: v })}
+                />
+                {settings?.anthropic_api_key_masked && (
+                  <button
+                    type="button"
+                    className="mt-2 text-xs text-destructive hover:underline"
+                    onClick={() => onUpdate({ anthropic_api_key: null })}
+                  >
+                    Clear key
+                  </button>
+                )}
               </CardContent>
             </Card>
           </TabsContent>

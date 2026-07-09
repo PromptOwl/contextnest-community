@@ -950,6 +950,157 @@ export function runMigrations(db: Database.Database): void {
       recordMigration("020_server_settings");
     })();
   }
+
+  // 020: interval schedules for the workflow plane. One row = "create a run
+  //   for this agent every N minutes". The server loop (workflow/scheduler.ts)
+  //   only inserts run rows on the interval; an external runner in poll mode
+  //   executes them — the server itself never calls an LLM.
+  if (!hasMigration("020_schedules")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS schedules (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          agent_node TEXT NOT NULL,
+          every_minutes INTEGER NOT NULL CHECK(every_minutes >= 5),
+          enabled INTEGER NOT NULL DEFAULT 1,
+          last_run_at TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_agent
+          ON schedules(nest_id, agent_node);
+      `);
+    })();
+    recordMigration("020_schedules");
+  }
+
+  // 021: schedule bounds — "run every N minutes UNTIL you've run K times".
+  //   max_runs NULL = forever; runs_created counts firings; the scheduler
+  //   auto-pauses the row when the bound is hit. This is the deterministic
+  //   v1 of a goal condition; condition-based stopping (approve/metric)
+  //   layers on later.
+  if (!hasMigration("021_schedule_bounds")) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE schedules ADD COLUMN max_runs INTEGER;
+        ALTER TABLE schedules ADD COLUMN runs_created INTEGER NOT NULL DEFAULT 0;
+      `);
+    })();
+    recordMigration("021_schedule_bounds");
+  }
+
+  // 022: tools + HITL notify.
+  //   nest_env — per-nest key/value store for tool credentials. Values are
+  //     write-only through the API (masked on read); they travel to the
+  //     runner inside the run bundle. NOT encrypted at rest — same trust
+  //     domain as the nest content itself; document that honestly.
+  //   watchers — "tag a person to a node": watchers of an agent (or of a
+  //     document) get a notification row when a review request lands for
+  //     the document / for the agent's output.
+  //   notifications — the inbox rows behind /me/work; a Slack/webhook
+  //     connector can drain these later without schema change.
+  if (!hasMigration("022_tools_and_watchers")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS nest_env (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          key TEXT NOT NULL,
+          value TEXT NOT NULL,
+          updated_by TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (nest_id, key)
+        );
+        CREATE TABLE IF NOT EXISTS watchers (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          user_email TEXT NOT NULL,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_watchers_unique
+          ON watchers(nest_id, node_id, user_email);
+        CREATE TABLE IF NOT EXISTS notifications (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          user_email TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          subject_id TEXT,
+          message TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          read_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_notifications_user
+          ON notifications(user_email, read_at, created_at);
+      `);
+    })();
+    recordMigration("022_tools_and_watchers");
+  }
+
+  // 023: connectors — outbound channels as data, not code. One dispatch
+  //   engine; each row = "when <events> happen in this nest, POST to
+  //   <channel-formatted> <url>". url may be a literal https URL or an
+  //   "env:KEY" reference into the same env store tools use — connectors
+  //   are part of the tools layer, lego-style.
+  if (!hasMigration("023_connectors")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS connectors (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          channel TEXT NOT NULL CHECK(channel IN ('slack', 'teams', 'webhook')),
+          url TEXT NOT NULL,               -- https://… or env:KEY
+          events TEXT NOT NULL,            -- JSON array of kinds, or ["*"]
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_connectors_nest ON connectors(nest_id);
+      `);
+    })();
+    recordMigration("023_connectors");
+  }
+
+  // 024: inbound trigger hooks — the listener face of the tools layer. One
+  //   row = a tokenized public URL that creates a run for an agent. The
+  //   preset decides the adapter: how to parse the caller's payload into run
+  //   inputs, how to verify it (signing secret from the env store), and how
+  //   to shape the ack (Slack wants {response_type,text} inside 3s).
+  if (!hasMigration("024_trigger_hooks")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS trigger_hooks (
+          id TEXT PRIMARY KEY,               -- the token (hk_…), capability auth
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          agent_node TEXT NOT NULL,
+          preset TEXT NOT NULL CHECK(preset IN ('slack', 'teams', 'webhook')),
+          enabled INTEGER NOT NULL DEFAULT 1,
+          fire_count INTEGER NOT NULL DEFAULT 0,
+          last_fired_at TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hooks_nest ON trigger_hooks(nest_id);
+      `);
+    })();
+    recordMigration("024_trigger_hooks");
+  }
+
+  // 025: atomic run claiming. Two pollers seeing the same unclaimed run and
+  //   both executing it means duplicate side effects — the claim column is
+  //   the mutex: UPDATE … WHERE claimed_by IS NULL, check rows-affected.
+  if (!hasMigration("025_run_claims")) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE runs ADD COLUMN claimed_by TEXT;
+        ALTER TABLE runs ADD COLUMN claimed_at TEXT;
+      `);
+    })();
+    recordMigration("025_run_claims");
+  }
 }
 
 /**

@@ -3,7 +3,8 @@ import { serializeDocument } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
-import { ValidationError } from "../shared/errors.js";
+import { ValidationError, NotFoundError } from "../shared/errors.js";
+import { queryTableNode } from "../tables/query.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { syncNodeTags } from "../governance/tag-index-service.js";
 import {
@@ -462,6 +463,32 @@ queryRoutes.post("/context", async (c) => {
 });
 
 // POST /nests/:nestId/query
+// POST /nests/:nestId/table-query — deterministic fact lookup against a
+// TABLE node (body = CSV with directive-annotated headers). The point:
+// an agent with a 1,000-row table fetches the exact rows it needs instead
+// of dragging the whole table into context, and the same query against the
+// same version always returns the same rows.
+//
+//   { "table": "[[Price List]]" | "nodes/price-list",
+//     "query": "where region = \"EU\" and price > 100 select sku, price limit 5" }
+queryRoutes.post("/table-query", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const body = await c.req.json<{
+    table?: string;
+    query?: string;
+    include_drafts?: boolean;
+  }>();
+  const ref = typeof body.table === "string" ? body.table.trim() : "";
+  if (!ref) throw new ValidationError("table is required — [[Title]] or node id");
+  const result = await queryTableNode(
+    nestId,
+    ref,
+    typeof body.query === "string" ? body.query : "",
+    body.include_drafts === true,
+  );
+  return c.json(result);
+});
+
 queryRoutes.post("/query", async (c) => {
   const body = await c.req.json<{ query?: string; hops?: number }>();
   if (!body.query) {

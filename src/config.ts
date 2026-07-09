@@ -258,6 +258,27 @@ export const config = {
    * This flag is also the future license-tier hook: gating a paid tier here
    * is a one-line change because every plane route checks it per request.
    */
+  /**
+   * Optional Slack incoming-webhook URL for team notifications (review
+   * submitted/approved/rejected). Empty/unset = connector off. https only —
+   * a webhook carries an implicit secret in its path, so it never travels
+   * plaintext. (Ported from development PR #105.)
+   */
+  get SLACK_WEBHOOK_URL(): string | null {
+    const raw = process.env.SLACK_WEBHOOK_URL?.trim();
+    if (!raw) return null;
+    if (!/^https:\/\//i.test(raw)) {
+      if (!slackUrlWarned) {
+        slackUrlWarned = true;
+        console.warn(
+          "[config] SLACK_WEBHOOK_URL rejected: must be an https:// URL. Slack notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
+  },
+
   get FEATURE_WORKFLOW_PLANE(): boolean {
     return process.env.FEATURE_WORKFLOW_PLANE === "true";
   },
@@ -289,6 +310,13 @@ export const config = {
   get RUN_MAX_STEPS(): number {
     const n = parseInt(process.env.RUN_MAX_STEPS || "10000", 10);
     return Number.isFinite(n) ? Math.min(100000, Math.max(10, n)) : 10000;
+  },
+  /** Max concurrently-RUNNING root (depth-0) runs per nest. The subagent
+   *  depth/fan-out caps bound a single tree; this bounds how many trees a
+   *  caller can start at once, so root triggers can't flood the nest. */
+  get RUN_MAX_CONCURRENT_ROOTS(): number {
+    const n = parseInt(process.env.RUN_MAX_CONCURRENT_ROOTS || "50", 10);
+    return Number.isFinite(n) ? Math.min(1000, Math.max(1, n)) : 50;
   },
   get AUTH_MODE(): "open" | "key" {
     // Default is "key" — requires an explicit AUTH_MODE=open to run
@@ -344,26 +372,6 @@ export const config = {
         emailToWarned = true;
         console.warn(
           "[config] NOTIFY_EMAIL_TO rejected: must be a comma-separated list of email addresses. Email notifications disabled.",
-        );
-      }
-      return null;
-    }
-    return raw;
-  },
-  /**
-   * Optional Slack incoming-webhook URL for team notifications (review
-   * submitted/approved/rejected, nest shared). Empty/unset = connector off.
-   * https only — a webhook carries an implicit secret in its path, so it
-   * never travels plaintext.
-   */
-  get SLACK_WEBHOOK_URL(): string | null {
-    const raw = process.env.SLACK_WEBHOOK_URL?.trim();
-    if (!raw) return null;
-    if (!/^https:\/\//i.test(raw)) {
-      if (!slackUrlWarned) {
-        slackUrlWarned = true;
-        console.warn(
-          "[config] SLACK_WEBHOOK_URL rejected: must be an https:// URL. Slack notifications disabled.",
         );
       }
       return null;

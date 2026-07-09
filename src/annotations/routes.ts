@@ -76,18 +76,25 @@ annotationRoutes.post("/:nodeId{.+}/annotations", async (c) => {
   return c.json({ thread }, 201);
 });
 
-// POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments — reply
-annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/comments", async (c) => {
+// POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/comments — reply.
+// The handler body is exported: RegExpRouter's greedy param merge routes this
+// URL shape to the governance POST /:nodeId{.+}/comments route (the greedy
+// nodeId swallows "…/annotations/<threadId>"), which detects the shape and
+// delegates here. The direct registration below still serves routers that
+// match it natively.
+export async function handleAnnotationReply(
+  c: any,
+  nodeId: string,
+  threadId: string,
+): Promise<Response> {
   const nestId = c.req.param("nestId")!;
-  const nodeId = getNodeId(c);
-  const threadId = c.req.param("threadId")!;
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
   if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
     return c.json({ error: "Access denied" }, 403);
   }
 
-  const input = await c.req.json<{ body?: string }>();
+  const input = (await c.req.json()) as { body?: string };
   if (!input.body || !input.body.trim()) {
     throw new ValidationError("body is required");
   }
@@ -95,7 +102,11 @@ annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/comments", async (c) =
   const thread = await addComment(nestId, nodeId, threadId, userEmail, input.body);
   await syncAnnotationsNode(nestId, nodeId, userEmail);
   return c.json({ thread });
-});
+}
+
+annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/comments", async (c) =>
+  handleAnnotationReply(c, getNodeId(c), c.req.param("threadId")!),
+);
 
 // POST /nests/:nestId/nodes/:nodeId/annotations/:threadId/resolve
 annotationRoutes.post("/:nodeId{.+}/annotations/:threadId/resolve", async (c) => {

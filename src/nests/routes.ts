@@ -151,11 +151,35 @@ nestRoutes.get("/", async (c) => {
     "SELECT nest_id, COUNT(DISTINCT user_email) AS c FROM stewards WHERE is_active = 1 GROUP BY nest_id",
   )) as Array<{ nest_id: string; c: number }>;
   const stewardByNest = new Map(stewardRows.map((r) => [r.nest_id, r.c]));
+  // Who, not just how many — the card face shows the actual people. Two
+  // grouped queries; capped client-side to a handful of chips.
+  const stewardEmailRows = (await db.all(
+    `SELECT nest_id, user_email FROM stewards WHERE is_active = 1
+      GROUP BY nest_id, user_email ORDER BY MIN(assigned_at)`,
+  )) as Array<{ nest_id: string; user_email: string }>;
+  const stewardEmailsByNest = new Map<string, string[]>();
+  for (const r of stewardEmailRows) {
+    const arr = stewardEmailsByNest.get(r.nest_id) ?? [];
+    if (arr.length < 8) arr.push(r.user_email);
+    stewardEmailsByNest.set(r.nest_id, arr);
+  }
+  const collabEmailRows = (await db.all(
+    `SELECT nc.nest_id, u.email FROM nest_collaborators nc
+       JOIN users u ON u.id = nc.user_id ORDER BY nc.granted_at`,
+  )) as Array<{ nest_id: string; email: string }>;
+  const collabEmailsByNest = new Map<string, string[]>();
+  for (const r of collabEmailRows) {
+    const arr = collabEmailsByNest.get(r.nest_id) ?? [];
+    if (arr.length < 8) arr.push(r.email);
+    collabEmailsByNest.set(r.nest_id, arr);
+  }
   const withMeta = out.map((n) => ({
     ...n,
     document_count: docByNest.get(n.id) ?? 0,
     collaborator_count: collabByNest.get(n.id) ?? 0,
     steward_count: stewardByNest.get(n.id) ?? 0,
+    steward_emails: stewardEmailsByNest.get(n.id) ?? [],
+    collaborator_emails: collabEmailsByNest.get(n.id) ?? [],
   }));
   return c.json({ nests: withMeta });
 });
@@ -175,7 +199,13 @@ nestRoutes.post("/", async (c) => {
 // browser uploads each file's relative path + content; the server writes them
 // into the nest's own storage under DATA_ROOT (it never browses its own disk),
 // so import works whether or not the server is colocated with the user.
-nestRoutes.post("/import", async (c) => {
+// Registered as /:nestId with a literal-"import" branch (see the router-compat
+// note on the unsynced routes below): a static /import sibling would knock the
+// app off RegExpRouter. There is no other POST /nests/:nestId endpoint.
+nestRoutes.post("/:nestId", async (c) => {
+  if (c.req.param("nestId") !== "import") {
+    throw new NotFoundError("Not found");
+  }
   const body = await c.req.json<{
     name?: string;
     files?: { path: string; content: string }[];
@@ -199,20 +229,31 @@ nestRoutes.post("/import", async (c) => {
 // sync (dropped in by the starter CLI or copied in manually). In key mode only
 // the license-admin sees them; the listing reflects server-side filesystem
 // state, so non-admins shouldn't be probing what's lying around on disk.
-// Must be registered before `/:nestId` so the literal segment wins routing.
-nestRoutes.get("/unsynced", async (c) => {
+//
+// Served from inside the `/:nestId` param route (literal "unsynced" branch),
+// NOT as a static sibling route: RegExpRouter refuses a static path beside a
+// param at the same position (UnsupportedPathError), which silently dropped
+// the WHOLE app onto TrieRouter — and TrieRouter can't match greedy suffix
+// routes like /:nodeId{.+}/versions for ids nested 3+ segments deep. The
+// public URLs are unchanged.
+async function handleUnsyncedList(c: any) {
   const userId = c.get("userId");
   if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can list unsynced folders");
   }
   return c.json({ folders: listUnsyncedFolders() });
-});
+}
 
 // POST /nests/unsynced/sync — convert a sibling folder into a real nest.
 // Folder identifier travels in the body because leaf paths contain slashes
 // ("nodes/architecture") that would split a path-param across route segments.
-// Same admin-gate as the list endpoint (touches server disk).
-nestRoutes.post("/unsynced/sync", async (c) => {
+// Same admin-gate as the list endpoint (touches server disk). Registered as
+// /:nestId/sync for the router-compat reason above; only the literal
+// "unsynced" segment is served, anything else 404s.
+nestRoutes.post("/:nestId/sync", async (c) => {
+  if (c.req.param("nestId") !== "unsynced") {
+    throw new NotFoundError("Not found");
+  }
   const userId = c.get("userId");
   if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can sync folders");
@@ -232,6 +273,7 @@ nestRoutes.post("/unsynced/sync", async (c) => {
 // GET /nests/:nestId
 nestRoutes.get("/:nestId", async (c) => {
   const nestId = c.req.param("nestId")!;
+  if (nestId === "unsynced") return handleUnsyncedList(c);
   const userId = c.get("userId");
   const permission = await effectivePermission(nestId, userId);
   if (permission === "none") {

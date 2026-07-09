@@ -125,12 +125,14 @@ export async function exchangePromptOwlToken(token: string) {
 export async function getHealth() {
   return request<{
     status: string;
+    version?: string;
     auth_mode: string;
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
     manual_sign_in?: "open" | "invite-only" | "disabled";
     workflow_plane_enabled?: boolean;
     subagent_runs_enabled?: boolean;
+    runner_key_configured?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
@@ -148,6 +150,7 @@ export interface AdminSettings {
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
   subagent_runs_enabled: boolean;
+  anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   smtp_url: string;
   notify_email_from: string;
@@ -159,7 +162,11 @@ export async function getAdminSettings() {
 }
 
 /** Admin: patch one or more server settings. Live + persisted server-side. */
-export async function updateAdminSettings(patch: Partial<AdminSettings>) {
+export async function updateAdminSettings(
+  patch: Partial<AdminSettings> & {
+    anthropic_api_key?: string | null;
+  },
+) {
   return request<{ settings: AdminSettings }>("/admin/settings", {
     method: "PATCH",
     body: JSON.stringify(patch),
@@ -479,176 +486,6 @@ export async function deleteDefinition(nestId: string, id: string) {
   );
 }
 
-// ─── Edge-type registry ("turing" workflow plane) ───────────────────────
-// The vocabulary of connections: stewards articulate once what a relation
-// (`next`, `escalates-when`, …) MEANS; edges reference the registry. Every
-// route is feature-flagged server-side — 404 unless FEATURE_WORKFLOW_PLANE
-// / the "Workflow plane" admin toggle is on. Reads read-tier, writes write-tier.
-
-export interface EdgeTypeCondition {
-  /** Named parameters a conditional edge fills in (e.g. ["term","op","value"]). */
-  params: string[];
-  mode_default: "structured" | "nl" | "open";
-}
-
-export interface EdgeType {
-  id: string;
-  nest_id: string;
-  name: string;
-  description: string;
-  direction: "directed" | "undirected";
-  /** Flow types form the workflow DAG; non-flow are lineage/ownership. */
-  is_flow: boolean;
-  condition_schema: EdgeTypeCondition | null;
-  color: string | null;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export async function listEdgeTypes(nestId: string) {
-  return request<{ count: number; edge_types: EdgeType[] }>(
-    `/nests/${nestId}/edge-types`,
-  );
-}
-
-export async function upsertEdgeType(
-  nestId: string,
-  data: {
-    name: string;
-    description: string;
-    direction?: "directed" | "undirected";
-    is_flow?: boolean;
-    // 6-digit hex (e.g. #16a34a) or null/"" to clear. Bad hex → server 400.
-    color?: string | null;
-    // Omit / null for a plain edge type; provide params to make it conditional.
-    condition_schema?: { params: string[]; mode_default?: EdgeTypeCondition["mode_default"] } | null;
-  },
-) {
-  return request<{ edge_type: EdgeType }>(`/nests/${nestId}/edge-types`, {
-    method: "POST",
-    body: JSON.stringify(data),
-  });
-}
-
-export async function deleteEdgeType(nestId: string, id: string) {
-  return request<{ deleted: boolean }>(
-    `/nests/${nestId}/edge-types/${encodeURIComponent(id)}`,
-    { method: "DELETE" },
-  );
-}
-
-// ─── Runs ("turing" workflow plane) ─────────────────────────────────────
-// A nest's agent runs and their step traces, plus triggerRun (creates the run
-// record + bundle; the server never executes it — a runner does).
-// `inputs`/`trace`/`detail` come back null when the caller lacks write tier
-// (server-side redaction).
-
-export interface Run {
-  id: string;
-  nest_id: string;
-  agent_node: string;
-  triggered_by: string;
-  status: "running" | "succeeded" | "failed" | "cancelled";
-  inputs: unknown | null;
-  trace: unknown | null;
-  started_at: string;
-  finished_at: string | null;
-  /** Sub-agent runs: the run that spawned this one (null = top-level), and its
-   * depth in the call tree (0 = top-level). Present once migration 018 ran. */
-  parent_run_id: string | null;
-  depth: number;
-}
-
-export interface RunStep {
-  seq: number;
-  node_id: string | null;
-  edge_id: string | null;
-  action: "read" | "write" | "branch" | "notify" | "external";
-  detail: unknown | null;
-  at: string;
-}
-
-export async function listRuns(
-  nestId: string,
-  opts?: { agent?: string; status?: string; limit?: number },
-) {
-  const params = new URLSearchParams();
-  if (opts?.agent) params.set("agent", opts.agent);
-  if (opts?.status) params.set("status", opts.status);
-  if (opts?.limit != null) params.set("limit", String(opts.limit));
-  const qs = params.toString();
-  return request<{ count: number; runs: Run[] }>(
-    `/nests/${nestId}/runs${qs ? `?${qs}` : ""}`,
-  );
-}
-
-export async function getRun(runId: string) {
-  return request<{ run: Run; steps: RunStep[] }>(
-    `/runs/${encodeURIComponent(runId)}`,
-  );
-}
-
-/** The executable bundle a trigger returns — handed to an external runner. */
-export interface RunBundle {
-  run_id: string;
-  parent_run_id: string | null;
-  depth: number;
-  agent: {
-    id: string;
-    title: string;
-    type: string;
-    schedule: unknown;
-    content: string;
-  };
-  edges: unknown[];
-  definitions: unknown[];
-  trace_hint: { retrieval: string; steps: string };
-}
-
-/**
- * Trigger a run: creates the run record and returns the executable bundle.
- * The server does NOT execute — an external runner must walk the bundle and
- * report steps back. Write tier required. `agentNode` is a node id like
- * `nodes/my-agent`; its slashes are preserved (the route matches `.+`), so
- * don't encode the whole path.
- *
- * Pass `parentRunId` to spawn this as a SUB-AGENT run nested under a still-
- * running parent (requires FEATURE_SUBAGENT_RUNS; the server rejects it with a
- * 400 when the flag is off, and bounds depth/fan-out/re-entrancy when on).
- */
-export async function triggerRun(
-  nestId: string,
-  agentNode: string,
-  inputs?: unknown,
-  parentRunId?: string | null,
-) {
-  const path = agentNode
-    .split("/")
-    .map((seg) => encodeURIComponent(seg))
-    .join("/");
-  const body: { inputs?: unknown; parent_run_id?: string } = {};
-  if (inputs !== undefined) body.inputs = inputs;
-  if (parentRunId) body.parent_run_id = parentRunId;
-  return request<RunBundle>(`/nests/${nestId}/run/${path}`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-}
-
-/** A runnable node (type agent/skill) — powers the trigger picker. */
-export interface Runnable {
-  id: string;
-  title: string;
-  type: string;
-}
-
-/** Every runnable node (agent/skill) in the nest, filtered server-side. */
-export async function listRunnables(nestId: string) {
-  return request<{ count: number; runnables: Runnable[] }>(
-    `/nests/${nestId}/runnables`,
-  );
-}
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
 // Upload an image into the nest's assets folder. Multipart (not the JSON
@@ -725,6 +562,15 @@ export async function updateNode(
 
 export async function deleteNode(nestId: string, nodeId: string) {
   return request(`/nests/${nestId}/nodes/${nodeId}`, { method: "DELETE" });
+}
+
+/** Move a document to another folder ("" = nest root). The node id changes;
+ *  history, review state, annotations, edges, and grants follow it. */
+export async function moveNode(nestId: string, nodeId: string, folder: string) {
+  return request<{ ok: boolean; node: any; previousId: string }>(
+    `/nests/${nestId}/nodes/${nodeId}/move`,
+    { method: "POST", body: JSON.stringify({ folder }) },
+  );
 }
 
 // ─── Search & Query ─────────────────────────────────────────────────────
@@ -1262,4 +1108,390 @@ export interface NestGraph {
 
 export async function getNestGraph(nestId: string) {
   return request<NestGraph>(`/nests/${nestId}/graph`);
+}
+
+// ─── My Work — cross-nest inbox ──────────────────────────────────────────
+
+export interface WorkItem {
+  type: "review";
+  nest_id: string;
+  nest_name: string;
+  node_id: string;
+  title: string;
+  requested_by: string;
+  requested_at: string;
+  priority?: string;
+}
+
+export interface WatcherNotification {
+  id: string;
+  nest_id: string;
+  kind: string;
+  subject_id: string | null;
+  message: string;
+  created_at: string;
+  read_at: string | null;
+}
+
+export async function getMyWork() {
+  return request<{
+    items: WorkItem[];
+    waiting: WorkItem[];
+    notifications?: WatcherNotification[];
+  }>("/me/work");
+}
+
+export async function approveReview(nestId: string, nodeId: string, note?: string) {
+  return request(`/nests/${nestId}/nodes/${nodeId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+}
+
+export async function rejectReview(nestId: string, nodeId: string, note?: string) {
+  return request(`/nests/${nestId}/nodes/${nodeId}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ note }),
+  });
+}
+
+// ─── Workflow plane (typed edges + governed runs) ────────────────────────
+
+export interface EdgeType {
+  id: string;
+  name: string;
+  description: string;
+  direction: "directed" | "undirected";
+  is_flow: boolean;
+  color: string | null;
+}
+
+export interface WorkflowEdge {
+  id: string;
+  from_node: string;
+  to_node: string;
+  type: { id: string; name: string; color: string | null; is_flow: boolean };
+  condition_mode: "structured" | "nl" | "open" | null;
+  condition: string | null;
+}
+
+export interface RunSummary {
+  id: string;
+  agent_node: string;
+  triggered_by: string;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  started_at: string;
+  finished_at: string | null;
+  depth?: number;
+  parent_run_id?: string | null;
+  /** Write-tier only; null for read-tier callers. */
+  trace?: { error?: string; [k: string]: unknown } | null;
+}
+
+export interface RunStep {
+  seq: number;
+  node_id: string | null;
+  edge_id: string | null;
+  action: string;
+  detail: any;
+  at: string;
+}
+
+export interface RunDetail extends RunSummary {
+  nest_id: string;
+  inputs: any;
+  trace: any;
+  steps: RunStep[];
+}
+
+export async function listEdgeTypes(nestId: string) {
+  const r = await request<{ edge_types: EdgeType[] }>(
+    `/nests/${nestId}/edge-types`,
+  );
+  return r.edge_types;
+}
+
+export async function listEdges(nestId: string) {
+  const r = await request<{ edges: WorkflowEdge[] }>(`/nests/${nestId}/edges`);
+  return r.edges;
+}
+
+export async function createEdge(
+  nestId: string,
+  body: {
+    from_node: string;
+    to_node: string;
+    type: string;
+    condition_mode?: "structured" | "nl" | "open" | null;
+    condition?: unknown;
+  },
+) {
+  const r = await request<{ edge: WorkflowEdge }>(`/nests/${nestId}/edges`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return r.edge;
+}
+
+export async function updateEdge(
+  nestId: string,
+  edgeId: string,
+  body: {
+    type?: string;
+    condition_mode?: "structured" | "nl" | "open" | null;
+    condition?: unknown;
+  },
+) {
+  const r = await request<{ edge: WorkflowEdge }>(
+    `/nests/${nestId}/edges/${edgeId}`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  );
+  return r.edge;
+}
+
+export async function deleteEdge(nestId: string, edgeId: string) {
+  return request(`/nests/${nestId}/edges/${edgeId}`, { method: "DELETE" });
+}
+
+export interface Schedule {
+  id: string;
+  agent_node: string;
+  every_minutes: number;
+  enabled: boolean;
+  last_run_at: string | null;
+  next_due_at: string | null;
+  max_runs: number | null;
+  runs_created: number;
+  created_by: string;
+  created_at: string;
+}
+
+export async function listSchedules(nestId: string) {
+  const r = await request<{ schedules: Schedule[] }>(`/nests/${nestId}/schedules`);
+  return r.schedules;
+}
+
+export async function createSchedule(
+  nestId: string,
+  body: {
+    agent_node: string;
+    every_minutes: number;
+    enabled?: boolean;
+    max_runs?: number | null;
+  },
+) {
+  const r = await request<{ schedule: Schedule }>(`/nests/${nestId}/schedules`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return r.schedule;
+}
+
+export async function updateSchedule(
+  nestId: string,
+  id: string,
+  body: { every_minutes?: number; enabled?: boolean; max_runs?: number | null },
+) {
+  const r = await request<{ schedule: Schedule }>(
+    `/nests/${nestId}/schedules/${id}`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  );
+  return r.schedule;
+}
+
+export async function deleteSchedule(nestId: string, id: string) {
+  return request(`/nests/${nestId}/schedules/${id}`, { method: "DELETE" });
+}
+
+// Watchers — tag a person to a node (usually an agent) for HITL notifications.
+export async function listNodeWatchers(nestId: string, nodeId: string) {
+  const r = await request<{ watchers: Array<{ user_email: string }> }>(
+    `/nests/${nestId}/nodes/${nodeId}/watchers`,
+  );
+  return r.watchers;
+}
+
+export async function addNodeWatcher(nestId: string, nodeId: string, email: string) {
+  const r = await request<{ watchers: Array<{ user_email: string }> }>(
+    `/nests/${nestId}/nodes/${nodeId}/watchers`,
+    { method: "POST", body: JSON.stringify({ email }) },
+  );
+  return r.watchers;
+}
+
+export async function removeNodeWatcher(nestId: string, nodeId: string, email: string) {
+  const r = await request<{ watchers: Array<{ user_email: string }> }>(
+    `/nests/${nestId}/nodes/${nodeId}/watchers?email=${encodeURIComponent(email)}`,
+    { method: "DELETE" },
+  );
+  return r.watchers;
+}
+
+export async function markNotificationsRead(ids: string[] | "all") {
+  return request<{ ok: boolean }>("/me/notifications/read", {
+    method: "POST",
+    body: JSON.stringify({ ids }),
+  });
+}
+
+// Per-nest env store — tool credentials; values are masked on read.
+export interface EnvEntry {
+  key: string;
+  value_masked: string;
+  updated_by: string;
+  updated_at: string;
+}
+
+export async function listEnv(nestId: string) {
+  const r = await request<{ env: EnvEntry[] }>(`/nests/${nestId}/env`);
+  return r.env;
+}
+
+export async function putEnv(nestId: string, key: string, value: string) {
+  return request<{ key: string; value_masked: string }>(`/nests/${nestId}/env`, {
+    method: "PUT",
+    body: JSON.stringify({ key, value }),
+  });
+}
+
+export async function deleteEnv(nestId: string, key: string) {
+  return request(`/nests/${nestId}/env/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
+}
+
+// Inbound trigger hooks — tokenized listener URLs (slack/teams/webhook).
+export interface TriggerHook {
+  id: string;
+  /** Full URL only at creation; null in list responses (token masked). */
+  url: string | null;
+  agent_node: string;
+  preset: "slack" | "teams" | "webhook";
+  enabled: boolean;
+  fire_count: number;
+  last_fired_at: string | null;
+}
+
+export async function listHooks(nestId: string, agent?: string) {
+  const q = agent ? `?agent=${encodeURIComponent(agent)}` : "";
+  const r = await request<{ hooks: TriggerHook[] }>(`/nests/${nestId}/hooks${q}`);
+  return r.hooks;
+}
+
+export async function createHook(
+  nestId: string,
+  agentNode: string,
+  preset: TriggerHook["preset"],
+) {
+  const r = await request<{ hook: TriggerHook }>(`/nests/${nestId}/hooks`, {
+    method: "POST",
+    body: JSON.stringify({ agent_node: agentNode, preset }),
+  });
+  return r.hook;
+}
+
+export async function deleteHook(nestId: string, id: string) {
+  return request(`/nests/${nestId}/hooks/${id}`, { method: "DELETE" });
+}
+
+// Outbound connectors — event → channel bricks.
+export interface Connector {
+  id: string;
+  channel: "slack" | "teams" | "webhook";
+  url: string;
+  events: string[];
+  enabled: boolean;
+}
+
+export async function listConnectors(nestId: string) {
+  const r = await request<{ connectors: Connector[] }>(`/nests/${nestId}/connectors`);
+  return r.connectors;
+}
+
+export async function createConnector(
+  nestId: string,
+  body: { channel: Connector["channel"]; url: string; events: string[] },
+) {
+  const r = await request<{ connector: Connector }>(`/nests/${nestId}/connectors`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return r.connector;
+}
+
+export async function updateConnector(
+  nestId: string,
+  id: string,
+  body: { enabled?: boolean; events?: string[]; url?: string },
+) {
+  const r = await request<{ connector: Connector }>(
+    `/nests/${nestId}/connectors/${id}`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  );
+  return r.connector;
+}
+
+export async function deleteConnector(nestId: string, id: string) {
+  return request(`/nests/${nestId}/connectors/${id}`, { method: "DELETE" });
+}
+
+/** Deterministic table lookup — exact rows from a TABLE node. */
+export async function tableQuery(nestId: string, table: string, query: string) {
+  return request<{
+    table: string;
+    columns: string[];
+    rows: string[][];
+    matched: number;
+    returned: number;
+    total: number;
+  }>(`/nests/${nestId}/table-query`, {
+    method: "POST",
+    body: JSON.stringify({ table, query, include_drafts: true }),
+  });
+}
+
+/** Deterministic context assembly — what an agent run will actually read. */
+export async function queryContext(
+  nestId: string,
+  selector: string,
+  hops: number,
+  maxTokens = 4000,
+) {
+  return request<{
+    context: string;
+    trace?: { hops_used?: number; nodes_traversed?: number };
+    nodes_traversed?: number;
+  }>(`/nests/${nestId}/context`, {
+    method: "POST",
+    body: JSON.stringify({ selector, hops, max_tokens: maxTokens }),
+  });
+}
+
+export async function listRuns(nestId: string, agent?: string) {
+  const q = agent ? `?agent=${encodeURIComponent(agent)}` : "";
+  const r = await request<{ runs: RunSummary[] }>(
+    `/nests/${nestId}/runs${q}`,
+  );
+  return r.runs;
+}
+
+export async function getRun(runId: string) {
+  const r = await request<{ run: RunDetail; steps: RunStep[] }>(
+    `/runs/${runId}`,
+  );
+  return { ...r.run, steps: r.steps };
+}
+
+/** Trigger an agent — returns the run bundle (the runner's entry point). */
+export async function triggerRun(
+  nestId: string,
+  agentNode: string,
+  inputs?: Record<string, unknown>,
+) {
+  return request<{ run_id: string }>(
+    `/nests/${nestId}/run/${agentNode}`,
+    // The route reads body.inputs — wrap, don't spread (a bare {foo:1} body
+    // would silently drop the inputs).
+    { method: "POST", body: JSON.stringify(inputs ? { inputs } : {}) },
+  );
 }

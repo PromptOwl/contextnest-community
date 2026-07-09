@@ -27,8 +27,14 @@ import {
 } from "../governance/external-edit-service.js";
 import { derivedAnnotationsId } from "../annotations/service.js";
 import {
+  listWatchers,
+  addWatcher,
+  removeWatcher,
+} from "../governance/notify-service.js";
+import {
   createNode,
   updateNode,
+  moveNode,
   listNodesForCaller,
   toNodeResponse,
   bodyOnly,
@@ -115,7 +121,7 @@ nodeRoutes.post("/", async (c) => {
 // Import governance services inline to avoid circular deps.
 
 // GET /nests/:nestId/nodes/:nodeId/stewards
-nodeRoutes.get("/:nodeId{.+?}/stewards", async (c) => {
+nodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
@@ -139,7 +145,7 @@ nodeRoutes.get("/:nodeId{.+?}/stewards", async (c) => {
 });
 
 // GET /nests/:nestId/nodes/:nodeId/versions
-nodeRoutes.get("/:nodeId{.+?}/versions", async (c) => {
+nodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
@@ -185,7 +191,7 @@ nodeRoutes.get("/:nodeId{.+?}/versions", async (c) => {
 });
 
 // GET /nests/:nestId/nodes/:nodeId/reviews
-nodeRoutes.get("/:nodeId{.+?}/reviews", async (c) => {
+nodeRoutes.get("/:nodeId{.+}/reviews", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
@@ -240,6 +246,78 @@ nodeRoutes.post("/:nodeId{.+}/revert", async (c) => {
   return c.json({ ok: true, version, node: toNodeResponse(node) });
 });
 
+// POST /nests/:nestId/nodes/:nodeId/move — relocate a document to another
+// folder. Body: { "folder": "gtm/deals" } ("" = nest root). The id changes;
+// version history, review state, annotations, edges, grants, and traces all
+// follow (see moveNode). POST suffix route, same shape as /revert.
+nodeRoutes.post("/:nodeId{.+}/move", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
+
+  const body = await c.req
+    .json<{ folder?: string }>()
+    .catch(() => ({}) as { folder?: string });
+  if (typeof body.folder !== "string") {
+    throw new ValidationError('folder (a string; "" for the nest root) is required');
+  }
+
+  const { node, previousId } = await moveNode(nestId, nodeId, body.folder, userEmail);
+  return c.json({ ok: true, node: toNodeResponse(node), previousId });
+});
+
+// Watchers — "tag a person to this node". Watchers of an agent hear when its
+// output lands for review; watchers of a document hear when the document
+// itself does. Suffix routes, same shape as /revert and /move.
+
+// GET /nests/:nestId/nodes/:nodeId/watchers
+nodeRoutes.get("/:nodeId{.+}/watchers", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  return c.json({ watchers: await listWatchers(nestId, nodeId) });
+});
+
+// POST /nests/:nestId/nodes/:nodeId/watchers { email }
+nodeRoutes.post("/:nodeId{.+}/watchers", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const body = await c.req.json<{ email?: string }>().catch(() => ({}) as { email?: string });
+  const email = typeof body.email === "string" ? body.email.trim() : "";
+  if (!email || !email.includes("@")) {
+    throw new ValidationError("email is required");
+  }
+  await addWatcher(nestId, nodeId, email, await getUserEmail(c));
+  return c.json({ watchers: await listWatchers(nestId, nodeId) }, 201);
+});
+
+// DELETE /nests/:nestId/nodes/:nodeId/watchers?email=
+nodeRoutes.delete("/:nodeId{.+}/watchers", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const email = c.req.query("email")?.trim() ?? "";
+  if (!email) throw new ValidationError("email query param is required");
+  if (!(await removeWatcher(nestId, nodeId, email))) {
+    throw new NotFoundError("Not watching");
+  }
+  return c.json({ watchers: await listWatchers(nestId, nodeId) });
+});
+
+// GET /nests/:nestId/nodes/:nodeId — the greedy catch-all. Safe ONLY because
+// createApp pins LinearRouter: it matches in registration order with
+// per-route backtracking, so the suffix action routes above (and the
+// governance/annotation sub-routers mounted before this one) win first at
+// any id depth. Under the default SmartRouter this same pattern either
+// shadows every suffix route (RegExpRouter) or breaks for ids nested 3+
+// segments (TrieRouter fallback) — don't change the router without
+// re-running test/nested-node-actions.test.ts.
 nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
@@ -339,7 +417,8 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   return c.json({ node: response });
 });
 
-// PATCH /nests/:nestId/nodes/:nodeId{.+}
+// PATCH /nests/:nestId/nodes/:nodeId — greedy catch-all; see the
+// LinearRouter note on the GET route above.
 nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
@@ -392,7 +471,8 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
   return c.json({ node: toNodeResponse(node), version: responseVersion });
 });
 
-// DELETE /nests/:nestId/nodes/:nodeId{.+}
+// DELETE /nests/:nestId/nodes/:nodeId — greedy catch-all; see the
+// LinearRouter note on the GET route above.
 nodeRoutes.delete("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;

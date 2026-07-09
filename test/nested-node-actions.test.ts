@@ -1,17 +1,16 @@
 /**
- * Router regression guard: suffix action routes (/versions, /stewards,
- * /annotations, …) must match for node ids nested ANY number of folders
+ * Router regression guard: suffix action routes (/versions, /annotations,
+ * /stewards, /move, …) must match for node ids nested ANY number of folders
  * deep.
  *
- * createApp pins LinearRouter (bb96ca8) precisely for this: under the
- * default SmartRouter, RegExpRouter lets the greedy /:nodeId{.+} catch-all
- * shadow every suffix route — and if any route pattern is unsupported the
- * app silently falls back to TrieRouter, which can't match greedy-suffix
- * routes for ids with 3+ segments at all. Either way, version history,
- * annotations, and approvals 404 on docs inside nested folders while
- * everything else keeps working. If someone swaps the router again, this
- * suite is the tripwire (bb96ca8 covered 2-segment foldered artifacts; the
- * TrieRouter failure only appears at 3+).
+ * History: the app once ran on Hono's default SmartRouter. RegExpRouter (its
+ * fast path) lets the greedy /:nodeId{.+} catch-all shadow every suffix
+ * route; worse, one unsupported pattern anywhere silently dropped the whole
+ * app onto TrieRouter, which can't match greedy-suffix routes for ids with
+ * 3+ segments — so version history, annotations, and approvals 404'd on any
+ * doc inside a nested folder. createApp now pins LinearRouter (matching
+ * upstream bb96ca8). If someone swaps the router again, this suite is the
+ * tripwire.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
@@ -21,7 +20,7 @@ let app: any;
 let alice: { apiKey: string; userId: string; email: string };
 let nestId: string;
 
-// Three folders deep — the depth the TrieRouter fallback silently loses.
+// Three folders deep — the depth TrieRouter silently lost.
 const DEEP_ID = "nodes/a/b/c/deep-doc";
 
 beforeAll(async () => {
@@ -59,7 +58,7 @@ describe("suffix routes on deeply nested node ids", () => {
     expect(res.status).toBe(200);
   });
 
-  it("annotation thread create + reply match (reply hits the annotation route, not governance comments)", async () => {
+  it("annotation thread create + reply match (and reply hits the annotation route, not governance comments)", async () => {
     const created = await jsonRequest(
       app, "POST", `/nests/${nestId}/nodes/${DEEP_ID}/annotations`,
       { body: "note on a deep doc" }, alice.apiKey,
@@ -76,6 +75,21 @@ describe("suffix routes on deeply nested node ids", () => {
     // returns 201 with a bare comment. Assert we got the right handler.
     expect(replied.status).toBe(200);
     expect(replied.data.thread.comments).toHaveLength(2);
+  });
+
+  it("POST /move matches", async () => {
+    const res = await jsonRequest(
+      app, "POST", `/nests/${nestId}/nodes/${DEEP_ID}/move`,
+      { folder: "a/b" }, alice.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.node.id).toBe("nodes/a/b/deep-doc");
+    // Move back so earlier assertions stay valid on re-runs within the suite.
+    const back = await jsonRequest(
+      app, "POST", `/nests/${nestId}/nodes/nodes/a/b/deep-doc/move`,
+      { folder: "a/b/c" }, alice.apiKey,
+    );
+    expect(back.status).toBe(200);
   });
 
   it("plain GET of the deep doc still matches the catch-all", async () => {
