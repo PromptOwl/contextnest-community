@@ -53,6 +53,9 @@ const HISTORICAL_MIGRATIONS = [
   "020_schedules",
   "021_schedule_bounds",
   "022_tools_and_watchers",
+  "023_connectors",
+  "024_trigger_hooks",
+  "025_run_claims",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -353,6 +356,32 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_notifications_user
       ON notifications(user_email, read_at, created_at);
 
+    CREATE TABLE IF NOT EXISTS connectors (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      channel TEXT NOT NULL CHECK(channel IN ('slack', 'teams', 'webhook')),
+      url TEXT NOT NULL,
+      events TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_connectors_nest ON connectors(nest_id);
+
+    CREATE TABLE IF NOT EXISTS trigger_hooks (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      agent_node TEXT NOT NULL,
+      preset TEXT NOT NULL CHECK(preset IN ('slack', 'teams', 'webhook')),
+      enabled INTEGER NOT NULL DEFAULT 1,
+      fire_count INTEGER NOT NULL DEFAULT 0,
+      last_fired_at TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_hooks_nest ON trigger_hooks(nest_id);
+
     CREATE TABLE IF NOT EXISTS edge_types (
       id TEXT PRIMARY KEY,
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
@@ -398,7 +427,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       inputs TEXT,
       trace TEXT,
       started_at TEXT NOT NULL,
-      finished_at TEXT
+      finished_at TEXT,
+      claimed_by TEXT,
+      claimed_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_runs_nest ON runs(nest_id, started_at);
     CREATE INDEX IF NOT EXISTS idx_runs_agent ON runs(nest_id, agent_node);

@@ -934,6 +934,69 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("022_tools_and_watchers");
   }
+
+  // 023: connectors — outbound channels as data, not code. One dispatch
+  //   engine; each row = "when <events> happen in this nest, POST to
+  //   <channel-formatted> <url>". url may be a literal https URL or an
+  //   "env:KEY" reference into the same env store tools use — connectors
+  //   are part of the tools layer, lego-style.
+  if (!hasMigration("023_connectors")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS connectors (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          channel TEXT NOT NULL CHECK(channel IN ('slack', 'teams', 'webhook')),
+          url TEXT NOT NULL,               -- https://… or env:KEY
+          events TEXT NOT NULL,            -- JSON array of kinds, or ["*"]
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_connectors_nest ON connectors(nest_id);
+      `);
+    })();
+    recordMigration("023_connectors");
+  }
+
+  // 024: inbound trigger hooks — the listener face of the tools layer. One
+  //   row = a tokenized public URL that creates a run for an agent. The
+  //   preset decides the adapter: how to parse the caller's payload into run
+  //   inputs, how to verify it (signing secret from the env store), and how
+  //   to shape the ack (Slack wants {response_type,text} inside 3s).
+  if (!hasMigration("024_trigger_hooks")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS trigger_hooks (
+          id TEXT PRIMARY KEY,               -- the token (hk_…), capability auth
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          agent_node TEXT NOT NULL,
+          preset TEXT NOT NULL CHECK(preset IN ('slack', 'teams', 'webhook')),
+          enabled INTEGER NOT NULL DEFAULT 1,
+          fire_count INTEGER NOT NULL DEFAULT 0,
+          last_fired_at TEXT,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hooks_nest ON trigger_hooks(nest_id);
+      `);
+    })();
+    recordMigration("024_trigger_hooks");
+  }
+
+  // 025: atomic run claiming. Two pollers seeing the same unclaimed run and
+  //   both executing it means duplicate side effects — the claim column is
+  //   the mutex: UPDATE … WHERE claimed_by IS NULL, check rows-affected.
+  if (!hasMigration("025_run_claims")) {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE runs ADD COLUMN claimed_by TEXT;
+        ALTER TABLE runs ADD COLUMN claimed_at TEXT;
+      `);
+    })();
+    recordMigration("025_run_claims");
+  }
 }
 
 /**

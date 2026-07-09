@@ -18,6 +18,7 @@ import {
   CornerDownRight,
   Clock3,
   Wrench,
+  Table2,
 } from "lucide-react";
 import {
   listEdges,
@@ -40,7 +41,17 @@ import {
   listEnv,
   putEnv,
   deleteEnv,
+  getHealth,
+  listHooks,
+  createHook,
+  deleteHook,
+  listConnectors,
+  createConnector,
+  updateConnector,
+  deleteConnector,
   type EnvEntry,
+  type TriggerHook,
+  type Connector,
   type WorkflowEdge,
   type EdgeType,
   type RunSummary,
@@ -118,8 +129,10 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <EdgesPanel nestId={nestId} />
         </TabsContent>
         <TabsContent value="activity" className="mt-4 space-y-6">
+          <RunnerKeyCallout nestId={nestId} />
           <SchedulesPanel nestId={nestId} />
           <RunsPanel nestId={nestId} />
+          <ConnectorsPanel nestId={nestId} />
           <EnvPanel nestId={nestId} />
         </TabsContent>
       </Tabs>
@@ -135,6 +148,7 @@ function TypeGlyph({ type }: { type?: string }) {
   if (type === "skill") return <Zap className="h-3.5 w-3.5 text-blue-500 shrink-0" />;
   if (type === "artifact") return <FileCode2 className="h-3.5 w-3.5 text-amber-500 shrink-0" />;
   if (type === "tool") return <Wrench className="h-3.5 w-3.5 text-teal-500 shrink-0" />;
+  if (type === "table") return <Table2 className="h-3.5 w-3.5 text-cyan-500 shrink-0" />;
   return <FileText className="h-3.5 w-3.5 text-slate-400 shrink-0" />;
 }
 
@@ -713,17 +727,19 @@ function RunsPanel({ nestId }: { nestId: string }) {
               it and calls the LLM. Point it at this nest:
             </p>
             <pre className="overflow-x-auto rounded bg-background border p-2 font-mono text-[10.5px] leading-relaxed">
-{`docker run --rm --network host \\
+{`docker run -d --name cn-runner --network host \\
   -e CONTEXTNEST_SERVER=http://localhost:4040 \\
   -e CONTEXTNEST_NEST=${nestId} \\
   -e CONTEXTNEST_KEY=cnst_localdev \\
-  -e ANTHROPIC_API_KEY=sk-ant-... \\
-  contextnest-runner:local run <agent-node-id>`}
+  contextnest-runner:local poll`}
             </pre>
             <p>
-              Or run <code>schedule</code> instead of <code>run</code> to poll
-              this nest continuously. Steps stream back into the trace on the
-              right — refresh to watch.
+              <b>poll</b> claims every run this server creates (Schedules tab,
+              Run buttons) and executes it — one standing container per nest.
+              No Anthropic key flag needed: set{" "}
+              <code>ANTHROPIC_API_KEY</code> in Activity → Tool environment
+              and the runner picks it up from the run bundle. Steps stream
+              back into the trace on the right — refresh to watch.
             </p>
           </div>
         </details>
@@ -911,6 +927,12 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   // HITL tags: people watching the selected node (notified on its output).
   const [watchers, setWatchers] = useState<string[]>([]);
   const [watcherEmail, setWatcherEmail] = useState("");
+  // Inbound trigger hooks for the selected runnable node.
+  const [nodeHooks, setNodeHooks] = useState<TriggerHook[]>([]);
+  const [hookPreset, setHookPreset] = useState<TriggerHook["preset"]>("slack");
+  // Full trigger URLs are revealed exactly once, at creation (API-key
+  // semantics) — cache them for this session so copy keeps working.
+  const [revealedHookUrls, setRevealedHookUrls] = useState<Record<string, string>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -939,6 +961,9 @@ function CanvasPanel({ nestId }: { nestId: string }) {
     listNodeWatchers(nestId, selNode)
       .then((w) => !cancelled && setWatchers(w.map((x) => x.user_email)))
       .catch(() => !cancelled && setWatchers([]));
+    listHooks(nestId, selNode)
+      .then((h) => !cancelled && setNodeHooks(h))
+      .catch(() => !cancelled && setNodeHooks([]));
     return () => {
       cancelled = true;
     };
@@ -1546,6 +1571,84 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                   </div>
                 )}
 
+                {runnable && (
+                  <div className="space-y-1.5">
+                    <label className="block text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Triggers — call this agent from outside
+                    </label>
+                    {nodeHooks.map((h) => (
+                      <div key={h.id} className="rounded-md border px-2 py-1.5 text-[11px] space-y-1">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="secondary" className="text-[10px]">{h.preset}</Badge>
+                          <span className="text-muted-foreground">
+                            fired {h.fire_count}×
+                          </span>
+                          <div className="flex-1" />
+                          <button
+                            type="button"
+                            className="text-destructive hover:underline"
+                            onClick={async () => {
+                              await deleteHook(nestId, h.id);
+                              setNodeHooks(await listHooks(nestId, selNode));
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        {(h.url ?? revealedHookUrls[h.id]) ? (
+                          <button
+                            type="button"
+                            className="w-full text-left font-mono break-all rounded bg-muted/40 px-1.5 py-1 hover:border-primary border border-transparent"
+                            title="Copy the trigger URL — paste into a Slack slash command / Events API, Teams outgoing webhook, or any system that can POST"
+                            onClick={() => copy(`hook-${h.id}`, h.url ?? revealedHookUrls[h.id])}
+                          >
+                            {copied === `hook-${h.id}` ? "✓ copied" : (h.url ?? revealedHookUrls[h.id])}
+                          </button>
+                        ) : (
+                          <p className="text-muted-foreground px-1.5">
+                            URL was shown at creation only (like an API key).
+                            Remove + re-add to mint a fresh one.
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        value={hookPreset}
+                        onChange={(e) => setHookPreset(e.target.value as TriggerHook["preset"])}
+                        className="h-7 rounded-md border bg-background px-1.5 text-xs flex-1"
+                      >
+                        <option value="slack">Slack (slash command / @mention)</option>
+                        <option value="teams">Teams (outgoing webhook)</option>
+                        <option value="webhook">Webhook (any system)</option>
+                      </select>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2"
+                        onClick={async () => {
+                          const created = await createHook(nestId, selNode, hookPreset);
+                          if (created.url) {
+                            // List responses mask the id (hk_xxxx…yyyy) —
+                            // key the reveal cache by that same masked form.
+                            const maskedId = `${created.id.slice(0, 7)}…${created.id.slice(-4)}`;
+                            setRevealedHookUrls((prev) => ({ ...prev, [maskedId]: created.url! }));
+                          }
+                          setNodeHooks(await listHooks(nestId, selNode));
+                        }}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Each trigger is a secret URL that queues a run — message
+                      text becomes the run's inputs. Add
+                      SLACK_SIGNING_SECRET to the Tool environment to verify
+                      Slack requests.
+                    </p>
+                  </div>
+                )}
+
                 <div className="space-y-1.5">
                   <label className="block text-[10px] uppercase tracking-wide text-muted-foreground">
                     Notify on output
@@ -2079,6 +2182,256 @@ function EnvPanel({ nestId }: { nestId: string }) {
           >
             {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Set"}
           </Button>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+
+// ─── First-run key prompt ────────────────────────────────────────────────
+//
+// The single thing every new workflow user hits: runs don't execute without
+// an Anthropic key. Until the nest env store carries ANTHROPIC_API_KEY,
+// this callout sits at the top of Activity with an inline input — no hunting
+// through collapsed sections or env files.
+
+function RunnerKeyCallout({ nestId }: { nestId: string }) {
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
+  const [value, setValue] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [justSet, setJustSet] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      listEnv(nestId).catch(() => null),
+      getHealth().catch(() => null),
+    ]).then(([env, health]) => {
+      if (cancelled) return;
+      // Server-wide key (super-admin Settings) satisfies runners for every
+      // nest — only prompt when NEITHER level has one.
+      if (health?.runner_key_configured) return setHasKey(true);
+      if (!env) return setHasKey(null);
+      setHasKey(env.some((e) => e.key === "ANTHROPIC_API_KEY"));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [nestId]);
+
+  if (hasKey !== false) {
+    return justSet ? (
+      <div className="max-w-2xl rounded-lg border border-emerald-400/50 bg-emerald-500/5 px-4 py-3 text-sm">
+        ✓ Key stored (masked from here on). Runners pick it up from the run
+        bundle — start one in poll mode and your queued runs execute.
+      </div>
+    ) : null;
+  }
+
+  return (
+    <div className="max-w-2xl rounded-lg border border-amber-400/60 bg-amber-500/5 px-4 py-3">
+      <div className="text-sm font-medium mb-1">
+        🔑 Add your Anthropic API key to execute runs
+      </div>
+      <p className="text-xs text-muted-foreground mb-2">
+        Runs are created here, but a runner needs a key to call the model.
+        Paste it once — it's stored write-only for this nest (masked
+        everywhere, delivered to runners inside the run bundle). Get one at
+        console.anthropic.com → Settings → API keys.
+      </p>
+      {error && (
+        <p className="text-xs text-destructive mb-2">{error}</p>
+      )}
+      <div className="flex items-center gap-2">
+        <Input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="sk-ant-…"
+          className="h-8 text-sm font-mono flex-1"
+          data-testid="runner-key-input"
+        />
+        <Button
+          size="sm"
+          className="h-8"
+          disabled={saving || !value.trim().startsWith("sk-")}
+          onClick={async () => {
+            setSaving(true);
+            try {
+              await putEnv(nestId, "ANTHROPIC_API_KEY", value.trim());
+              setValue("");
+              setHasKey(true);
+              setJustSet(true);
+            } catch (err) {
+              setError(err instanceof Error ? err.message : "Save failed");
+            } finally {
+              setSaving(false);
+            }
+          }}
+        >
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Save key"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+
+// ─── Connectors: outbound event → channel bricks ─────────────────────────
+//
+// Rows the dispatch engine fans events into. Channel is a preset (slack /
+// teams / raw webhook); url may be a literal https URL or an env:KEY
+// reference into the Tool environment — same secret store as tools. The
+// server-wide Settings webhook remains an implicit slack connector.
+
+const CONNECTOR_EVENTS = [
+  ["review_requested", "review requested"],
+  ["review_approved", "approved"],
+  ["review_rejected", "rejected"],
+  ["run_failed", "run failed"],
+] as const;
+
+function ConnectorsPanel({ nestId }: { nestId: string }) {
+  const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [channel, setChannel] = useState<Connector["channel"]>("slack");
+  const [url, setUrl] = useState("");
+  const [events, setEvents] = useState<string[]>(["*"]);
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setConnectors(await listConnectors(nestId));
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load connectors");
+    }
+  }, [nestId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const toggleEvent = (k: string) => {
+    setEvents((prev) => {
+      if (k === "*") return ["*"];
+      const without = prev.filter((e) => e !== "*" && e !== k);
+      return prev.includes(k) ? (without.length ? without : ["*"]) : [...without, k];
+    });
+  };
+
+  return (
+    <details className="max-w-2xl rounded-lg border px-4 py-3" open={connectors.length > 0}>
+      <summary className="cursor-pointer select-none text-sm font-medium">
+        📤 Connectors ({connectors.length}) — send events to Slack / Teams / webhooks
+      </summary>
+      <div className="mt-3 space-y-3">
+        <p className="text-[11px] text-muted-foreground">
+          Governance + run events post to each matching channel.
+          Fire-and-forget — a channel outage never blocks a review. The
+          server-wide Slack webhook (super-admin Settings) always fires too.
+        </p>
+        {error && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {error}
+          </div>
+        )}
+        {connectors.length > 0 && (
+          <div className="rounded-md border divide-y">
+            {connectors.map((con) => (
+              <div key={con.id} className="px-3 py-2 flex items-center gap-2 text-xs">
+                <Badge variant="secondary" className="text-[10px] shrink-0">{con.channel}</Badge>
+                <span className="font-mono truncate">{con.url}</span>
+                <span className="text-muted-foreground shrink-0">
+                  {con.events.includes("*") ? "all events" : con.events.join(", ")}
+                </span>
+                <div className="flex-1" />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 text-[11px] px-2 shrink-0"
+                  onClick={async () => {
+                    await updateConnector(nestId, con.id, { enabled: !con.enabled });
+                    await load();
+                  }}
+                >
+                  {con.enabled ? "Pause" : "Resume"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 text-muted-foreground hover:text-destructive shrink-0"
+                  onClick={async () => {
+                    await deleteConnector(nestId, con.id);
+                    await load();
+                  }}
+                  title="Delete connector"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="space-y-2 rounded-md border bg-muted/20 p-2.5">
+          <div className="flex items-center gap-1.5">
+            <select
+              value={channel}
+              onChange={(e) => setChannel(e.target.value as Connector["channel"])}
+              className="h-8 rounded-md border bg-background px-1.5 text-xs"
+            >
+              <option value="slack">Slack</option>
+              <option value="teams">Teams</option>
+              <option value="webhook">Webhook (raw JSON)</option>
+            </select>
+            <Input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://hooks.slack.com/… or env:SLACK_WEBHOOK"
+              className="h-8 text-xs font-mono flex-1"
+            />
+            <Button
+              size="sm"
+              className="h-8"
+              disabled={saving || !(url.startsWith("https://") || url.startsWith("env:"))}
+              onClick={async () => {
+                setSaving(true);
+                try {
+                  await createConnector(nestId, { channel, url: url.trim(), events });
+                  setUrl("");
+                  setEvents(["*"]);
+                  await load();
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "Create failed");
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          <div className="flex items-center flex-wrap gap-1 text-[11px]">
+            <button
+              type="button"
+              className={`rounded-full border px-2 py-0.5 ${events.includes("*") ? "bg-primary text-primary-foreground border-primary" : "hover:bg-muted"}`}
+              onClick={() => toggleEvent("*")}
+            >
+              all events
+            </button>
+            {CONNECTOR_EVENTS.map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                className={`rounded-full border px-2 py-0.5 ${events.includes(k) ? "bg-primary text-primary-foreground border-primary" : "hover:bg-muted"}`}
+                onClick={() => toggleEvent(k)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     </details>

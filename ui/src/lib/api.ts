@@ -130,6 +130,7 @@ export async function getHealth() {
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
     workflow_plane_enabled?: boolean;
+    runner_key_configured?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
@@ -145,6 +146,8 @@ export interface AdminSettings {
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
   subagent_runs_enabled: boolean;
+  anthropic_api_key_masked?: string | null;
+  slack_webhook_url?: string;
 }
 
 export async function getAdminSettings() {
@@ -152,7 +155,11 @@ export async function getAdminSettings() {
 }
 
 /** Admin: patch one or more server settings. Live + persisted server-side. */
-export async function updateAdminSettings(patch: Partial<AdminSettings>) {
+export async function updateAdminSettings(
+  patch: Partial<AdminSettings> & {
+    anthropic_api_key?: string | null;
+  },
+) {
   return request<{ settings: AdminSettings }>("/admin/settings", {
     method: "PATCH",
     body: JSON.stringify(patch),
@@ -1252,6 +1259,96 @@ export async function putEnv(nestId: string, key: string, value: string) {
 export async function deleteEnv(nestId: string, key: string) {
   return request(`/nests/${nestId}/env/${encodeURIComponent(key)}`, {
     method: "DELETE",
+  });
+}
+
+// Inbound trigger hooks — tokenized listener URLs (slack/teams/webhook).
+export interface TriggerHook {
+  id: string;
+  /** Full URL only at creation; null in list responses (token masked). */
+  url: string | null;
+  agent_node: string;
+  preset: "slack" | "teams" | "webhook";
+  enabled: boolean;
+  fire_count: number;
+  last_fired_at: string | null;
+}
+
+export async function listHooks(nestId: string, agent?: string) {
+  const q = agent ? `?agent=${encodeURIComponent(agent)}` : "";
+  const r = await request<{ hooks: TriggerHook[] }>(`/nests/${nestId}/hooks${q}`);
+  return r.hooks;
+}
+
+export async function createHook(
+  nestId: string,
+  agentNode: string,
+  preset: TriggerHook["preset"],
+) {
+  const r = await request<{ hook: TriggerHook }>(`/nests/${nestId}/hooks`, {
+    method: "POST",
+    body: JSON.stringify({ agent_node: agentNode, preset }),
+  });
+  return r.hook;
+}
+
+export async function deleteHook(nestId: string, id: string) {
+  return request(`/nests/${nestId}/hooks/${id}`, { method: "DELETE" });
+}
+
+// Outbound connectors — event → channel bricks.
+export interface Connector {
+  id: string;
+  channel: "slack" | "teams" | "webhook";
+  url: string;
+  events: string[];
+  enabled: boolean;
+}
+
+export async function listConnectors(nestId: string) {
+  const r = await request<{ connectors: Connector[] }>(`/nests/${nestId}/connectors`);
+  return r.connectors;
+}
+
+export async function createConnector(
+  nestId: string,
+  body: { channel: Connector["channel"]; url: string; events: string[] },
+) {
+  const r = await request<{ connector: Connector }>(`/nests/${nestId}/connectors`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return r.connector;
+}
+
+export async function updateConnector(
+  nestId: string,
+  id: string,
+  body: { enabled?: boolean; events?: string[]; url?: string },
+) {
+  const r = await request<{ connector: Connector }>(
+    `/nests/${nestId}/connectors/${id}`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  );
+  return r.connector;
+}
+
+export async function deleteConnector(nestId: string, id: string) {
+  return request(`/nests/${nestId}/connectors/${id}`, { method: "DELETE" });
+}
+
+/** Deterministic table lookup — exact rows from a TABLE node. */
+export async function tableQuery(nestId: string, table: string, query: string) {
+  return request<{
+    table: string;
+    columns: string[];
+    rows: string[][];
+    matched: number;
+    returned: number;
+    total: number;
+  }>(`/nests/${nestId}/table-query`, {
+    method: "POST",
+    body: JSON.stringify({ table, query, include_drafts: true }),
   });
 }
 

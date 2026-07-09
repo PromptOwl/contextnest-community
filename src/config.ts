@@ -48,6 +48,10 @@ function dataRoot() {
   return process.env.DATA_ROOT || join(process.cwd(), "data");
 }
 
+// Warn at most once when SLACK_WEBHOOK_URL is set to a non-https value —
+// the getter is read per governance event and would otherwise spam the log.
+let slackUrlWarned = false;
+
 export const config = {
   get PORT() {
     return parseInt(process.env.PORT || "3838", 10);
@@ -216,6 +220,27 @@ export const config = {
    * This flag is also the future license-tier hook: gating a paid tier here
    * is a one-line change because every plane route checks it per request.
    */
+  /**
+   * Optional Slack incoming-webhook URL for team notifications (review
+   * submitted/approved/rejected). Empty/unset = connector off. https only —
+   * a webhook carries an implicit secret in its path, so it never travels
+   * plaintext. (Ported from development PR #105.)
+   */
+  get SLACK_WEBHOOK_URL(): string | null {
+    const raw = process.env.SLACK_WEBHOOK_URL?.trim();
+    if (!raw) return null;
+    if (!/^https:\/\//i.test(raw)) {
+      if (!slackUrlWarned) {
+        slackUrlWarned = true;
+        console.warn(
+          "[config] SLACK_WEBHOOK_URL rejected: must be an https:// URL. Slack notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
+  },
+
   get FEATURE_WORKFLOW_PLANE(): boolean {
     return process.env.FEATURE_WORKFLOW_PLANE === "true";
   },

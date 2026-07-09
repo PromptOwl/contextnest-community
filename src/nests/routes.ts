@@ -142,11 +142,35 @@ nestRoutes.get("/", async (c) => {
     "SELECT nest_id, COUNT(DISTINCT user_email) AS c FROM stewards WHERE is_active = 1 GROUP BY nest_id",
   )) as Array<{ nest_id: string; c: number }>;
   const stewardByNest = new Map(stewardRows.map((r) => [r.nest_id, r.c]));
+  // Who, not just how many — the card face shows the actual people. Two
+  // grouped queries; capped client-side to a handful of chips.
+  const stewardEmailRows = (await db.all(
+    `SELECT nest_id, user_email FROM stewards WHERE is_active = 1
+      GROUP BY nest_id, user_email ORDER BY MIN(assigned_at)`,
+  )) as Array<{ nest_id: string; user_email: string }>;
+  const stewardEmailsByNest = new Map<string, string[]>();
+  for (const r of stewardEmailRows) {
+    const arr = stewardEmailsByNest.get(r.nest_id) ?? [];
+    if (arr.length < 8) arr.push(r.user_email);
+    stewardEmailsByNest.set(r.nest_id, arr);
+  }
+  const collabEmailRows = (await db.all(
+    `SELECT nc.nest_id, u.email FROM nest_collaborators nc
+       JOIN users u ON u.id = nc.user_id ORDER BY nc.granted_at`,
+  )) as Array<{ nest_id: string; email: string }>;
+  const collabEmailsByNest = new Map<string, string[]>();
+  for (const r of collabEmailRows) {
+    const arr = collabEmailsByNest.get(r.nest_id) ?? [];
+    if (arr.length < 8) arr.push(r.email);
+    collabEmailsByNest.set(r.nest_id, arr);
+  }
   const withMeta = out.map((n) => ({
     ...n,
     document_count: docByNest.get(n.id) ?? 0,
     collaborator_count: collabByNest.get(n.id) ?? 0,
     steward_count: stewardByNest.get(n.id) ?? 0,
+    steward_emails: stewardEmailsByNest.get(n.id) ?? [],
+    collaborator_emails: collabEmailsByNest.get(n.id) ?? [],
   }));
   return c.json({ nests: withMeta });
 });

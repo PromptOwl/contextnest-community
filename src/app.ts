@@ -25,6 +25,8 @@ import {
 } from "./workflow/run-routes.js";
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
+import { connectorRoutes } from "./notify/connector-routes.js";
+import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
 import {
   listNotifications,
   markNotificationsRead,
@@ -181,6 +183,9 @@ export function createApp(): Hono<AuthEnv> {
       version: SERVICE_VERSION,
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
+      // Presence only, never the value: lets the UI stop prompting for a
+      // runner key once the server-wide one exists.
+      runner_key_configured: !!process.env.ANTHROPIC_API_KEY,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
       // Surfaced so the UI can show/hide the Workflows nav without an
       // admin-only /admin/settings call. Public, matches logo_url/gate.
@@ -302,6 +307,11 @@ export function createApp(): Hono<AuthEnv> {
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+    // Server-wide runner default. NEVER the value — masked tail only.
+    anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
+      ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
+      : null,
+    slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
   });
 
   app.get("/admin/settings", async (c) => {
@@ -348,6 +358,24 @@ export function createApp(): Hono<AuthEnv> {
         name: "FEATURE_WORKFLOW_PLANE",
         value: body.workflow_plane_enabled ? "true" : null,
       });
+    }
+    if ("slack_webhook_url" in body) {
+      const v = String(body.slack_webhook_url ?? "").trim();
+      if (v && !/^https:\/\//i.test(v)) {
+        errors.push("slack_webhook_url must be an https:// URL (or empty to disable)");
+      } else {
+        pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
+      }
+    }
+    if ("anthropic_api_key" in body) {
+      const v = body.anthropic_api_key;
+      if (v === null || v === "") {
+        pending.push({ name: "ANTHROPIC_API_KEY", value: null });
+      } else if (typeof v !== "string" || !v.trim().startsWith("sk-")) {
+        errors.push("anthropic_api_key must start with sk- (or null to clear)");
+      } else {
+        pending.push({ name: "ANTHROPIC_API_KEY", value: v.trim() });
+      }
     }
     if ("subagent_runs_enabled" in body) {
       // Requires the base plane: turning recursion on with the plane off is
@@ -492,6 +520,10 @@ export function createApp(): Hono<AuthEnv> {
   // === Runner-facing run detail routes (turing) ===
   app.use("/runs/*", flexAuthMiddleware);
   app.route("/runs", runDetailRoutes);
+  // Inbound trigger hooks — public by design: the unguessable token in the
+  // path is the capability; presets add platform signature verification on
+  // top (see workflow/hook-routes.ts).
+  app.route("/hooks", hookFireRoutes);
 
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
@@ -698,6 +730,11 @@ export function createApp(): Hono<AuthEnv> {
       required = c.req.method === "GET" || c.req.method === "POST"
         ? "write"
         : "admin";
+    } else if (parts[1] === "hooks") {
+      // Hook rows carry trigger capability (the token fires runs, which is
+      // a write-tier action) — reading the list must not be a read-tier
+      // privilege escalation.
+      required = "write";
     } else if (
       c.req.method !== "GET" &&
       !isStewardActionPath &&
@@ -814,6 +851,8 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/runs", runListRoutes);
   nestsApp.route("/:nestId/schedules", scheduleRoutes);
   nestsApp.route("/:nestId/env", envRoutes);
+  nestsApp.route("/:nestId/connectors", connectorRoutes);
+  nestsApp.route("/:nestId/hooks", hookNestRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);

@@ -20,7 +20,9 @@ import type { AdminSettings, SignInGate } from "../lib/api";
 interface SettingsPageProps {
   onBack: () => void;
   settings: AdminSettings | null;
-  onUpdate: (patch: Partial<AdminSettings>) => void;
+  onUpdate: (
+    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
+  ) => void;
 }
 
 const GATE_OPTIONS: { value: SignInGate; label: string; hint: string }[] = [
@@ -225,6 +227,66 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
             </CardContent>
           </Card>
 
+          {/* LLM access — the key that powers runners + future LLM-assisted
+              features. Server-wide default; a nest's Tool environment can
+              override it per nest. */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Anthropic API key</CardTitle>
+              <CardDescription>
+                The server-wide model key. Runners pick it up automatically
+                (every nest, unless a nest overrides it in its Tool
+                environment), and it's what future LLM-assisted features key
+                off — LLM use stays an option: no key, no LLM calls.
+                Stored in the server's env file; shown masked.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="text-xs text-muted-foreground mb-2">
+                {settings.anthropic_api_key_masked
+                  ? `Current: ${settings.anthropic_api_key_masked}`
+                  : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
+              </div>
+              <TextSetting
+                type="password"
+                value=""
+                placeholder="sk-ant-… (paste to set or replace)"
+                onSave={(v) => {
+                  if (v.trim()) onUpdate({ anthropic_api_key: v.trim() });
+                }}
+              />
+              {settings.anthropic_api_key_masked && (
+                <button
+                  type="button"
+                  className="mt-2 text-xs text-destructive hover:underline"
+                  onClick={() => onUpdate({ anthropic_api_key: null })}
+                >
+                  Clear key
+                </button>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Slack connector — ported from development PR #105 */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Slack notifications</CardTitle>
+              <CardDescription>
+                Paste a Slack incoming-webhook URL and governance events
+                (review requested / approved / rejected) post to that channel.
+                Empty = off. Fire-and-forget — Slack being down never blocks a
+                review.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <TextSetting
+                value={settings.slack_webhook_url ?? ""}
+                placeholder="https://hooks.slack.com/services/…"
+                onSave={(v) => onUpdate({ slack_webhook_url: v.trim() })}
+              />
+            </CardContent>
+          </Card>
+
           {/* Sub-agent runs (recursion) */}
           <Card>
             <CardHeader>
@@ -246,6 +308,25 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   onCheckedChange={(v) => onUpdate({ subagent_runs_enabled: v })}
                 />
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Public base URL — used in shared links + connector messages */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Public base URL</CardTitle>
+              <CardDescription>
+                How this server is reached from outside (e.g.
+                https://nest.yourco.com). Used when links are generated in
+                notifications and shares. Empty = requests' own origin.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <TextSetting
+                value={settings.public_base_url ?? ""}
+                placeholder="https://nest.yourco.com"
+                onSave={(v) => onUpdate({ public_base_url: v.trim() })}
+              />
             </CardContent>
           </Card>
 

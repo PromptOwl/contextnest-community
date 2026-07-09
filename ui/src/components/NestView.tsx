@@ -16,7 +16,7 @@ import {
   Clock, CheckCircle2, Send, Loader2, RefreshCw, Link2, Settings as SettingsIcon,
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
-  FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench,
+  FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 
@@ -39,7 +39,9 @@ function NodeTypeIcon({
           ? { Icon: FileCode2, cls: "text-amber-600 dark:text-amber-400 bg-amber-500/10", label: "Artifact" }
           : type === "tool"
             ? { Icon: Wrench, cls: "text-teal-600 dark:text-teal-400 bg-teal-500/10", label: "Tool" }
-            : { Icon: FileText, cls: "text-slate-500 dark:text-slate-400 bg-slate-500/10", label: "Document" };
+            : type === "table"
+              ? { Icon: Table2, cls: "text-cyan-600 dark:text-cyan-400 bg-cyan-500/10", label: "Table" }
+              : { Icon: FileText, cls: "text-slate-500 dark:text-slate-400 bg-slate-500/10", label: "Document" };
   return (
     <span
       className={`inline-flex items-center justify-center rounded-md p-1 shrink-0 ${spec.cls}`}
@@ -128,7 +130,7 @@ interface NestViewProps {
   isOwner: boolean;
   isAnonOwned: boolean;
   onBack: () => void;
-  onOpenDocument: (nodeId: string | "new") => void;
+  onOpenDocument: (nodeId: string | "new", opts?: { folder?: string }) => void;
   /** Seed the search filter on mount. Used when arriving from a tag
    *  click on a document detail page. */
   initialSearch?: string;
@@ -329,6 +331,7 @@ export function NestView({
   const [showConnect, setShowConnect] = useState(false);
   const [showGenerate, setShowGenerate] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
+  const importDirRef = useRef<HTMLInputElement>(null);
   const [newFolderPath, setNewFolderPath] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
 
@@ -1021,9 +1024,20 @@ export function NestView({
         for (const file of files) {
           const type = kindForFile(file.name)!;
           const title = file.name.replace(/\.(md|markdown|txt|html|htm)$/i, "");
+          // Whole-vault import (webkitdirectory) carries relative paths —
+          // keep the tree: strip the picked root dir + filename, the rest is
+          // the folder. Hidden dirs (.versions, .context) are engine files.
+          const rel = (file as any).webkitRelativePath as string | undefined;
+          let folder: string | undefined;
+          if (rel && rel.includes("/")) {
+            const segs = rel.split("/").slice(1, -1);
+            if (segs.some((seg) => seg.startsWith("."))) continue;
+            // A vault's own "nodes/" root maps to our storage root, not a folder.
+            folder = (segs[0] === "nodes" ? segs.slice(1) : segs).join("/") || undefined;
+          }
           try {
             const text = await file.text();
-            const res = await api.createNode(nestId, { title, content: text, type });
+            const res = await api.createNode(nestId, { title, content: text, type, folder });
             const id = (res as any)?.node?.id;
             if (id) createdIds.push(id);
           } catch (e: any) {
@@ -1190,65 +1204,65 @@ export function NestView({
             on wider screens keeps the spacing visually intentional rather
             than awkwardly clipped at the right edge. */}
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:shrink-0 sm:justify-end">
-          {!isReadOnly && (
+          {/* Connect is the front door for every read/write surface (CLI,
+              API, MCP, Add-with-AI) — a first-class button, not a menu item. */}
+          <Button variant="outline" onClick={() => setShowConnect(true)}>
+            <Link2 className="h-4 w-4 mr-2" />
+            Connect
+          </Button>
+          {canManage && (
+            <Button variant="outline" onClick={() => setShowShare(true)}>
+              <Users className="h-4 w-4 mr-2" />
+              Share
+            </Button>
+          )}
+          {!isReadOnly && canEditDocs && (
             <>
-              {/* Settings is stewardship-only and server-admin gated. Also
-                  hidden when the admin is viewing a real user's nest —
-                  stewardship is a governance concern over the commons /
-                  the admin's own nests, not something to impose on a user
-                  who owns their own nest. */}
-              {canManageGovernance && (
-                <Button variant="outline" onClick={() => setShowSettings(true)}>
-                  <SettingsIcon className="h-4 w-4 mr-2" />
-                  Settings
-                </Button>
-              )}
-              {canEditDocs && (
-                <>
-                  {/* Visible import affordance — same path as drag-and-drop. */}
-                  <input
-                    ref={importInputRef}
-                    type="file"
-                    multiple
-                    accept=".md,.markdown,.txt,.html,.htm"
-                    className="hidden"
-                    onChange={(e) => {
-                      if (e.target.files?.length) void importFiles(e.target.files);
-                      e.target.value = "";
-                    }}
-                  />
-                  <Button
-                    variant="outline"
-                    onClick={() => importInputRef.current?.click()}
-                    title="Import .md or .html files (or just drag them onto the page)"
-                    data-testid="nest-import-files"
-                  >
+              {/* Visible import affordance — same path as drag-and-drop.
+                  Two inputs: loose files, or a whole vault folder (nested
+                  paths preserved via webkitRelativePath). */}
+              <input
+                ref={importInputRef}
+                type="file"
+                multiple
+                accept=".md,.markdown,.txt,.html,.htm"
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files?.length) void importFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <input
+                ref={importDirRef}
+                type="file"
+                className="hidden"
+                // @ts-expect-error — non-standard but universal in practice
+                webkitdirectory=""
+                onChange={(e) => {
+                  if (e.target.files?.length) void importFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <DropdownMenu modal={false}>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" data-testid="nest-import-files">
                     <Upload className="h-4 w-4 mr-2" />
                     Import
                   </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => setShowGenerate(true)}
-                    title="Generate context with an AI agent and push it into this nest"
-                    data-testid="nest-generate-context"
-                  >
-                    <Sparkles className="h-4 w-4 mr-2" />
-                    Add with AI
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => setShowNewFolder(true)}
-                    title="Create a folder (nest with parent/child)"
-                  >
-                    <FolderPlus className="h-4 w-4 mr-2" />
-                    New Folder
-                  </Button>
-                  <Button onClick={() => onOpenDocument("new")}>
-                    <Plus className="h-4 w-4 mr-2" />
-                    New Document
-                  </Button>
-                </>
-              )}
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
+                    Files (.md / .html)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => importDirRef.current?.click()}>
+                    Whole vault (folder, keeps structure)
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <Button onClick={() => onOpenDocument("new")}>
+                <Plus className="h-4 w-4 mr-2" />
+                New Document
+              </Button>
             </>
           )}
           {/* Secondary actions collapsed into an overflow menu at the end.
@@ -1256,18 +1270,12 @@ export function NestView({
               (server requires admin on /collaborators + /visibility). Delete:
               destructive, write+admin gated. */}
           {(() => {
-            const actions: OverflowAction[] = [
-              {
-                label: "Connect",
-                icon: Link2,
-                onSelect: () => setShowConnect(true),
-              },
-            ];
-            if (canManage)
+            const actions: OverflowAction[] = [];
+            if (!isReadOnly && canManageGovernance)
               actions.push({
-                label: "Share",
-                icon: Users,
-                onSelect: () => setShowShare(true),
+                label: "Nest settings",
+                icon: SettingsIcon,
+                onSelect: () => setShowSettings(true),
               });
             // Gate on canManageGovernance (owner/admin on THIS nest), not the
             // server-admin flag — otherwise a license admin who is only an
@@ -1372,7 +1380,10 @@ export function NestView({
           When stewardship is off the latter two tabs are hidden because
           their data is empty by definition. */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="mb-4">
+        {/* New Folder sits beside the tab row — it acts on the content area
+            below (Overview/Documents), not on the nest as a whole. */}
+        <div className="flex items-center gap-2 mb-4">
+          <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>
           {/* Governance tabs hidden for view-only. */}
@@ -1412,7 +1423,20 @@ export function NestView({
           {(canManage || collabCanWrite) && (
             <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
           )}
-        </TabsList>
+          </TabsList>
+          {!isReadOnly && canEditDocs && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-auto text-muted-foreground"
+              onClick={() => setShowNewFolder(true)}
+              title="Create a folder (nest with parent/child)"
+            >
+              <FolderPlus className="h-4 w-4 mr-1.5" />
+              New Folder
+            </Button>
+          )}
+        </div>
 
         {/* Overview — the nest's index/landing: stat tiles, recently-edited
             rows, and a grouped table-of-contents grid so opening a nest
@@ -1578,6 +1602,26 @@ export function NestView({
                             {g.items.length}
                           </Badge>
                           <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover/folder:text-muted-foreground" />
+                          {canEditDocs && (
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/folder:opacity-100 hover:text-primary hover:bg-primary/10"
+                              title={`New document in ${prettyFolderPath(g.folder)}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenDocument("new", { folder: g.folder });
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.stopPropagation();
+                                  onOpenDocument("new", { folder: g.folder });
+                                }
+                              }}
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                            </span>
+                          )}
                         </button>
                       )}
                       <div className="grid gap-1 sm:grid-cols-2">
@@ -1750,6 +1794,17 @@ export function NestView({
                   <Badge variant="secondary" className="ml-1 text-[10px] px-1.5 py-0 h-5">
                     {filtered.length}
                   </Badge>
+                  {canEditDocs && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-xs text-muted-foreground ml-1"
+                      onClick={() => onOpenDocument("new", { folder: folderFilter })}
+                      title={`New document in this folder`}
+                    >
+                      <Plus className="h-3.5 w-3.5 mr-1" /> New here
+                    </Button>
+                  )}
                 </div>
               )}
               {/* Saved filters — one-click apply of a named filter snapshot.
@@ -2197,7 +2252,7 @@ export function NestView({
                           <div key={g.folder || "__root"}>
                             {showHeader && (
                               <div
-                                className={`flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none cursor-pointer transition-colors ${
+                                className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none cursor-pointer transition-colors ${
                                   isDropTarget
                                     ? "bg-primary/10 ring-1 ring-primary"
                                     : "hover:bg-muted/50"
@@ -2236,6 +2291,19 @@ export function NestView({
                                 >
                                   {g.items.length}
                                 </Badge>
+                                {canEditDocs && (
+                                  <button
+                                    type="button"
+                                    className="ml-1 rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
+                                    title={`New document in ${prettyFolderPath(g.folder)}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onOpenDocument("new", { folder: g.folder });
+                                    }}
+                                  >
+                                    <Plus className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
                               </div>
                             )}
                             {!(showHeader && isCollapsed) && (
@@ -2641,6 +2709,10 @@ export function NestView({
         <ConnectModal
           isOpen={showConnect}
           onClose={() => setShowConnect(false)}
+          onGenerate={() => {
+            setShowConnect(false);
+            setShowGenerate(true);
+          }}
           nestId={nestId}
           nestName={nestName}
         />
