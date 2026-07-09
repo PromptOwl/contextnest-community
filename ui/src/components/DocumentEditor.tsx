@@ -600,6 +600,14 @@ export function DocumentEditor({
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
   const [touched, setTouched] = useState(false);
 
+  // Save on blur, not on every keystroke. Per-keystroke autosave spun up
+  // dozens of versions for one editing session; instead we persist once when
+  // the user clicks out of the editor. Unlike the old SILENT autosave this is
+  // visible — it drives the Save button's spinner + "Saved" state so the user
+  // can see their changes landed. Skips new docs (a silent create is
+  // surprising), locked/reviewer/view-only sessions, and clean state.
+  const [justSaved, setJustSaved] = useState(false);
+
   // Settings → Submit-for-Review visibility; permission → read-only gate.
   useEffect(() => {
     let cancelled = false;
@@ -838,6 +846,7 @@ export function DocumentEditor({
     setError(null);
     try {
       const { savedId } = await persistCurrent();
+      setJustSaved(true);
       afterSave(savedId ?? "");
     } catch (err: any) {
       setError(err.message);
@@ -848,45 +857,46 @@ export function DocumentEditor({
 
   const handleSave = () => runSave((savedId) => onSaved?.(savedId));
 
-  // Silent debounced autosave — fires on a typing pause and on click-out
-  // (editor blur). No spinner, no "saving…" so the always-editable surface
-  // never flickers. Skips new docs (a silent create is surprising),
-  // locked/reviewer/view-only sessions, and clean state. autosaveRef is
-  // reassigned every render so the debounce timer always runs the latest
-  // closure (current title/content/tags).
-  const autosaveTimer = useRef<number | null>(null);
-  const autosaveRef = useRef<() => void>(() => { });
-  autosaveRef.current = async () => {
-    if (isNew || saving) return;
+  // Clear the "Saved" hint the moment the doc is edited again.
+  useEffect(() => {
+    if (isDirty) setJustSaved(false);
+  }, [isDirty]);
+
+  // Coalesce to one save at a time. The server serializes version writes, but
+  // a second in-flight request is wasted work — mark it pending and run one
+  // trailing save after the current finishes so the latest edit still lands.
+  const saveInFlight = useRef(false);
+  const savePending = useRef(false);
+  const saveOnBlurRef = useRef<() => void>(() => { });
+  saveOnBlurRef.current = async () => {
+    if (isNew) return;
     if (isLocked || isReviewerOnly || isViewOnly) return;
     if (title.trim().length === 0 || content.trim().length === 0) return;
     if (!isDirty) return;
+    if (saveInFlight.current) {
+      savePending.current = true;
+      return;
+    }
+    saveInFlight.current = true;
+    setSaving(true);
+    setError(null);
     try {
       await persistCurrent();
-    } catch {
-      /* stay dirty; the manual Save path surfaces the error */
+      setJustSaved(true);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      saveInFlight.current = false;
+      setSaving(false);
+      if (savePending.current) {
+        savePending.current = false;
+        void saveOnBlurRef.current();
+      }
     }
   };
-  const scheduleAutosave = useCallback(() => {
-    if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
-    autosaveTimer.current = window.setTimeout(() => {
-      autosaveTimer.current = null;
-      void autosaveRef.current();
-    }, 1200);
+  const saveOnBlur = useCallback(() => {
+    void saveOnBlurRef.current();
   }, []);
-  const flushAutosave = useCallback(() => {
-    if (autosaveTimer.current) {
-      window.clearTimeout(autosaveTimer.current);
-      autosaveTimer.current = null;
-    }
-    void autosaveRef.current();
-  }, []);
-  useEffect(
-    () => () => {
-      if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
-    },
-    [],
-  );
 
   // Confirm before unmount when dirty; read-only sessions skip the prompt.
   const confirmLeave = (label: string, run: () => void) => {
@@ -1138,10 +1148,18 @@ export function DocumentEditor({
               >
                 {saving ? (
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : justSaved && !isDirty ? (
+                  <Check className="h-4 w-4 mr-2 text-green-600" />
                 ) : (
                   <Save className="h-4 w-4 mr-2" />
                 )}
-                {isNew ? "Create" : "Save"}
+                {saving
+                  ? "Saving…"
+                  : justSaved && !isDirty
+                    ? "Saved"
+                    : isNew
+                      ? "Create"
+                      : "Save"}
               </Button>
             ) : (
               <Button
@@ -1321,6 +1339,7 @@ export function DocumentEditor({
                   setTitle(e.target.value);
                   setTouched(true);
                 }}
+                onBlur={saveOnBlur}
                 placeholder="Untitled"
                 disabled={fieldsDisabled}
                 data-testid="document-editor-title"
@@ -1566,8 +1585,8 @@ export function DocumentEditor({
                     onChange={(e) => {
                       setSchedule(e.target.value);
                       setTouched(true);
-                      scheduleAutosave();
                     }}
+                    onBlur={saveOnBlur}
                     className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -1732,9 +1751,8 @@ export function DocumentEditor({
                   if (fieldsDisabled) return;
                   setContent(e.target.value);
                   setTouched(true);
-                  scheduleAutosave();
                 }}
-                onBlur={flushAutosave}
+                onBlur={saveOnBlur}
                 readOnly={fieldsDisabled}
                 spellCheck={false}
                 placeholder="# Raw markdown"
@@ -1748,6 +1766,7 @@ export function DocumentEditor({
                   setContent(e.target.value);
                   setTouched(true);
                 }}
+                onBlur={saveOnBlur}
                 placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
                 spellCheck={false}
                 className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
@@ -1776,10 +1795,9 @@ export function DocumentEditor({
                   setContent(next);
                   // TipTap onUpdate fires only on real user input here.
                   setTouched(true);
-                  scheduleAutosave();
                 }}
                 onSave={handleSave}
-                onBlur={flushAutosave}
+                onBlur={saveOnBlur}
                 nestId={nestId}
                 currentNodeId={isNew ? undefined : nodeId}
                 editable={!fieldsDisabled}
