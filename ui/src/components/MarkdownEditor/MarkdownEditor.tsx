@@ -21,6 +21,7 @@ import {
 import { BubbleMenu } from "@tiptap/react/menus";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
+import TiptapImage from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
@@ -144,6 +145,7 @@ import {
   Quote,
   Code,
   Link as LinkIcon,
+  ImagePlus,
   FileText,
   Undo,
   Redo,
@@ -213,6 +215,9 @@ interface MarkdownEditorProps {
   currentNodeId?: string;
   /** Toolbar "Link to document" button calls this. Parent shows the picker. */
   onRequestDocLink?: () => void;
+  /** Toolbar "Image" button: upload the picked file, resolve to its URL.
+   *  Omit to hide the button (e.g. contexts with no asset storage). */
+  onUploadImage?: (file: File) => Promise<string>;
   /** Click on a `[[Title]]` decoration inside the editor. */
   onWikiLinkClick?: (title: string, id: string | null) => void;
   /** Click on an `@name` decoration. */
@@ -234,6 +239,7 @@ export const MarkdownEditor = forwardRef<
     nestId,
     currentNodeId,
     onRequestDocLink,
+    onUploadImage,
     onWikiLinkClick,
     onMentionClick,
     placeholder = "Start writing...",
@@ -256,12 +262,21 @@ export const MarkdownEditor = forwardRef<
     query: string;
     from: number;
     to: number;
-    coords: { left: number; top: number };
+    // Caret rect edges (viewport coords). `top`/`bottom` are the caret's
+    // top and bottom so the render can flip the panel above the caret when
+    // there isn't room below (caret near the bottom of the viewport).
+    coords: { left: number; top: number; bottom: number };
     selectedIdx: number;
   } | null>(null);
   const [wikiResults, setWikiResults] = useState<
     Array<{ id: string; title: string }>
   >([]);
+  // Full node list for the nest, fetched once per popup-open and filtered
+  // client-side. Server search on every keystroke added 3-4s of latency;
+  // the nest's list is small enough to filter locally for instant matches.
+  const wikiNodesRef = useRef<Array<{ id: string; title: string }>>([]);
+  // Bump when the list finishes loading so the filter effect recomputes.
+  const [wikiNodesVersion, setWikiNodesVersion] = useState(0);
   // Refs mirror state so the editor's static `handleKeyDown` (captured
   // once at useEditor time) can see the latest values without a re-init.
   const wikiPopupRef = useRef(wikiPopup);
@@ -339,6 +354,9 @@ export const MarkdownEditor = forwardRef<
       }),
       TaskList,
       TaskItem.configure({ nested: true }),
+      // Inline images — required for tiptap-markdown to round-trip ![alt](url)
+      // instead of dropping it. Rendering constrained via editor-styles.css.
+      TiptapImage.configure({ inline: false, allowBase64: false }),
       // `==text==` highlight. multicolor lets the color marks set a bg.
       Highlight.configure({ multicolor: true }),
       // Text color mark (in-editor + HTML export). Note: plain markdown has
@@ -548,7 +566,7 @@ export const MarkdownEditor = forwardRef<
         query,
         from: matchStart,
         to: $from.pos,
-        coords: { left: coords.left, top: coords.bottom },
+        coords: { left: coords.left, top: coords.top, bottom: coords.bottom },
         selectedIdx: prev && prev.query === query ? prev.selectedIdx : 0,
       }));
     };
@@ -560,34 +578,44 @@ export const MarkdownEditor = forwardRef<
     };
   }, [editor, effectiveEditable]);
 
-  // Fetch matching docs whenever the query changes. Empty query
-  // (just `[[`) lists everything so users can browse without typing.
+  // Load the nest's node list once each time the popup opens (not per
+  // keystroke). Re-fetching on open keeps the list fresh (docs created
+  // this session show up) while filtering stays local and instant.
+  const wikiPopupOpen = !!wikiPopup;
   useEffect(() => {
-    if (!wikiPopup || !nestId) {
-      setWikiResults([]);
-      return;
-    }
+    if (!wikiPopupOpen || !nestId) return;
     let cancelled = false;
-    const q = wikiPopup.query.trim();
     (async () => {
       try {
-        const res = q
-          ? await api.searchNodes(nestId, q)
-          : await api.listNodes(nestId);
+        const res = await api.listNodes(nestId);
         if (cancelled) return;
-        const list = ((res.nodes as Array<{ id: string; title: string }>) || [])
-          // A doc can't link to itself — drop it from the suggestions.
-          .filter((n) => n.id !== currentNodeId)
-          .slice(0, 8);
-        setWikiResults(list);
+        wikiNodesRef.current =
+          (res.nodes as Array<{ id: string; title: string }>) || [];
+        setWikiNodesVersion((v) => v + 1);
       } catch {
-        if (!cancelled) setWikiResults([]);
+        /* leave the last list in place; filter still works offline */
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [wikiPopup?.query, nestId, currentNodeId]);
+  }, [wikiPopupOpen, nestId]);
+
+  // Filter the cached list client-side as the query changes. Empty query
+  // (just `[[`) lists everything so users can browse without typing.
+  useEffect(() => {
+    if (!wikiPopup) {
+      setWikiResults([]);
+      return;
+    }
+    const q = wikiPopup.query.trim().toLowerCase();
+    const list = wikiNodesRef.current
+      // A doc can't link to itself — drop it from the suggestions.
+      .filter((n) => n.id !== currentNodeId)
+      .filter((n) => !q || n.title.toLowerCase().includes(q))
+      .slice(0, 8);
+    setWikiResults(list);
+  }, [wikiPopup?.query, currentNodeId, wikiNodesVersion]);
 
   // Sync external content only when not focused — avoids selection
   // loss + onUpdate loop on re-render.
@@ -943,6 +971,7 @@ export const MarkdownEditor = forwardRef<
             editor={editor}
             onLink={setLink}
             onRequestDocLink={onRequestDocLink}
+            onUploadImage={onUploadImage}
             previewing={previewing}
             onTogglePreview={() => setPreviewing((p) => !p)}
           />
@@ -1222,13 +1251,40 @@ export const MarkdownEditor = forwardRef<
         </div>
       )}
 
-      {wikiPopup && wikiResults.length > 0 && (
+      {wikiPopup && wikiResults.length > 0 && (() => {
+        // Panel is w-72 (288px) / max-h-64 (256px), fixed-positioned at the
+        // caret. Near the bottom or right edge of the viewport it would clip
+        // off-screen, so flip it above the caret when space below is short,
+        // and clamp its left so it never runs past the right edge. maxHeight
+        // is set to the space available on the chosen side so a long list
+        // scrolls inside the panel instead of overflowing the viewport.
+        const PANEL_W = 288;
+        const PANEL_H = 256;
+        const GAP = 4;
+        const MARGIN = 8;
+        const { left, top, bottom } = wikiPopup.coords;
+        const spaceBelow = window.innerHeight - bottom;
+        const spaceAbove = top;
+        const flipUp = spaceBelow < PANEL_H + GAP && spaceAbove > spaceBelow;
+        const clampedLeft = Math.max(
+          MARGIN,
+          Math.min(left, window.innerWidth - PANEL_W - MARGIN),
+        );
+        const style = flipUp
+          ? {
+              left: clampedLeft,
+              bottom: window.innerHeight - top + GAP,
+              maxHeight: spaceAbove - GAP - MARGIN,
+            }
+          : {
+              left: clampedLeft,
+              top: bottom + GAP,
+              maxHeight: spaceBelow - GAP - MARGIN,
+            };
+        return (
         <div
-          className="fixed z-50 w-72 max-h-64 overflow-y-auto rounded-md border bg-popover text-popover-foreground shadow-md"
-          style={{
-            left: wikiPopup.coords.left,
-            top: wikiPopup.coords.top + 4,
-          }}
+          className="fixed z-50 w-72 overflow-y-auto rounded-md border bg-popover text-popover-foreground shadow-md"
+          style={style}
           // Avoid stealing editor focus so the cursor selection that
           // `insertContentAt` targets stays intact.
           onMouseDown={(e) => e.preventDefault()}
@@ -1256,7 +1312,8 @@ export const MarkdownEditor = forwardRef<
             ))}
           </ul>
         </div>
-      )}
+        );
+      })()}
 
       {/* Drag handle (⠿). The official extension positions it in the left
           gutter of the hovered block and handles drag-to-reorder natively.
@@ -1436,15 +1493,36 @@ function Toolbar({
   editor,
   onLink,
   onRequestDocLink,
+  onUploadImage,
   previewing,
   onTogglePreview,
 }: {
   editor: Editor;
   onLink: () => void;
   onRequestDocLink?: () => void;
+  onUploadImage?: (file: File) => Promise<string>;
   previewing: boolean;
   onTogglePreview: () => void;
 }) {
+  // Hidden file input driven by the Image toolbar button.
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const pickImage = () => imageInputRef.current?.click();
+  const onImagePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file || !onUploadImage) return;
+    try {
+      const url = await onUploadImage(file);
+      editor
+        .chain()
+        .focus()
+        .setImage({ src: url, alt: file.name.replace(/\.[^.]+$/, "") })
+        .run();
+    } catch (err: any) {
+      // Surface via the browser-native path — the editor has no toast scope.
+      alert(err?.message || "Image upload failed");
+    }
+  };
   // In preview mode every formatting affordance is irrelevant — collapse
   // the toolbar to just the toggle so the user has one obvious way back
   // to editing.
@@ -1587,6 +1665,20 @@ function Toolbar({
         >
           <FileText className="h-3.5 w-3.5" />
         </ToolbarButton>
+      )}
+      {onUploadImage && (
+        <>
+          <ToolbarButton onClick={pickImage} title="Insert image (uploads to this nest)">
+            <ImagePlus className="h-3.5 w-3.5" />
+          </ToolbarButton>
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp"
+            className="hidden"
+            onChange={onImagePicked}
+          />
+        </>
       )}
 
       <Divider />

@@ -1,19 +1,29 @@
 /**
  * GET/PATCH /admin/settings — the server-wide settings the admin edits from
- * the Settings page. This endpoint mutates process.env live and writes to
- * ENV_FILE_PATH, so it is security-sensitive: only the admin may reach it,
- * validation must reject bad values, and a partially-invalid PATCH must apply
- * nothing (the response code and server state must agree).
+ * the Settings page. This endpoint mutates process.env live and persists to the
+ * server_settings DB table (durable + shared across instances; the .env-file
+ * persistence it replaced was wiped by every Cloud Run rebuild). It is
+ * security-sensitive: only the admin may reach it, validation must reject bad
+ * values, and a partially-invalid PATCH must apply nothing (the response code
+ * and server state must agree).
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
 import {
   setupTestEnv,
   createTestApp,
   registerUser,
   jsonRequest,
 } from "./helpers";
+
+/** Read a persisted setting straight from the DB the running app uses. */
+async function persistedSetting(key: string): Promise<string | null | undefined> {
+  const { getDb } = await import("../src/db/client.js");
+  const row = (await getDb().get(
+    "SELECT value FROM server_settings WHERE key = ?",
+    [key],
+  )) as { value: string | null } | undefined;
+  return row ? row.value : undefined;
+}
 
 const OWNER_EMAIL = "owner@example.com";
 
@@ -23,9 +33,12 @@ let env: ReturnType<typeof setupTestEnv>;
 // test's mutation can't leak into the next.
 const SETTING_ENV = [
   "PROMPTOWL_SIGN_IN_GATE",
+  "MANUAL_SIGN_IN",
   "LOGO_URL",
   "PUBLIC_BASE_URL",
   "MAX_BODY_BYTES",
+  "FEATURE_WORKFLOW_PLANE",
+  "FEATURE_SUBAGENT_RUNS",
 ];
 
 beforeEach(() => {
@@ -103,12 +116,10 @@ describe("/admin/settings — admin round-trip (key mode)", () => {
     expect(after.data.promptowl_sign_in_gate).toBe("admin-only");
     expect(after.data.max_body_bytes).toBe(20 * 1024 * 1024);
 
-    // Persisted: the env file under DATA_ROOT carries the change across restart.
-    const envFile = join(env.dataDir, ".env");
-    expect(existsSync(envFile)).toBe(true);
-    const contents = readFileSync(envFile, "utf8");
-    expect(contents).toMatch(/PROMPTOWL_SIGN_IN_GATE=admin-only/);
-    expect(contents).toMatch(/MAX_BODY_BYTES=20971520/);
+    // Persisted: the DB rows carry the change across restart (and to every
+    // other instance).
+    expect(await persistedSetting("PROMPTOWL_SIGN_IN_GATE")).toBe("admin-only");
+    expect(await persistedSetting("MAX_BODY_BYTES")).toBe("20971520");
   });
 });
 
@@ -142,6 +153,56 @@ describe("/admin/settings — validation", () => {
     expect(tooBig.status).toBe(400);
   });
 
+  it("rejects enabling sub-agent runs while the workflow plane is off", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { subagent_runs_enabled: true },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/workflow_plane_enabled/);
+
+    // Nothing applied — the flag stays off.
+    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(after.data.subagent_runs_enabled).toBe(false);
+  });
+
+  it("enables plane + sub-agent runs together in one PATCH and persists both", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { workflow_plane_enabled: true, subagent_runs_enabled: true },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.settings.workflow_plane_enabled).toBe(true);
+    expect(res.data.settings.subagent_runs_enabled).toBe(true);
+
+    expect(await persistedSetting("FEATURE_WORKFLOW_PLANE")).toBe("true");
+    expect(await persistedSetting("FEATURE_SUBAGENT_RUNS")).toBe("true");
+
+    // And it can be turned back off (null tombstones the row → falls to default).
+    const off = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { subagent_runs_enabled: false },
+      admin.apiKey,
+    );
+    expect(off.status).toBe(200);
+    expect(off.data.settings.subagent_runs_enabled).toBe(false);
+    expect(await persistedSetting("FEATURE_SUBAGENT_RUNS")).toBeNull();
+  });
+
   it("applies NOTHING when one field of a multi-field PATCH is invalid", async () => {
     const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
     const admin = await registerUser(app, OWNER_EMAIL);
@@ -161,10 +222,130 @@ describe("/admin/settings — validation", () => {
     const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
     expect(after.data.logo_url).toBeNull();
 
-    // Nothing persisted: env file either absent or free of LOGO_URL.
-    const envFile = join(env.dataDir, ".env");
-    if (existsSync(envFile)) {
-      expect(readFileSync(envFile, "utf8")).not.toMatch(/LOGO_URL=/);
-    }
+    // Nothing persisted: no LOGO_URL row was written.
+    expect(await persistedSetting("LOGO_URL")).toBeUndefined();
+  });
+});
+
+describe("/admin/settings — sign-in method gates", () => {
+  it("defaults manual sign-in to open and persists invite-only / disabled", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const before = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(before.data.manual_sign_in).toBe("open");
+
+    const invite = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "invite-only" },
+      admin.apiKey,
+    );
+    expect(invite.status).toBe(200);
+    expect(invite.data.settings.manual_sign_in).toBe("invite-only");
+    expect(await persistedSetting("MANUAL_SIGN_IN")).toBe("invite-only");
+
+    const off = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "disabled" },
+      admin.apiKey,
+    );
+    expect(off.status).toBe(200);
+    expect(await persistedSetting("MANUAL_SIGN_IN")).toBe("disabled");
+  });
+
+  it("rejects an invalid manual_sign_in value", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "nonsense" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/manual_sign_in/);
+  });
+
+  it("rejects disabling BOTH manual and PromptOwl sign-in in one PATCH", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "disabled", promptowl_sign_in_gate: "disabled" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/both/i);
+
+    // Nothing applied — manual stays open.
+    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(after.data.manual_sign_in).toBe("open");
+  });
+
+  it("rejects disabling manual when PromptOwl is ALREADY disabled (config fallback)", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    // Turn PromptOwl off first — valid, manual still open.
+    const off = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { promptowl_sign_in_gate: "disabled" },
+      admin.apiKey,
+    );
+    expect(off.status).toBe(200);
+
+    // Disabling manual alone now would leave no method — rejected via the
+    // effective-state fallback to current config (gate not in this body).
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "disabled" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/both/i);
+  });
+
+  it("allows invite-only alongside PromptOwl disabled (login still works)", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "invite-only", promptowl_sign_in_gate: "disabled" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.settings.manual_sign_in).toBe("invite-only");
+    expect(res.data.settings.promptowl_sign_in_gate).toBe("disabled");
+  });
+
+  it("allows manual disabled together with PromptOwl admin-only", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "disabled", promptowl_sign_in_gate: "admin-only" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.settings.manual_sign_in).toBe("disabled");
+    expect(res.data.settings.promptowl_sign_in_gate).toBe("admin-only");
   });
 });

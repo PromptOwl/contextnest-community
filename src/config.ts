@@ -29,6 +29,28 @@ if (envFileLoaded && !isTestRun) {
 // loaded above (dev) to avoid a redundant pass.
 const canonicalEnvFile = process.env.ENV_FILE_PATH || join(dataRoot(), ".env");
 let canonicalEnvLoaded: string | null = null;
+// Warn at most once when SLACK_WEBHOOK_URL is set to a non-https value. The
+// getter is read once per governance event, so without this a misconfigured
+// env value (set directly, bypassing the /admin/settings validator) would
+// spam the log on every submit/approve/reject/add-collaborator.
+let slackUrlWarned = false;
+let emailFromWarned = false;
+let emailToWarned = false;
+
+/**
+ * Loose email shape gate for the notification envelope: something@something,
+ * no whitespace, no CR/LF. `\s` already excludes interior newlines; the extra
+ * CR/LF reject closes the JS quirk where a non-`m` `$` still matches before a
+ * single trailing "\n" (header-injection shape). Shared by config getters and
+ * the /admin/settings validator so env-set and UI-set values gate identically.
+ */
+export function isEmailish(v: string): boolean {
+  return /^[^\s@]+@[^\s@]+$/.test(v) && !/[\r\n]/.test(v);
+}
+/** Comma-separated recipient list where every entry is isEmailish(). */
+export function isEmailListish(v: string): boolean {
+  return v.split(",").every((e) => isEmailish(e.trim()));
+}
 if (
   !isTestRun &&
   canonicalEnvFile !== envFileLoaded &&
@@ -47,10 +69,6 @@ if (!isTestRun) {
 function dataRoot() {
   return process.env.DATA_ROOT || join(process.cwd(), "data");
 }
-
-// Warn at most once when SLACK_WEBHOOK_URL is set to a non-https value —
-// the getter is read per governance event and would otherwise spam the log.
-let slackUrlWarned = false;
 
 export const config = {
   get PORT() {
@@ -179,6 +197,26 @@ export const config = {
       : "open";
   },
   /**
+   * Manual (email + password) sign-in. Three modes, independent of
+   * `PROMPTOWL_SIGN_IN_GATE` (the two methods are controlled separately):
+   *   "open"        — anyone may log in and self-register (default).
+   *   "invite-only" — existing + admin-invited users may log in and an invited
+   *                   placeholder may set its password ("claim"), but brand-new
+   *                   self-registration is refused. Use this when the admin
+   *                   provisions accounts (invite / share / steward) and users
+   *                   shouldn't be able to create their own.
+   *   "disabled"    — no email/password sign-in at all (PromptOwl only).
+   * Enforced at POST /auth/login and POST /auth/register. The /admin/settings
+   * validator refuses "disabled" while PromptOwl is also disabled, so a server
+   * can never be left with no way to sign in.
+   */
+  get MANUAL_SIGN_IN(): "open" | "invite-only" | "disabled" {
+    const v = (process.env.MANUAL_SIGN_IN || "open").trim().toLowerCase();
+    return v === "invite-only" || v === "disabled"
+      ? (v as "invite-only" | "disabled")
+      : "open";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path
@@ -285,6 +323,74 @@ export const config = {
     // without authentication. Safer default for public deployments;
     // local/dev users opt in explicitly.
     return (process.env.AUTH_MODE || "key") as "open" | "key";
+  },
+  /**
+   * Optional SMTP connection URL for email notifications, e.g.
+   * smtps://user:pass@smtp.example.com:465. smtp:// or smtps:// only.
+   * Empty/unset = email connector off. Requires NOTIFY_EMAIL_FROM/_TO.
+   */
+  get SMTP_URL(): string | null {
+    const raw = process.env.SMTP_URL?.trim();
+    if (!raw) return null;
+    if (!/^smtps?:\/\//i.test(raw)) {
+      console.warn(
+        "[config] SMTP_URL rejected: must be an smtp:// or smtps:// URL. Email notifications disabled.",
+      );
+      return null;
+    }
+    return raw;
+  },
+  /**
+   * From address for notification emails. Shape-validated here (not only in
+   * the /admin/settings PATCH) so a value set directly via env/Docker can't
+   * reach nodemailer's envelope unchecked. Invalid = connector off.
+   */
+  get NOTIFY_EMAIL_FROM(): string | null {
+    const raw = process.env.NOTIFY_EMAIL_FROM?.trim();
+    if (!raw) return null;
+    if (!isEmailish(raw)) {
+      if (!emailFromWarned) {
+        emailFromWarned = true;
+        console.warn(
+          "[config] NOTIFY_EMAIL_FROM rejected: must be a plain email address. Email notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
+  },
+  /**
+   * Comma-separated recipient list for notification emails. Shape-validated
+   * here for the same env-bypass reason as NOTIFY_EMAIL_FROM. Invalid (any
+   * entry malformed) = connector off.
+   */
+  get NOTIFY_EMAIL_TO(): string | null {
+    const raw = process.env.NOTIFY_EMAIL_TO?.trim();
+    if (!raw) return null;
+    if (!isEmailListish(raw)) {
+      if (!emailToWarned) {
+        emailToWarned = true;
+        console.warn(
+          "[config] NOTIFY_EMAIL_TO rejected: must be a comma-separated list of email addresses. Email notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
+  },
+  /**
+   * Per-nest notification digest window in milliseconds. A burst of governance
+   * events on one nest inside this window collapses into a single digest
+   * message instead of one post per event. Empty / non-numeric / negative /
+   * unset → 15000 (15s).
+   */
+  get NOTIFY_DEBOUNCE_MS(): number {
+    // Guard empty-but-set (NOTIFY_DEBOUNCE_MS=) first: Number("") is 0, not
+    // NaN, so it would otherwise yield a 0ms window instead of the default.
+    const raw = process.env.NOTIFY_DEBOUNCE_MS?.trim();
+    if (!raw) return 15_000;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 15_000;
   },
   /**
    * CORS origin allowlist. Comma-separated list of origins or "*".

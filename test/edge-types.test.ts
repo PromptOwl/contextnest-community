@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+import { getDb } from "../src/db/client.js";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -106,6 +107,9 @@ describe("registry", () => {
       { name: "ok-name", description: "x", condition_schema: { params: "not-an-array" } },
       { name: "ok-name", description: "x", direction: "sideways" },
       { name: 123, description: "x" },
+      // color is cosmetic but still validated — a bad hex 400s, not silent null.
+      { name: "ok-name", description: "x", color: "red" },
+      { name: "ok-name", description: "x", color: "#ff0" },
     ]) {
       const res = await jsonRequest(app, "POST", `/nests/${nestId}/edge-types`, body, owner.apiKey);
       expect(res.status).toBe(400);
@@ -151,5 +155,99 @@ describe("registry", () => {
       owner.apiKey,
     );
     expect(missing.status).toBe(404);
+  });
+});
+
+describe("concurrency", () => {
+  // The lazy seed is a check-then-insert; two first-touch requests against a
+  // brand-new nest (double-fetch, StrictMode, parallel processes) must NOT
+  // trip idx_edge_types_name. ON CONFLICT DO NOTHING makes the loser a no-op.
+  it("seeds exactly once under concurrent first-touch GETs — no 409, no dupes", async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Race" }, owner.apiKey);
+    const raceNest = nest.data.nest.id;
+    const results = await Promise.all([
+      jsonRequest(app, "GET", `/nests/${raceNest}/edge-types`, undefined, owner.apiKey),
+      jsonRequest(app, "GET", `/nests/${raceNest}/edge-types`, undefined, owner.apiKey),
+      jsonRequest(app, "GET", `/nests/${raceNest}/edge-types`, undefined, owner.apiKey),
+    ]);
+    for (const r of results) expect(r.status).toBe(200);
+    const list = await jsonRequest(app, "GET", `/nests/${raceNest}/edge-types`, undefined, owner.apiKey);
+    expect(list.data.count).toBe(5);
+    // Exactly one of each stock type — no duplicate rows.
+    const counts = new Map<string, number>();
+    for (const t of list.data.edge_types) counts.set(t.name, (counts.get(t.name) ?? 0) + 1);
+    for (const n of ["next", "on-success", "on-failure", "depends-on", "owned-by"]) {
+      expect(counts.get(n)).toBe(1);
+    }
+  });
+
+  // Defaults are attributed to the nest owner, not whoever's request landed
+  // first — a read-tier GET must not stamp a viewer as created_by.
+  it("attributes seeded defaults to the nest owner even when a reader triggers the seed", async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Attribution" }, owner.apiKey);
+    const attrNest = nest.data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${attrNest}/collaborators`,
+      { email: reader.email, permission: "read" },
+      owner.apiKey,
+    );
+    // Reader is first to touch it → triggers the lazy seed.
+    const list = await jsonRequest(app, "GET", `/nests/${attrNest}/edge-types`, undefined, reader.apiKey);
+    expect(list.status).toBe(200);
+    for (const t of list.data.edge_types) {
+      expect(t.created_by).toBe(owner.email);
+    }
+  });
+
+  // Concurrent upserts of the same name must converge to one row, not race
+  // into a duplicate-key 500.
+  it("collapses concurrent same-name upserts to a single row", async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Upsert" }, owner.apiKey);
+    const upNest = nest.data.nest.id;
+    const posts = await Promise.all([
+      jsonRequest(app, "POST", `/nests/${upNest}/edge-types`, { name: "blocks", description: "a" }, owner.apiKey),
+      jsonRequest(app, "POST", `/nests/${upNest}/edge-types`, { name: "Blocks", description: "b" }, owner.apiKey),
+    ]);
+    for (const p of posts) expect([200, 201]).toContain(p.status);
+    const list = await jsonRequest(app, "GET", `/nests/${upNest}/edge-types`, undefined, owner.apiKey);
+    const matches = list.data.edge_types.filter((t: any) => t.name.toLowerCase() === "blocks");
+    expect(matches.length).toBe(1);
+  });
+});
+
+describe("delete guard", () => {
+  // No edge-CRUD API yet (PR 2), so wire a raw edge row straight to the DB to
+  // exercise both the app-level in-use check and the ON DELETE RESTRICT that
+  // backs it. Confirms the guard actually refuses (400) instead of orphaning.
+  it("refuses to delete a type while an edge references it, then allows it once free", async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "DelGuard" }, owner.apiKey);
+    const dgNest = nest.data.nest.id;
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${dgNest}/edge-types`,
+      { name: "references", description: "x" },
+      owner.apiKey,
+    );
+    const typeId = created.data.edge_type.id;
+
+    const db = getDb();
+    await db.run(
+      `INSERT INTO edges
+         (id, nest_id, from_node, to_node, type_id, condition_mode, condition, metadata, created_by, created_at, updated_at)
+       VALUES (?, ?, 'nodes/a', 'nodes/b', ?, NULL, NULL, NULL, ?, ?, ?)`,
+      ["edge-delguard-1", dgNest, typeId, owner.email, "t", "t"],
+    );
+
+    const blocked = await jsonRequest(app, "DELETE", `/nests/${dgNest}/edge-types/${typeId}`, undefined, owner.apiKey);
+    expect(blocked.status).toBe(400);
+    expect(blocked.data.error).toMatch(/in use/i);
+
+    // Free the type → delete now succeeds.
+    await db.run("DELETE FROM edges WHERE id = ?", ["edge-delguard-1"]);
+    const ok = await jsonRequest(app, "DELETE", `/nests/${dgNest}/edge-types/${typeId}`, undefined, owner.apiKey);
+    expect(ok.status).toBe(200);
   });
 });

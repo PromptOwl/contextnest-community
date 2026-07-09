@@ -341,13 +341,29 @@ export async function createStewardRecord(params: {
       [email],
     ) as { id: string } | undefined;
 
+    // Mint an invited placeholder for an unregistered email — mirrors the
+    // collaborator/grant/MCP provisioning paths. This gives the steward a real
+    // user row so the admin can issue them a password (Invite / Reset password)
+    // and it shows up in the teammates list. Without it, under
+    // MANUAL_SIGN_IN=invite-only the email would have no account and no way in
+    // (self-registration of a brand-new email is refused there).
+    let userId = userRow?.id;
+    if (!userId) {
+      const { hashPassword } = await import("../auth/keys.js");
+      userId = uuid();
+      await db.run(
+        "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
+        [userId, email, null, await hashPassword(uuid())],
+      );
+    }
+
     const created = await assignSteward({
       nestId: params.nestId,
       scope: params.scope,
       nodePattern,
       tagName,
       userEmail: email,
-      userId: userRow?.id,
+      userId,
       role: user.role ?? "reviewer",
       assignedBy: params.assignedBy,
       assignedAt: new Date().toISOString(),

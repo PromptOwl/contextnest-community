@@ -9,12 +9,13 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { notifyReviewRequested, notifyReviewResolved } from "./notify-service.js";
 import { dispatchEvent } from "../notify/dispatch.js";
+import { notifyNestEvent } from "../notify/notify.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
 import * as versions from "./version-service.js";
-import { buildTitleMap, describeNode } from "./title-resolver.js";
+import { buildTitleMap, describeNode, buildDocContext } from "./title-resolver.js";
 import type {
   ReviewRequest,
   ReviewRequestPriority,
@@ -32,6 +33,8 @@ export async function submitForReview(params: {
   requestedBy: string;
   note?: string;
   priority?: ReviewRequestPriority;
+  /** Request origin, for building the notification's document link. */
+  baseUrl?: string;
 }): Promise<ReviewRequest> {
   const db = getDb();
 
@@ -67,13 +70,29 @@ export async function submitForReview(params: {
     [params.nestId, params.nodeId, params.version],
   );
 
+  const reviewCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
   void dispatchEvent({
     kind: "review_requested",
     nestId: params.nestId,
     subjectId: params.nodeId,
     actor: params.requestedBy,
-    message: `Review requested on *${await describeNode(params.nestId, params.nodeId)}* (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
+    message: `Review requested on *${reviewCtx.label}* (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
   });
+  // SLACK_WEBHOOK_URL + email connector (digest-batched). Complements the
+  // connector-table dispatch above; email is the piece connectors don't cover.
+  void notifyNestEvent(
+    params.nestId,
+    `:memo: Review requested on *${reviewCtx.label}* (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
+    {
+      status: "pending_review",
+      docTitle: reviewCtx.docTitle,
+      path: reviewCtx.path,
+      link: reviewCtx.link,
+      actor: params.requestedBy,
+      version: params.version,
+      note: params.note || null,
+    },
+  );
 
   // Fan out to watchers of this doc + of agents flowing into it (HITL tags).
   // Best-effort inside notifyReviewRequested — never fails the submission.
@@ -97,6 +116,8 @@ export async function approve(params: {
   approvedBy: string;
   note?: string;
   override?: boolean;
+  /** Request origin, for building the notification's document link. */
+  baseUrl?: string;
 }): Promise<ReviewRequest> {
   const db = getDb();
 
@@ -217,6 +238,20 @@ export async function approve(params: {
     );
   }
 
+  const approveCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
+  void notifyNestEvent(
+    params.nestId,
+    `:white_check_mark: *${approveCtx.label}* v${params.version} approved by ${params.approvedBy}`,
+    {
+      status: "approved",
+      docTitle: approveCtx.docTitle,
+      path: approveCtx.path,
+      link: approveCtx.link,
+      actor: params.approvedBy,
+      version: params.version,
+    },
+  );
+
   return (await getReviewRequest(pending.id))!;
 }
 
@@ -229,6 +264,8 @@ export async function reject(params: {
   version: number;
   rejectedBy: string;
   note: string;
+  /** Request origin, for building the notification's document link. */
+  baseUrl?: string;
 }): Promise<ReviewRequest> {
   const db = getDb();
 
@@ -262,13 +299,27 @@ export async function reject(params: {
     [params.nestId, params.nodeId, params.version],
   );
 
+  const rejectCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
   void dispatchEvent({
     kind: "review_rejected",
     nestId: params.nestId,
     subjectId: params.nodeId,
     actor: params.rejectedBy,
-    message: `*${await describeNode(params.nestId, params.nodeId)}* v${params.version} rejected by ${params.rejectedBy}${params.note ? ` — "${params.note}"` : ""}`,
+    message: `*${rejectCtx.label}* v${params.version} rejected by ${params.rejectedBy}${params.note ? ` — "${params.note}"` : ""}`,
   });
+  void notifyNestEvent(
+    params.nestId,
+    `:x: *${rejectCtx.label}* v${params.version} rejected by ${params.rejectedBy} — "${params.note}"`,
+    {
+      status: "rejected",
+      docTitle: rejectCtx.docTitle,
+      path: rejectCtx.path,
+      link: rejectCtx.link,
+      actor: params.rejectedBy,
+      version: params.version,
+      note: params.note || null,
+    },
+  );
 
   // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.
   await notifyReviewResolved({

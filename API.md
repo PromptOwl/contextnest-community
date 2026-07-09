@@ -19,7 +19,7 @@ All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with ap
 ## 1. Auth
 
 ### POST `/auth/register`
-Public. Creates a user OR claims an invited placeholder.
+Public **self sign-up** — creates a brand-new account only. Gated by `MANUAL_SIGN_IN`: allowed only in `open`; `invite-only` and `disabled` return `403`. It never sets the password on an already-provisioned (invited) account — that returns `409` (no email verification exists, so self-claiming would be account takeover). Invited users get a password from their admin (`/auth/invite` or admin reset), then log in and change it.
 
 Body:
 ```json
@@ -43,7 +43,7 @@ Body:
 ```json
 { "email": "user@x.com", "password": "secret123" }
 ```
-200 + session cookie. 401 `Invalid credentials`. Rate-limited per IP and per email.
+200 + session cookie. 401 `Invalid credentials`. Rate-limited per IP and per email. Gated by `MANUAL_SIGN_IN` — returns `403` when set to `disabled` (`invite-only` still allows login).
 
 ### POST `/auth/logout`
 Clears session cookie. 200.
@@ -278,10 +278,12 @@ Lists all readable docs.
     "author": "...",
     "created_at": "...",
     "updated_at": "...",
-    "content": "# md body"
+    "content": "# md body",
+    "schedule": "0 6 * * *"
   }]
 }
 ```
+- `schedule` is present only on runnable nodes (`type` `agent`/`skill`); omitted otherwise.
 
 ### POST `/nests/:nestId/nodes`
 ```json
@@ -292,11 +294,13 @@ Lists all readable docs.
   "type": "document",
   "scope": "team",
   "status": "draft",
-  "folder": "gtm/deals"
+  "folder": "gtm/deals",
+  "schedule": "0 6 * * *"
 }
 ```
 - Slug derived from title → `nodes/<slug>`.
 - Optional `folder` (string) nests the doc → `nodes/<folder>/<slug>`. Each `/`-separated segment is slugified independently (so `../` or absolute paths can't escape the vault); empty segments drop. Max 8 levels deep; each segment (and the title slug) max 100 chars — otherwise `400`.
+- Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Auto-syncs tag index for steward resolution.
 
@@ -321,10 +325,12 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
   "title": "...",
   "content": "...",
   "tags": ["..."],
-  "changeNote": "fixed typo"
+  "changeNote": "fixed typo",
+  "schedule": "0 7 * * *"
 }
 ```
 Requires nest write permission.
+- `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
@@ -556,6 +562,122 @@ suggestions ("proposed an edit", read from nest storage) + reviews
 
 ---
 
+## 8b. Glossary definitions
+
+A literal table-based ontology per nest: stewards/editors define and articulate
+terms — existing `#tags` or brand-new vocabulary — and external runtimes (quant
+analysis jobs, agents) pull them in real time. One row per `(nest, term)`,
+case-insensitive. Reads are read-tier; writes are write-tier.
+
+### GET `/nests/:nestId/definitions`
+List the whole glossary, ordered by term.
+```json
+{
+  "count": 1,
+  "definitions": [{
+    "id": "...",
+    "nest_id": "...",
+    "term": "CAC",
+    "definition": "Customer acquisition cost: S&M spend / new customers, 90d.",
+    "linked_tag": "#gtm",
+    "defined_by": "owner@acme.com",
+    "created_at": "...",
+    "updated_at": "..."
+  }]
+}
+```
+
+### GET `/nests/:nestId/definitions?term=CAC`
+Real-time single lookup — one indexed, case-insensitive query. `404` if the term
+isn't defined.
+```json
+{ "definition": { "id": "...", "term": "CAC", "definition": "...", "linked_tag": "#gtm", "defined_by": "...", "created_at": "...", "updated_at": "..." } }
+```
+
+### POST `/nests/:nestId/definitions` (write+)
+Upsert by term text (case-insensitive). New term → `201`; re-defining an existing
+term updates it in place → `200`.
+```json
+{ "term": "CAC", "definition": "...", "linked_tag": "gtm", "editing_id": "<id?>" }
+```
+- `term` required, ≤ 200 chars. `definition` required. Non-string `term`/`definition`/`linked_tag` → `400`.
+- `linked_tag`: omit = leave unchanged on update; `null`/`""` = clear; string = set (normalized to `#lowercase`).
+- `editing_id` (optional): the id of the row being edited. Scopes the upsert to
+  that row so a **rename replaces it in place** instead of overwriting whichever
+  row happens to own the new term. If the new term already belongs to a
+  **different** row → `409` (no data loss). Unknown `editing_id` → `404`. Omit it
+  for the plain add form and real-time writers (pure upsert-by-term).
+
+### DELETE `/nests/:nestId/definitions/:id` (write+)
+```json
+{ "deleted": true }
+```
+`404` if the id isn't in this nest.
+
+---
+
+## 8c. Edge-type registry ("turing" workflow plane)
+
+The vocabulary of connections: the definitions-table move applied to relations.
+Stewards articulate once what `next` or `escalates-when` MEANS in a nest; edges
+then reference the registry. **Feature-flagged** — every route here `404`s
+unless `FEATURE_WORKFLOW_PLANE` is on (env var or the admin-settings toggle).
+Reads are read-tier; writes are write-tier. One row per `(nest, name)`,
+case-insensitive.
+
+On first touch a nest is lazily seeded with five stock types (attributed to the
+nest owner): `next`, `on-success`, `on-failure` (flow types, form the DAG),
+`depends-on`, `owned-by`.
+
+### GET `/nests/:nestId/edge-types`
+List the registry, ordered by name. Seeds the defaults if empty.
+```json
+{
+  "count": 5,
+  "edge_types": [{
+    "id": "...",
+    "nest_id": "...",
+    "name": "next",
+    "description": "Unconditional flow: after the source completes, run the target.",
+    "direction": "directed",
+    "is_flow": true,
+    "condition_schema": null,
+    "color": "#16a34a",
+    "created_by": "owner@acme.com",
+    "created_at": "...",
+    "updated_at": "..."
+  }]
+}
+```
+
+### POST `/nests/:nestId/edge-types` (write+)
+Upsert by name (case-insensitive). New name → `201`; re-defining an existing
+name updates it in place → `200`.
+```json
+{
+  "name": "escalates-when",
+  "description": "Conditional escalation on a metric guardrail.",
+  "direction": "directed",
+  "is_flow": true,
+  "color": "#f59e0b",
+  "condition_schema": { "params": ["term", "op", "value"], "mode_default": "structured" }
+}
+```
+- `name` required, ≤ 100 chars, `^[a-z0-9][a-z0-9-]*$` (alphanumeric-with-dashes). `description` required.
+- `direction`: `directed` (default) | `undirected`. Anything else → `400`.
+- `is_flow`: boolean, default `false`. Flow types form the workflow DAG.
+- `color`: optional 6-digit hex (e.g. `#16a34a`). A malformed color → `400` (not silently dropped).
+- `condition_schema`: optional `{ "params": [string…], "mode_default"?: "structured"|"nl"|"open" }`. Malformed → `400`. Stored normalized (`mode_default` defaults to `structured`).
+
+### DELETE `/nests/:nestId/edge-types/:id` (write+)
+```json
+{ "deleted": true }
+```
+`404` if the id isn't in this nest. `400` if edges still reference the type
+(delete those edges first — the DB enforces this with `ON DELETE RESTRICT`).
+
+---
+
 ## 9. Query / Search (read-only consumers)
 
 These power LLM context retrieval. Open-mode friendly.
@@ -713,8 +835,63 @@ Notes:
   `truncated: true` and `totalNodes` set; `signals` are still computed over the
   full set so the gap numbers stay accurate.
 
+### GET `/nests/:nestId/runnables` (read+)
+Orchestrator surface: every **runnable** node (`type` `agent` or `skill`) with its
+`schedule` and body in one call, so an external scheduler can connect, discover
+what to run and when, and pull the prompt/skill content. Reuses the same
+per-caller gating as the node list (`listNodesForCaller`), so stewardship and the
+public-reader approved-only rule apply — a read-tier orchestrator key only ever
+sees **approved** agent/skill definitions; unapproved drafts are omitted.
+
+```json
+{
+  "count": 1,
+  "runnables": [{
+    "id": "nodes/nightly-digest-agent",
+    "title": "Nightly Digest Agent",
+    "type": "agent",
+    "schedule": "0 6 * * *",
+    "status": "published",
+    "tags": ["#ops"],
+    "updated_at": "...",
+    "content": "# Agent\n\n..."
+  }]
+}
+```
+- `schedule` is `null` when the node carries no schedule.
+- Filtering to runnable types happens before the per-node governance/version
+  enrichment, so cost scales with the number of runnables, not total nest size.
+
 ### POST `/nests/:nestId/publish`
 Publishes the nest (snapshots + index).
+
+---
+
+## 9b. Workflow plane ("turing")
+
+**Feature-flagged — every route below `404`s unless `FEATURE_WORKFLOW_PLANE=true`** (Settings → Workflow plane). Typed edges, an edge-type registry, and governed runs. Full contract in [`WORKFLOW_PLANE.md`](./WORKFLOW_PLANE.md). Reads are read-tier, mutations write-tier via the standard nest gate.
+
+### Edge types — the vocabulary of relations
+
+- `GET /nests/:nestId/edge-types` (read) — list the registry. Seeds the five stock flow types (`next`, `on-success`, `on-failure`, `depends-on`, `owned-by`) on first touch.
+- `POST /nests/:nestId/edge-types` (write) — upsert by name (case-insensitive). Body: `{ name, description, direction?, is_flow?, condition_schema?, color? }`. `name` is a slug (`^[a-z0-9][a-z0-9-]*$`); `is_flow` types are DAG-validated; `condition_schema` is `{ params: string[], mode_default? }`. `201` on create, `200` on update.
+- `DELETE /nests/:nestId/edge-types/:id` (write) — refused (`400`) while any edge references it.
+
+### Edges — typed, condition-carrying links
+
+- `GET /nests/:nestId/edges?type=<name|id>&node=<id>` (read) — list, optionally filtered by edge type and/or an endpoint node.
+- `POST /nests/:nestId/edges` (write) — Body: `{ from_node, to_node, type, condition_mode?, condition?, metadata? }`. Both endpoints must be real nodes in the nest; `type` must exist in the registry. `condition_mode` ∈ `structured | nl | open` (`structured` predicates whose `term` must resolve against the glossary). Creating a flow edge that would close a cycle → `409` naming the path.
+- `DELETE /nests/:nestId/edges/:id` (write).
+
+### Runs — the operational trace (server never executes)
+
+- `POST /nests/:nestId/run/:agentNode` (write) — trigger a run. Body: `{ inputs?, parent_run_id? }`. Returns `201` with the executable **bundle**: `{ run_id, parent_run_id, depth, agent{content,…}, edges[<reachable flow subgraph>], definitions[], trace_hint }`. `triggered_by` is derived from auth, never client-supplied. Only `agent`/`skill` nodes are runnable (else `400`). `parent_run_id` spawns a **sub-agent run** nested under a still-running parent (`FEATURE_SUBAGENT_RUNS`, off by default — any `parent_run_id` is `400` while off); it's bounded by `SUBAGENT_MAX_DEPTH` (depth → `403`) and `SUBAGENT_MAX_CHILDREN` (fan-out → `403`, enforced atomically with the insert), rejects re-entrancy of an agent already in the ancestor chain (`409`), and refuses a closed (`409`) or unknown/cross-nest (`404`) parent.
+- `POST /runs/:id/steps` (write) — append one step. Body: `{ action: read|write|branch|notify|external, node_id?, edge_id?, detail? }`. `seq` is server-assigned (monotonic, atomic); any client `seq` is ignored. `409` if the run is already terminal, or once the run hits `RUN_MAX_STEPS`.
+- `PATCH /runs/:id` (write) — close/update. Body: `{ status: running|succeeded|failed|cancelled, trace? }`. Compare-and-swap on `status='running'`: a second close → `409` ("terminal is final").
+- `GET /runs/:id` (read) — full trace `{ run, steps[] }`. Freeform payloads (`run.inputs`, `run.trace`, `steps[].detail`) are redacted to `null` below write tier.
+- `GET /nests/:nestId/runs?agent=&status=&limit=` (read) — run history, newest first (same read-tier redaction).
+
+> The `/runs/:id*` family mounts outside the per-nest gate, so it re-checks nest-scope keys, suspension and license itself before any write — the same guarantees the `/nests/:nestId/*` gate provides.
 
 ---
 
@@ -728,6 +905,84 @@ Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same 
 - `context_sync_folder` — mirrors `POST /nests/unsynced/sync`. Args: `name` (folder path relative to `DATA_ROOT`).
 
 Both reuse the same `listUnsyncedFolders` / `syncUnsyncedFolder` service functions the REST routes call, so a single fix lands in both surfaces.
+
+### Workflow-plane tools (only advertised when `FEATURE_WORKFLOW_PLANE=true`)
+
+Let an MCP agent **build and execute** governed workflows without leaving the tool surface. Each shares the exact service/validator code its REST counterpart uses (run-service, edge-routes, edge-type-routes), so the two surfaces can't drift. Write tools require write tier on the nest; run-detail tools additionally scope the `run_id` to the MCP nest.
+
+Build:
+- `workflow_edge_types_list` / `workflow_edge_type_upsert` / `workflow_edge_type_delete` — mirror the `/edge-types` routes.
+- `workflow_edges_list` / `workflow_edge_create` / `workflow_edge_delete` — mirror the `/edges` routes (DAG cycle guard + condition validation included).
+
+Execute (the runner contract — the agent IS the runner):
+- `workflow_run` — trigger; returns the executable bundle (agent body + reachable subgraph + definitions + `run_id`).
+- `workflow_run_step` — append a step (server-assigned `seq`).
+- `workflow_run_close` — close with a terminal status (`409`-equivalent conflict on a second close).
+- `workflow_run_get` / `workflow_runs_list` — read traces/history (freeform payloads redacted below write tier).
+
+---
+
+## 10. Admin / operator
+
+### GET `/admin/trace` (server-admin only)
+Operator activity trail — one newest-first row per API request and per MCP tool call, so the server admin has a single place to audit what every client and agent did. Server-admin only: the license admin, or a `super_admin` in `access.yaml` (open mode: always allowed). Everyone else gets `403`. Cross-tenant data; not scoped to a nest.
+
+Rows are best-effort fire-and-forget writes to the `api_events` table (a broken trace table never fails a real request) on a rolling **14-day** retention window. API rows come from a global request-logging middleware; MCP rows are logged inside `handleToolCall`, so both per-nest and server-level tool calls — including ones that throw — are captured.
+
+Query params (all optional):
+- `kind` — `api` or `mcp`. Omit for both.
+- `user` — substring match on caller email, or exact user id.
+- `nest` — filter to a single nest id.
+- `limit` — page size, clamped to `1..1000` (default `25`). Non-numeric values fall back to the default rather than erroring.
+- `offset` — rows to skip for pagination (default `0`). The UI pages in blocks of 25 (`offset = page * 25`).
+
+`total` is the full filtered row count (independent of `limit`/`offset`), so the client can render a pager. `count` is the number of rows on the current page.
+
+Response (200):
+```json
+{
+  "count": 2,
+  "total": 137,
+  "limit": 25,
+  "offset": 0,
+  "events": [
+    {
+      "id": 412,
+      "ts": "2026-07-03T13:58:44.812Z",
+      "kind": "mcp",
+      "method": null,
+      "path": null,
+      "tool": "context_overview",
+      "nest_id": "nest_abc",
+      "user_id": "usr_123",
+      "caller": "alice@acme.com",
+      "status": 200,
+      "duration_ms": 14
+    },
+    {
+      "id": 411,
+      "ts": "2026-07-03T13:58:44.790Z",
+      "kind": "api",
+      "method": "POST",
+      "path": "/nests/nest_abc/nodes",
+      "tool": null,
+      "nest_id": "nest_abc",
+      "user_id": "usr_123",
+      "caller": "alice@acme.com",
+      "status": 201,
+      "duration_ms": 23
+    }
+  ]
+}
+```
+- `kind` — `api` (HTTP request) or `mcp` (tool call).
+- `method` / `path` — set on `api` rows; `null` on `mcp` rows.
+- `tool` — set on `mcp` rows; `null` on `api` rows.
+- `caller` — resolved caller email (from the row's stored email or a join on `user_id`).
+- `status` — HTTP status for `api` rows; `200` (success) / `500` (threw) for `mcp` rows.
+- `duration_ms` — wall-clock duration of the call.
+
+Surfaced in the UI under the user menu → **Activity trace** (`ActivityTracePage`), with kind/user filters, 25-per-page pagination, and a refresh button.
 
 ---
 

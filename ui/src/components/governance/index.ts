@@ -8,6 +8,8 @@ export { ReviewActions } from "./ReviewActions";
 export { SubmitForReviewModal } from "./SubmitForReviewModal";
 export { VersionHistory } from "./VersionHistory";
 export type { Version } from "./VersionHistory";
+export { VersionHistoryModal } from "./VersionHistoryModal";
+export type { VersionHistoryData } from "./VersionHistoryModal";
 export { LifecycleStatusBadge, AIEligibilityBadge } from "./LifecycleStatusBadge";
 export type { DocumentLifecycleStatus } from "./LifecycleStatusBadge";
 export { ExternalEditBanner } from "./ExternalEditBanner";

@@ -35,6 +35,16 @@ beforeAll(async () => {
       owner.apiKey,
     );
   }
+  // Structured conditions validate their `term` against the glossary when the
+  // definitions table is present (it is), so define CAC up front — otherwise
+  // the structured-edge case below is correctly rejected as an undefined term.
+  await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/definitions`,
+    { term: "CAC", definition: "Customer acquisition cost." },
+    owner.apiKey,
+  );
 });
 
 afterAll(() => {
@@ -75,6 +85,18 @@ describe("edge creation + validation", () => {
     expect(badNode.data.error).toContain("nodes/ghost");
   });
 
+  it("rejects path-traversal node ids before they reach storage", async () => {
+    // `..` must be caught by assertSafeNodeId (400), not fall through to
+    // storage.readDocument where it could escape the nest vault.
+    const traversal = await mkEdge({
+      from_node: "../other-nest/nodes/secret",
+      to_node: "nodes/beta",
+      type: "next",
+    });
+    expect(traversal.status).toBe(400);
+    expect(traversal.data.error).toContain("traversal");
+  });
+
   it("carries conditions per mode; junk shapes 400", async () => {
     // Define a conditional type first.
     await jsonRequest(
@@ -94,9 +116,11 @@ describe("edge creation + validation", () => {
     expect(ok.status).toBe(201);
     expect(ok.data.edge.condition).toEqual({ term: "CAC", op: ">", value: 500 });
 
+    // beta→owner-doc (not alpha→gamma): keep this flow edge off the
+    // alpha→beta→gamma spine so it can't shortcut the cycle test below.
     const nl = await mkEdge({
-      from_node: "nodes/alpha",
-      to_node: "nodes/gamma",
+      from_node: "nodes/beta",
+      to_node: "nodes/owner-doc",
       type: "escalates-when",
       condition_mode: "nl",
       condition: "if we lost on price rather than product",
@@ -129,9 +153,11 @@ describe("edge creation + validation", () => {
       type: "next",
     });
     expect(res.status).toBe(409);
-    expect(res.data.error).toContain("cycle");
-    expect(res.data.error).toContain("nodes/gamma");
-    expect(res.data.error).toContain("nodes/alpha");
+    // Names the exact closed cycle: alpha→beta→gamma (existing flow) then the
+    // proposed gamma→alpha edge closing back to alpha.
+    expect(res.data.error).toContain(
+      'cycle: ["nodes/alpha","nodes/beta","nodes/gamma","nodes/alpha"]',
+    );
   });
 
   it("allows cycles over NON-flow types (ownership isn't a DAG)", async () => {

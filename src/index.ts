@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server";
 import { config } from "./config.js";
 import { createApp } from "./app.js";
 import { initDb } from "./db/client.js";
+import { loadServerSettings } from "./db/settings.js";
 import { backfillNodeVersionsFromHistory } from "./db/backfill.js";
 import {
   validateLicense,
@@ -18,6 +19,20 @@ async function main() {
   // Initialize the database backend (SQLite by default, or Postgres/Cloud SQL
   // when configured) and run migrations before anything touches the DB.
   const db = await initDb();
+
+  // Overlay durable, DB-backed server settings (admin Settings + the installed
+  // license key) onto process.env before anything reads config. This is what
+  // makes those values survive a Cloud Run rebuild and stay consistent across
+  // instances (see db/settings.ts). MUST run before validateLicense() below,
+  // since PROMPTOWL_KEY may be one of the persisted settings.
+  try {
+    const loaded = await loadServerSettings();
+    if (loaded > 0) {
+      console.log(`  Loaded ${loaded} persisted server setting(s) from the database`);
+    }
+  } catch (err) {
+    console.error("[settings] failed to load persisted server settings:", err);
+  }
 
   // One-shot: catch historic nests up where engine history.yaml ran
   // ahead of node_versions (pre-fix steward approvals). Gated by

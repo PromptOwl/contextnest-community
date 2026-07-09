@@ -237,8 +237,9 @@ async function resolveParentRun(
       | undefined;
     if (!row) throw new NotFoundError(`Parent run not found: ${cursor}`);
     if (row.nest_id !== nestId) {
-      // Never let a parent in another nest pull a child into this one.
-      throw new ForbiddenError("Parent run belongs to a different nest");
+      // Never let a parent in another nest pull a child into this one. 404,
+      // not 403: don't confirm a cross-nest run's existence (no oracle).
+      throw new NotFoundError(`Parent run not found: ${cursor}`);
     }
     if (cursor === parentRunId && row.status !== "running") {
       throw new ConflictError(
@@ -437,9 +438,9 @@ async function loadRunWithPermission(
       ? "owner"
       : await resolveNestPermission(run.nest_id, c.get("userId"));
   if (permissionLevel(perm) < permissionLevel(required)) {
-    throw new ForbiddenError(
-      `This run belongs to a nest where you lack ${required} access.`,
-    );
+    // No permission at all → 404, mirroring the nest gate: hide the run's
+    // existence rather than confirm it with a 403 (no cross-nest oracle).
+    throw new NotFoundError("Run not found");
   }
   (c as any).set("runPermission", perm);
   return run;

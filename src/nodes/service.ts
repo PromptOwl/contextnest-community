@@ -3,13 +3,17 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
-import { serializeDocument, parseDocument } from "@promptowl/contextnest-engine";
+import {
+  serializeDocument,
+  parseDocument,
+} from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { rename, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { safePublishDocument } from "../governance/safe-publish.js";
 import { engineCache } from "./engine.js";
 import {
+  AppError,
   NotFoundError,
   LockedError,
   ValidationError,
@@ -25,7 +29,10 @@ import {
   filterAccessible,
 } from "../governance/access-guard.js";
 import { isPublicReader, resolveNestPermission } from "../shared/access.js";
-import { listUserGrants, grantCoversNode } from "../governance/grants-service.js";
+import {
+  listUserGrants,
+  grantCoversNode,
+} from "../governance/grants-service.js";
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import { ANON_USER_ID } from "../shared/constants.js";
@@ -33,8 +40,10 @@ import { ANON_USER_ID } from "../shared/constants.js";
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
   const db = getDb();
-  const row = await db
-    .get("SELECT id FROM users WHERE LOWER(email) = LOWER(?)", [email]) as { id: string } | undefined;
+  const row = (await db.get(
+    "SELECT id FROM users WHERE LOWER(email) = LOWER(?)",
+    [email]
+  )) as { id: string } | undefined;
   return row?.id ?? ANON_USER_ID;
 }
 
@@ -68,6 +77,37 @@ function folderToSegments(folder: string): string[] {
 const stripUndefined = <T extends Record<string, any>>(o: T): T =>
   Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 
+// Serialize writes per node. Without this, concurrent saves (rapid autosave,
+// two tabs, MCP + REST) each read the same base version and append "base+1",
+// producing duplicate/swapped version numbers that break the engine diff
+// chain and split the DB count from history.yaml. Chaining a node's writes
+// through one promise makes read→write→version-append atomic. In-process is
+// enough: single-process server over local SQLite + filesystem.
+const nodeWriteChains = new Map<string, Promise<unknown>>();
+function withNodeWriteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = (nodeWriteChains.get(key) ?? Promise.resolve()).catch(() => {});
+  const run = prev.then(fn);
+  nodeWriteChains.set(key, run);
+  void run
+    .catch(() => {})
+    .finally(() => {
+      if (nodeWriteChains.get(key) === run) nodeWriteChains.delete(key);
+    });
+  return run;
+}
+
+// Convert any thrown value into a client-safe error. Domain AppErrors
+// (NotFound/Locked/Validation…) carry intentional, user-facing messages and
+// pass through untouched. Anything else — engine faults, chain-break/integrity
+// errors, filesystem/DB internals — is logged server-side and replaced with a
+// generic message, so raw internals (paths, chain hashes, stack traces) never
+// reach the API response OR the MCP result (both share this service).
+function toSafeError(err: unknown, context: string, message: string): AppError {
+  if (err instanceof AppError) return err;
+  console.error(`${context}:`, err);
+  return new AppError(500, message);
+}
+
 /** Strip YAML frontmatter from reconstructed markdown; mirrors node.body shape. */
 export function bodyOnly(nodeId: string, raw: string): string {
   try {
@@ -90,6 +130,15 @@ export interface NodeResponse {
   updated_at?: string;
   content: string;
   pendingChange?: any;
+  /** Orchestrator hint for runnable nodes (type agent/skill) — free-form
+   *  cron/interval string, opaque to the server. */
+  schedule?: string;
+}
+
+/** Node types an orchestrator can fetch and run; only these carry schedule. */
+export const RUNNABLE_NODE_TYPES = ["agent", "skill"] as const;
+export function isRunnableType(type: string | undefined): boolean {
+  return (RUNNABLE_NODE_TYPES as readonly string[]).includes(type || "");
 }
 
 export function toNodeResponse(node: ContextNode): NodeResponse {
@@ -114,11 +163,18 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
     updated_at: fm.updated_at,
     content: node.body || "",
     pendingChange: node.pendingChange ?? undefined,
+    // Same YAML-coercion rule as title above: `schedule: 123` parses as a
+    // number — normalize to string at the API boundary.
+    schedule:
+      (fm.metadata as any)?.schedule != null
+        ? String((fm.metadata as any).schedule)
+        : undefined,
   };
 }
 
 export interface ListNodesFilters {
-  type?: string;
+  /** One type, or several (e.g. runnable types) to keep. */
+  type?: string | readonly string[];
   tag?: string;
   limit?: number;
 }
@@ -131,19 +187,23 @@ export interface ListNodesFilters {
 export async function listNodesForCaller(
   nestId: string,
   userId: string,
-  filters: ListNodesFilters = {},
+  filters: ListNodesFilters = {}
 ): Promise<NodeResponse[]> {
   const { storage, versions: versionManager } = await engineCache.get(nestId);
   let documents = await storage.discoverDocuments();
 
-  // Cheap on-frontmatter filters first — narrows what we enrich below.
+  // Cheap on-frontmatter filters first — narrows what we enrich below, so the
+  // per-node governance/version work never runs on docs we'd discard anyway.
   if (filters.type) {
-    documents = documents.filter((n) => n.frontmatter.type === filters.type);
+    const wanted = new Set(
+      Array.isArray(filters.type) ? filters.type : [filters.type]
+    );
+    documents = documents.filter((n) => wanted.has(n.frontmatter.type));
   }
   if (filters.tag) {
     const tag = normalizeTag(filters.tag);
     documents = documents.filter((n) =>
-      (n.frontmatter.tags || []).includes(tag),
+      (n.frontmatter.tags || []).includes(tag)
     );
   }
 
@@ -151,13 +211,18 @@ export async function listNodesForCaller(
   let accessible = await filterAccessible(nestId, userId, userEmail, documents);
 
   // Share grants: a caller with NO nest-wide permission sees exactly the
-  // documents their grants cover (one shared doc, or a shared folder's
-  // contents) — never the whole list. Overrides filterAccessible's
-  // "stewardship off → return everything" default for grant-only callers.
-  if ((await resolveNestPermission(nestId, userId)) === "none") {
+  // documents their grants cover — never the whole list. filterAccessible's
+  // stewardship-OFF path returns the entire nest (open read), which must NOT
+  // apply to a non-member, so narrow it to their grant-covered docs. With
+  // stewardship ON, filterAccessible already restricted to
+  // steward-accessible + grant-covered, so there's nothing to narrow.
+  if (
+    (await resolveNestPermission(nestId, userId)) === "none" &&
+    !(await isStewardshipEnabled(nestId))
+  ) {
     const grants = await listUserGrants(nestId, userId);
     accessible = grants.length
-      ? accessible.filter((d) => grantCoversNode(grants, d.id))
+      ? documents.filter((d) => grantCoversNode(grants, d.id))
       : accessible;
   }
   const publicReader = await isPublicReader(nestId, userId);
@@ -170,10 +235,18 @@ export async function listNodesForCaller(
         const approved = await versions.getApprovedVersion(nestId, doc.id);
         if (approved != null) {
           try {
-            const raw = await versionManager.reconstructVersion(doc.id, approved);
+            const raw = await versionManager.reconstructVersion(
+              doc.id,
+              approved
+            );
             r.content = bodyOnly(doc.id, raw);
           } catch (err) {
-            console.error("reconstructVersion failed (list)", doc.id, approved, err);
+            console.error(
+              "reconstructVersion failed (list)",
+              doc.id,
+              approved,
+              err
+            );
             r.content = "";
           }
           r.version = approved;
@@ -195,7 +268,7 @@ export async function listNodesForCaller(
         r.status = await versions.getDisplayStatus(nestId, r.id);
       }
       return r;
-    }),
+    })
   );
 
   return filters.limit ? enriched.slice(0, filters.limit) : enriched;
@@ -205,7 +278,7 @@ export async function listNodesForCaller(
 export async function listNodesForCallerByEmail(
   nestId: string,
   userEmail: string,
-  filters: ListNodesFilters = {},
+  filters: ListNodesFilters = {}
 ): Promise<NodeResponse[]> {
   return listNodesForCaller(nestId, await userIdFromEmail(userEmail), filters);
 }
@@ -221,6 +294,9 @@ export interface CreateNodeInput {
    *  the title slug. Used by derived/system nodes that need a deterministic,
    *  collision-free id independent of the human-readable title. */
   id?: string;
+  /** Orchestrator schedule (cron/interval string, opaque to the server).
+   *  Only valid for runnable types (agent/skill). */
+  schedule?: string;
   /** Folder path under nodes/ (e.g. "gtm/deals"). Each segment is slugified;
    *  storage and read/update/delete already handle nested ids, only creation
    *  was flat. Ignored when an explicit id is given. */
@@ -234,6 +310,8 @@ export interface UpdateNodePatch {
   title?: string;
   status?: string;
   changeNote?: string;
+  /** Orchestrator schedule — runnable types only; empty string clears it. */
+  schedule?: string;
 }
 
 export interface NodeMutationResult {
@@ -244,7 +322,7 @@ export interface NodeMutationResult {
 export async function createNode(
   nestId: string,
   input: CreateNodeInput,
-  userEmail: string,
+  userEmail: string
 ): Promise<NodeMutationResult> {
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
@@ -259,8 +337,10 @@ export async function createNode(
     // Bound the title slug too, so an overlong title fails as a clean 400
     // instead of an ENAMETOOLONG surfacing as an unhandled 500 at
     // storage.writeDocument.
-    if (slug.length > 100) {
-      throw new ValidationError("each folder or title segment must be at most 100 characters");
+    if ([...folderSegments, slug].some((seg) => seg.length > 100)) {
+      throw new ValidationError(
+        "each folder or title segment must be at most 100 characters"
+      );
     }
     id =
       folderSegments.length > 0
@@ -269,6 +349,14 @@ export async function createNode(
   }
   const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
+
+  if (input.schedule !== undefined && !isRunnableType(input.type)) {
+    throw new ValidationError(
+      `schedule is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(
+        ", "
+      )})`
+    );
+  }
 
   const hasStewards = await isStewardshipEnabled(nestId);
   const initialStatus = hasStewards ? "draft" : "published";
@@ -286,7 +374,11 @@ export async function createNode(
       version: initialVersion,
       created_at: now,
       updated_at: now,
-      metadata: { owners: ["*"], scope: input.scope || "team" },
+      metadata: {
+        owners: ["*"],
+        scope: input.scope || "team",
+        ...(input.schedule ? { schedule: input.schedule } : {}),
+      } as any,
     },
     body: input.content,
     rawContent: "",
@@ -370,7 +462,7 @@ export async function createNode(
  */
 export async function registerImportedDocuments(
   nestId: string,
-  userEmail: string,
+  userEmail: string
 ): Promise<number> {
   const { storage } = await engineCache.get(nestId);
   let docs: ContextNode[];
@@ -382,9 +474,23 @@ export async function registerImportedDocuments(
   }
 
   let registered = 0;
-  for (const doc of docs) {
+  for (let doc of docs) {
     const nodeId = doc.id;
     if ((await versions.getCurrentVersion(nestId, nodeId)) > 0) continue; // already tracked
+
+    // Imported markdown often ships without a frontmatter `title:`, which
+    // would list the doc as untitled. Fall back to the filename (leaf of the
+    // node id) and persist it to disk BEFORE publish so the title sticks.
+    if (!doc.frontmatter?.title) {
+      const title = nodeId.split("/").pop() || nodeId;
+      doc = { ...doc, frontmatter: { ...doc.frontmatter, title } };
+      try {
+        await storage.writeDocument(nodeId, serializeDocument(doc));
+      } catch (err) {
+        console.error("import: failed to persist filename title", nodeId, err);
+      }
+    }
+
     const rawTags = Array.isArray(doc.frontmatter?.tags)
       ? doc.frontmatter.tags
       : [];
@@ -404,7 +510,11 @@ export async function registerImportedDocuments(
       version = result.node.frontmatter.version || version;
       content = result.node.body || content;
     } catch (err) {
-      console.error("safePublishDocument failed (import register)", nodeId, err);
+      console.error(
+        "safePublishDocument failed (import register)",
+        nodeId,
+        err
+      );
     }
 
     await versions.createVersion({
@@ -430,122 +540,182 @@ export async function updateNode(
   nestId: string,
   nodeId: string,
   patch: UpdateNodePatch,
-  userEmail: string,
+  userEmail: string
 ): Promise<NodeMutationResult> {
-  const { storage, versions: versionManager } = await engineCache.get(nestId);
-
-  let node: ContextNode;
-  try {
-    node = await storage.readDocument(nodeId);
-  } catch {
-    throw new NotFoundError(`Node not found: ${nodeId}`);
-  }
-
-  if (patch.content !== undefined) {
-    node = { ...node, body: patch.content };
-  }
-  if (patch.append) {
-    node = { ...node, body: (node.body || "") + "\n\n" + patch.append };
-  }
-  if (patch.tags) {
-    const newTags = patch.tags.map(normalizeTag);
-    const merged = [...new Set([...(node.frontmatter.tags || []), ...newTags])];
-    node = { ...node, frontmatter: { ...node.frontmatter, tags: merged } };
-  }
-  if (patch.status) {
-    node = { ...node, frontmatter: { ...node.frontmatter, status: patch.status as any } };
-  }
-  if (patch.title) {
-    node = { ...node, frontmatter: { ...node.frontmatter, title: patch.title } };
-  }
-
-  const hasStewards = await isStewardshipEnabled(nestId);
-  const currentTags = (node.frontmatter.tags || []) as string[];
-
-  // Stewardship lock: a node with an open review request is frozen. The
-  // reviewer is evaluating a specific version, so edits are rejected (423)
-  // until the review is approved or rejected — that's the only path that
-  // releases the lock.
-  if (hasStewards && (await getPendingReview(nestId, nodeId))) {
-    throw new LockedError(
-      "This document is awaiting steward review and is locked. Approve or reject the pending review before editing.",
-    );
-  }
-
-  let responseVersion: number;
-  if (hasStewards) {
-    const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
-    const newVersion = currentVersion + 1;
-    node = {
-      ...node,
-      frontmatter: {
-        ...node.frontmatter,
-        version: newVersion,
-        updated_at: new Date().toISOString(),
-        // Drop stale published-state checksum so the next verified read
-        // doesn't flag this write as external drift.
-        checksum: undefined,
-      },
-    };
-    node = { ...node, frontmatter: stripUndefined(node.frontmatter) };
-    await storage.writeDocument(nodeId, serializeDocument(node));
-    await syncNodeTags(nestId, nodeId, currentTags);
-
+  return withNodeWriteLock(`${nestId}::${nodeId}`, async () => {
     try {
-      await versionManager.createVersion(node, userEmail, { note: patch.changeNote });
-    } catch (err) {
-      console.error("VersionManager.createVersion failed (node patch)", err);
-    }
-    await versions.createVersion({
-      nestId,
-      nodeId,
-      version: newVersion,
-      content: node.body || "",
-      author: userEmail,
-      status: "draft",
-      tags: currentTags,
-      changeNote: patch.changeNote,
-    });
-    responseVersion = newVersion;
-  } else {
-    node = {
-      ...node,
-      frontmatter: {
-        ...node.frontmatter,
-        updated_at: new Date().toISOString(),
-        checksum: undefined,
-      },
-    };
-    node = { ...node, frontmatter: stripUndefined(node.frontmatter) };
-    await storage.writeDocument(nodeId, serializeDocument(node));
-    await syncNodeTags(nestId, nodeId, currentTags);
+      const { storage, versions: versionManager } = await engineCache.get(
+        nestId
+      );
 
-    let publishedVersion = (node.frontmatter.version || 0) + 1;
-    try {
-      const result = await safePublishDocument(storage, nodeId, {
-        editedBy: userEmail,
-        note: patch.changeNote || "Auto-published on edit (no stewards)",
-      });
-      publishedVersion = result.node.frontmatter.version || publishedVersion;
-      node = result.node;
-    } catch (err) {
-      console.error("publishDocument failed (node patch auto-publish)", err);
-    }
-    await versions.createVersion({
-      nestId,
-      nodeId,
-      version: publishedVersion,
-      content: node.body || "",
-      author: userEmail,
-      status: "published",
-      tags: currentTags,
-      changeNote: patch.changeNote,
-    });
-    await versions.setApprovedVersion(nestId, nodeId, publishedVersion, userEmail);
-    responseVersion = publishedVersion;
-  }
+      let node: ContextNode;
+      try {
+        node = await storage.readDocument(nodeId);
+      } catch {
+        throw new NotFoundError(`Node not found: ${nodeId}`);
+      }
 
-  return { node, version: responseVersion };
+      if (patch.content !== undefined) {
+        node = { ...node, body: patch.content };
+      }
+      if (patch.append) {
+        node = { ...node, body: (node.body || "") + "\n\n" + patch.append };
+      }
+      if (patch.tags) {
+        const newTags = patch.tags.map(normalizeTag);
+        const merged = [
+          ...new Set([...(node.frontmatter.tags || []), ...newTags]),
+        ];
+        node = { ...node, frontmatter: { ...node.frontmatter, tags: merged } };
+      }
+      if (patch.status) {
+        node = {
+          ...node,
+          frontmatter: { ...node.frontmatter, status: patch.status as any },
+        };
+      }
+      if (patch.title) {
+        node = {
+          ...node,
+          frontmatter: { ...node.frontmatter, title: patch.title },
+        };
+      }
+      if (patch.schedule !== undefined) {
+        if (!isRunnableType(node.frontmatter.type)) {
+          throw new ValidationError(
+            `schedule is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(
+              ", "
+            )})`
+          );
+        }
+        const metadata = { ...(node.frontmatter.metadata as any) };
+        if (patch.schedule === "") delete metadata.schedule;
+        else metadata.schedule = patch.schedule;
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+      }
+
+      const hasStewards = await isStewardshipEnabled(nestId);
+      const currentTags = (node.frontmatter.tags || []) as string[];
+
+      // Stewardship lock: a node with an open review request is frozen. The
+      // reviewer is evaluating a specific version, so edits are rejected (423)
+      // until the review is approved or rejected — that's the only path that
+      // releases the lock.
+      if (hasStewards && (await getPendingReview(nestId, nodeId))) {
+        throw new LockedError(
+          "This document is awaiting steward review and is locked. Approve or reject the pending review before editing."
+        );
+      }
+
+      let responseVersion: number;
+      if (hasStewards) {
+        const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
+        const newVersion = currentVersion + 1;
+        node = {
+          ...node,
+          frontmatter: {
+            ...node.frontmatter,
+            version: newVersion,
+            updated_at: new Date().toISOString(),
+            // Drop stale published-state checksum so the next verified read
+            // doesn't flag this write as external drift.
+            checksum: undefined,
+          },
+        };
+        node = { ...node, frontmatter: stripUndefined(node.frontmatter) };
+        await storage.writeDocument(nodeId, serializeDocument(node));
+        await syncNodeTags(nestId, nodeId, currentTags);
+
+        // Persist to the engine history FIRST, then mirror into the DB. If the
+        // engine append fails (e.g. a broken diff chain), rethrow so we DON'T
+        // record a DB version the engine never stored — that silent swallow is
+        // what let node_versions drift ahead of history.yaml (DB v19 vs v15).
+        try {
+          await versionManager.createVersion(node, userEmail, {
+            note: patch.changeNote,
+          });
+        } catch (err) {
+          console.error(
+            "VersionManager.createVersion failed (node patch)",
+            err
+          );
+          throw err;
+        }
+        await versions.createVersion({
+          nestId,
+          nodeId,
+          version: newVersion,
+          content: node.body || "",
+          author: userEmail,
+          status: "draft",
+          tags: currentTags,
+          changeNote: patch.changeNote,
+        });
+        responseVersion = newVersion;
+      } else {
+        node = {
+          ...node,
+          frontmatter: {
+            ...node.frontmatter,
+            updated_at: new Date().toISOString(),
+            checksum: undefined,
+          },
+        };
+        node = { ...node, frontmatter: stripUndefined(node.frontmatter) };
+        await storage.writeDocument(nodeId, serializeDocument(node));
+        await syncNodeTags(nestId, nodeId, currentTags);
+
+        let publishedVersion = (node.frontmatter.version || 0) + 1;
+        // Publish through the engine FIRST; only mirror into the DB once it
+        // actually landed. Rethrow on failure — swallowing here is what let
+        // node_versions climb past what history.yaml stored (DB v19 vs v15).
+        try {
+          const result = await safePublishDocument(storage, nodeId, {
+            editedBy: userEmail,
+            note: patch.changeNote || "Auto-published on edit (no stewards)",
+          });
+          publishedVersion =
+            result.node.frontmatter.version || publishedVersion;
+          node = result.node;
+        } catch (err) {
+          console.error(
+            "publishDocument failed (node patch auto-publish)",
+            err
+          );
+          throw err;
+        }
+        await versions.createVersion({
+          nestId,
+          nodeId,
+          version: publishedVersion,
+          content: node.body || "",
+          author: userEmail,
+          status: "published",
+          tags: currentTags,
+          changeNote: patch.changeNote,
+        });
+        await versions.setApprovedVersion(
+          nestId,
+          nodeId,
+          publishedVersion,
+          userEmail
+        );
+        responseVersion = publishedVersion;
+      }
+
+      return { node, version: responseVersion };
+    } catch (err) {
+      // One boundary: domain errors (NotFound/Locked/Validation) pass through
+      // with their intended messages; engine/internal faults become a generic
+      // safe message. Same result for REST and MCP callers — neither leaks
+      // internals.
+      throw toSafeError(
+        err,
+        `updateNode failed (${nestId}/${nodeId})`,
+        "Couldn't save your changes. Please reload the document and try again."
+      );
+    }
+  });
 }
 
 /** Mirror of annotations/service.ts derivedAnnotationsId — duplicated here

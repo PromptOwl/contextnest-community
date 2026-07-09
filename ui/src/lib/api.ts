@@ -129,17 +129,21 @@ export async function getHealth() {
     auth_mode: string;
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
+    manual_sign_in?: "open" | "invite-only" | "disabled";
     workflow_plane_enabled?: boolean;
+    subagent_runs_enabled?: boolean;
     runner_key_configured?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
 
 export type SignInGate = "open" | "admin-only" | "disabled";
+export type ManualSignIn = "open" | "invite-only" | "disabled";
 
 /** Server-wide settings editable from the admin Settings page. */
 export interface AdminSettings {
   promptowl_sign_in_gate: SignInGate;
+  manual_sign_in: ManualSignIn;
   logo_url: string | null;
   telemetry_enabled: boolean;
   public_base_url: string;
@@ -147,7 +151,10 @@ export interface AdminSettings {
   workflow_plane_enabled: boolean;
   subagent_runs_enabled: boolean;
   anthropic_api_key_masked?: string | null;
-  slack_webhook_url?: string;
+  slack_webhook_url: string;
+  smtp_url: string;
+  notify_email_from: string;
+  notify_email_to: string;
 }
 
 export async function getAdminSettings() {
@@ -241,6 +248,30 @@ export async function changePassword(current: string, next: string) {
     method: "POST",
     body: JSON.stringify({ current, next }),
   });
+}
+
+// Superadmin activity trace — API + MCP call rows, newest first, paginated.
+export async function getAdminTrace(params: {
+  kind?: "api" | "mcp";
+  user?: string;
+  nest?: string;
+  limit?: number;
+  offset?: number;
+} = {}) {
+  const qs = new URLSearchParams();
+  if (params.kind) qs.set("kind", params.kind);
+  if (params.user) qs.set("user", params.user);
+  if (params.nest) qs.set("nest", params.nest);
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  const suffix = qs.toString() ? `?${qs}` : "";
+  return request<{
+    count: number;
+    total: number;
+    limit: number;
+    offset: number;
+    events: any[];
+  }>(`/admin/trace${suffix}`);
 }
 
 // Admin removes a user entirely — revokes all access and deletes them.
@@ -412,7 +443,65 @@ export async function getServerStats() {
   return request<{ nests: number; documents: number; users: number }>("/stats");
 }
 
+// ─── Glossary definitions ──────────────────────────────────────────────
+
+export interface Definition {
+  id: string;
+  term: string;
+  definition: string;
+  linked_tag: string | null;
+  defined_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listDefinitions(nestId: string) {
+  return request<{ count: number; definitions: Definition[] }>(
+    `/nests/${nestId}/definitions`,
+  );
+}
+
+export async function upsertDefinition(
+  nestId: string,
+  data: {
+    term: string;
+    definition: string;
+    linked_tag?: string | null;
+    // The row being edited, when renaming/editing an existing definition.
+    // Scopes the upsert to that row so a rename can't overwrite a sibling
+    // that already owns the new term (server returns 409 instead).
+    editing_id?: string;
+  },
+) {
+  return request<{ definition: Definition }>(`/nests/${nestId}/definitions`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteDefinition(nestId: string, id: string) {
+  return request<{ deleted: boolean }>(
+    `/nests/${nestId}/definitions/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
 // ─── Nodes ──────────────────────────────────────────────────────────────
+
+// Upload an image into the nest's assets folder. Multipart (not the JSON
+// request() helper) — the browser sets the boundary content-type itself.
+export async function uploadAsset(nestId: string, file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`/nests/${nestId}/assets`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Upload failed: ${res.status}`);
+  return data as { file: string; url: string; markdown: string };
+}
 
 export async function listNodes(nestId: string) {
   return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
@@ -437,6 +526,8 @@ export async function createNode(
     tags?: string[];
     type?: string;
     folder?: string;
+    /** Orchestrator schedule — runnable types (agent/skill) only. */
+    schedule?: string;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -448,7 +539,14 @@ export async function createNode(
 export async function updateNode(
   nestId: string,
   nodeId: string,
-  data: { content?: string; tags?: string[]; title?: string; changeNote?: string },
+  data: {
+    content?: string;
+    tags?: string[];
+    title?: string;
+    changeNote?: string;
+    /** Runnable types (agent/skill) only; "" clears it. */
+    schedule?: string;
+  },
   baseVersion?: number,
 ) {
   const headers: Record<string, string> = {};

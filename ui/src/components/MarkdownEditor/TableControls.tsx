@@ -138,37 +138,50 @@ export function TableControls({ editor }: { editor: Editor }) {
 
   if (!geo) return null;
 
-  // Off-screen (scrolled out of the editor viewport) → don't render.
+  // Off-screen (scrolled out of the editor viewport, either axis) → skip.
   const visible =
-    geo.table.bottom > geo.clip.top && geo.table.top < geo.clip.bottom;
+    geo.table.bottom > geo.clip.top &&
+    geo.table.top < geo.clip.bottom &&
+    geo.table.right > geo.clip.left &&
+    geo.table.left < geo.clip.right;
   if (!visible) return null;
 
+  // Keep every overlay inside the editor's visible box. Controls are
+  // fixed-positioned from live table rects; without clamping to the scroll
+  // container the add-column bar and any table wider than the editor spill
+  // past its right/bottom edge (autocomplete is the only popup allowed out).
   const clampY = (y: number) => Math.max(geo.clip.top, Math.min(geo.clip.bottom, y));
+  const clampX = (x: number) => Math.max(geo.clip.left, Math.min(geo.clip.right, x));
 
   return (
     <>
       {/* Column grips (above each column). */}
-      {geo.cols.map((c, i) => (
-        <button
-          key={`col-${i}`}
-          data-table-control
-          type="button"
-          title="Column actions"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() =>
-            setMenu({ kind: "col", index: i, x: c.center, y: geo.table.top })
-          }
-          className="fixed z-40 flex items-center justify-center rounded-sm bg-border/70 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
-          style={{
-            left: c.start + 1,
-            top: clampY(geo.table.top - 12),
-            width: c.size - 2,
-            height: 9,
-          }}
-        >
-          <span className="text-[8px] leading-none">⋯</span>
-        </button>
-      ))}
+      {geo.cols.map((c, i) => {
+        const left = Math.max(geo.clip.left, c.start + 1);
+        const right = Math.min(geo.clip.right, c.start + c.size - 1);
+        if (right <= left) return null; // column scrolled out horizontally
+        return (
+          <button
+            key={`col-${i}`}
+            data-table-control
+            type="button"
+            title="Column actions"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() =>
+              setMenu({ kind: "col", index: i, x: clampX(c.center), y: geo.table.top })
+            }
+            className="fixed z-40 flex items-center justify-center rounded-sm bg-border/70 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
+            style={{
+              left,
+              top: clampY(geo.table.top - 12),
+              width: right - left,
+              height: 9,
+            }}
+          >
+            <span className="text-[8px] leading-none">⋯</span>
+          </button>
+        );
+      })}
 
       {/* Row grips (left of each row). */}
       {geo.rows.map((r, i) => (
@@ -179,11 +192,11 @@ export function TableControls({ editor }: { editor: Editor }) {
           title="Row actions"
           onMouseDown={(e) => e.preventDefault()}
           onClick={() =>
-            setMenu({ kind: "row", index: i, x: geo.table.left, y: r.center })
+            setMenu({ kind: "row", index: i, x: clampX(geo.table.left), y: r.center })
           }
           className="fixed z-40 flex items-center justify-center rounded-sm bg-border/70 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
           style={{
-            left: geo.table.left - 12,
+            left: clampX(geo.table.left - 12),
             top: clampY(r.start + 1),
             width: 9,
             height: r.size - 2,
@@ -204,7 +217,11 @@ export function TableControls({ editor }: { editor: Editor }) {
         )}
         className="fixed z-40 flex items-center justify-center rounded-sm bg-border/50 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
         style={{
-          left: geo.table.right + 3,
+          // Sit just past the table's right edge, but never past the editor's.
+          left: Math.max(
+            geo.clip.left,
+            Math.min(geo.table.right + 3, geo.clip.right - 14),
+          ),
           top: clampY(geo.table.top),
           width: 14,
           height: Math.min(geo.table.height, geo.clip.bottom - geo.table.top),
@@ -224,9 +241,12 @@ export function TableControls({ editor }: { editor: Editor }) {
         )}
         className="fixed z-40 flex items-center justify-center rounded-sm bg-border/50 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
         style={{
-          left: geo.table.left,
+          // Span only the visible width of the table inside the editor box.
+          left: Math.max(geo.clip.left, geo.table.left),
           top: clampY(geo.table.bottom + 3),
-          width: geo.table.width,
+          width:
+            Math.min(geo.clip.right, geo.table.right) -
+            Math.max(geo.clip.left, geo.table.left),
           height: 14,
         }}
       >
@@ -238,7 +258,7 @@ export function TableControls({ editor }: { editor: Editor }) {
         <div
           data-table-control
           className="fixed z-50 min-w-40 overflow-hidden rounded-md border bg-popover py-1 text-popover-foreground shadow-md"
-          style={{ left: menu.x, top: clampY(menu.y) }}
+          style={{ left: clampX(menu.x), top: clampY(menu.y) }}
           onMouseDown={(e) => e.preventDefault()}
         >
           {menu.kind === "col" ? (

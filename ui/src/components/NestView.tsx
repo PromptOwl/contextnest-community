@@ -78,7 +78,7 @@ import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu
 import {
   StewardList, StewardModal,
   ReviewQueue, ReviewActions,
-  SubmitForReviewModal, VersionHistory, LifecycleStatusBadge,
+  SubmitForReviewModal, VersionHistoryModal, LifecycleStatusBadge,
   type Steward, type StewardRole, type ReviewRequest, type Version,
   type DocumentLifecycleStatus,
 } from "./governance";
@@ -249,6 +249,7 @@ export function NestView({
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
     );
   const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [typeFilter, setTypeFilter] = useState<string>("all");
   const [authorFilter, setAuthorFilter] = useState<string>("all");
   const [dateFilter, setDateFilter] = useState<DatePreset>("any");
   // Document list sort: by title, last edited, or comment (annotation) count.
@@ -307,6 +308,7 @@ export function NestView({
         tags: tagFilters.length ? tagFilters : undefined,
         author: authorFilter !== "all" ? authorFilter : undefined,
         datePreset: dateFilter !== "any" ? dateFilter : undefined,
+        type: typeFilter !== "all" ? typeFilter : undefined,
       }),
     );
     setSaveFilterName("");
@@ -318,6 +320,7 @@ export function NestView({
     setTagFilters(f.tags ?? []);
     setAuthorFilter(f.author ?? "all");
     setDateFilter(f.datePreset ?? "any");
+    setTypeFilter(f.type ?? "all");
   };
   const [reviewNode, setReviewNode] = useState<any | null>(null);
   const [submitNode, setSubmitNode] = useState<any | null>(null);
@@ -531,6 +534,7 @@ export function NestView({
         tags: tagFilters,
         author: authorFilter,
         updatedAfter,
+        type: typeFilter,
       })
     )
       return false;
@@ -609,15 +613,25 @@ export function NestView({
     return [...set].sort((a, b) => a.localeCompare(b));
   }, [nodes]);
 
+  // Distinct node types present (missing type = "document"), for the type
+  // filter dropdown. Only offered when the nest actually mixes types.
+  const typesPresent = useMemo(() => {
+    const set = new Set<string>();
+    for (const n of nodes) set.add(n.type || "document");
+    return [...set].sort((a, b) => a.localeCompare(b));
+  }, [nodes]);
+
   const hasActiveFilters =
     !!search ||
     statusFilter !== "all" ||
+    typeFilter !== "all" ||
     tagFilters.length > 0 ||
     authorFilter !== "all" ||
     dateFilter !== "any";
   const clearAllFilters = () => {
     setSearch("");
     setStatusFilter("all");
+    setTypeFilter("all");
     setTagFilters([]);
     setAuthorFilter("all");
     setDateFilter("any");
@@ -638,6 +652,40 @@ export function NestView({
     "90d": "Last 90 days",
     "1y": "Last year",
   };
+  const TYPE_LABELS: Record<string, string> = {
+    document: "Document",
+    artifact: "Artifact",
+    agent: "Agent",
+    skill: "Skill",
+  };
+  // Colored pill for a non-document node type, shown on each list/card row so
+  // the kind is scannable. `document` returns null (the default — no pill).
+  const typePill = (
+    t: string,
+  ): { label: string; cls: string; title: string } | null => {
+    switch (t) {
+      case "artifact":
+        return {
+          label: "HTML",
+          title: "Hosted HTML artifact",
+          cls: "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300",
+        };
+      case "agent":
+        return {
+          label: "Agent",
+          title: "Runnable agent node",
+          cls: "bg-violet-100 text-violet-800 dark:bg-violet-950/40 dark:text-violet-300",
+        };
+      case "skill":
+        return {
+          label: "Skill",
+          title: "Runnable skill node",
+          cls: "bg-sky-100 text-sky-800 dark:bg-sky-950/40 dark:text-sky-300",
+        };
+      default:
+        return null;
+    }
+  };
   const activeFilterChips: Array<{ label: string; clear: () => void }> = [];
   if (search)
     activeFilterChips.push({ label: `Search: ${search}`, clear: () => setSearch("") });
@@ -645,6 +693,11 @@ export function NestView({
     activeFilterChips.push({
       label: `Status: ${STATUS_LABELS[statusFilter] ?? statusFilter}`,
       clear: () => setStatusFilter("all"),
+    });
+  if (typeFilter !== "all")
+    activeFilterChips.push({
+      label: `Type: ${TYPE_LABELS[typeFilter] ?? typeFilter}`,
+      clear: () => setTypeFilter("all"),
     });
   if (authorFilter !== "all")
     activeFilterChips.push({
@@ -1533,14 +1586,17 @@ export function NestView({
                         <span className="text-sm truncate flex-1">
                           {n.title || n.id}
                         </span>
-                        {n.type === "artifact" && (
-                          <span
-                            className="shrink-0 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide"
-                            title="Hosted HTML artifact"
-                          >
-                            HTML
-                          </span>
-                        )}
+                        {(() => {
+                          const p = typePill(n.type || "document");
+                          return p ? (
+                            <span
+                              className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${p.cls}`}
+                              title={p.title}
+                            >
+                              {p.label}
+                            </span>
+                          ) : null;
+                        })()}
                         {n.updated_at && (
                           <span className="text-xs text-muted-foreground shrink-0">
                             {timeAgo(n.updated_at)}
@@ -1636,6 +1692,17 @@ export function NestView({
                             <span className="text-sm truncate flex-1">
                               {n.title || n.id}
                             </span>
+                            {(() => {
+                              const p = typePill(n.type || "document");
+                              return p ? (
+                                <span
+                                  className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${p.cls}`}
+                                  title={p.title}
+                                >
+                                  {p.label}
+                                </span>
+                              ) : null;
+                            })()}
                             <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
                           </button>
                         ))}
@@ -1651,9 +1718,9 @@ export function NestView({
         <TabsContent value="documents" className="space-y-4">
           <Card>
             <CardHeader>
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div className="flex flex-col gap-3">
                 <CardTitle className="text-lg">Documents</CardTitle>
-                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                <div className="flex flex-wrap items-center gap-2 w-full">
                   <div className="relative flex-1 min-w-[12rem] sm:flex-none sm:w-80">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
                     <Input
@@ -1681,6 +1748,21 @@ export function NestView({
                         <SelectItem value="approved">Approved</SelectItem>
                         <SelectItem value="published">Published</SelectItem>
                         <SelectItem value="rejected">Rejected</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  )}
+                  {typesPresent.length > 1 && (
+                    <Select value={typeFilter} onValueChange={setTypeFilter}>
+                      <SelectTrigger className="w-[130px] h-8" title="Filter by type">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All types</SelectItem>
+                        {typesPresent.map((t) => (
+                          <SelectItem key={t} value={t}>
+                            {TYPE_LABELS[t] ?? t}
+                          </SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
                   )}
@@ -1997,7 +2079,10 @@ export function NestView({
                     const cards = viewMode === "cards";
                     // Hosted HTML artifacts get a distinct icon + badge so they
                     // read differently from markdown documents in the list.
-                    const isArtifact = node.type === "artifact";
+                    const nodeType = node.type || "document";
+                    const isArtifact = nodeType === "artifact";
+                    const isRunnable = nodeType === "agent" || nodeType === "skill";
+                    const nodePill = typePill(nodeType);
                     const canSubmit =
                       stewardshipEnabled &&
                       node.status === "draft" &&
@@ -2107,12 +2192,12 @@ export function NestView({
                             >
                               {node.title}
                             </span>
-                            {isArtifact && (
+                            {nodePill && (
                               <span
-                                className="shrink-0 rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide"
-                                title="Hosted HTML artifact"
+                                className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${nodePill.cls}`}
+                                title={nodePill.title}
                               >
-                                HTML
+                                {nodePill.label}
                               </span>
                             )}
                             <LifecycleStatusBadge
@@ -2878,30 +2963,23 @@ export function NestView({
       )}
 
       {versionNode && (
-        <Dialog open onOpenChange={() => setVersionNode(null)}>
-          <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-hidden flex flex-col">
-            <DialogHeader>
-              <DialogTitle>{versionNode.title}</DialogTitle>
-            </DialogHeader>
-            <VersionHistory
-              className="flex-1 min-h-0 overflow-hidden"
-              versions={versionData.versions}
-              currentVersion={versionData.currentVersion}
-              approvedVersion={versionData.approvedVersion}
-              onRestore={async (v) => {
-                if (!versionNode) return;
-                try {
-                  await api.revertToVersion(nestId, versionNode.id, v);
-                  toast.success(`Reverted to version ${v}`);
-                  await openVersions(versionNode);
-                  fetchData();
-                } catch (e: any) {
-                  toast.error(e?.message || "Revert failed");
-                }
-              }}
-            />
-          </DialogContent>
-        </Dialog>
+        <VersionHistoryModal
+          open
+          onClose={() => setVersionNode(null)}
+          title={versionNode.title}
+          versionData={versionData}
+          onRestore={async (v) => {
+            if (!versionNode) return;
+            try {
+              await api.revertToVersion(nestId, versionNode.id, v);
+              toast.success(`Reverted to version ${v}`);
+              await openVersions(versionNode);
+              fetchData();
+            } catch (e: any) {
+              toast.error(e?.message || "Revert failed");
+            }
+          }}
+        />
       )}
     </div>
   );

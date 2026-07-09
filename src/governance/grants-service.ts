@@ -105,6 +105,15 @@ export async function createGrant(params: {
     throw new ValidationError("role must be read | write");
   }
   if (!target.trim()) throw new ValidationError("target is required");
+  // A folder target must name a subfolder, not the `nodes` root: every node id
+  // is `nodes/…`, so a bare `nodes` prefix would match ALL of them and silently
+  // share the whole nest. Require at least one segment past the root.
+  if (targetType === "folder") {
+    const t = target.trim().replace(/\/+$/, "");
+    if (t === "nodes" || t === "") {
+      throw new ValidationError("folder target must name a subfolder, not the nest root");
+    }
+  }
   const db = getDb();
   const now = new Date().toISOString();
   // Never shadow the nest owner (they already have everything) — but that's a

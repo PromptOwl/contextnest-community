@@ -20,6 +20,7 @@ beforeAll(async () => {
   process.env.FEATURE_SUBAGENT_RUNS = "true";
   process.env.SUBAGENT_MAX_DEPTH = "2";
   process.env.SUBAGENT_MAX_CHILDREN = "2";
+  process.env.RUN_MAX_STEPS = "10"; // clamp floor is 10 — the lowest testable cap
   env = setupTestEnv();
   app = await createTestApp("key");
   owner = await registerUser(app, "owner@acme.com", "Owner");
@@ -41,6 +42,7 @@ afterAll(() => {
   delete process.env.FEATURE_SUBAGENT_RUNS;
   delete process.env.SUBAGENT_MAX_DEPTH;
   delete process.env.SUBAGENT_MAX_CHILDREN;
+  delete process.env.RUN_MAX_STEPS;
   env.cleanup();
 });
 
@@ -113,6 +115,43 @@ describe("nested runs", () => {
   it("unknown parent run 404s", async () => {
     const res = await trigger("child-agent", { parent_run_id: "run_does-not-exist" });
     expect(res.status).toBe(404);
+  });
+
+  it("a parent run in another nest 404s — no cross-nest existence oracle", async () => {
+    // Same signal as an unknown id: a write-tier caller must not learn whether
+    // an arbitrary run id exists in a nest they don't own by reading 403-vs-404.
+    const other = await jsonRequest(app, "POST", "/nests", { name: "Other" }, owner.apiKey);
+    const otherNestId = other.data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${otherNestId}/nodes`,
+      { title: "Other Root", content: "# Other Root", type: "agent" },
+      owner.apiKey,
+    );
+    const otherRoot = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${otherNestId}/run/nodes/other-root`,
+      {},
+      owner.apiKey,
+    );
+    expect(otherRoot.status).toBe(201);
+    const child = await trigger("child-agent", { parent_run_id: otherRoot.data.run_id });
+    expect(child.status).toBe(404);
+  });
+
+  it("caps the per-run step log at RUN_MAX_STEPS (fork-bomb of the trace)", async () => {
+    const root = await trigger("root-agent");
+    const runId = root.data.run_id;
+    for (let i = 0; i < 10; i++) {
+      const s = await jsonRequest(app, "POST", `/runs/${runId}/steps`, { action: "read" }, owner.apiKey);
+      expect(s.status).toBe(201);
+      expect(s.data.seq).toBe(i + 1);
+    }
+    const over = await jsonRequest(app, "POST", `/runs/${runId}/steps`, { action: "read" }, owner.apiKey);
+    expect(over.status).toBe(409);
+    expect(over.data.error).toContain("step limit");
   });
 });
 

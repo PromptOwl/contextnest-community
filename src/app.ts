@@ -31,15 +31,26 @@ import {
   listNotifications,
   markNotificationsRead,
 } from "./governance/notify-service.js";
+import { definitionRoutes } from "./definitions/routes.js";
+import { assetRoutes } from "./nests/asset-routes.js";
+import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
+import { isSuperAdmin } from "./governance/access-service.js";
+import {
+  llmsTxtRoutes,
+  nestIndexRoutes,
+  serverMcpRoutes,
+} from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
+import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
   permissionLevel,
   type NestPermission,
 } from "./shared/access.js";
 import { AppError } from "./shared/errors.js";
-import { config } from "./config.js";
+import { config, isEmailish, isEmailListish } from "./config.js";
+import { verifySmtp } from "./notify/email.js";
 import { getDb } from "./db/client.js";
 import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
@@ -48,8 +59,8 @@ import {
   getCurrentLicense,
   installLicenseKey,
   isLicenseAdminUserId,
-  upsertEnvVar,
 } from "./auth/license.js";
+import { persistSetting } from "./db/settings.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
@@ -175,6 +186,30 @@ export function createApp(): Hono<AuthEnv> {
     return next();
   });
 
+  // Activity trace — one row per API request (MCP tool calls log separately
+  // in mcp/routes.ts with the tool name). Registered before the routes so it
+  // wraps everything; userId is read AFTER next() because the per-group auth
+  // middleware sets it downstream. Static assets, the SPA shell, and /health
+  // are noise, not activity — skipped.
+  app.use("*", async (c, next) => {
+    const path = c.req.path;
+    const traced =
+      /^\/(nests|auth|admin|stats|license|index|mcp)(\/|$)/.test(path) &&
+      !path.endsWith("/mcp"); // MCP transport rows come from the tool logger
+    const started = Date.now();
+    await next();
+    if (!traced) return;
+    void logTraceEvent({
+      kind: "api",
+      method: c.req.method,
+      path,
+      nestId: /^\/nests\/([^/]+)/.exec(path)?.[1] ?? null,
+      userId: c.get("userId") ?? null,
+      status: c.res.status,
+      durationMs: Date.now() - started,
+    });
+  });
+
   // Health check (public)
   app.get("/health", (c) =>
     c.json({
@@ -187,9 +222,18 @@ export function createApp(): Hono<AuthEnv> {
       // runner key once the server-wide one exists.
       runner_key_configured: !!process.env.ANTHROPIC_API_KEY,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
-      // Surfaced so the UI can show/hide the Workflows nav without an
-      // admin-only /admin/settings call. Public, matches logo_url/gate.
+      // Manual (email/password) sign-in mode (open | invite-only | disabled).
+      // The login page reads this to show/hide the credential form, and to
+      // switch the Register link to an "activate invite" affordance.
+      manual_sign_in: config.MANUAL_SIGN_IN,
+      // Public feature flags the SPA needs before auth to decide what to
+      // render. Mirrors the server-side route gate so UI and API agree:
+      // flag off → the plane's routes 404 AND its UI stays hidden.
       workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+      // Sub-agent runs gate its own recursion surface separately (env-only,
+      // must clear a security review — NOT a UI toggle). Exposed read-only so
+      // the Runs page shows the "spawn sub-agent" option only when it's live.
+      subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     }),
   );
@@ -273,16 +317,16 @@ export function createApp(): Hono<AuthEnv> {
         tier: info.tier,
         org: info.org,
         limits: info.limits,
-        // The key validated and is live now, but if it couldn't be written to
-        // disk it'll be lost on restart — surface that instead of pretending
+        // The key validated and is live now, but if it couldn't be saved to the
+        // database it'll be lost on restart — surface that instead of pretending
         // the setup is durable (the old behavior silently swallowed this).
         persisted: info.persisted,
         ...(info.persisted
           ? {}
           : {
-              warning: `License validated, but it could not be saved to disk (${
+              warning: `License validated, but it could not be saved to the database (${
                 info.persistError || "unknown error"
-              }). It will be LOST on the next restart. Set ENV_FILE_PATH to a writable, persisted path (e.g. under DATA_ROOT) or provide PROMPTOWL_KEY via the container environment.`,
+              }). It will be LOST on the next restart. Check the database connection, or provide PROMPTOWL_KEY via the container environment.`,
             }),
       });
     } catch (err) {
@@ -301,6 +345,7 @@ export function createApp(): Hono<AuthEnv> {
     (await isLicenseAdminUserId(c.get("userId")));
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+    manual_sign_in: config.MANUAL_SIGN_IN,
     logo_url: config.LOGO_URL,
     telemetry_enabled: config.TELEMETRY_ENABLED,
     public_base_url: config.PUBLIC_BASE_URL,
@@ -312,6 +357,9 @@ export function createApp(): Hono<AuthEnv> {
       ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
       : null,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
+    smtp_url: config.SMTP_URL ?? "",
+    notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
+    notify_email_to: config.NOTIFY_EMAIL_TO ?? "",
   });
 
   app.get("/admin/settings", async (c) => {
@@ -342,6 +390,12 @@ export function createApp(): Hono<AuthEnv> {
         errors.push("promptowl_sign_in_gate must be open | admin-only | disabled");
       else pending.push({ name: "PROMPTOWL_SIGN_IN_GATE", value: v });
     }
+    if ("manual_sign_in" in body) {
+      const v = String(body.manual_sign_in ?? "").trim().toLowerCase();
+      if (!["open", "invite-only", "disabled"].includes(v))
+        errors.push("manual_sign_in must be open | invite-only | disabled");
+      else pending.push({ name: "MANUAL_SIGN_IN", value: v });
+    }
     if ("logo_url" in body) {
       const v = String(body.logo_url ?? "").trim();
       pending.push({ name: "LOGO_URL", value: v || null });
@@ -359,14 +413,6 @@ export function createApp(): Hono<AuthEnv> {
         value: body.workflow_plane_enabled ? "true" : null,
       });
     }
-    if ("slack_webhook_url" in body) {
-      const v = String(body.slack_webhook_url ?? "").trim();
-      if (v && !/^https:\/\//i.test(v)) {
-        errors.push("slack_webhook_url must be an https:// URL (or empty to disable)");
-      } else {
-        pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
-      }
-    }
     if ("anthropic_api_key" in body) {
       const v = body.anthropic_api_key;
       if (v === null || v === "") {
@@ -378,19 +424,55 @@ export function createApp(): Hono<AuthEnv> {
       }
     }
     if ("subagent_runs_enabled" in body) {
-      // Requires the base plane: turning recursion on with the plane off is
-      // always a mistake, so reject rather than silently store a dead flag.
+      // Depends on the plane: enabling recursion without the plane's run routes
+      // is inert (they'd 404). Honour the plane state THIS request sets, so a
+      // single patch can turn both on together. This flag opens a recursion
+      // surface — it's gated separately by design and should only be flipped
+      // after the security review the feature ships behind.
       const planeOn =
         "workflow_plane_enabled" in body
-          ? Boolean(body.workflow_plane_enabled)
+          ? !!body.workflow_plane_enabled
           : config.FEATURE_WORKFLOW_PLANE;
-      if (body.subagent_runs_enabled && !planeOn)
-        errors.push("subagent_runs_enabled requires workflow_plane_enabled");
-      else
+      if (body.subagent_runs_enabled && !planeOn) {
+        errors.push(
+          "subagent_runs_enabled requires workflow_plane_enabled to be on",
+        );
+      } else {
         pending.push({
           name: "FEATURE_SUBAGENT_RUNS",
           value: body.subagent_runs_enabled ? "true" : null,
         });
+      }
+    }
+    if ("slack_webhook_url" in body) {
+      const v = String(body.slack_webhook_url ?? "").trim();
+      // Empty clears (connector off). A webhook URL carries an implicit
+      // secret in its path — https only.
+      if (v && !/^https:\/\//i.test(v))
+        errors.push("slack_webhook_url must be an https:// URL (or empty to disable)");
+      else pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
+    }
+    if ("smtp_url" in body) {
+      const v = String(body.smtp_url ?? "").trim();
+      if (v && !/^smtps?:\/\//i.test(v))
+        errors.push("smtp_url must be an smtp:// or smtps:// URL (or empty to disable)");
+      else pending.push({ name: "SMTP_URL", value: v || null });
+    }
+    // Shape check (something@something, no CR/LF) — these flow into
+    // nodemailer's envelope, so junk and header-injection shapes stop here.
+    // Same guard the config getters apply, so env-set and UI-set values gate
+    // identically.
+    if ("notify_email_from" in body) {
+      const v = String(body.notify_email_from ?? "").trim();
+      if (v && !isEmailish(v))
+        errors.push("notify_email_from must be a plain email address");
+      else pending.push({ name: "NOTIFY_EMAIL_FROM", value: v || null });
+    }
+    if ("notify_email_to" in body) {
+      const v = String(body.notify_email_to ?? "").trim();
+      if (v && !isEmailListish(v))
+        errors.push("notify_email_to must be a comma-separated list of email addresses");
+      else pending.push({ name: "NOTIFY_EMAIL_TO", value: v || null });
     }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);
@@ -399,16 +481,56 @@ export function createApp(): Hono<AuthEnv> {
       else pending.push({ name: "MAX_BODY_BYTES", value: String(Math.floor(n)) });
     }
 
+    // Total-lockout guard: manual and PromptOwl sign-in can't BOTH be off, or
+    // no one could ever log in. Evaluate the effective post-PATCH state —
+    // values this request sets, falling back to current config for fields it
+    // doesn't touch — so the combination is checked even when only one of the
+    // two is in the body.
+    const effManual =
+      "manual_sign_in" in body
+        ? String(body.manual_sign_in ?? "").trim().toLowerCase()
+        : config.MANUAL_SIGN_IN;
+    const effGate =
+      "promptowl_sign_in_gate" in body
+        ? String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase()
+        : config.PROMPTOWL_SIGN_IN_GATE;
+    if (effManual === "disabled" && effGate === "disabled") {
+      errors.push(
+        "Cannot disable both manual and PromptOwl sign-in — no one would be able to log in.",
+      );
+    }
+
     // Reject the whole request if any field failed validation — apply nothing.
     if (errors.length)
       return c.json({ error: errors.join("; "), settings: currentServerSettings() }, 400);
 
+    // Shape is good — now prove the SMTP credentials actually work before we
+    // persist them. A prefix-valid URL can still point at the wrong host or
+    // carry a bad password; connect + authenticate so junk is blocked at save
+    // instead of silently failing on the first governance event. Only runs when
+    // the URL is being set to a non-empty value (empty = disabling the
+    // connector, nothing to verify).
+    const smtpChange = pending.find((p) => p.name === "SMTP_URL");
+    if (smtpChange && smtpChange.value) {
+      const result = await verifySmtp(smtpChange.value);
+      if (!result.ok)
+        return c.json(
+          {
+            error: `SMTP connection failed: ${result.error}`,
+            settings: currentServerSettings(),
+          },
+          400,
+        );
+    }
+
     // All valid: persist first, then mutate live env. Ordering persist-before-
-    // live means a disk failure aborts before the running server changes, so a
-    // 500 never leaves a live setting that was never written to disk.
+    // live means a DB failure aborts before the running server changes, so a
+    // 500 never leaves a live setting that was never durably stored. The store
+    // is the database (durable + shared across instances) rather than a .env
+    // file, which Cloud Run wipes on rebuild — see db/settings.ts.
     for (const { name, value } of pending) {
       try {
-        upsertEnvVar(config.ENV_FILE_PATH, name, value);
+        await persistSetting(name, value);
       } catch (e) {
         return c.json(
           {
@@ -423,6 +545,35 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     return c.json({ settings: currentServerSettings() });
+  });
+
+  // GET /admin/trace — the operator audit surface: newest-first activity
+  // rows (API + MCP), optional kind/nest/user/limit filters. Server admin
+  // only (license admin OR access.yaml super_admin) — cross-tenant data.
+  app.use("/admin/trace", flexAuthMiddleware);
+  const traceAllowed = async (c: any) => {
+    if (config.AUTH_MODE === "open") return true;
+    const userId = c.get("userId");
+    if (await isLicenseAdminUserId(userId)) return true;
+    return isSuperAdmin(await resolveCallerEmail(userId));
+  };
+  app.get("/admin/trace", async (c) => {
+    if (!(await traceAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const limitRaw = Number(c.req.query("limit"));
+    const offsetRaw = Number(c.req.query("offset"));
+    const limit = Number.isFinite(limitRaw) ? limitRaw : 25;
+    const offset = Number.isFinite(offsetRaw) ? offsetRaw : 0;
+    const { events, total } = await listTraceEvents({
+      limit,
+      offset,
+      kind: c.req.query("kind") as any,
+      nestId: c.req.query("nest") || undefined,
+      user: c.req.query("user") || undefined,
+    });
+    // `count` = rows on this page (back-compat); `total` = full filtered count
+    // for the pager. limit/offset echo the applied window.
+    return c.json({ count: events.length, total, limit, offset, events });
   });
 
   // GET /stats — dashboard summary counts: nests visible to caller,
@@ -525,6 +676,14 @@ export function createApp(): Hono<AuthEnv> {
   // top (see workflow/hook-routes.ts).
   app.route("/hooks", hookFireRoutes);
 
+  // === Agent entry point: /llms.txt (public manual), /index (person nest
+  // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
+  app.route("/llms.txt", llmsTxtRoutes);
+  app.use("/index", flexAuthMiddleware);
+  app.route("/index", nestIndexRoutes);
+  app.use("/mcp", flexAuthMiddleware);
+  app.route("/mcp", serverMcpRoutes);
+
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
 
@@ -626,6 +785,16 @@ export function createApp(): Hono<AuthEnv> {
     // routes — a grant on one doc never opens the rest of the nest.
     // targetTail is the path under /nodes/, i.e. the node id + any subresource
     // (versions, comments, annotations) — the same prefix a grant covers.
+    // Retrieval/query routes (context, query, search, export) are READ-tier:
+    // the body is a query, not a mutation — same class as GET /search &
+    // /export. A doc/folder grantee may use them; the handler scopes every
+    // result to their granted docs via filterAccessible, exactly like the node
+    // list. Deliberately NOT graph/publish (nest-write) or changes/overview
+    // (whole-nest views). parts.length===2 pins the exact /nests/:id/<route>.
+    const isReadQuery =
+      parts.length === 2 &&
+      ["context", "query", "search", "export"].includes(parts[1]);
+
     let grantRole: "read" | "write" | null = null;
     let grantNestVisible = false;
     if (permission === "none") {
@@ -648,6 +817,11 @@ export function createApp(): Hono<AuthEnv> {
       ) {
         // GET /nests/:id/nodes (the list) — allowed for grantees; the handler
         // (listNodesForCaller) filters to only the nodes they're granted.
+        grantNestVisible = await hasAnyGrant(nestId, userId);
+      } else if (isReadQuery) {
+        // Retrieval routes — a grantee may query/search/context/export; the
+        // handler's filterAccessible scopes every result to their grants, so
+        // they can never read past what they were shared (same as the list).
         grantNestVisible = await hasAnyGrant(nestId, userId);
       }
       if (!grantRole && !grantNestVisible) {
@@ -739,7 +913,8 @@ export function createApp(): Hono<AuthEnv> {
       c.req.method !== "GET" &&
       !isStewardActionPath &&
       !isCommentAction &&
-      !isAnnotationAction
+      !isAnnotationAction &&
+      !isReadQuery
     ) {
       required = "write";
     }
@@ -822,23 +997,38 @@ export function createApp(): Hono<AuthEnv> {
     return next();
   });
 
+  // SECURITY: single containment chokepoint for every node-id-bearing route
+  // across the three routers mounted below (governance node ops, annotations,
+  // node CRUD). Node ids become filesystem paths in the engine's storage layer
+  // (join(nestRoot, id + ".md"), no containment of its own), so a `../` id must
+  // be rejected before ANY handler turns it into a read/write/delete — otherwise
+  // a caller scoped to one nest reaches another tenant's files. Centralized here
+  // (not per-route) so a newly added node route can't silently forget the guard.
+  // The greedy {.+} captures the whole remainder incl. any suffix (/versions,
+  // /annotations/:id/comments, …); assertSafeNodeId trips on a `..` segment
+  // anywhere in it. Non-node routes (create/list POST|GET /nodes) don't match.
+  nestsApp.use("/:nestId/nodes/:nodeId{.+}", async (c, next) => {
+    assertSafeNodeId(c.req.param("nodeId")!);
+    return next();
+  });
+
   // Nest list/CRUD
   nestsApp.route("/", nestRoutes);
 
   // Nest-scoped sub-routes
   // Governance nest-level routes (stewards, review-queue)
   nestsApp.route("/:nestId", governanceRoutes);
-  // Governance node-level routes (approve, reject, submit-review, versions, etc.)
-  // Must be mounted BEFORE nodeRoutes because nodeRoutes has a greedy /:nodeId{.+} catch-all.
-  // POST routes work fine (Hono matches method+path), but GET routes clash.
-  // Solution: mount governance node routes and node CRUD on the same Hono instance.
-  // Annotations + sandboxed artifact serving — mounted FIRST among the
-  // /nodes sub-routers: annotation paths carry a literal "annotations"
-  // segment (…/:nodeId/annotations/:threadId/comments), and the governance
-  // router's greedy POST /:nodeId{.+}/comments would otherwise swallow the
-  // nodeId + "annotations/<threadId>" prefix whole and hijack thread
-  // replies. The reverse can't happen: governance paths never contain an
-  // "annotations" segment, so annotation routes can't shadow them.
+  // Node-level sub-routers all share the /:nestId/nodes base and rely on a
+  // greedy /:nodeId{.+} param (node ids are multi-segment paths). Under the
+  // LinearRouter (see createApp) the FIRST registered match wins, so mount
+  // order = specificity order, longest/most-specific first:
+  //   1. annotationRoutes  — /:nodeId/annotations/:threadId/comments, /hosted.
+  //      Must precede governanceNodeRoutes: its greedy POST /:nodeId/comments
+  //      would otherwise swallow the annotation reply URL (…/annotations/:id/
+  //      comments), capturing "…/annotations/:id" as the node id.
+  //   2. governanceNodeRoutes — /:nodeId/{approve,reject,submit-review,comments,…}
+  //   3. nodeRoutes — CRUD incl. the bare /:nodeId{.+} catch-all, mounted last
+  //      so it only matches when no suffix route did.
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
@@ -853,6 +1043,8 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/env", envRoutes);
   nestsApp.route("/:nestId/connectors", connectorRoutes);
   nestsApp.route("/:nestId/hooks", hookNestRoutes);
+  nestsApp.route("/:nestId/definitions", definitionRoutes);
+  nestsApp.route("/:nestId/assets", assetRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
 
   app.route("/nests", nestsApp);

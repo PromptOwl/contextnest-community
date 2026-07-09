@@ -1,9 +1,12 @@
 /**
  * SettingsPage — server-level admin settings. A home for toggles that aren't
- * per-nest. Each setting applies live and persists across restarts. Add new
- * settings as sibling <Card>s.
+ * per-nest. Every field persists to the same /admin/settings endpoint, so the
+ * page edits a local DRAFT and commits everything with one global Save (next
+ * to the title) instead of a Save button per card. Cards are grouped into
+ * tabs by role so the page stays short. Add a new setting to a tab's <Card>
+ * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Shield, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,54 +18,191 @@ import {
   CardDescription,
   CardContent,
 } from "@/components/ui/card";
-import type { AdminSettings, SignInGate } from "../lib/api";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import type { AdminSettings, SignInGate, ManualSignIn } from "../lib/api";
 
 interface SettingsPageProps {
   onBack: () => void;
   settings: AdminSettings | null;
   onUpdate: (
     patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
-  ) => void;
+  ) => void | Promise<void>;
 }
 
 const GATE_OPTIONS: { value: SignInGate; label: string; hint: string }[] = [
   { value: "open", label: "Everyone", hint: "Anyone can sign in with PromptOwl." },
   { value: "admin-only", label: "Admins only", hint: "Only the server admin can use PromptOwl sign-in." },
-  { value: "disabled", label: "Off", hint: "Hide PromptOwl sign-in — email & password only." },
+  { value: "disabled", label: "Off", hint: "Hide PromptOwl sign-in." },
 ];
 
-/** A label + text input + Save row that only enables Save when changed. */
-function TextSetting({
+const MANUAL_OPTIONS: { value: ManualSignIn; label: string; hint: string }[] = [
+  { value: "open", label: "Everyone", hint: "Anyone can sign in and create their own account." },
+  { value: "invite-only", label: "Invite only", hint: "Invited users sign in and set a password; no self sign-up." },
+  { value: "disabled", label: "Off", hint: "No email & password sign-in — PromptOwl only." },
+];
+
+/** Which settings live under each tab — drives the tab's unsaved-changes dot. */
+const TABS: { id: string; label: string; keys: (keyof AdminSettings)[] }[] = [
+  {
+    id: "general",
+    label: "General",
+    keys: [
+      "promptowl_sign_in_gate",
+      "manual_sign_in",
+      "public_base_url",
+      "logo_url",
+    ],
+  },
+  {
+    id: "notifications",
+    label: "Notifications",
+    keys: ["slack_webhook_url", "smtp_url", "notify_email_from", "notify_email_to"],
+  },
+  {
+    id: "advanced",
+    label: "Advanced",
+    keys: [
+      "telemetry_enabled",
+      "max_body_bytes",
+      "workflow_plane_enabled",
+      "subagent_runs_enabled",
+    ],
+  },
+];
+
+/** Controlled text input bound straight to the draft (no per-field Save). */
+function TextField({
   value,
   placeholder,
-  onSave,
+  onChange,
   type = "text",
 }: {
   value: string;
   placeholder?: string;
-  onSave: (v: string) => void;
+  onChange: (v: string) => void;
   type?: string;
 }) {
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
-  const dirty = draft !== value;
+  return (
+    <Input
+      value={value}
+      type={type}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)}
+      className="flex-1"
+    />
+  );
+}
+
+/** Write-only secret input (e.g. the Anthropic key): local state + explicit
+ *  Save so a partial value is never sent. Not part of the settings draft — the
+ *  server only ever returns it masked. */
+function SecretField({
+  placeholder,
+  onSave,
+}: {
+  placeholder?: string;
+  onSave: (v: string) => void;
+}) {
+  const [v, setV] = useState("");
   return (
     <div className="flex items-center gap-2">
       <Input
-        value={draft}
-        type={type}
+        type="password"
+        value={v}
         placeholder={placeholder}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => setV(e.target.value)}
         className="flex-1"
       />
-      <Button size="sm" disabled={!dirty} onClick={() => onSave(draft)}>
+      <Button
+        size="sm"
+        disabled={!v.trim()}
+        onClick={() => {
+          onSave(v.trim());
+          setV("");
+        }}
+      >
         Save
       </Button>
     </div>
   );
 }
 
+/** Megabytes input that reads/writes the draft's byte count. */
+function MbField({
+  bytes,
+  onChange,
+}: {
+  bytes: number;
+  onChange: (bytes: number) => void;
+}) {
+  const [mb, setMb] = useState(String(Math.round(bytes / (1024 * 1024))));
+  useEffect(() => setMb(String(Math.round(bytes / (1024 * 1024)))), [bytes]);
+  return (
+    <div className="flex items-center gap-2 max-w-xs">
+      <Input
+        type="number"
+        value={mb}
+        onChange={(e) => {
+          setMb(e.target.value);
+          const n = Number(e.target.value);
+          if (Number.isFinite(n) && n > 0)
+            onChange(Math.floor(n * 1024 * 1024));
+        }}
+      />
+      <span className="text-sm text-muted-foreground shrink-0">MB</span>
+    </div>
+  );
+}
+
 export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) {
+  // Local editable copy. Re-synced whenever the server value changes (initial
+  // load, and after a successful save — which clears the dirty state).
+  const [draft, setDraft] = useState<AdminSettings | null>(settings);
+  const [saving, setSaving] = useState(false);
+  // Error from the last failed save (shape validation or SMTP verify), shown
+  // inline near the fields. Cleared on the next edit or a successful save.
+  const [saveError, setSaveError] = useState<string | null>(null);
+  useEffect(() => {
+    if (settings) setDraft(settings);
+  }, [settings]);
+
+  const set = (patch: Partial<AdminSettings>) => {
+    setDraft((d) => (d ? { ...d, ...patch } : d));
+    // Any edit invalidates a prior save error — let the admin retry cleanly.
+    setSaveError(null);
+  };
+
+  // null and "" are equivalent for the nullable string fields (backend stores
+  // "" as null), so normalize before comparing to avoid a phantom dirty state.
+  const dirtyKeys = useMemo(() => {
+    if (!draft || !settings) return [] as (keyof AdminSettings)[];
+    return (Object.keys(draft) as (keyof AdminSettings)[]).filter(
+      (k) => (draft[k] ?? "") !== (settings[k] ?? ""),
+    );
+  }, [draft, settings]);
+  const isDirty = dirtyKeys.length > 0;
+  const dirtyInTab = (keys: (keyof AdminSettings)[]) =>
+    keys.some((k) => dirtyKeys.includes(k));
+
+  const save = async () => {
+    if (!draft || !isDirty) return;
+    const patch: Partial<AdminSettings> = {};
+    for (const k of dirtyKeys) (patch as Record<string, unknown>)[k] = draft[k];
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await onUpdate(patch);
+    } catch (e: any) {
+      // Surface the server's reason inline (near the notification fields) so
+      // the admin sees exactly why the save was blocked, and keep the draft so
+      // the values stay put for correction.
+      setSaveError(e?.message || "Failed to save settings");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const discard = () => settings && setDraft(settings);
+
   return (
     <div>
       <div className="flex items-center gap-3 mb-6">
@@ -72,289 +212,392 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
         <div className="flex-1">
           <h2 className="text-2xl font-semibold">Server settings</h2>
           <p className="text-sm text-muted-foreground">
-            Server-wide options. Changes apply immediately and persist across
+            Server-wide options. Changes apply on Save and persist across
             restarts.
           </p>
         </div>
+        {settings && (
+          <div className="flex items-center gap-2 shrink-0">
+            {isDirty && (
+              <span className="text-xs text-muted-foreground mr-1">
+                Unsaved changes
+              </span>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={discard}
+              disabled={!isDirty || saving}
+            >
+              Discard
+            </Button>
+            <Button size="sm" onClick={save} disabled={!isDirty || saving}>
+              {saving && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
+              Save changes
+            </Button>
+          </div>
+        )}
       </div>
 
-      {!settings ? (
+      {saveError && (
+        <div
+          role="alert"
+          className="mb-4 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          {saveError}
+        </div>
+      )}
+
+      {!draft ? (
         <div className="flex items-center gap-2 text-sm text-muted-foreground py-10">
           <Loader2 className="h-4 w-4 animate-spin" /> Loading settings…
         </div>
       ) : (
-        <div className="space-y-4 max-w-2xl">
-          {/* PromptOwl sign-in gate */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Shield className="h-4 w-4 text-muted-foreground" />
-                PromptOwl sign-in
-              </CardTitle>
-              <CardDescription>
-                Who can sign in to this server using their PromptOwl account.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                {GATE_OPTIONS.map((opt) => {
-                  const active = settings.promptowl_sign_in_gate === opt.value;
-                  return (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      onClick={() =>
-                        !active && onUpdate({ promptowl_sign_in_gate: opt.value })
-                      }
-                      className={`text-left rounded-lg border p-3 transition-colors ${
-                        active
-                          ? "border-primary bg-primary/5 ring-1 ring-primary"
-                          : "hover:bg-muted/50"
-                      }`}
-                      aria-pressed={active}
-                    >
-                      <div className="text-sm font-medium">{opt.label}</div>
-                      <div className="text-xs text-muted-foreground mt-0.5">
-                        {opt.hint}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </CardContent>
-          </Card>
+        <Tabs defaultValue="general">
+          <TabsList>
+            {TABS.map((t) => (
+              <TabsTrigger key={t.id} value={t.id} className="gap-1.5">
+                {t.label}
+                {dirtyInTab(t.keys) && (
+                  <span
+                    className="h-1.5 w-1.5 rounded-full bg-primary"
+                    aria-label="unsaved changes"
+                  />
+                )}
+              </TabsTrigger>
+            ))}
+          </TabsList>
 
-          {/* Logo */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Logo</CardTitle>
-              <CardDescription>
-                URL of the logo shown in the header. Leave empty for the default.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <TextSetting
-                value={settings.logo_url ?? ""}
-                placeholder="https://example.com/logo.svg"
-                onSave={(v) => onUpdate({ logo_url: v })}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Usage telemetry */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Usage telemetry</CardTitle>
-              <CardDescription>
-                Send anonymous usage counts to PromptOwl. Turn off to keep all
-                usage data on this server.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-between">
-                <span className="text-sm">
-                  {settings.telemetry_enabled ? "On" : "Off"}
-                </span>
-                <Switch
-                  checked={settings.telemetry_enabled}
-                  onCheckedChange={(v) => onUpdate({ telemetry_enabled: v })}
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Public base URL */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Public base URL</CardTitle>
-              <CardDescription>
-                This server's public address — used for share links and SSO
-                redirects. Leave empty if unsure.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <TextSetting
-                value={settings.public_base_url ?? ""}
-                placeholder="https://nest.yourcompany.com"
-                onSave={(v) => onUpdate({ public_base_url: v })}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Workflow plane ("turing" track) */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Workflow plane</CardTitle>
-              <CardDescription>
-                Typed edges, an edge-type registry, and governed runs — the
-                automation layer. Optional; off by default. Turning it on adds
-                API surface and UI views but changes nothing until someone
-                creates an edge.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-between">
-                <span className="text-sm">
-                  {settings.workflow_plane_enabled ? "On" : "Off"}
-                </span>
-                <Switch
-                  checked={settings.workflow_plane_enabled}
-                  onCheckedChange={(v) => onUpdate({ workflow_plane_enabled: v })}
-                />
-              </div>
-              {settings.workflow_plane_enabled && (
-                <div className="mt-3 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                  <div className="font-medium text-foreground mb-1">
-                    Where it shows up
-                  </div>
-                  <ul className="list-disc pl-4 space-y-0.5">
-                    <li>
-                      Open any nest → <b>Workflows</b> button in the header (next
-                      to Graph) → Edges + Runs.
-                    </li>
-                    <li>
-                      <b>New Document</b> → the Type dropdown now includes{" "}
-                      <b>Agent</b> and <b>Skill</b> (runnable) nodes.
-                    </li>
-                    <li>
-                      Runs are executed by the external{" "}
-                      <code>contextnest-runner</code> — the Runs tab shows the
-                      exact command.
-                    </li>
-                  </ul>
+          {/* General */}
+          <TabsContent value="general" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Shield className="h-4 w-4 text-muted-foreground" />
+                  PromptOwl sign-in
+                </CardTitle>
+                <CardDescription>
+                  Who can sign in to this server using their PromptOwl account.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {GATE_OPTIONS.map((opt) => {
+                    const active = draft.promptowl_sign_in_gate === opt.value;
+                    // Can't pick "Off" while manual sign-in is also off (lockout —
+                    // the server rejects it); disable that one option.
+                    const locked =
+                      opt.value === "disabled" &&
+                      draft.manual_sign_in === "disabled";
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        disabled={locked}
+                        onClick={() =>
+                          !active &&
+                          !locked &&
+                          set({ promptowl_sign_in_gate: opt.value })
+                        }
+                        className={`text-left rounded-lg border p-3 transition-colors ${
+                          active
+                            ? "border-primary bg-primary/5 ring-1 ring-primary"
+                            : locked
+                              ? "opacity-50 cursor-not-allowed"
+                              : "hover:bg-muted/50"
+                        }`}
+                        aria-pressed={active}
+                      >
+                        <div className="text-sm font-medium">{opt.label}</div>
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          {opt.hint}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
-              )}
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
 
-          {/* LLM access — the key that powers runners + future LLM-assisted
-              features. Server-wide default; a nest's Tool environment can
-              override it per nest. */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Anthropic API key</CardTitle>
-              <CardDescription>
-                The server-wide model key. Runners pick it up automatically
-                (every nest, unless a nest overrides it in its Tool
-                environment), and it's what future LLM-assisted features key
-                off — LLM use stays an option: no key, no LLM calls.
-                Stored in the server's env file; shown masked.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="text-xs text-muted-foreground mb-2">
-                {settings.anthropic_api_key_masked
-                  ? `Current: ${settings.anthropic_api_key_masked}`
-                  : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
-              </div>
-              <TextSetting
-                type="password"
-                value=""
-                placeholder="sk-ant-… (paste to set or replace)"
-                onSave={(v) => {
-                  if (v.trim()) onUpdate({ anthropic_api_key: v.trim() });
-                }}
-              />
-              {settings.anthropic_api_key_masked && (
-                <button
-                  type="button"
-                  className="mt-2 text-xs text-destructive hover:underline"
-                  onClick={() => onUpdate({ anthropic_api_key: null })}
-                >
-                  Clear key
-                </button>
-              )}
-            </CardContent>
-          </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Shield className="h-4 w-4 text-muted-foreground" />
+                  Manual sign-in
+                </CardTitle>
+                <CardDescription>
+                  Email &amp; password sign-in. Independent of PromptOwl — you
+                  can't turn this fully off while PromptOwl sign-in is also off.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {MANUAL_OPTIONS.map((opt) => {
+                    const active = draft.manual_sign_in === opt.value;
+                    // Can't pick "Off" while PromptOwl is also off (lockout —
+                    // the server rejects it); disable that one option.
+                    const locked =
+                      opt.value === "disabled" &&
+                      draft.promptowl_sign_in_gate === "disabled";
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        disabled={locked}
+                        onClick={() =>
+                          !active &&
+                          !locked &&
+                          set({ manual_sign_in: opt.value })
+                        }
+                        className={`text-left rounded-lg border p-3 transition-colors ${
+                          active
+                            ? "border-primary bg-primary/5 ring-1 ring-primary"
+                            : locked
+                              ? "opacity-50 cursor-not-allowed"
+                              : "hover:bg-muted/50"
+                        }`}
+                        aria-pressed={active}
+                      >
+                        <div className="text-sm font-medium">{opt.label}</div>
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          {opt.hint}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </CardContent>
+            </Card>
 
-          {/* Slack connector — ported from development PR #105 */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Slack notifications</CardTitle>
-              <CardDescription>
-                Paste a Slack incoming-webhook URL and governance events
-                (review requested / approved / rejected) post to that channel.
-                Empty = off. Fire-and-forget — Slack being down never blocks a
-                review.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <TextSetting
-                value={settings.slack_webhook_url ?? ""}
-                placeholder="https://hooks.slack.com/services/…"
-                onSave={(v) => onUpdate({ slack_webhook_url: v.trim() })}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Sub-agent runs (recursion) */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Sub-agent runs</CardTitle>
-              <CardDescription>
-                Lets a run spawn nested sub-agent runs (recursion), with a
-                server-enforced depth cap. Riskier surface — needs the
-                workflow plane on, and is gated separately for a reason.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-between">
-                <span className="text-sm">
-                  {settings.subagent_runs_enabled ? "On" : "Off"}
-                </span>
-                <Switch
-                  checked={settings.subagent_runs_enabled}
-                  disabled={!settings.workflow_plane_enabled}
-                  onCheckedChange={(v) => onUpdate({ subagent_runs_enabled: v })}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Public base URL</CardTitle>
+                <CardDescription>
+                  This server's public address — used for share links and SSO
+                  redirects. Leave empty if unsure.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <TextField
+                  value={draft.public_base_url ?? ""}
+                  placeholder="https://nest.yourcompany.com"
+                  onChange={(v) => set({ public_base_url: v })}
                 />
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
 
-          {/* Public base URL — used in shared links + connector messages */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Public base URL</CardTitle>
-              <CardDescription>
-                How this server is reached from outside (e.g.
-                https://nest.yourco.com). Used when links are generated in
-                notifications and shares. Empty = requests' own origin.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <TextSetting
-                value={settings.public_base_url ?? ""}
-                placeholder="https://nest.yourco.com"
-                onSave={(v) => onUpdate({ public_base_url: v.trim() })}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Max upload size */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Max upload size</CardTitle>
-              <CardDescription>
-                Largest request/file accepted, in megabytes. Raise this if big
-                HTML artifacts (decks, dashboards) get rejected.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center gap-2">
-                <TextSetting
-                  type="number"
-                  value={String(Math.round(settings.max_body_bytes / (1024 * 1024)))}
-                  onSave={(v) => {
-                    const mb = Number(v);
-                    if (Number.isFinite(mb) && mb > 0)
-                      onUpdate({ max_body_bytes: Math.floor(mb * 1024 * 1024) });
-                  }}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Logo</CardTitle>
+                <CardDescription>
+                  URL of the logo shown in the header. Leave empty for the
+                  default.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <TextField
+                  value={draft.logo_url ?? ""}
+                  placeholder="https://example.com/logo.svg"
+                  onChange={(v) => set({ logo_url: v })}
                 />
-                <span className="text-sm text-muted-foreground shrink-0">MB</span>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+              </CardContent>
+            </Card>
+
+            {/* Anthropic API key — server-wide runner/LLM key. Write-only
+                (masked); saved immediately via SecretField, not staged in the
+                draft. A nest's Tool environment can override it per nest. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Anthropic API key</CardTitle>
+                <CardDescription>
+                  The server-wide model key. Runners pick it up automatically
+                  (every nest, unless a nest overrides it in its Tool
+                  environment). No key, no LLM calls. Stored server-side; shown
+                  masked.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="text-xs text-muted-foreground mb-2">
+                  {settings?.anthropic_api_key_masked
+                    ? `Current: ${settings.anthropic_api_key_masked}`
+                    : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
+                </div>
+                <SecretField
+                  placeholder="sk-ant-… (paste to set or replace)"
+                  onSave={(v) => onUpdate({ anthropic_api_key: v })}
+                />
+                {settings?.anthropic_api_key_masked && (
+                  <button
+                    type="button"
+                    className="mt-2 text-xs text-destructive hover:underline"
+                    onClick={() => onUpdate({ anthropic_api_key: null })}
+                  >
+                    Clear key
+                  </button>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* Notifications */}
+          <TabsContent value="notifications" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Slack notifications</CardTitle>
+                <CardDescription>
+                  Post governance events (review requested, approved, rejected,
+                  nest shared) to a Slack channel via an incoming-webhook URL.
+                  Leave empty to turn the connector off. The URL contains a
+                  secret — treat it like a password.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <TextField
+                  type="password"
+                  value={draft.slack_webhook_url ?? ""}
+                  placeholder="https://hooks.slack.com/services/…"
+                  onChange={(v) => set({ slack_webhook_url: v })}
+                />
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Email notifications</CardTitle>
+                <CardDescription>
+                  Send the same governance events over SMTP. Set the connection
+                  URL (smtp:// or smtps://, credentials inline), a From address,
+                  and one or more recipients (comma-separated). Leave the URL
+                  empty to turn the connector off.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <TextField
+                  type="password"
+                  value={draft.smtp_url ?? ""}
+                  placeholder="smtps://user:pass@smtp.example.com:465"
+                  onChange={(v) => set({ smtp_url: v })}
+                />
+                <TextField
+                  value={draft.notify_email_from ?? ""}
+                  placeholder="From — nest@yourcompany.com"
+                  onChange={(v) => set({ notify_email_from: v })}
+                />
+                <TextField
+                  value={draft.notify_email_to ?? ""}
+                  placeholder="To — team@yourcompany.com, ops@yourcompany.com"
+                  onChange={(v) => set({ notify_email_to: v })}
+                />
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* Advanced */}
+          <TabsContent value="advanced" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Usage telemetry</CardTitle>
+                <CardDescription>
+                  Send anonymous usage counts to PromptOwl. Turn off to keep all
+                  usage data on this server.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.telemetry_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.telemetry_enabled}
+                    onCheckedChange={(v) => set({ telemetry_enabled: v })}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Max upload size</CardTitle>
+                <CardDescription>
+                  Largest request/file accepted, in megabytes. Raise this if big
+                  HTML artifacts (decks, dashboards) get rejected.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <MbField
+                  bytes={draft.max_body_bytes}
+                  onChange={(bytes) => set({ max_body_bytes: bytes })}
+                />
+              </CardContent>
+            </Card>
+
+            {/* Workflow plane ("turing" track) */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Workflow plane</CardTitle>
+                <CardDescription>
+                  Typed edges, an edge-type registry, and governed runs — the
+                  automation layer. Optional; off by default. Turning it on adds
+                  API surface and UI views but changes nothing until someone
+                  creates an edge.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.workflow_plane_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.workflow_plane_enabled}
+                    onCheckedChange={(v) =>
+                      set({
+                        workflow_plane_enabled: v,
+                        // Turning the plane off makes sub-agent runs inert; keep
+                        // the two consistent so the server never sees the
+                        // dependent-flag-without-parent state.
+                        ...(v ? {} : { subagent_runs_enabled: false }),
+                      })
+                    }
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Sub-agent runs (recursion) — gated separately from the plane */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Sub-agent runs (recursion)
+                </CardTitle>
+                <CardDescription>
+                  Lets a run spawn nested sub-agent runs (a call tree). Bounded
+                  by depth, fan-out and re-entrancy caps so the tree stays
+                  finite. This opens a recursion surface — enable it only after
+                  reviewing the caps for your deployment. Requires the workflow
+                  plane.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.subagent_runs_enabled ? "On" : "Off"}
+                    {!draft.workflow_plane_enabled && (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · enable the workflow plane first
+                      </span>
+                    )}
+                  </span>
+                  <Switch
+                    checked={draft.subagent_runs_enabled}
+                    disabled={!draft.workflow_plane_enabled}
+                    onCheckedChange={(v) => set({ subagent_runs_enabled: v })}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
       )}
     </div>
   );

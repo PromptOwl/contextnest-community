@@ -23,18 +23,30 @@ export function Login() {
   const [promptowlGate, setPromptowlGate] = useState<
     "open" | "admin-only" | "disabled"
   >("open");
+  // Manual (email/password) sign-in mode (MANUAL_SIGN_IN on the server):
+  //   "open"        — credential form + self-register.
+  //   "invite-only" — credential form + "activate invite" (claim) only.
+  //   "disabled"    — no credential form at all.
+  // The server enforces all of this; the UI just stays honest.
+  const [manualMode, setManualMode] = useState<
+    "open" | "invite-only" | "disabled"
+  >("open");
   const adminMode =
     typeof window !== "undefined" &&
     new URLSearchParams(window.location.search).has("admin");
   const showPromptOwl =
     promptowlGate === "open" || (promptowlGate === "admin-only" && adminMode);
+  const showManual = manualMode !== "disabled";
+  const allowSelfRegister = manualMode === "open";
 
   useEffect(() => {
     let cancelled = false;
     api
       .getHealth()
       .then((h) => {
-        if (!cancelled) setPromptowlGate(h.promptowl_sign_in_gate ?? "open");
+        if (cancelled) return;
+        setPromptowlGate(h.promptowl_sign_in_gate ?? "open");
+        setManualMode(h.manual_sign_in ?? "open");
       })
       .catch(() => {});
     return () => {
@@ -193,8 +205,8 @@ export function Login() {
 
         {/* Hide email/password path while PromptOwl device-auth flow is
             live — keeps focus on the active flow and avoids accidental
-            credential entry mid-poll. */}
-        {!deviceUrl && (
+            credential entry mid-poll — or when manual sign-in is disabled. */}
+        {!deviceUrl && showManual && (
           <>
             {showPromptOwl && (
               <div className="relative">
@@ -264,7 +276,9 @@ export function Login() {
           <p className="text-sm text-destructive text-center">{error}</p>
         )}
 
-        {!deviceUrl && (
+        {/* Self sign-up link — open mode only. Invited users don't self-serve:
+            their admin shares a password; they log in and change it. */}
+        {!deviceUrl && showManual && allowSelfRegister && (
           <p className="text-xs text-center text-muted-foreground">
             {mode === "login" ? (
               <>
@@ -281,6 +295,14 @@ export function Login() {
                 </button>
               </>
             )}
+          </p>
+        )}
+
+        {/* Nothing to show: manual off AND PromptOwl hidden for this visitor.
+            The admin-only ?admin=1 link below still lets the admin in. */}
+        {!deviceUrl && !showManual && !showPromptOwl && (
+          <p className="text-sm text-center text-muted-foreground">
+            Sign-in is restricted on this server. Contact your admin for access.
           </p>
         )}
 

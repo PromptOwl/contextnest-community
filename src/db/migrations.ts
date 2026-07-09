@@ -719,6 +719,109 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("012_merge_case_colliding_users");
   }
+
+  // 019: document + folder sharing grants (CU-wdqcpzv656). A dedicated ACCESS
+  //   model, distinct from stewardship (which is REVIEW governance). One row =
+  //   "user has role on this document, or on everything under this folder
+  //   prefix". Lets an owner/admin share a single doc or a folder with a
+  //   person who isn't a nest-wide collaborator.
+  if (!hasMigration("019_grants")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS grants (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          target_type TEXT NOT NULL CHECK(target_type IN ('document', 'folder')),
+          target TEXT NOT NULL,        -- node id (document) or path prefix (folder)
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          role TEXT NOT NULL CHECK(role IN ('read', 'write')),
+          granted_by TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_unique
+          ON grants(nest_id, target_type, target, user_id);
+        CREATE INDEX IF NOT EXISTS idx_grants_user ON grants(nest_id, user_id);
+      `);
+    })();
+    recordMigration("019_grants");
+  }
+
+  // 013: deletion tombstones (CU-wdqcpzv219). DELETE /nodes purges every
+  //   governance row for the node (so slug reuse works), which left external
+  //   sync consumers (GitHub/GitBook mirrors) no way to learn a doc was
+  //   removed. One tombstone row per (nest, node); re-deletion after a
+  //   recreate updates it in place. GET /nests/:id/changes reads these.
+  //   (Numbered 013 — 012 is reserved by the case-colliding-users merge on
+  //   its own branch; ids are strings, arrival order doesn't matter.)
+  if (!hasMigration("013_node_deletion_tombstones")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS node_deletions (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          deleted_by TEXT,
+          deleted_at TEXT NOT NULL,
+          PRIMARY KEY (nest_id, node_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_node_deletions_time
+          ON node_deletions(nest_id, deleted_at);
+      `);
+    })();
+    recordMigration("013_node_deletion_tombstones");
+  }
+
+  // 014: activity trace (CU-wdqcpzv21h). One row per API request and per MCP
+  //   tool invocation so the server admin has a single place to audit what
+  //   every client and agent did. Simple form by design: who, what, where,
+  //   outcome, duration. Pruned on a rolling window (see trace-log.ts).
+  if (!hasMigration("014_api_events")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS api_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          ts TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('api', 'mcp')),
+          method TEXT,                 -- HTTP method (api rows)
+          path TEXT,                   -- request path (api rows)
+          tool TEXT,                   -- tool name (mcp rows)
+          nest_id TEXT,
+          user_id TEXT,
+          user_email TEXT,
+          status INTEGER,              -- HTTP status (api rows)
+          duration_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_events_ts ON api_events(ts);
+      `);
+    })();
+    recordMigration("014_api_events");
+  }
+
+  // 015: glossary definitions (CU-wdqcpzv2eg). A literal table-based
+  //   ontology per nest: stewards define and articulate terms — existing
+  //   tags or brand-new ones — and external runtimes (quant analysis jobs,
+  //   agents) pull them in real time via GET /definitions?term=. One row
+  //   per (nest, term), case-insensitive.
+  if (!hasMigration("015_definitions")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS definitions (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          term TEXT NOT NULL,
+          definition TEXT NOT NULL,
+          linked_tag TEXT,               -- optional #tag this term maps to
+          defined_by TEXT NOT NULL,      -- email
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_definitions_term
+          ON definitions(nest_id, term COLLATE NOCASE);
+      `);
+    })();
+    recordMigration("015_definitions");
+  }
+
   // 016: workflow plane foundations (CU-wdqcpzv34u, "turing" track). Typed
   //   edges between nodes, with a steward-defined registry articulating what
   //   each connection MEANS (the definitions-table move, applied to
@@ -751,7 +854,10 @@ export function runMigrations(db: Database.Database): void {
           nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
           from_node TEXT NOT NULL,
           to_node TEXT NOT NULL,
-          type_id TEXT NOT NULL REFERENCES edge_types(id) ON DELETE CASCADE,
+          -- RESTRICT (not CASCADE): the app refuses to delete an edge type
+          -- while edges reference it; the DB backs that invariant instead of
+          -- silently cascade-deleting live edges if the app check is bypassed.
+          type_id TEXT NOT NULL REFERENCES edge_types(id) ON DELETE RESTRICT,
           condition_mode TEXT
             CHECK(condition_mode IN ('structured', 'nl', 'open')),
           condition TEXT,
@@ -815,36 +921,34 @@ export function runMigrations(db: Database.Database): void {
       db.exec(`
         ALTER TABLE runs ADD COLUMN parent_run_id TEXT;
         ALTER TABLE runs ADD COLUMN depth INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
       `);
     })();
     recordMigration("018_subagent_runs");
   }
 
-  // 019: document + folder sharing grants (CU-wdqcpzv656). A dedicated ACCESS
-  //   model, distinct from stewardship (which is REVIEW governance). One row =
-  //   "user has role on this document, or on everything under this folder
-  //   prefix". Lets an owner/admin share a single doc or a folder with a
-  //   person who isn't a nest-wide collaborator.
-  if (!hasMigration("019_grants")) {
+  // 020: server_settings — durable store for runtime-mutable server config (the
+  //   admin Settings page values + the installed license key). Replaces writing
+  //   these to a .env file under DATA_ROOT, which was lost on every Cloud Run
+  //   rebuild (the container filesystem is ephemeral) and never shared across
+  //   horizontally scaled instances. Loaded into process.env at boot.
+  //     value        — the effective setting; NULL = explicitly cleared (tombstone)
+  //     env_at_write — the deploy-env value in effect when the row was written,
+  //                    so a redeploy that CHANGES the env is detected and takes
+  //                    precedence (operator intent) while an unchanged env lets
+  //                    the stored UI edit win. See db/settings.ts.
+  if (!hasMigration("020_server_settings")) {
     db.transaction(() => {
       db.exec(`
-        CREATE TABLE IF NOT EXISTS grants (
-          id TEXT PRIMARY KEY,
-          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
-          target_type TEXT NOT NULL CHECK(target_type IN ('document', 'folder')),
-          target TEXT NOT NULL,        -- node id (document) or path prefix (folder)
-          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          role TEXT NOT NULL CHECK(role IN ('read', 'write')),
-          granted_by TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS server_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT,
+          env_at_write TEXT,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_unique
-          ON grants(nest_id, target_type, target, user_id);
-        CREATE INDEX IF NOT EXISTS idx_grants_user ON grants(nest_id, user_id);
       `);
+      recordMigration("020_server_settings");
     })();
-    recordMigration("019_grants");
   }
 
   // 020: interval schedules for the workflow plane. One row = "create a run
@@ -1062,15 +1166,15 @@ export function mergeCaseCollidingUsers(db: Database.Database): {
           WHERE LOWER(u.email) = ? AND u.id != ?`,
       )
       .all(le, ANON_USER_ID) as Array<{
-      id: string;
-      email: string;
-      is_invited: number;
-      is_admin: number;
-      name: string | null;
-      created_at: string;
-      keys: number;
-      sessions: number;
-    }>;
+        id: string;
+        email: string;
+        is_invited: number;
+        is_admin: number;
+        name: string | null;
+        created_at: string;
+        keys: number;
+        sessions: number;
+      }>;
     if (rows.length < 2) continue;
 
     // Winner: claimed account (is_invited=0) > placeholder; then has an active

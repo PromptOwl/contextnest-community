@@ -12,8 +12,11 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
+import { AgentDocsPage } from "./components/AgentDocsPage";
+import { ActivityTracePage } from "./components/ActivityTracePage";
+import { DefinitionsPage } from "./components/DefinitionsPage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -76,6 +79,8 @@ type View =
   | { page: "teammates" }
   | { page: "settings" }
   | { page: "guide" }
+  | { page: "trace" }
+  | { page: "docs" }
   | {
       page: "ontology-graph";
       nestId: string;
@@ -85,6 +90,13 @@ type View =
     }
   | {
       page: "workflows";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    }
+  | {
+      page: "definitions";
       nestId: string;
       nestName: string;
       isOwner: boolean;
@@ -100,10 +112,12 @@ export default function App() {
     authMode,
     logoUrl,
     serverVersion,
-    workflowPlaneEnabled,
     adminStatus,
     authenticated,
     isAdmin,
+    workflowPlaneEnabled,
+    subagentRunsEnabled,
+    refreshHealth,
     loading,
     error,
     logout,
@@ -147,13 +161,23 @@ export default function App() {
     try {
       const res = await updateAdminSettings(patch);
       setServerSettings(res.settings);
+      // Feature flags gate other views (workflow-plane nav, sub-agent picker)
+      // off the /health-sourced AuthContext state, not serverSettings. Re-read
+      // health so those toggles take effect live, without a page reload.
+      if ("workflow_plane_enabled" in patch || "subagent_runs_enabled" in patch) {
+        await refreshHealth();
+      }
       toast.success("Settings saved");
     } catch (e: any) {
-      toast.error(e?.message || "Failed to save settings");
-      // Re-sync from server so the UI reflects the true state.
-      getAdminSettings().then(setServerSettings).catch(() => {});
+      const message = e?.message || "Failed to save settings";
+      toast.error(message);
+      // A rejected save (validation / SMTP verify) persisted nothing server-side,
+      // so DON'T re-sync — that would reset the draft and wipe what the admin
+      // typed. Re-throw so the Settings page can show the error inline at the
+      // offending field and keep the values for the admin to correct.
+      throw new Error(message);
     }
-  }, []);
+  }, [refreshHealth]);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
   const [showQuickOpen, setShowQuickOpen] = useState(false);
 
@@ -203,9 +227,13 @@ export default function App() {
       setDeepLinkProbe({ status: "missing" });
       return;
     }
+    // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
+    // this effect first fires); the cancel guard drops the stale navigation.
+    let cancelled = false;
     (async () => {
       try {
         const { nest } = await getNest(nestId);
+        if (cancelled) return;
         setDeepLinkProbe({
           status: "ok",
           nestId: nest.id,
@@ -225,6 +253,25 @@ export default function App() {
           });
           return;
         }
+        // ?view=<sub> → land on a nest-scoped sub-page (shareable deep link).
+        // edge-types stays gated on the flag so a shared link can't reach a
+        // plane the server has disabled — it falls back to the nest view.
+        const sub = params.get("view");
+        const subPage =
+          sub === "graph" ? "ontology-graph"
+          : sub === "workflows" && workflowPlaneEnabled ? "workflows"
+          : sub === "definitions" ? "definitions"
+          : null;
+        if (subPage) {
+          setView({
+            page: subPage,
+            nestId: nest.id,
+            nestName: nest.name,
+            isOwner: false,
+            isAnonOwned: false,
+          });
+          return;
+        }
         setView({
           page: "nest",
           nestId: nest.id,
@@ -233,10 +280,13 @@ export default function App() {
           isAnonOwned: false,
         });
       } catch {
-        setDeepLinkProbe({ status: "missing" });
+        if (!cancelled) setDeepLinkProbe({ status: "missing" });
       }
     })();
-  }, [deepLinkProbe.status]);
+    return () => {
+      cancelled = true;
+    };
+  }, [deepLinkProbe.status, workflowPlaneEnabled]);
 
   // Keep the URL in sync with the current view so documents (and nests) are
   // shareable — paste the address bar and the recipient lands on the same doc.
@@ -251,19 +301,41 @@ export default function App() {
       params.set("nest", view.nestId);
       if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
       else params.delete("doc");
+      params.delete("view");
     } else if (view.page === "nest") {
       params.set("nest", view.nestId);
       params.delete("doc");
+      params.delete("view");
+    } else if (
+      // Nest-scoped sub-pages: keep ?nest and tag the sub-view so the address
+      // bar stays shareable instead of dropping the nest context.
+      view.page === "ontology-graph" ||
+      view.page === "workflows" ||
+      view.page === "definitions"
+    ) {
+      params.set("nest", view.nestId);
+      params.delete("doc");
+      params.set(
+        "view",
+        view.page === "ontology-graph"
+          ? "graph"
+          : view.page === "workflows"
+            ? "workflows"
+            : "definitions",
+      );
     } else {
       params.delete("nest");
       params.delete("doc");
+      params.delete("view");
     }
     const qs = params.toString();
     const next =
       window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash;
     const current =
       window.location.pathname + window.location.search + window.location.hash;
-    if (next !== current) window.history.replaceState({}, "", next);
+    if (next !== current) {
+      window.history.replaceState({}, "", next);
+    }
   }, [view, deepLinkProbe.status]);
 
   // One-click PromptOwl SSO (GET /auth/sso) bounces back to "/?sso_error=<code>"
@@ -485,6 +557,18 @@ export default function App() {
               </span>
             )}
 
+            {view.page !== "docs" && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setView({ page: "docs" })}
+                title="API, MCP & CLI docs for agents"
+              >
+                <BookOpen className="h-3.5 w-3.5 mr-1" />
+                Docs
+              </Button>
+            )}
+
             {view.page === "nest" && (
               <Button
                 variant="outline"
@@ -501,6 +585,25 @@ export default function App() {
               >
                 <Network className="h-3.5 w-3.5 mr-1" />
                 Graph
+              </Button>
+            )}
+
+            {view.page === "nest" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setView({
+                    page: "definitions",
+                    nestId: view.nestId,
+                    nestName: view.nestName,
+                    isOwner: view.isOwner,
+                    isAnonOwned: view.isAnonOwned,
+                  })
+                }
+              >
+                <BookMarked className="h-3.5 w-3.5 mr-1" />
+                Definitions
               </Button>
             )}
 
@@ -530,6 +633,7 @@ export default function App() {
                 onTeammates={() => setView({ page: "teammates" })}
                 onSettings={() => setView({ page: "settings" })}
                 onGuide={() => setView({ page: "guide" })}
+                onTrace={() => setView({ page: "trace" })}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
               />
@@ -734,6 +838,21 @@ export default function App() {
             />
           );
         })()}
+        {view.page === "definitions" && (
+          <DefinitionsPage
+            nestId={view.nestId}
+            nestName={view.nestName}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
+        )}
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}
@@ -744,6 +863,12 @@ export default function App() {
             settings={serverSettings}
             onUpdate={updateServerSettings}
           />
+        )}
+        {view.page === "trace" && (
+          <ActivityTracePage onBack={() => setView({ page: "dashboard" })} />
+        )}
+        {view.page === "docs" && (
+          <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}
         {view.page === "ontology-graph" && (
           <OntologyGraphView
@@ -803,6 +928,7 @@ interface UserMenuProps {
   onTeammates: () => void;
   onSettings: () => void;
   onGuide: () => void;
+  onTrace: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
 }
@@ -813,6 +939,7 @@ function UserMenu({
   onTeammates,
   onSettings,
   onGuide,
+  onTrace,
   onChangePassword,
   onLogout,
 }: UserMenuProps) {
@@ -870,6 +997,10 @@ function UserMenu({
             <DropdownMenuItem onSelect={onSettings} className="cursor-pointer">
               <Shield className="h-3.5 w-3.5 mr-2" />
               Server settings
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onTrace} className="cursor-pointer">
+              <ScrollText className="h-3.5 w-3.5 mr-2" />
+              Activity trace
             </DropdownMenuItem>
           </>
         )}
