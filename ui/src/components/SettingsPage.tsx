@@ -19,7 +19,7 @@ import {
   CardContent,
 } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import type { AdminSettings, SignInGate } from "../lib/api";
+import type { AdminSettings, SignInGate, ManualSignIn } from "../lib/api";
 
 interface SettingsPageProps {
   onBack: () => void;
@@ -30,7 +30,13 @@ interface SettingsPageProps {
 const GATE_OPTIONS: { value: SignInGate; label: string; hint: string }[] = [
   { value: "open", label: "Everyone", hint: "Anyone can sign in with PromptOwl." },
   { value: "admin-only", label: "Admins only", hint: "Only the server admin can use PromptOwl sign-in." },
-  { value: "disabled", label: "Off", hint: "Hide PromptOwl sign-in — email & password only." },
+  { value: "disabled", label: "Off", hint: "Hide PromptOwl sign-in." },
+];
+
+const MANUAL_OPTIONS: { value: ManualSignIn; label: string; hint: string }[] = [
+  { value: "open", label: "Everyone", hint: "Anyone can sign in and create their own account." },
+  { value: "invite-only", label: "Invite only", hint: "Invited users sign in and set a password; no self sign-up." },
+  { value: "disabled", label: "Off", hint: "No email & password sign-in — PromptOwl only." },
 ];
 
 /** Which settings live under each tab — drives the tab's unsaved-changes dot. */
@@ -38,7 +44,12 @@ const TABS: { id: string; label: string; keys: (keyof AdminSettings)[] }[] = [
   {
     id: "general",
     label: "General",
-    keys: ["promptowl_sign_in_gate", "public_base_url", "logo_url"],
+    keys: [
+      "promptowl_sign_in_gate",
+      "manual_sign_in",
+      "public_base_url",
+      "logo_url",
+    ],
   },
   {
     id: "notifications",
@@ -237,17 +248,78 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   {GATE_OPTIONS.map((opt) => {
                     const active = draft.promptowl_sign_in_gate === opt.value;
+                    // Can't pick "Off" while manual sign-in is also off (lockout —
+                    // the server rejects it); disable that one option.
+                    const locked =
+                      opt.value === "disabled" &&
+                      draft.manual_sign_in === "disabled";
                     return (
                       <button
                         key={opt.value}
                         type="button"
+                        disabled={locked}
                         onClick={() =>
-                          !active && set({ promptowl_sign_in_gate: opt.value })
+                          !active &&
+                          !locked &&
+                          set({ promptowl_sign_in_gate: opt.value })
                         }
-                        className={`text-left rounded-lg border p-3 transition-colors ${active
+                        className={`text-left rounded-lg border p-3 transition-colors ${
+                          active
                             ? "border-primary bg-primary/5 ring-1 ring-primary"
-                            : "hover:bg-muted/50"
-                          }`}
+                            : locked
+                              ? "opacity-50 cursor-not-allowed"
+                              : "hover:bg-muted/50"
+                        }`}
+                        aria-pressed={active}
+                      >
+                        <div className="text-sm font-medium">{opt.label}</div>
+                        <div className="text-xs text-muted-foreground mt-0.5">
+                          {opt.hint}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Shield className="h-4 w-4 text-muted-foreground" />
+                  Manual sign-in
+                </CardTitle>
+                <CardDescription>
+                  Email &amp; password sign-in. Independent of PromptOwl — you
+                  can't turn this fully off while PromptOwl sign-in is also off.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {MANUAL_OPTIONS.map((opt) => {
+                    const active = draft.manual_sign_in === opt.value;
+                    // Can't pick "Off" while PromptOwl is also off (lockout —
+                    // the server rejects it); disable that one option.
+                    const locked =
+                      opt.value === "disabled" &&
+                      draft.promptowl_sign_in_gate === "disabled";
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        disabled={locked}
+                        onClick={() =>
+                          !active &&
+                          !locked &&
+                          set({ manual_sign_in: opt.value })
+                        }
+                        className={`text-left rounded-lg border p-3 transition-colors ${
+                          active
+                            ? "border-primary bg-primary/5 ring-1 ring-primary"
+                            : locked
+                              ? "opacity-50 cursor-not-allowed"
+                              : "hover:bg-muted/50"
+                        }`}
                         aria-pressed={active}
                       >
                         <div className="text-sm font-medium">{opt.label}</div>
