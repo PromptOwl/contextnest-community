@@ -19,7 +19,7 @@ All bodies are JSON unless noted. All errors return `{ "error": "msg" }` with ap
 ## 1. Auth
 
 ### POST `/auth/register`
-Public. Creates a user OR claims an invited placeholder.
+Public **self sign-up** — creates a brand-new account only. Gated by `MANUAL_SIGN_IN`: allowed only in `open`; `invite-only` and `disabled` return `403`. It never sets the password on an already-provisioned (invited) account — that returns `409` (no email verification exists, so self-claiming would be account takeover). Invited users get a password from their admin (`/auth/invite` or admin reset), then log in and change it.
 
 Body:
 ```json
@@ -43,7 +43,7 @@ Body:
 ```json
 { "email": "user@x.com", "password": "secret123" }
 ```
-200 + session cookie. 401 `Invalid credentials`. Rate-limited per IP and per email.
+200 + session cookie. 401 `Invalid credentials`. Rate-limited per IP and per email. Gated by `MANUAL_SIGN_IN` — returns `403` when set to `disabled` (`invite-only` still allows login).
 
 ### POST `/auth/logout`
 Clears session cookie. 200.

@@ -128,6 +128,7 @@ export async function getHealth() {
     auth_mode: string;
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
+    manual_sign_in?: "open" | "invite-only" | "disabled";
     workflow_plane_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     suspended_reason?: string;
@@ -135,10 +136,12 @@ export async function getHealth() {
 }
 
 export type SignInGate = "open" | "admin-only" | "disabled";
+export type ManualSignIn = "open" | "invite-only" | "disabled";
 
 /** Server-wide settings editable from the admin Settings page. */
 export interface AdminSettings {
   promptowl_sign_in_gate: SignInGate;
+  manual_sign_in: ManualSignIn;
   logo_url: string | null;
   telemetry_enabled: boolean;
   public_base_url: string;

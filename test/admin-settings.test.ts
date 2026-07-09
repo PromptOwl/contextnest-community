@@ -23,6 +23,7 @@ let env: ReturnType<typeof setupTestEnv>;
 // test's mutation can't leak into the next.
 const SETTING_ENV = [
   "PROMPTOWL_SIGN_IN_GATE",
+  "MANUAL_SIGN_IN",
   "LOGO_URL",
   "PUBLIC_BASE_URL",
   "MAX_BODY_BYTES",
@@ -220,5 +221,128 @@ describe("/admin/settings — validation", () => {
     if (existsSync(envFile)) {
       expect(readFileSync(envFile, "utf8")).not.toMatch(/LOGO_URL=/);
     }
+  });
+});
+
+describe("/admin/settings — sign-in method gates", () => {
+  it("defaults manual sign-in to open and persists invite-only / disabled", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const before = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(before.data.manual_sign_in).toBe("open");
+
+    const invite = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "invite-only" },
+      admin.apiKey,
+    );
+    expect(invite.status).toBe(200);
+    expect(invite.data.settings.manual_sign_in).toBe("invite-only");
+    expect(await persistedSetting("MANUAL_SIGN_IN")).toBe("invite-only");
+
+    const off = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "disabled" },
+      admin.apiKey,
+    );
+    expect(off.status).toBe(200);
+    expect(await persistedSetting("MANUAL_SIGN_IN")).toBe("disabled");
+  });
+
+  it("rejects an invalid manual_sign_in value", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "nonsense" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/manual_sign_in/);
+  });
+
+  it("rejects disabling BOTH manual and PromptOwl sign-in in one PATCH", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "disabled", promptowl_sign_in_gate: "disabled" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/both/i);
+
+    // Nothing applied — manual stays open.
+    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(after.data.manual_sign_in).toBe("open");
+  });
+
+  it("rejects disabling manual when PromptOwl is ALREADY disabled (config fallback)", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    // Turn PromptOwl off first — valid, manual still open.
+    const off = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { promptowl_sign_in_gate: "disabled" },
+      admin.apiKey,
+    );
+    expect(off.status).toBe(200);
+
+    // Disabling manual alone now would leave no method — rejected via the
+    // effective-state fallback to current config (gate not in this body).
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "disabled" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/both/i);
+  });
+
+  it("allows invite-only alongside PromptOwl disabled (login still works)", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "invite-only", promptowl_sign_in_gate: "disabled" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.settings.manual_sign_in).toBe("invite-only");
+    expect(res.data.settings.promptowl_sign_in_gate).toBe("disabled");
+  });
+
+  it("allows manual disabled together with PromptOwl admin-only", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "disabled", promptowl_sign_in_gate: "admin-only" },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.settings.manual_sign_in).toBe("disabled");
+    expect(res.data.settings.promptowl_sign_in_gate).toBe("admin-only");
   });
 });

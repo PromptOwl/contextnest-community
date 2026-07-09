@@ -242,7 +242,26 @@ async function provisionPromptowlUser(
 export const authRoutes = new Hono<AuthEnv>();
 
 // POST /auth/register
+//
+// SELF sign-up only — creates a brand-new account. It deliberately does NOT set
+// the password on an already-provisioned (invited) account: there's no email
+// verification here, so letting anyone who knows an invited address choose its
+// password would be account takeover. Invited users instead receive a password
+// from their admin (POST /auth/invite / admin reset), log in, then change it.
 authRoutes.post("/register", async (c) => {
+  // Manual sign-in gate. Self-registration is allowed ONLY in "open" mode.
+  // "invite-only" and "disabled" both refuse it — invited users receive a
+  // password from their admin (Invite / Reset) and log in with that instead.
+  if (config.MANUAL_SIGN_IN !== "open") {
+    return c.json(
+      {
+        error:
+          "Self-registration is disabled on this server. If you were invited, use “Set your password” to activate your account. Otherwise ask your admin for an invite.",
+      },
+      403,
+    );
+  }
+
   const body = await c.req.json<{
     email?: string;
     password?: string;
@@ -266,31 +285,29 @@ authRoutes.post("/register", async (c) => {
     [email],
   ) as { id: string; is_invited: number } | undefined;
 
-  let userId: string;
-  const passwordHash = await hashPassword(body.password);
-
-  if (existing && existing.is_invited === 1) {
-    // Claim flow: an admin invited / shared / steward-assigned this email
-    // before the person registered. Adopt the existing row so all
-    // downstream FK links (api_keys, nest_collaborators, stewards) keep
-    // working — just swap in the user-chosen password and clear the
-    // pending flag.
-    userId = existing.id;
-    await db.run(
-      "UPDATE users SET password_hash = ?, name = COALESCE(?, name), is_invited = 0 WHERE id = ?",
-      [passwordHash, body.name || null, userId],
-    );
-    trackEvent("user.register", { userId, email, claimed: true });
-  } else if (existing) {
+  if (existing) {
+    // An admin-provisioned placeholder can't be self-registered — that would
+    // let anyone who knows the address take over the account. The admin shares
+    // a password for it (Invite / Reset password); the user logs in + changes it.
+    if (existing.is_invited === 1) {
+      return c.json(
+        {
+          error:
+            "You've been invited to this server. Ask your admin for your temporary password, then sign in and change it — you can't set it here.",
+        },
+        409,
+      );
+    }
     throw new ValidationError("Email already registered");
-  } else {
-    userId = uuid();
-    await db.run(
-      "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
-      [userId, email, body.name || null, passwordHash],
-    );
-    trackEvent("user.register", { userId, email });
   }
+
+  const userId = uuid();
+  const passwordHash = await hashPassword(body.password);
+  await db.run(
+    "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+    [userId, email, body.name || null, passwordHash],
+  );
+  trackEvent("user.register", { userId, email });
 
   // Web session — browser auth lives in an httpOnly cookie. We do NOT
   // mint an external api_key here. The user can mint one on demand from
@@ -313,6 +330,20 @@ authRoutes.post("/register", async (c) => {
 
 // POST /auth/login
 authRoutes.post("/login", async (c) => {
+  // Manual sign-in gate — only "disabled" blocks login. "invite-only" still
+  // permits existing + invited users to log in (it only restricts NEW
+  // self-registration, enforced in /auth/register). The /admin/settings
+  // validator prevents disabling both manual and PromptOwl at once.
+  if (config.MANUAL_SIGN_IN === "disabled") {
+    return c.json(
+      {
+        error:
+          "Email & password sign-in is disabled on this server. Sign in with PromptOwl, or contact your admin.",
+      },
+      403,
+    );
+  }
+
   const body = await c.req.json<{
     email?: string;
     password?: string;

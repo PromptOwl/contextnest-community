@@ -197,6 +197,26 @@ export const config = {
       : "open";
   },
   /**
+   * Manual (email + password) sign-in. Three modes, independent of
+   * `PROMPTOWL_SIGN_IN_GATE` (the two methods are controlled separately):
+   *   "open"        — anyone may log in and self-register (default).
+   *   "invite-only" — existing + admin-invited users may log in and an invited
+   *                   placeholder may set its password ("claim"), but brand-new
+   *                   self-registration is refused. Use this when the admin
+   *                   provisions accounts (invite / share / steward) and users
+   *                   shouldn't be able to create their own.
+   *   "disabled"    — no email/password sign-in at all (PromptOwl only).
+   * Enforced at POST /auth/login and POST /auth/register. The /admin/settings
+   * validator refuses "disabled" while PromptOwl is also disabled, so a server
+   * can never be left with no way to sign in.
+   */
+  get MANUAL_SIGN_IN(): "open" | "invite-only" | "disabled" {
+    const v = (process.env.MANUAL_SIGN_IN || "open").trim().toLowerCase();
+    return v === "invite-only" || v === "disabled"
+      ? (v as "invite-only" | "disabled")
+      : "open";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path

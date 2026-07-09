@@ -200,6 +200,10 @@ export function createApp(): Hono<AuthEnv> {
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+      // Manual (email/password) sign-in mode (open | invite-only | disabled).
+      // The login page reads this to show/hide the credential form, and to
+      // switch the Register link to an "activate invite" affordance.
+      manual_sign_in: config.MANUAL_SIGN_IN,
       // Public feature flags the SPA needs before auth to decide what to
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
@@ -319,6 +323,7 @@ export function createApp(): Hono<AuthEnv> {
     (await isLicenseAdminUserId(c.get("userId")));
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+    manual_sign_in: config.MANUAL_SIGN_IN,
     logo_url: config.LOGO_URL,
     telemetry_enabled: config.TELEMETRY_ENABLED,
     public_base_url: config.PUBLIC_BASE_URL,
@@ -358,6 +363,12 @@ export function createApp(): Hono<AuthEnv> {
       if (!["open", "admin-only", "disabled"].includes(v))
         errors.push("promptowl_sign_in_gate must be open | admin-only | disabled");
       else pending.push({ name: "PROMPTOWL_SIGN_IN_GATE", value: v });
+    }
+    if ("manual_sign_in" in body) {
+      const v = String(body.manual_sign_in ?? "").trim().toLowerCase();
+      if (!["open", "invite-only", "disabled"].includes(v))
+        errors.push("manual_sign_in must be open | invite-only | disabled");
+      else pending.push({ name: "MANUAL_SIGN_IN", value: v });
     }
     if ("logo_url" in body) {
       const v = String(body.logo_url ?? "").trim();
@@ -432,6 +443,25 @@ export function createApp(): Hono<AuthEnv> {
       if (!Number.isFinite(n) || n < 1024 * 1024 || n > 500 * 1024 * 1024)
         errors.push("max_body_bytes must be between 1MB and 500MB");
       else pending.push({ name: "MAX_BODY_BYTES", value: String(Math.floor(n)) });
+    }
+
+    // Total-lockout guard: manual and PromptOwl sign-in can't BOTH be off, or
+    // no one could ever log in. Evaluate the effective post-PATCH state —
+    // values this request sets, falling back to current config for fields it
+    // doesn't touch — so the combination is checked even when only one of the
+    // two is in the body.
+    const effManual =
+      "manual_sign_in" in body
+        ? String(body.manual_sign_in ?? "").trim().toLowerCase()
+        : config.MANUAL_SIGN_IN;
+    const effGate =
+      "promptowl_sign_in_gate" in body
+        ? String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase()
+        : config.PROMPTOWL_SIGN_IN_GATE;
+    if (effManual === "disabled" && effGate === "disabled") {
+      errors.push(
+        "Cannot disable both manual and PromptOwl sign-in — no one would be able to log in.",
+      );
     }
 
     // Reject the whole request if any field failed validation — apply nothing.
