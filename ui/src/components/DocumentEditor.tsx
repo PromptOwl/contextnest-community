@@ -833,6 +833,9 @@ export function DocumentEditor({
   } | null>(null);
 
   // Single save path; afterSave continuation feeds onSaved or stashed intent.
+  // Shares the blur-autosave in-flight guard (saveInFlight/savePending, defined
+  // below) so a field blur that fires right before a Save click — or a blur
+  // save already running — can't double-write the same edit into two versions.
   const runSave = async (afterSave: (savedId: string) => void) => {
     if (!canSave) {
       setError(
@@ -842,6 +845,7 @@ export function DocumentEditor({
       );
       return;
     }
+    saveInFlight.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -851,7 +855,14 @@ export function DocumentEditor({
     } catch (err: any) {
       setError(err.message);
     } finally {
+      saveInFlight.current = false;
       setSaving(false);
+      // A blur that arrived mid-save was parked; run one trailing save so the
+      // latest edit lands (no-ops if already clean).
+      if (savePending.current) {
+        savePending.current = false;
+        void saveOnBlurRef.current();
+      }
     }
   };
 
@@ -1142,6 +1153,10 @@ export function DocumentEditor({
           {!isViewOnly && !isReviewerOnly && !isLocked && (
             mode === "edit" ? (
               <Button
+                // Keep focus in the editor field so clicking Save doesn't fire
+                // the field's blur (which would trigger a second, concurrent
+                // save alongside this click). One save per click.
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={handleSave}
                 disabled={!canSave}
                 data-testid="document-editor-save"
