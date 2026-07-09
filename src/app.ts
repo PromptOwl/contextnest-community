@@ -50,8 +50,8 @@ import {
   getCurrentLicense,
   installLicenseKey,
   isLicenseAdminUserId,
-  upsertEnvVar,
 } from "./auth/license.js";
+import { persistSetting } from "./db/settings.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
@@ -291,16 +291,16 @@ export function createApp(): Hono<AuthEnv> {
         tier: info.tier,
         org: info.org,
         limits: info.limits,
-        // The key validated and is live now, but if it couldn't be written to
-        // disk it'll be lost on restart — surface that instead of pretending
+        // The key validated and is live now, but if it couldn't be saved to the
+        // database it'll be lost on restart — surface that instead of pretending
         // the setup is durable (the old behavior silently swallowed this).
         persisted: info.persisted,
         ...(info.persisted
           ? {}
           : {
-              warning: `License validated, but it could not be saved to disk (${
+              warning: `License validated, but it could not be saved to the database (${
                 info.persistError || "unknown error"
-              }). It will be LOST on the next restart. Set ENV_FILE_PATH to a writable, persisted path (e.g. under DATA_ROOT) or provide PROMPTOWL_KEY via the container environment.`,
+              }). It will be LOST on the next restart. Check the database connection, or provide PROMPTOWL_KEY via the container environment.`,
             }),
       });
     } catch (err) {
@@ -458,11 +458,13 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     // All valid: persist first, then mutate live env. Ordering persist-before-
-    // live means a disk failure aborts before the running server changes, so a
-    // 500 never leaves a live setting that was never written to disk.
+    // live means a DB failure aborts before the running server changes, so a
+    // 500 never leaves a live setting that was never durably stored. The store
+    // is the database (durable + shared across instances) rather than a .env
+    // file, which Cloud Run wipes on rebuild — see db/settings.ts.
     for (const { name, value } of pending) {
       try {
-        upsertEnvVar(config.ENV_FILE_PATH, name, value);
+        await persistSetting(name, value);
       } catch (e) {
         return c.json(
           {

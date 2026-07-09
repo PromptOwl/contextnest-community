@@ -1,19 +1,29 @@
 /**
  * GET/PATCH /admin/settings — the server-wide settings the admin edits from
- * the Settings page. This endpoint mutates process.env live and writes to
- * ENV_FILE_PATH, so it is security-sensitive: only the admin may reach it,
- * validation must reject bad values, and a partially-invalid PATCH must apply
- * nothing (the response code and server state must agree).
+ * the Settings page. This endpoint mutates process.env live and persists to the
+ * server_settings DB table (durable + shared across instances; the .env-file
+ * persistence it replaced was wiped by every Cloud Run rebuild). It is
+ * security-sensitive: only the admin may reach it, validation must reject bad
+ * values, and a partially-invalid PATCH must apply nothing (the response code
+ * and server state must agree).
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
 import {
   setupTestEnv,
   createTestApp,
   registerUser,
   jsonRequest,
 } from "./helpers";
+
+/** Read a persisted setting straight from the DB the running app uses. */
+async function persistedSetting(key: string): Promise<string | null | undefined> {
+  const { getDb } = await import("../src/db/client.js");
+  const row = (await getDb().get(
+    "SELECT value FROM server_settings WHERE key = ?",
+    [key],
+  )) as { value: string | null } | undefined;
+  return row ? row.value : undefined;
+}
 
 const OWNER_EMAIL = "owner@example.com";
 
@@ -105,12 +115,10 @@ describe("/admin/settings — admin round-trip (key mode)", () => {
     expect(after.data.promptowl_sign_in_gate).toBe("admin-only");
     expect(after.data.max_body_bytes).toBe(20 * 1024 * 1024);
 
-    // Persisted: the env file under DATA_ROOT carries the change across restart.
-    const envFile = join(env.dataDir, ".env");
-    expect(existsSync(envFile)).toBe(true);
-    const contents = readFileSync(envFile, "utf8");
-    expect(contents).toMatch(/PROMPTOWL_SIGN_IN_GATE=admin-only/);
-    expect(contents).toMatch(/MAX_BODY_BYTES=20971520/);
+    // Persisted: the DB rows carry the change across restart (and to every
+    // other instance).
+    expect(await persistedSetting("PROMPTOWL_SIGN_IN_GATE")).toBe("admin-only");
+    expect(await persistedSetting("MAX_BODY_BYTES")).toBe("20971520");
   });
 });
 
@@ -178,12 +186,10 @@ describe("/admin/settings — validation", () => {
     expect(res.data.settings.workflow_plane_enabled).toBe(true);
     expect(res.data.settings.subagent_runs_enabled).toBe(true);
 
-    const envFile = join(env.dataDir, ".env");
-    const contents = readFileSync(envFile, "utf8");
-    expect(contents).toMatch(/FEATURE_WORKFLOW_PLANE=true/);
-    expect(contents).toMatch(/FEATURE_SUBAGENT_RUNS=true/);
+    expect(await persistedSetting("FEATURE_WORKFLOW_PLANE")).toBe("true");
+    expect(await persistedSetting("FEATURE_SUBAGENT_RUNS")).toBe("true");
 
-    // And it can be turned back off (null clears the line → falls to default).
+    // And it can be turned back off (null tombstones the row → falls to default).
     const off = await jsonRequest(
       app,
       "PATCH",
@@ -193,7 +199,7 @@ describe("/admin/settings — validation", () => {
     );
     expect(off.status).toBe(200);
     expect(off.data.settings.subagent_runs_enabled).toBe(false);
-    expect(readFileSync(envFile, "utf8")).not.toMatch(/FEATURE_SUBAGENT_RUNS=true/);
+    expect(await persistedSetting("FEATURE_SUBAGENT_RUNS")).toBeNull();
   });
 
   it("applies NOTHING when one field of a multi-field PATCH is invalid", async () => {
@@ -215,10 +221,7 @@ describe("/admin/settings — validation", () => {
     const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
     expect(after.data.logo_url).toBeNull();
 
-    // Nothing persisted: env file either absent or free of LOGO_URL.
-    const envFile = join(env.dataDir, ".env");
-    if (existsSync(envFile)) {
-      expect(readFileSync(envFile, "utf8")).not.toMatch(/LOGO_URL=/);
-    }
+    // Nothing persisted: no LOGO_URL row was written.
+    expect(await persistedSetting("LOGO_URL")).toBeUndefined();
   });
 });

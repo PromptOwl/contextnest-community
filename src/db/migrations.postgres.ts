@@ -53,6 +53,7 @@ const HISTORICAL_MIGRATIONS = [
   "017_workflow_runs",
   "018_subagent_runs",
   "019_grants",
+  "020_server_settings",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -421,6 +422,18 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS depth INTEGER NOT NULL DEFAULT 0;
     CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
+
+    -- server_settings (migration 020): durable store for runtime-mutable server
+    -- config (admin Settings + installed license key), loaded into process.env
+    -- at boot. Replaces the ephemeral .env-file persistence. value NULL is a
+    -- tombstone (explicitly cleared); env_at_write is the deploy-env baseline
+    -- for reconcile precedence — see db/settings.ts.
+    CREATE TABLE IF NOT EXISTS server_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      env_at_write TEXT,
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

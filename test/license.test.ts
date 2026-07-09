@@ -7,7 +7,6 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { join } from "path";
-import { existsSync, readFileSync } from "fs";
 import { setupTestEnv } from "./helpers";
 
 type LicenseModule = typeof import("../src/auth/license.js");
@@ -261,9 +260,7 @@ describe("installLicenseKey — durable persistence (Docker)", () => {
     expect(config.ENV_FILE_PATH).toBe(join(env.dataDir, ".env"));
   });
 
-  it("persists the validated key to ENV_FILE_PATH and reports persisted:true", async () => {
-    const envPath = join(env.dataDir, ".env");
-    process.env.ENV_FILE_PATH = envPath;
+  it("persists the validated key to the database and reports persisted:true", async () => {
     mockFetch({
       body: { valid: true, tier: "team", org: "Acme", limits: { maxNests: 100, maxUsers: 25 } },
     });
@@ -271,23 +268,35 @@ describe("installLicenseKey — durable persistence (Docker)", () => {
     const result = await installLicenseKey("pk_persist_1");
     expect(result.valid).toBe(true);
     expect(result.persisted).toBe(true);
-    expect(existsSync(envPath)).toBe(true);
-    expect(readFileSync(envPath, "utf8")).toContain("PROMPTOWL_KEY=pk_persist_1");
+    // The key is durably stored in server_settings (survives restart + reaches
+    // every instance) rather than an ephemeral .env file.
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get(
+      "SELECT value FROM server_settings WHERE key = ?",
+      ["PROMPTOWL_KEY"],
+    )) as { value: string | null } | undefined;
+    expect(row?.value).toBe("pk_persist_1");
   });
 
-  it("surfaces a write failure instead of silently keeping the key in memory", async () => {
-    // Parent dir absent → writeFileSync throws regardless of uid (root in CI
-    // would otherwise mask a permission failure).
-    const envPath = join(env.dataDir, "missing-dir", ".env");
-    process.env.ENV_FILE_PATH = envPath;
+  it("surfaces a persistence failure instead of silently keeping the key in memory", async () => {
+    // Force the DB write to throw by mocking the settings module — the license
+    // still validates in-memory, but the operator must be told it did NOT
+    // persist (the failure used to be swallowed, so the UI showed success).
+    vi.resetModules();
+    vi.doMock("../src/db/settings.js", () => ({
+      persistSetting: vi.fn(async () => {
+        throw new Error("database unavailable");
+      }),
+      loadServerSettings: vi.fn(async () => 0),
+    }));
     mockFetch({ body: { valid: true, tier: "team", org: "Acme" } });
-    const { installLicenseKey } = await loadLicense();
+    const { installLicenseKey } = await import("../src/auth/license.js");
     const result = await installLicenseKey("pk_persist_2");
     // Validated, so it works in-memory for this process...
     expect(result.valid).toBe(true);
     // ...but the operator must be told it did NOT persist.
     expect(result.persisted).toBe(false);
     expect(result.persistError).toBeTruthy();
-    expect(existsSync(envPath)).toBe(false);
+    vi.doUnmock("../src/db/settings.js");
   });
 });
