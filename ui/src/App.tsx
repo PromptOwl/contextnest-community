@@ -170,9 +170,13 @@ export default function App() {
       }
       toast.success("Settings saved");
     } catch (e: any) {
-      toast.error(e?.message || "Failed to save settings");
-      // Re-sync from server so the UI reflects the true state.
-      getAdminSettings().then(setServerSettings).catch(() => {});
+      const message = e?.message || "Failed to save settings";
+      toast.error(message);
+      // A rejected save (validation / SMTP verify) persisted nothing server-side,
+      // so DON'T re-sync — that would reset the draft and wipe what the admin
+      // typed. Re-throw so the Settings page can show the error inline at the
+      // offending field and keep the values for the admin to correct.
+      throw new Error(message);
     }
   }, [refreshHealth]);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.

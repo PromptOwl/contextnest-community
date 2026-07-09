@@ -41,6 +41,7 @@ import {
 } from "./shared/access.js";
 import { AppError } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
+import { verifySmtp } from "./notify/email.js";
 import { getDb } from "./db/client.js";
 import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
@@ -436,6 +437,25 @@ export function createApp(): Hono<AuthEnv> {
     // Reject the whole request if any field failed validation — apply nothing.
     if (errors.length)
       return c.json({ error: errors.join("; "), settings: currentServerSettings() }, 400);
+
+    // Shape is good — now prove the SMTP credentials actually work before we
+    // persist them. A prefix-valid URL can still point at the wrong host or
+    // carry a bad password; connect + authenticate so junk is blocked at save
+    // instead of silently failing on the first governance event. Only runs when
+    // the URL is being set to a non-empty value (empty = disabling the
+    // connector, nothing to verify).
+    const smtpChange = pending.find((p) => p.name === "SMTP_URL");
+    if (smtpChange && smtpChange.value) {
+      const result = await verifySmtp(smtpChange.value);
+      if (!result.ok)
+        return c.json(
+          {
+            error: `SMTP connection failed: ${result.error}`,
+            settings: currentServerSettings(),
+          },
+          400,
+        );
+    }
 
     // All valid: persist first, then mutate live env. Ordering persist-before-
     // live means a disk failure aborts before the running server changes, so a
