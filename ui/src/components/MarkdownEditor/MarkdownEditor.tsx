@@ -262,12 +262,21 @@ export const MarkdownEditor = forwardRef<
     query: string;
     from: number;
     to: number;
-    coords: { left: number; top: number };
+    // Caret rect edges (viewport coords). `top`/`bottom` are the caret's
+    // top and bottom so the render can flip the panel above the caret when
+    // there isn't room below (caret near the bottom of the viewport).
+    coords: { left: number; top: number; bottom: number };
     selectedIdx: number;
   } | null>(null);
   const [wikiResults, setWikiResults] = useState<
     Array<{ id: string; title: string }>
   >([]);
+  // Full node list for the nest, fetched once per popup-open and filtered
+  // client-side. Server search on every keystroke added 3-4s of latency;
+  // the nest's list is small enough to filter locally for instant matches.
+  const wikiNodesRef = useRef<Array<{ id: string; title: string }>>([]);
+  // Bump when the list finishes loading so the filter effect recomputes.
+  const [wikiNodesVersion, setWikiNodesVersion] = useState(0);
   // Refs mirror state so the editor's static `handleKeyDown` (captured
   // once at useEditor time) can see the latest values without a re-init.
   const wikiPopupRef = useRef(wikiPopup);
@@ -557,7 +566,7 @@ export const MarkdownEditor = forwardRef<
         query,
         from: matchStart,
         to: $from.pos,
-        coords: { left: coords.left, top: coords.bottom },
+        coords: { left: coords.left, top: coords.top, bottom: coords.bottom },
         selectedIdx: prev && prev.query === query ? prev.selectedIdx : 0,
       }));
     };
@@ -569,34 +578,44 @@ export const MarkdownEditor = forwardRef<
     };
   }, [editor, effectiveEditable]);
 
-  // Fetch matching docs whenever the query changes. Empty query
-  // (just `[[`) lists everything so users can browse without typing.
+  // Load the nest's node list once each time the popup opens (not per
+  // keystroke). Re-fetching on open keeps the list fresh (docs created
+  // this session show up) while filtering stays local and instant.
+  const wikiPopupOpen = !!wikiPopup;
   useEffect(() => {
-    if (!wikiPopup || !nestId) {
-      setWikiResults([]);
-      return;
-    }
+    if (!wikiPopupOpen || !nestId) return;
     let cancelled = false;
-    const q = wikiPopup.query.trim();
     (async () => {
       try {
-        const res = q
-          ? await api.searchNodes(nestId, q)
-          : await api.listNodes(nestId);
+        const res = await api.listNodes(nestId);
         if (cancelled) return;
-        const list = ((res.nodes as Array<{ id: string; title: string }>) || [])
-          // A doc can't link to itself — drop it from the suggestions.
-          .filter((n) => n.id !== currentNodeId)
-          .slice(0, 8);
-        setWikiResults(list);
+        wikiNodesRef.current =
+          (res.nodes as Array<{ id: string; title: string }>) || [];
+        setWikiNodesVersion((v) => v + 1);
       } catch {
-        if (!cancelled) setWikiResults([]);
+        /* leave the last list in place; filter still works offline */
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [wikiPopup?.query, nestId, currentNodeId]);
+  }, [wikiPopupOpen, nestId]);
+
+  // Filter the cached list client-side as the query changes. Empty query
+  // (just `[[`) lists everything so users can browse without typing.
+  useEffect(() => {
+    if (!wikiPopup) {
+      setWikiResults([]);
+      return;
+    }
+    const q = wikiPopup.query.trim().toLowerCase();
+    const list = wikiNodesRef.current
+      // A doc can't link to itself — drop it from the suggestions.
+      .filter((n) => n.id !== currentNodeId)
+      .filter((n) => !q || n.title.toLowerCase().includes(q))
+      .slice(0, 8);
+    setWikiResults(list);
+  }, [wikiPopup?.query, currentNodeId, wikiNodesVersion]);
 
   // Sync external content only when not focused — avoids selection
   // loss + onUpdate loop on re-render.
@@ -1232,13 +1251,40 @@ export const MarkdownEditor = forwardRef<
         </div>
       )}
 
-      {wikiPopup && wikiResults.length > 0 && (
+      {wikiPopup && wikiResults.length > 0 && (() => {
+        // Panel is w-72 (288px) / max-h-64 (256px), fixed-positioned at the
+        // caret. Near the bottom or right edge of the viewport it would clip
+        // off-screen, so flip it above the caret when space below is short,
+        // and clamp its left so it never runs past the right edge. maxHeight
+        // is set to the space available on the chosen side so a long list
+        // scrolls inside the panel instead of overflowing the viewport.
+        const PANEL_W = 288;
+        const PANEL_H = 256;
+        const GAP = 4;
+        const MARGIN = 8;
+        const { left, top, bottom } = wikiPopup.coords;
+        const spaceBelow = window.innerHeight - bottom;
+        const spaceAbove = top;
+        const flipUp = spaceBelow < PANEL_H + GAP && spaceAbove > spaceBelow;
+        const clampedLeft = Math.max(
+          MARGIN,
+          Math.min(left, window.innerWidth - PANEL_W - MARGIN),
+        );
+        const style = flipUp
+          ? {
+              left: clampedLeft,
+              bottom: window.innerHeight - top + GAP,
+              maxHeight: spaceAbove - GAP - MARGIN,
+            }
+          : {
+              left: clampedLeft,
+              top: bottom + GAP,
+              maxHeight: spaceBelow - GAP - MARGIN,
+            };
+        return (
         <div
-          className="fixed z-50 w-72 max-h-64 overflow-y-auto rounded-md border bg-popover text-popover-foreground shadow-md"
-          style={{
-            left: wikiPopup.coords.left,
-            top: wikiPopup.coords.top + 4,
-          }}
+          className="fixed z-50 w-72 overflow-y-auto rounded-md border bg-popover text-popover-foreground shadow-md"
+          style={style}
           // Avoid stealing editor focus so the cursor selection that
           // `insertContentAt` targets stays intact.
           onMouseDown={(e) => e.preventDefault()}
@@ -1266,7 +1312,8 @@ export const MarkdownEditor = forwardRef<
             ))}
           </ul>
         </div>
-      )}
+        );
+      })()}
 
       {/* Drag handle (⠿). The official extension positions it in the left
           gutter of the hovered block and handles drag-to-reorder natively.
