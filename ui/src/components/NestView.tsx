@@ -46,7 +46,7 @@ import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu
 import {
   StewardList, StewardModal,
   ReviewQueue, ReviewActions,
-  SubmitForReviewModal, VersionHistory, LifecycleStatusBadge,
+  SubmitForReviewModal, VersionHistoryModal, LifecycleStatusBadge,
   type Steward, type StewardRole, type ReviewRequest, type Version,
   type DocumentLifecycleStatus,
 } from "./governance";
@@ -2567,30 +2567,23 @@ export function NestView({
       )}
 
       {versionNode && (
-        <Dialog open onOpenChange={() => setVersionNode(null)}>
-          <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-hidden flex flex-col">
-            <DialogHeader>
-              <DialogTitle>{versionNode.title}</DialogTitle>
-            </DialogHeader>
-            <VersionHistory
-              className="flex-1 min-h-0 overflow-hidden"
-              versions={versionData.versions}
-              currentVersion={versionData.currentVersion}
-              approvedVersion={versionData.approvedVersion}
-              onRestore={async (v) => {
-                if (!versionNode) return;
-                try {
-                  await api.revertToVersion(nestId, versionNode.id, v);
-                  toast.success(`Reverted to version ${v}`);
-                  await openVersions(versionNode);
-                  fetchData();
-                } catch (e: any) {
-                  toast.error(e?.message || "Revert failed");
-                }
-              }}
-            />
-          </DialogContent>
-        </Dialog>
+        <VersionHistoryModal
+          open
+          onClose={() => setVersionNode(null)}
+          title={versionNode.title}
+          versionData={versionData}
+          onRestore={async (v) => {
+            if (!versionNode) return;
+            try {
+              await api.revertToVersion(nestId, versionNode.id, v);
+              toast.success(`Reverted to version ${v}`);
+              await openVersions(versionNode);
+              fetchData();
+            } catch (e: any) {
+              toast.error(e?.message || "Revert failed");
+            }
+          }}
+        />
       )}
     </div>
   );

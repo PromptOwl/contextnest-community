@@ -52,7 +52,7 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
-import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory, DiffViewer } from "./governance";
+import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
 import { unifiedDiff } from "./governance/diff-util";
 import {
   DropdownMenu,
@@ -600,6 +600,14 @@ export function DocumentEditor({
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
   const [touched, setTouched] = useState(false);
 
+  // Save on blur, not on every keystroke. Per-keystroke autosave spun up
+  // dozens of versions for one editing session; instead we persist once when
+  // the user clicks out of the editor. Unlike the old SILENT autosave this is
+  // visible — it drives the Save button's spinner + "Saved" state so the user
+  // can see their changes landed. Skips new docs (a silent create is
+  // surprising), locked/reviewer/view-only sessions, and clean state.
+  const [justSaved, setJustSaved] = useState(false);
+
   // Settings → Submit-for-Review visibility; permission → read-only gate.
   useEffect(() => {
     let cancelled = false;
@@ -825,6 +833,9 @@ export function DocumentEditor({
   } | null>(null);
 
   // Single save path; afterSave continuation feeds onSaved or stashed intent.
+  // Shares the blur-autosave in-flight guard (saveInFlight/savePending, defined
+  // below) so a field blur that fires right before a Save click — or a blur
+  // save already running — can't double-write the same edit into two versions.
   const runSave = async (afterSave: (savedId: string) => void) => {
     if (!canSave) {
       setError(
@@ -834,59 +845,69 @@ export function DocumentEditor({
       );
       return;
     }
+    saveInFlight.current = true;
     setSaving(true);
     setError(null);
     try {
       const { savedId } = await persistCurrent();
+      setJustSaved(true);
       afterSave(savedId ?? "");
     } catch (err: any) {
       setError(err.message);
     } finally {
+      saveInFlight.current = false;
       setSaving(false);
+      // A blur that arrived mid-save was parked; run one trailing save so the
+      // latest edit lands (no-ops if already clean).
+      if (savePending.current) {
+        savePending.current = false;
+        void saveOnBlurRef.current();
+      }
     }
   };
 
   const handleSave = () => runSave((savedId) => onSaved?.(savedId));
 
-  // Silent debounced autosave — fires on a typing pause and on click-out
-  // (editor blur). No spinner, no "saving…" so the always-editable surface
-  // never flickers. Skips new docs (a silent create is surprising),
-  // locked/reviewer/view-only sessions, and clean state. autosaveRef is
-  // reassigned every render so the debounce timer always runs the latest
-  // closure (current title/content/tags).
-  const autosaveTimer = useRef<number | null>(null);
-  const autosaveRef = useRef<() => void>(() => { });
-  autosaveRef.current = async () => {
-    if (isNew || saving) return;
+  // Clear the "Saved" hint the moment the doc is edited again.
+  useEffect(() => {
+    if (isDirty) setJustSaved(false);
+  }, [isDirty]);
+
+  // Coalesce to one save at a time. The server serializes version writes, but
+  // a second in-flight request is wasted work — mark it pending and run one
+  // trailing save after the current finishes so the latest edit still lands.
+  const saveInFlight = useRef(false);
+  const savePending = useRef(false);
+  const saveOnBlurRef = useRef<() => void>(() => { });
+  saveOnBlurRef.current = async () => {
+    if (isNew) return;
     if (isLocked || isReviewerOnly || isViewOnly) return;
     if (title.trim().length === 0 || content.trim().length === 0) return;
     if (!isDirty) return;
+    if (saveInFlight.current) {
+      savePending.current = true;
+      return;
+    }
+    saveInFlight.current = true;
+    setSaving(true);
+    setError(null);
     try {
       await persistCurrent();
-    } catch {
-      /* stay dirty; the manual Save path surfaces the error */
+      setJustSaved(true);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      saveInFlight.current = false;
+      setSaving(false);
+      if (savePending.current) {
+        savePending.current = false;
+        void saveOnBlurRef.current();
+      }
     }
   };
-  const scheduleAutosave = useCallback(() => {
-    if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
-    autosaveTimer.current = window.setTimeout(() => {
-      autosaveTimer.current = null;
-      void autosaveRef.current();
-    }, 1200);
+  const saveOnBlur = useCallback(() => {
+    void saveOnBlurRef.current();
   }, []);
-  const flushAutosave = useCallback(() => {
-    if (autosaveTimer.current) {
-      window.clearTimeout(autosaveTimer.current);
-      autosaveTimer.current = null;
-    }
-    void autosaveRef.current();
-  }, []);
-  useEffect(
-    () => () => {
-      if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
-    },
-    [],
-  );
 
   // Confirm before unmount when dirty; read-only sessions skip the prompt.
   const confirmLeave = (label: string, run: () => void) => {
@@ -1115,10 +1136,10 @@ export function DocumentEditor({
               variant="outline"
               onClick={() => setShowSubmitModal(true)}
               data-testid="document-editor-submit"
-              title="With stewardship on, &quot;publishing&quot; in this nest means submitting for steward approval."
+              title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
             >
               <Send className="h-4 w-4 mr-2" />
-              Publish (requires approval)
+              Publish
             </Button>
           )}
           {!isViewOnly && canReviewHere && (
@@ -1132,16 +1153,28 @@ export function DocumentEditor({
           {!isViewOnly && !isReviewerOnly && !isLocked && (
             mode === "edit" ? (
               <Button
+                // Keep focus in the editor field so clicking Save doesn't fire
+                // the field's blur (which would trigger a second, concurrent
+                // save alongside this click). One save per click.
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={handleSave}
                 disabled={!canSave}
                 data-testid="document-editor-save"
               >
                 {saving ? (
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : justSaved && !isDirty ? (
+                  <Check className="h-4 w-4 mr-2 text-green-600" />
                 ) : (
                   <Save className="h-4 w-4 mr-2" />
                 )}
-                {isNew ? "Create" : "Save"}
+                {saving
+                  ? "Saving…"
+                  : justSaved && !isDirty
+                    ? "Saved"
+                    : isNew
+                      ? "Create"
+                      : "Save"}
               </Button>
             ) : (
               <Button
@@ -1152,19 +1185,6 @@ export function DocumentEditor({
                 Start Editing
               </Button>
             )
-          )}
-          {/* Version history — opens modal w/ highlighted diffs (CU-wdqcpztgwn).
-              Icon-only; lives next to the overflow menu in the header. */}
-          {!isNew && (
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={openVersions}
-              title="Version history"
-              data-testid="document-editor-history"
-            >
-              <History className="h-4 w-4" />
-            </Button>
           )}
           {/* Compare ▾ — pick a past version; the doc area renders an
               ever-present current↔vN diff inline (no modal). */}
@@ -1227,42 +1247,44 @@ export function DocumentEditor({
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-          {/* Raw markdown source toggle — view/edit the underlying .md. */}
-          <Button
-            variant={rawMode ? "secondary" : "outline"}
-            size="icon"
-            onClick={() => setRawMode((v) => !v)}
-            title={rawMode ? "Rich editor" : "Markdown source"}
-            aria-pressed={rawMode}
-            data-testid="document-editor-markdown-toggle"
-          >
-            <Code2 className="h-4 w-4" />
-          </Button>
-          {/* Visible document-share action — copies the deep link the App's
-              ?nest=&doc= probe understands. Promoted out of the overflow menu
-              so sharing a single document is discoverable. */}
-          {!isNew && (
-            <Button
-              variant="outline"
-              size="sm"
-              title="Copy a shareable link to this document"
-              data-testid="document-editor-copy-link"
-              onClick={() => {
-                const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
-                navigator.clipboard.writeText(url);
-                toast.success("Link copied — recipient needs access to this nest");
-              }}
-            >
-              <LinkIcon className="h-4 w-4 mr-1" /> Share
-            </Button>
-          )}
-          {/* Share-nest (collaborators / visibility) stays in the overflow. */}
+          {/* Secondary actions collapse into one ⋮ menu to keep the header
+              uncluttered. Grouped by use: version history + markdown-source
+              view toggle, then sharing (copy link, share nest). Compare stays
+              a visible button because it carries active "Comparing vN" state
+              the flat menu can't surface. */}
           {(() => {
             const moreActions: OverflowAction[] = [];
+            if (!isNew)
+              moreActions.push({
+                label: "Version history",
+                icon: History,
+                testId: "document-editor-history",
+                onSelect: openVersions,
+              });
+            moreActions.push({
+              // Toggle: the label names the mode you switch TO.
+              label: rawMode ? "Rich editor" : "Markdown source",
+              icon: Code2,
+              testId: "document-editor-markdown-toggle",
+              onSelect: () => setRawMode((v) => !v),
+            });
+            if (!isNew)
+              moreActions.push({
+                label: "Copy link",
+                icon: LinkIcon,
+                separatorBefore: true,
+                testId: "document-editor-copy-link",
+                onSelect: () => {
+                  const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
+                  navigator.clipboard.writeText(url);
+                  toast.success("Link copied — recipient needs access to this nest");
+                },
+              });
             if (canShare)
               moreActions.push({
                 label: "Share nest",
                 icon: Users,
+                separatorBefore: !isNew ? false : true,
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
               });
@@ -1332,6 +1354,7 @@ export function DocumentEditor({
                   setTitle(e.target.value);
                   setTouched(true);
                 }}
+                onBlur={saveOnBlur}
                 placeholder="Untitled"
                 disabled={fieldsDisabled}
                 data-testid="document-editor-title"
@@ -1577,8 +1600,8 @@ export function DocumentEditor({
                     onChange={(e) => {
                       setSchedule(e.target.value);
                       setTouched(true);
-                      scheduleAutosave();
                     }}
+                    onBlur={saveOnBlur}
                     className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -1743,9 +1766,8 @@ export function DocumentEditor({
                   if (fieldsDisabled) return;
                   setContent(e.target.value);
                   setTouched(true);
-                  scheduleAutosave();
                 }}
-                onBlur={flushAutosave}
+                onBlur={saveOnBlur}
                 readOnly={fieldsDisabled}
                 spellCheck={false}
                 placeholder="# Raw markdown"
@@ -1759,6 +1781,7 @@ export function DocumentEditor({
                   setContent(e.target.value);
                   setTouched(true);
                 }}
+                onBlur={saveOnBlur}
                 placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
                 spellCheck={false}
                 className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
@@ -1787,10 +1810,9 @@ export function DocumentEditor({
                   setContent(next);
                   // TipTap onUpdate fires only on real user input here.
                   setTouched(true);
-                  scheduleAutosave();
                 }}
                 onSave={handleSave}
-                onBlur={flushAutosave}
+                onBlur={saveOnBlur}
                 nestId={nestId}
                 currentNodeId={isNew ? undefined : nodeId}
                 editable={!fieldsDisabled}
@@ -1940,39 +1962,25 @@ export function DocumentEditor({
       )}
 
       {showVersions && !isNew && (
-        <Dialog open onOpenChange={(o) => !o && setShowVersions(false)}>
-          <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-hidden flex flex-col">
-            <DialogHeader>
-              <DialogTitle>{title || nodeId}</DialogTitle>
-            </DialogHeader>
-            {versionData ? (
-              <VersionHistory
-                className="flex-1 min-h-0 overflow-hidden"
-                versions={versionData.versions}
-                currentVersion={versionData.currentVersion}
-                approvedVersion={versionData.approvedVersion}
-                onRestore={
-                  isViewOnly
-                    ? undefined
-                    : async (v) => {
-                      try {
-                        await api.revertToVersion(nestId, nodeId, v);
-                        toast.success(`Reverted to version ${v}`);
-                        await Promise.all([loadNode(), loadVersions()]);
-                      } catch (e: any) {
-                        toast.error(e?.message || "Revert failed");
-                      }
-                    }
+        <VersionHistoryModal
+          open
+          onClose={() => setShowVersions(false)}
+          title={title || nodeId}
+          versionData={versionData}
+          onRestore={
+            isViewOnly
+              ? undefined
+              : async (v) => {
+                try {
+                  await api.revertToVersion(nestId, nodeId, v);
+                  toast.success(`Reverted to version ${v}`);
+                  await Promise.all([loadNode(), loadVersions()]);
+                } catch (e: any) {
+                  toast.error(e?.message || "Revert failed");
                 }
-              />
-            ) : (
-              <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                Loading versions…
-              </div>
-            )}
-          </DialogContent>
-        </Dialog>
+              }
+          }
+        />
       )}
 
       {!isNew && (
