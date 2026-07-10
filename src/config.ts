@@ -160,8 +160,10 @@ export const config = {
   get PROMPTOWL_FETCH_HEADERS(): Record<string, string> {
     const h: Record<string, string> = { "Content-Type": "application/json" };
     if (this.PROMPTOWL_BYPASS_SECRET) {
+      // Server-side one-shot calls: only the bypass header is needed. The
+      // x-vercel-set-bypass-cookie header is for in-browser follow-up
+      // requests, which these are not — so it's omitted.
       h["x-vercel-protection-bypass"] = this.PROMPTOWL_BYPASS_SECRET;
-      h["x-vercel-set-bcookie"] = "true";
     }
     return h;
   },
