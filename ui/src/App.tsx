@@ -169,13 +169,12 @@ export default function App() {
       }
       toast.success("Settings saved");
     } catch (e: any) {
-      const message = e?.message || "Failed to save settings";
-      toast.error(message);
+      toast.error(e?.message || "Failed to save settings");
       // A rejected save (validation / SMTP verify) persisted nothing server-side,
       // so DON'T re-sync — that would reset the draft and wipe what the admin
-      // typed. Re-throw so the Settings page can show the error inline at the
-      // offending field and keep the values for the admin to correct.
-      throw new Error(message);
+      // typed. Re-throw the original error (with its `body.fieldErrors`) so the
+      // Settings page can focus the offending field's tab and show the message.
+      throw e;
     }
   }, [refreshHealth]);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.

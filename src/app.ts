@@ -381,19 +381,25 @@ export function createApp(): Hono<AuthEnv> {
     // applied (live env or disk) until all fields pass, so a single bad field
     // can't leave the server in a half-updated state that disagrees with the
     // 400 response. null value deletes the line (setting falls to its default).
-    const errors: string[] = [];
+    // Validation failures are keyed by the request field name (the same key the
+    // UI sends and groups under a tab) so the client can focus the offending
+    // field's tab deterministically instead of scraping the message text.
+    const fieldErrors: Record<string, string> = {};
+    const addError = (field: string, message: string) => {
+      fieldErrors[field] = message;
+    };
     const pending: Array<{ name: string; value: string | null }> = [];
 
     if ("promptowl_sign_in_gate" in body) {
       const v = String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase();
       if (!["open", "admin-only", "disabled"].includes(v))
-        errors.push("promptowl_sign_in_gate must be open | admin-only | disabled");
+        addError("promptowl_sign_in_gate", "PromptOwl sign-in must be set to Everyone, Admins only, or Off.");
       else pending.push({ name: "PROMPTOWL_SIGN_IN_GATE", value: v });
     }
     if ("manual_sign_in" in body) {
       const v = String(body.manual_sign_in ?? "").trim().toLowerCase();
       if (!["open", "invite-only", "disabled"].includes(v))
-        errors.push("manual_sign_in must be open | invite-only | disabled");
+        addError("manual_sign_in", "Manual sign-in must be set to Everyone, Invite only, or Off.");
       else pending.push({ name: "MANUAL_SIGN_IN", value: v });
     }
     if ("logo_url" in body) {
@@ -418,7 +424,7 @@ export function createApp(): Hono<AuthEnv> {
       if (v === null || v === "") {
         pending.push({ name: "ANTHROPIC_API_KEY", value: null });
       } else if (typeof v !== "string" || !v.trim().startsWith("sk-")) {
-        errors.push("anthropic_api_key must start with sk- (or null to clear)");
+        addError("anthropic_api_key", 'Anthropic API key must start with "sk-" (or be empty to clear it).');
       } else {
         pending.push({ name: "ANTHROPIC_API_KEY", value: v.trim() });
       }
@@ -434,8 +440,9 @@ export function createApp(): Hono<AuthEnv> {
           ? !!body.workflow_plane_enabled
           : config.FEATURE_WORKFLOW_PLANE;
       if (body.subagent_runs_enabled && !planeOn) {
-        errors.push(
-          "subagent_runs_enabled requires workflow_plane_enabled to be on",
+        addError(
+          "subagent_runs_enabled",
+          "Sub-agent runs require the Workflow plane to be turned on.",
         );
       } else {
         pending.push({
@@ -449,35 +456,39 @@ export function createApp(): Hono<AuthEnv> {
       // Empty clears (connector off). A webhook URL carries an implicit
       // secret in its path — https only.
       if (v && !/^https:\/\//i.test(v))
-        errors.push("slack_webhook_url must be an https:// URL (or empty to disable)");
+        addError("slack_webhook_url", "Slack webhook must be an https:// URL (or leave it empty to turn Slack notifications off).");
       else pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
     }
     if ("smtp_url" in body) {
       const v = String(body.smtp_url ?? "").trim();
       if (v && !/^smtps?:\/\//i.test(v))
-        errors.push("smtp_url must be an smtp:// or smtps:// URL (or empty to disable)");
+        addError("smtp_url", "SMTP connection URL must start with smtp:// or smtps:// (or leave it empty to turn email notifications off).");
       else pending.push({ name: "SMTP_URL", value: v || null });
     }
-    // Shape check (something@something, no CR/LF) — these flow into
-    // nodemailer's envelope, so junk and header-injection shapes stop here.
-    // Same guard the config getters apply, so env-set and UI-set values gate
-    // identically.
+    // Shape check (local@domain.tld, no CR/LF) — these flow into nodemailer's
+    // envelope, so junk and header-injection shapes stop here. Same guard the
+    // config getters apply, so env-set and UI-set values gate identically.
     if ("notify_email_from" in body) {
       const v = String(body.notify_email_from ?? "").trim();
-      if (v && !isEmailish(v))
-        errors.push("notify_email_from must be a plain email address");
+      // From is the envelope sender — exactly one address. Call out a list
+      // explicitly (recipients go in the To field) rather than a generic shape
+      // error, since a comma also trips isEmailish.
+      if (v && v.includes(","))
+        addError("notify_email_from", "From address must be a single email address — put multiple addresses in Recipients (To) instead.");
+      else if (v && !isEmailish(v))
+        addError("notify_email_from", "From address must be a valid email like nest@company.com.");
       else pending.push({ name: "NOTIFY_EMAIL_FROM", value: v || null });
     }
     if ("notify_email_to" in body) {
       const v = String(body.notify_email_to ?? "").trim();
       if (v && !isEmailListish(v))
-        errors.push("notify_email_to must be a comma-separated list of email addresses");
+        addError("notify_email_to", "Recipients must be valid emails, comma-separated (e.g. team@company.com, ops@company.com).");
       else pending.push({ name: "NOTIFY_EMAIL_TO", value: v || null });
     }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);
       if (!Number.isFinite(n) || n < 1024 * 1024 || n > 500 * 1024 * 1024)
-        errors.push("max_body_bytes must be between 1MB and 500MB");
+        addError("max_body_bytes", "Max upload size must be between 1 MB and 500 MB.");
       else pending.push({ name: "MAX_BODY_BYTES", value: String(Math.floor(n)) });
     }
 
@@ -495,14 +506,23 @@ export function createApp(): Hono<AuthEnv> {
         ? String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase()
         : config.PROMPTOWL_SIGN_IN_GATE;
     if (effManual === "disabled" && effGate === "disabled") {
-      errors.push(
+      // Cross-field rule — key it to a sign-in field so the client lands on the
+      // General tab where both toggles live.
+      addError(
+        "manual_sign_in",
         "Cannot disable both manual and PromptOwl sign-in — no one would be able to log in.",
       );
     }
 
     // Reject the whole request if any field failed validation — apply nothing.
-    if (errors.length)
-      return c.json({ error: errors.join("; "), settings: currentServerSettings() }, 400);
+    // `error` is the flat message for the banner; `fieldErrors` lets the client
+    // focus the offending field's tab by key (no message-text scraping).
+    const errorMessages = Object.values(fieldErrors);
+    if (errorMessages.length)
+      return c.json(
+        { error: errorMessages.join("; "), fieldErrors, settings: currentServerSettings() },
+        400,
+      );
 
     // Shape is good — now prove the SMTP credentials actually work before we
     // persist them. A prefix-valid URL can still point at the wrong host or
@@ -513,14 +533,17 @@ export function createApp(): Hono<AuthEnv> {
     const smtpChange = pending.find((p) => p.name === "SMTP_URL");
     if (smtpChange && smtpChange.value) {
       const result = await verifySmtp(smtpChange.value);
-      if (!result.ok)
+      if (!result.ok) {
+        const message = `SMTP connection failed: ${result.error}`;
         return c.json(
           {
-            error: `SMTP connection failed: ${result.error}`,
+            error: message,
+            fieldErrors: { smtp_url: message },
             settings: currentServerSettings(),
           },
           400,
         );
+      }
     }
 
     // All valid: persist first, then mutate live env. Ordering persist-before-

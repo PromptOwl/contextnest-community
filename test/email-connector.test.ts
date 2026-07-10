@@ -202,6 +202,8 @@ describe("admin settings validation", () => {
     expect(bad.status).toBe(400);
     expect(bad.data.error).toMatch(/SMTP connection failed/i);
     expect(bad.data.error).toMatch(/535 auth failed/);
+    // Keyed to smtp_url so the client focuses the Notifications tab.
+    expect(bad.data.fieldErrors?.smtp_url).toMatch(/SMTP connection failed/i);
     // Verify ran on the supplied URL and the throwaway transporter was closed.
     expect(verify).toHaveBeenCalled();
     expect(close).toHaveBeenCalled();
@@ -240,11 +242,27 @@ describe("admin settings validation", () => {
       notify_email_from: "not-an-email",
     });
     expect(badFrom.status).toBe(400);
+    // Errors are keyed by field name so the client can focus the right tab.
+    expect(badFrom.data.fieldErrors).toHaveProperty("notify_email_from");
     // A comma-list where one entry is malformed rejects the whole field.
     const badTo = await jsonRequest(openApp, "PATCH", "/admin/settings", {
       notify_email_to: "ok@acme.com, bogus",
     });
     expect(badTo.status).toBe(400);
+    expect(badTo.data.fieldErrors).toHaveProperty("notify_email_to");
+    // A bare @ with no dotted domain (e.g. "a@b", "test@test") is junk that
+    // passes a transport envelope but isn't a real address — rejected.
+    const noDot = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      notify_email_from: "test@test",
+    });
+    expect(noDot.status).toBe(400);
+    // From is a single sender — a comma-list (valid for To) is rejected with a
+    // message that points the admin at the Recipients field.
+    const multiFrom = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      notify_email_from: "a@acme.com, b@acme.com",
+    });
+    expect(multiFrom.status).toBe(400);
+    expect(multiFrom.data.fieldErrors.notify_email_from).toMatch(/single email/i);
     // A header-injection shape (interior CR/LF, survives .trim()) is rejected.
     const crlf = await jsonRequest(openApp, "PATCH", "/admin/settings", {
       notify_email_from: "nest@acme.com\nBcc: attacker@evil.com",

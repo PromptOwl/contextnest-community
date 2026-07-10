@@ -135,7 +135,8 @@ describe("/admin/settings — validation", () => {
       admin.apiKey,
     );
     expect(res.status).toBe(400);
-    expect(res.data.error).toMatch(/promptowl_sign_in_gate/);
+    expect(res.data.error).toMatch(/PromptOwl sign-in/i);
+    expect(res.data.fieldErrors).toHaveProperty("promptowl_sign_in_gate");
   });
 
   it("rejects an out-of-range max_body_bytes", async () => {
@@ -165,7 +166,9 @@ describe("/admin/settings — validation", () => {
       admin.apiKey,
     );
     expect(res.status).toBe(400);
-    expect(res.data.error).toMatch(/workflow_plane_enabled/);
+    expect(res.data.error).toMatch(/Workflow plane/i);
+    // Keyed to the field so the client focuses the right tab.
+    expect(res.data.fieldErrors).toHaveProperty("subagent_runs_enabled");
 
     // Nothing applied — the flag stays off.
     const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
@@ -268,7 +271,8 @@ describe("/admin/settings — sign-in method gates", () => {
       admin.apiKey,
     );
     expect(res.status).toBe(400);
-    expect(res.data.error).toMatch(/manual_sign_in/);
+    expect(res.data.error).toMatch(/Manual sign-in/i);
+    expect(res.data.fieldErrors).toHaveProperty("manual_sign_in");
   });
 
   it("rejects disabling BOTH manual and PromptOwl sign-in in one PATCH", async () => {

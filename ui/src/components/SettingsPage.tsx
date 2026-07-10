@@ -41,8 +41,17 @@ const MANUAL_OPTIONS: { value: ManualSignIn; label: string; hint: string }[] = [
   { value: "disabled", label: "Off", hint: "No email & password sign-in — PromptOwl only." },
 ];
 
-/** Which settings live under each tab — drives the tab's unsaved-changes dot. */
-const TABS: { id: string; label: string; keys: (keyof AdminSettings)[] }[] = [
+/**
+ * Which settings live under each tab. `keys` drives the tab's unsaved-changes
+ * dot AND maps a rejected-save field back to its tab: the server returns errors
+ * keyed by field name (`fieldErrors`), so a bad From address focuses
+ * Notifications by exact key — no message-text scraping.
+ */
+const TABS: {
+  id: string;
+  label: string;
+  keys: (keyof AdminSettings)[];
+}[] = [
   {
     id: "general",
     label: "General",
@@ -51,6 +60,7 @@ const TABS: { id: string; label: string; keys: (keyof AdminSettings)[] }[] = [
       "manual_sign_in",
       "public_base_url",
       "logo_url",
+      "anthropic_api_key",
     ],
   },
   {
@@ -93,40 +103,6 @@ function TextField({
   );
 }
 
-/** Write-only secret input (e.g. the Anthropic key): local state + explicit
- *  Save so a partial value is never sent. Not part of the settings draft — the
- *  server only ever returns it masked. */
-function SecretField({
-  placeholder,
-  onSave,
-}: {
-  placeholder?: string;
-  onSave: (v: string) => void;
-}) {
-  const [v, setV] = useState("");
-  return (
-    <div className="flex items-center gap-2">
-      <Input
-        type="password"
-        value={v}
-        placeholder={placeholder}
-        onChange={(e) => setV(e.target.value)}
-        className="flex-1"
-      />
-      <Button
-        size="sm"
-        disabled={!v.trim()}
-        onClick={() => {
-          onSave(v.trim());
-          setV("");
-        }}
-      >
-        Save
-      </Button>
-    </div>
-  );
-}
-
 /** Megabytes input that reads/writes the draft's byte count. */
 function MbField({
   bytes,
@@ -156,12 +132,20 @@ function MbField({
 
 export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) {
   // Local editable copy. Re-synced whenever the server value changes (initial
-  // load, and after a successful save — which clears the dirty state).
+  // load, and after a successful save — which clears the dirty state). Extends
+  // AdminSettings with the write-only `anthropic_api_key`: the server returns it
+  // only masked, so it isn't part of AdminSettings, but it's edited through the
+  // exact same draft + `set()` + global Save as every other field. Absent =
+  // untouched, string = set to this, null = clear on save.
   const [draft, setDraft] = useState<AdminSettings | null>(settings);
   const [saving, setSaving] = useState(false);
   // Error from the last failed save (shape validation or SMTP verify), shown
   // inline near the fields. Cleared on the next edit or a successful save.
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Controlled tab so a failed save can jump the admin to the tab holding the
+  // rejected field — otherwise the error banner points at fields on a tab
+  // they've navigated away from.
+  const [activeTab, setActiveTab] = useState<string>("general");
   useEffect(() => {
     if (settings) setDraft(settings);
   }, [settings]);
@@ -176,9 +160,20 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
   // "" as null), so normalize before comparing to avoid a phantom dirty state.
   const dirtyKeys = useMemo(() => {
     if (!draft || !settings) return [] as (keyof AdminSettings)[];
-    return (Object.keys(draft) as (keyof AdminSettings)[]).filter(
-      (k) => (draft[k] ?? "") !== (settings[k] ?? ""),
-    );
+    const base = settings as unknown as Record<string, unknown>;
+    return (Object.keys(draft) as (keyof AdminSettings)[]).filter((k) => {
+      // Write-only key: the server hands back only a mask, so there's no value
+      // to diff against — "staged" means a non-empty string (set) or null
+      // (clear). Everything else diffs by value like normal.
+      if (k === "anthropic_api_key") {
+        const v = draft.anthropic_api_key;
+        return (typeof v === "string" && v.trim() !== "") || v === null;
+      }
+      return (
+        ((draft as unknown as Record<string, unknown>)[k] ?? "") !==
+        (base[k] ?? "")
+      );
+    });
   }, [draft, settings]);
   const isDirty = dirtyKeys.length > 0;
   const dirtyInTab = (keys: (keyof AdminSettings)[]) =>
@@ -193,15 +188,29 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
     try {
       await onUpdate(patch);
     } catch (e: any) {
-      // Surface the server's reason inline (near the notification fields) so
-      // the admin sees exactly why the save was blocked, and keep the draft so
-      // the values stay put for correction.
+      // Surface the server's reason inline so the admin sees exactly why the
+      // save was blocked, and keep the draft so the values stay put for
+      // correction. Focus the tab that owns the rejected field so the banner and
+      // the offending input are visible together. The server keys each error by
+      // field name (`fieldErrors`) — match on that exactly; fall back to "the
+      // first tab with an edited field" only if the body carried no field keys.
       setSaveError(e?.message || "Failed to save settings");
+      const fieldErrors: Record<string, string> = e?.body?.fieldErrors ?? {};
+      const badFields = Object.keys(fieldErrors);
+      const owns = (t: (typeof TABS)[number]) =>
+        badFields.some((f) => (t.keys as string[]).includes(f));
+      const offending = badFields.length
+        ? TABS.find(owns)
+        : TABS.find((t) => t.keys.some((k) => dirtyKeys.includes(k)));
+      if (offending) setActiveTab(offending.id);
     } finally {
       setSaving(false);
     }
   };
-  const discard = () => settings && setDraft(settings);
+  const discard = () => {
+    if (settings) setDraft(settings);
+    setSaveError(null);
+  };
 
   return (
     <div>
@@ -244,7 +253,8 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
           role="alert"
           className="mb-4 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
-          {saveError}
+          <div className="font-medium">Couldn't save settings</div>
+          <div className="mt-0.5 text-destructive/90">{saveError}</div>
         </div>
       )}
 
@@ -253,7 +263,7 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
           <Loader2 className="h-4 w-4 animate-spin" /> Loading settings…
         </div>
       ) : (
-        <Tabs defaultValue="general">
+        <Tabs value={activeTab} onValueChange={setActiveTab}>
           <TabsList>
             {TABS.map((t) => (
               <TabsTrigger key={t.id} value={t.id} className="gap-1.5">
@@ -404,8 +414,9 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
             </Card>
 
             {/* Anthropic API key — server-wide runner/LLM key. Write-only
-                (masked); saved immediately via SecretField, not staged in the
-                draft. A nest's Tool environment can override it per nest. */}
+                (the server only returns it masked), so it isn't part of the
+                settings draft; its staged value rides the global Save via
+                `apiKeyDraft`. A nest's Tool environment can override it. */}
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Anthropic API key</CardTitle>
@@ -418,21 +429,39 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
               </CardHeader>
               <CardContent>
                 <div className="text-xs text-muted-foreground mb-2">
-                  {settings?.anthropic_api_key_masked
-                    ? `Current: ${settings.anthropic_api_key_masked}`
-                    : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
+                  {draft.anthropic_api_key === null
+                    ? "Will be cleared when you save."
+                    : settings?.anthropic_api_key_masked
+                      ? `Current: ${settings.anthropic_api_key_masked}`
+                      : "Not set — runs can't execute until a key exists here or in a nest's Tool environment."}
                 </div>
-                <SecretField
+                <TextField
+                  type="password"
+                  value={
+                    typeof draft.anthropic_api_key === "string"
+                      ? draft.anthropic_api_key
+                      : ""
+                  }
                   placeholder="sk-ant-… (paste to set or replace)"
-                  onSave={(v) => onUpdate({ anthropic_api_key: v })}
+                  onChange={(v) => set({ anthropic_api_key: v })}
                 />
-                {settings?.anthropic_api_key_masked && (
+                {settings?.anthropic_api_key_masked &&
+                  draft.anthropic_api_key !== null && (
+                    <button
+                      type="button"
+                      className="mt-2 text-xs text-destructive hover:underline"
+                      onClick={() => set({ anthropic_api_key: null })}
+                    >
+                      Clear key
+                    </button>
+                  )}
+                {draft.anthropic_api_key === null && (
                   <button
                     type="button"
-                    className="mt-2 text-xs text-destructive hover:underline"
-                    onClick={() => onUpdate({ anthropic_api_key: null })}
+                    className="mt-2 text-xs text-muted-foreground hover:underline"
+                    onClick={() => set({ anthropic_api_key: undefined })}
                   >
-                    Clear key
+                    Keep current key
                   </button>
                 )}
               </CardContent>
