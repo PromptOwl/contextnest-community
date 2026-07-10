@@ -116,7 +116,7 @@ export async function flushTelemetry(): Promise<void> {
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: config.PROMPTOWL_FETCH_HEADERS,
       body: JSON.stringify(payload),
     });
 
