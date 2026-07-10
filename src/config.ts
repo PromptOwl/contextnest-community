@@ -38,14 +38,17 @@ let emailFromWarned = false;
 let emailToWarned = false;
 
 /**
- * Loose email shape gate for the notification envelope: something@something,
- * no whitespace, no CR/LF. `\s` already excludes interior newlines; the extra
- * CR/LF reject closes the JS quirk where a non-`m` `$` still matches before a
- * single trailing "\n" (header-injection shape). Shared by config getters and
- * the /admin/settings validator so env-set and UI-set values gate identically.
+ * Email shape gate for the notification envelope: local@domain.tld, no
+ * whitespace, no CR/LF. The domain MUST carry a dot + tail so junk with a bare
+ * `@` (e.g. "a@b", "test@test") is refused — a value that passes the transport
+ * envelope but isn't a real address. `\s` already excludes interior newlines;
+ * the extra CR/LF reject closes the JS quirk where a non-`m` `$` still matches
+ * before a single trailing "\n" (header-injection shape). Shared by config
+ * getters and the /admin/settings validator so env-set and UI-set values gate
+ * identically.
  */
 export function isEmailish(v: string): boolean {
-  return /^[^\s@]+@[^\s@]+$/.test(v) && !/[\r\n]/.test(v);
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) && !/[\r\n]/.test(v);
 }
 /** Comma-separated recipient list where every entry is isEmailish(). */
 export function isEmailListish(v: string): boolean {

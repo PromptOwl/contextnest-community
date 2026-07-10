@@ -60,9 +60,21 @@ async function request<T = any>(
         window.dispatchEvent(new Event("auth:unauthorized"));
       }
     }
-    throw new Error(data.error || `Request failed: ${res.status}`);
+    // Carry the parsed error body on the Error so callers can read structured
+    // fields (e.g. `fieldErrors` from /admin/settings) instead of the flat
+    // message text.
+    const err = new Error(data.error || `Request failed: ${res.status}`) as ApiError;
+    err.status = res.status;
+    err.body = data;
+    throw err;
   }
   return data as T;
+}
+
+/** Error thrown by `request` on a non-2xx response, with the parsed body. */
+export interface ApiError extends Error {
+  status?: number;
+  body?: { error?: string; fieldErrors?: Record<string, string>; [k: string]: unknown };
 }
 
 // ─── Auth ───────────────────────────────────────────────────────────────
@@ -155,6 +167,7 @@ export interface AdminSettings {
   smtp_url: string;
   notify_email_from: string;
   notify_email_to: string;
+  anthropic_api_key?: string | null
 }
 
 export async function getAdminSettings() {
