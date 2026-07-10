@@ -301,7 +301,7 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
     const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
     const res = await fetch(`${promptowlUrl}/api/license/validate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: config.PROMPTOWL_FETCH_HEADERS,
       body: JSON.stringify({ key }),
     });
 

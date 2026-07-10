@@ -583,7 +583,7 @@ authRoutes.post("/device", async (c) => {
 
   const res = await fetch(`${promptowlUrl}/api/auth/device`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: config.PROMPTOWL_FETCH_HEADERS,
     body: JSON.stringify({
       deviceName: body.deviceName || "ContextNest Community",
       deviceType: body.deviceType || "webapp",
@@ -614,6 +614,7 @@ authRoutes.get("/device/poll", async (c) => {
   const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
   const res = await fetch(
     `${promptowlUrl}/api/auth/device/poll?code=${encodeURIComponent(code)}&client_secret=${encodeURIComponent(clientSecret)}`,
+    { headers: config.PROMPTOWL_FETCH_HEADERS },
   );
 
   const data = await res.json();
@@ -633,7 +634,7 @@ authRoutes.post("/promptowl", async (c) => {
 
   const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
   const meRes = await fetch(`${promptowlUrl}/api/user/me`, {
-    headers: { Authorization: `Bearer ${body.token}` },
+    headers: { ...config.PROMPTOWL_FETCH_HEADERS, Authorization: `Bearer ${body.token}` },
   });
 
   if (!meRes.ok) {

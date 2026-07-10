@@ -152,6 +152,19 @@ export const config = {
   get PROMPTOWL_KEY() {
     return process.env.PROMPTOWL_KEY || "";
   },
+  /** Vercel automation-bypass secret for PO calls; unset = no bypass. */
+  get PROMPTOWL_BYPASS_SECRET(): string {
+    return process.env.PROMPTOWL_BYPASS_SECRET || "";
+  },
+  /** Outbound headers for PO fetches; bypass header only when secret set. */
+  get PROMPTOWL_FETCH_HEADERS(): Record<string, string> {
+    const h: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.PROMPTOWL_BYPASS_SECRET) {
+      h["x-vercel-protection-bypass"] = this.PROMPTOWL_BYPASS_SECRET;
+      h["x-vercel-set-bcookie"] = "true";
+    }
+    return h;
+  },
   /**
    * Shared secret for one-click SSO auto-login from PromptOwl (PO).
    *
