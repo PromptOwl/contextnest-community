@@ -3,9 +3,8 @@
  * disk + DB stay in lockstep across both surfaces. Handlers stay thin
  * (auth, parse, response shape); this module owns create/update/list.
  */
-import { serializeDocument, parseDocument } from "@promptowl/contextnest-engine";
+import { serializeDocument, parseDocument, publishDocument } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
-import { safePublishDocument } from "../governance/safe-publish.js";
 import { engineCache } from "./engine.js";
 import { NotFoundError, LockedError, ValidationError } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
@@ -331,7 +330,7 @@ export async function createNode(
     });
   } else {
     try {
-      const result = await safePublishDocument(storage, id, {
+      const result = await publishDocument(storage, id, {
         editedBy: userEmail,
         note: "Auto-published on create (no stewards configured)",
       });
@@ -374,7 +373,7 @@ export async function createNode(
  * and editing wouldn't continue from their real version.
  *
  * This walks the folder's documents once and, for each, runs the engine's
- * publish (safePublishDocument) so the doc gains a published checksum + a
+ * publish (publishDocument) so the doc gains a published checksum + a
  * version-chain keyframe and context.yaml is regenerated — exactly the
  * no-stewards auto-publish path createNode uses. That is what makes an
  * imported doc usable by AI: GraphQueryEngine/Resolver only return
@@ -430,14 +429,14 @@ export async function registerImportedDocuments(
     let version = Number.isFinite(fmVersion) && fmVersion > 0 ? fmVersion : 1;
     let content = doc.body || "";
     try {
-      const result = await safePublishDocument(storage, nodeId, {
+      const result = await publishDocument(storage, nodeId, {
         editedBy: userEmail,
         note: "Imported from existing folder",
       });
       version = result.node.frontmatter.version || version;
       content = result.node.body || content;
     } catch (err) {
-      console.error("safePublishDocument failed (import register)", nodeId, err);
+      console.error("publishDocument failed (import register)", nodeId, err);
     }
 
     await versions.createVersion({
@@ -566,7 +565,7 @@ export async function updateNode(
 
     let publishedVersion = (node.frontmatter.version || 0) + 1;
     try {
-      const result = await safePublishDocument(storage, nodeId, {
+      const result = await publishDocument(storage, nodeId, {
         editedBy: userEmail,
         note: patch.changeNote || "Auto-published on edit (no stewards)",
       });

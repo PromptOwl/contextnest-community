@@ -10,7 +10,7 @@ import { getDb } from "../db/client.js";
 import { notifyNestEvent } from "../notify/notify.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
-import { safePublishDocument } from "./safe-publish.js";
+import { publishDocument } from "@promptowl/contextnest-engine";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
 import * as versions from "./version-service.js";
 import { buildTitleMap, buildDocContext } from "./title-resolver.js";
@@ -165,7 +165,7 @@ export async function approve(params: {
   // sees the DB stuck at N and 409s on every save.
   try {
     const { storage } = await engineCache.get(params.nestId);
-    const result = await safePublishDocument(storage, params.nodeId, {
+    const result = await publishDocument(storage, params.nodeId, {
       editedBy: params.approvedBy,
       note: params.note || `Approved review request ${pending.id}`,
     });
