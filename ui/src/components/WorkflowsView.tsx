@@ -668,6 +668,68 @@ function AgentSelect({
   );
 }
 
+/**
+ * Parent-run picker for the Trigger form. A native <select> can't show the
+ * type icon, a badge, or two lines, so this uses the Radix Select:
+ *   line 1:  <icon> <agent name>  <run id>  [reason badge]
+ *   line 2:  depth D → D+1 · <start time>
+ * The start time + id disambiguate several running runs of the same agent.
+ * Ineligible parents (depth/fan-out/loop) render disabled with the reason.
+ */
+function ParentSelect({
+  value,
+  onValueChange,
+  runs,
+  runLabel,
+  runType,
+  blockedReason,
+}: {
+  value: string;
+  onValueChange: (v: string) => void;
+  runs: RunSummary[];
+  runLabel: (id: string) => string;
+  runType: (id: string) => string | undefined;
+  blockedReason: (r: RunSummary) => string | null;
+}) {
+  const NONE = "__none__";
+  const running = runs.filter((r) => r.status === "running");
+  return (
+    <Select value={value || NONE} onValueChange={(v) => onValueChange(v === NONE ? "" : v)}>
+      <SelectTrigger className="h-auto min-h-9 w-full" data-testid="run-parent-lookup">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={NONE}>— None (top-level run)</SelectItem>
+        {running.map((r) => {
+          const reason = blockedReason(r);
+          const d = r.depth ?? 0;
+          return (
+            <SelectItem key={r.id} value={r.id} disabled={!!reason}>
+              <span className="flex flex-col gap-0.5 py-0.5">
+                <span className="flex items-center gap-1.5">
+                  <NodeTypeIcon type={runType(r.agent_node)} className="h-3.5 w-3.5" />
+                  <span className="font-medium">{runLabel(r.agent_node)}</span>
+                  <span className="font-mono text-[11px] text-muted-foreground">
+                    {r.id.replace(/^run_/, "").slice(0, 8)}
+                  </span>
+                  {reason && (
+                    <Badge variant="outline" className="text-[10px]">
+                      {reason}
+                    </Badge>
+                  )}
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  depth {d} → {d + 1} · {timeOf(r.started_at)}
+                </span>
+              </span>
+            </SelectItem>
+          );
+        })}
+      </SelectContent>
+    </Select>
+  );
+}
+
 function RunsPanel({ nestId }: { nestId: string }) {
   const { subagentRunsEnabled } = useAuth();
   const [runs, setRuns] = useState<RunSummary[]>([]);
@@ -1013,30 +1075,14 @@ function RunsPanel({ nestId }: { nestId: string }) {
             <label className="block text-[11px] font-medium text-muted-foreground mb-1">
               Parent run (optional — spawn as a sub-agent)
             </label>
-            <select
+            <ParentSelect
               value={triggerParent}
-              onChange={(e) => setTriggerParent(e.target.value)}
-              className="w-full h-9 rounded-md border bg-background px-2 text-sm"
-              data-testid="run-parent-lookup"
-            >
-              <option value="">— None (top-level run)</option>
-              {runs
-                .filter((r) => r.status === "running")
-                .map((r) => {
-                  // Depth is shown because two runs can share an agent name
-                  // (same doc) — depth + id tells them apart. Ineligible
-                  // parents (depth cap, 16/16 full, or would loop given the
-                  // chosen agent) are disabled up front, not after submit.
-                  const reason = parentBlockedReason(r, triggerNode);
-                  return (
-                    <option key={r.id} value={r.id} disabled={!!reason}>
-                      ↳ under {runLabel(r.agent_node)} · depth {r.depth ?? 0} →{" "}
-                      {(r.depth ?? 0) + 1} ({r.id.replace(/^run_/, "").slice(0, 8)})
-                      {reason ? ` — ${reason}` : ""}
-                    </option>
-                  );
-                })}
-            </select>
+              onValueChange={setTriggerParent}
+              runs={runs}
+              runLabel={runLabel}
+              runType={runType}
+              blockedReason={(r) => parentBlockedReason(r, triggerNode)}
+            />
             {triggerParentReason && (
               <p className="text-[11px] text-destructive mt-1">
                 This parent can't be used ({triggerParentReason}) — pick another
