@@ -8,6 +8,7 @@ import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
+import { canReadNode } from "../governance/access-guard.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -422,6 +423,14 @@ async function resolveLlmBody(
   ctx: McpToolContext,
   node: ContextNode,
 ): Promise<string | null> {
+  // Enforce the SAME per-node access gate as the REST retrieval path. This was
+  // missing here — MCP callers bypassed canUserAccess and could read every
+  // approved node's body regardless of document/tag/steward scope. Route through
+  // canReadNode (the REST helper); deny → return null so callers skip the node
+  // instead of leaking it. Strictly more restrictive; can only remove access.
+  if (!(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail))) {
+    return null;
+  }
   if (!(await isStewardshipEnabled(ctx.nestId))) return node.body || "";
   const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
   if (approved == null) return null;
