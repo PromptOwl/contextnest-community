@@ -63,6 +63,15 @@ import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { Input } from "./ui/input";
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from "./ui/select";
+import { useAuth } from "../auth/AuthContext";
+import { NodeTypeIcon } from "./NestView";
 
 interface Props {
   nestId: string;
@@ -105,21 +114,23 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
           <ArrowLeft className="h-4 w-4 mr-1" /> Back
         </Button>
         <div>
-          <div className="text-xs text-muted-foreground">
-            {nestName} · Workflows
-          </div>
-          <h1 className="text-lg font-semibold leading-tight">Workflow plane</h1>
+          <h1 className="text-lg font-semibold leading-tight">{nestName} Workflows</h1>
         </div>
       </div>
 
-      {/* One mental model, three views of it: the CANVAS is the workflow
+      {/* One mental model, four views of it: the CANVAS is the workflow
           itself (structure + per-wire conditions), the TABLE is the same
-          graph as a readable list (grouped flows + composer), and ACTIVITY
-          is time — standing schedules on top, the run log under them. */}
+          graph as a readable list (grouped flows + composer), RUN is
+          on-demand execution (trigger an agent → run log → replayable
+          trace), and ACTIVITY is the standing setup around runs — key,
+          schedules, connectors, tool env. Run split out from Activity so
+          "run it now" doesn't collide with the schedule/config in one
+          scroll. */}
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="canvas">Canvas</TabsTrigger>
           <TabsTrigger value="table">Table</TabsTrigger>
+          <TabsTrigger value="run">Run</TabsTrigger>
           <TabsTrigger value="activity">Activity</TabsTrigger>
         </TabsList>
         <TabsContent value="canvas" className="mt-4">
@@ -128,10 +139,12 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
         <TabsContent value="table" className="mt-4">
           <EdgesPanel nestId={nestId} />
         </TabsContent>
+        <TabsContent value="run" className="mt-4">
+          <RunsPanel nestId={nestId} />
+        </TabsContent>
         <TabsContent value="activity" className="mt-4 space-y-6">
           <RunnerKeyCallout nestId={nestId} />
           <SchedulesPanel nestId={nestId} />
-          <RunsPanel nestId={nestId} />
           <ConnectorsPanel nestId={nestId} />
           <EnvPanel nestId={nestId} />
         </TabsContent>
@@ -601,7 +614,62 @@ function EdgesPanel({ nestId }: { nestId: string }) {
 
 // ─── Runs: list + replayable trace ───────────────────────────────────────
 
+// Mirror the server caps (src/config.ts). Root runs are depth 0, so a run
+// already at SUBAGENT_MAX_DEPTH can't parent a deeper child; a run already at
+// SUBAGENT_MAX_CHILDREN can't parent another. We surface both — plus the
+// re-entrancy (loop) rule — in the pickers so an ineligible parent/agent is
+// greyed out up front instead of failing only after submit.
+const SUBAGENT_MAX_DEPTH = 8;
+const SUBAGENT_MAX_CHILDREN = 16;
+
+/**
+ * Agent/skill picker that renders the SAME type icon as the document list
+ * (NodeTypeIcon) in each option — a native <select> can't hold an SVG, so
+ * this uses the Radix Select. Empty value shows the placeholder.
+ */
+function AgentSelect({
+  value,
+  onValueChange,
+  runnables,
+  placeholder,
+  testId,
+  disabledReason,
+}: {
+  value: string;
+  onValueChange: (v: string) => void;
+  runnables: Array<{ id: string; title?: string; type?: string }>;
+  placeholder: string;
+  testId?: string;
+  /** Return a short reason to grey an agent out (e.g. re-entrancy), else null. */
+  disabledReason?: (id: string) => string | null;
+}) {
+  return (
+    <Select value={value || undefined} onValueChange={onValueChange}>
+      <SelectTrigger className="h-9 w-full" data-testid={testId} disabled={!runnables.length}>
+        <SelectValue placeholder={runnables.length ? placeholder : "No runnable agents yet"} />
+      </SelectTrigger>
+      <SelectContent>
+        {runnables.map((n) => {
+          const reason = disabledReason?.(n.id) ?? null;
+          return (
+            <SelectItem key={n.id} value={n.id} disabled={!!reason}>
+              <span className="flex items-center gap-2">
+                <NodeTypeIcon type={n.type} className="h-3.5 w-3.5" />
+                {n.title || n.id}
+                {reason && (
+                  <span className="text-[10px] text-muted-foreground">— {reason}</span>
+                )}
+              </span>
+            </SelectItem>
+          );
+        })}
+      </SelectContent>
+    </Select>
+  );
+}
+
 function RunsPanel({ nestId }: { nestId: string }) {
+  const { subagentRunsEnabled } = useAuth();
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [selected, setSelected] = useState<RunDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -609,6 +677,19 @@ function RunsPanel({ nestId }: { nestId: string }) {
   const [triggerNode, setTriggerNode] = useState("");
   const [triggering, setTriggering] = useState(false);
   const [triggerInputs, setTriggerInputs] = useState("");
+  // Optional parent in the top form → spawn a top-level trigger as a
+  // sub-agent under a running run (only offered when the feature is on).
+  const [triggerParent, setTriggerParent] = useState("");
+  // Inline sub-agent spawn: which run row's spawn form is open, plus its
+  // own agent/inputs draft. Lives on the row (like a version-list action),
+  // not the top form — there can be many running runs to parent under.
+  const [spawnParent, setSpawnParent] = useState("");
+  const [spawnAgent, setSpawnAgent] = useState("");
+  const [spawnInputs, setSpawnInputs] = useState("");
+  const [spawning, setSpawning] = useState(false);
+  // Spawn errors render inline in the row form (the top card's error banner
+  // is off-screen when the user is spawning from a deep row).
+  const [spawnError, setSpawnError] = useState<string | null>(null);
   const [nodes, setNodes] = useState<Array<{ id: string; title?: string; type?: string }>>([]);
 
   const load = useCallback(async () => {
@@ -642,25 +723,32 @@ function RunsPanel({ nestId }: { nestId: string }) {
     }
   };
 
+  // Inputs: JSON object if it parses as one, otherwise wrapped prose — either
+  // way the bundle carries it and conditions/vars can read it.
+  const parseInputs = (raw: string): Record<string, unknown> | undefined => {
+    const t = raw.trim();
+    if (!t) return undefined;
+    try {
+      const parsed = JSON.parse(t);
+      return typeof parsed === "object" && parsed !== null ? parsed : { input: parsed };
+    } catch {
+      return { input: t };
+    }
+  };
+
   const trigger = async () => {
     if (!triggerNode.trim()) return;
     setTriggering(true);
     try {
-      // Inputs: JSON object if it parses as one, otherwise wrapped prose —
-      // either way the bundle carries it and conditions/vars can read it.
-      const raw = triggerInputs.trim();
-      let inputs: Record<string, unknown> | undefined;
-      if (raw) {
-        try {
-          const parsed = JSON.parse(raw);
-          inputs = typeof parsed === "object" && parsed !== null ? parsed : { input: parsed };
-        } catch {
-          inputs = { input: raw };
-        }
-      }
-      await triggerRun(nestId, triggerNode.trim(), inputs);
+      await triggerRun(
+        nestId,
+        triggerNode.trim(),
+        parseInputs(triggerInputs),
+        triggerParent || undefined,
+      );
       setTriggerNode("");
       setTriggerInputs("");
+      setTriggerParent("");
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to trigger run");
@@ -669,54 +757,332 @@ function RunsPanel({ nestId }: { nestId: string }) {
     }
   };
 
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-[minmax(0,320px)_1fr] gap-4">
-      <div>
-        <div className="flex items-center gap-2 mb-2">
-          {/* Agent lookup, not a raw node-id field — pick from the nest's
-              runnable nodes. */}
-          <select
-            value={triggerNode}
-            onChange={(e) => setTriggerNode(e.target.value)}
-            className="h-8 rounded-md border bg-background px-2 text-sm flex-1 min-w-0"
-            data-testid="run-agent-lookup"
+  // Spawn a sub-agent under a specific running run (the row action). Errors
+  // land in spawnError so they show inline, right at the form.
+  const spawnSub = async (parentId: string) => {
+    if (!spawnAgent.trim()) return;
+    setSpawning(true);
+    setSpawnError(null);
+    try {
+      await triggerRun(nestId, spawnAgent.trim(), parseInputs(spawnInputs), parentId);
+      setSpawnParent("");
+      setSpawnAgent("");
+      setSpawnInputs("");
+      await load();
+    } catch (err) {
+      setSpawnError(err instanceof Error ? err.message : "Failed to spawn sub-agent");
+    } finally {
+      setSpawning(false);
+    }
+  };
+
+  // Runs are a call tree, not a flat log: a run can spawn sub-agent children
+  // (parent_run_id / depth). Group children under their parent so the
+  // sub-agent flow reads as the tree it is. Roots = runs with no parent (or
+  // whose parent isn't in this page). Order stays started_at DESC.
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const runLabel = (id: string) => byId.get(id)?.title || id.replace(/^nodes\//, "");
+  const runType = (id: string) => byId.get(id)?.type;
+  const childrenOf = new Map<string, RunSummary[]>();
+  const knownIds = new Set(runs.map((r) => r.id));
+  const roots: RunSummary[] = [];
+  for (const r of runs) {
+    if (r.parent_run_id && knownIds.has(r.parent_run_id)) {
+      if (!childrenOf.has(r.parent_run_id)) childrenOf.set(r.parent_run_id, []);
+      childrenOf.get(r.parent_run_id)!.push(r);
+    } else {
+      roots.push(r);
+    }
+  }
+
+  // Eligibility, computed client-side so the pickers grey out ineligible
+  // choices BEFORE submit (mirrors the server's resolveParentRun guards).
+  const runById = new Map(runs.map((r) => [r.id, r]));
+  const childCount = (runId: string) => childrenOf.get(runId)?.length ?? 0;
+  // Agent nodes in a run's own node + every ancestor — the re-entrancy set.
+  // Spawning an agent already in here would create a cycle (server rejects).
+  const chainAgents = (runId: string): Set<string> => {
+    const set = new Set<string>();
+    let cur: string | null = runId;
+    for (let i = 0; cur && i <= SUBAGENT_MAX_DEPTH + 1; i++) {
+      const r = runById.get(cur);
+      if (!r) break;
+      set.add(r.agent_node);
+      cur = r.parent_run_id ?? null;
+    }
+    return set;
+  };
+  // Why a run can't parent a NEW child of `childAgent` ("" = agent not chosen
+  // yet, so only parent-side caps are checked). null = eligible.
+  const parentBlockedReason = (p: RunSummary, childAgent: string): string | null => {
+    if ((p.depth ?? 0) >= SUBAGENT_MAX_DEPTH) return "at max depth";
+    if (childCount(p.id) >= SUBAGENT_MAX_CHILDREN)
+      return `${SUBAGENT_MAX_CHILDREN}/${SUBAGENT_MAX_CHILDREN} full`;
+    if (childAgent && chainAgents(p.id).has(childAgent)) return "would loop";
+    return null;
+  };
+  // The currently-picked form parent, and why it's blocked (if it is) for the
+  // currently-picked agent — drives the inline hint + Create-button guard.
+  const selectedParent = triggerParent ? runById.get(triggerParent) ?? null : null;
+  const triggerParentReason = selectedParent
+    ? parentBlockedReason(selectedParent, triggerNode)
+    : null;
+
+  const renderRun = (r: RunSummary, level: number): React.ReactNode => {
+    const kids = childrenOf.get(r.id) ?? [];
+    const indent = level ? `${0.75 + level * 1.1}rem` : undefined;
+    return (
+      <div key={r.id}>
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => void open(r.id)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") void open(r.id);
+          }}
+          className={`group w-full cursor-pointer px-3 py-2 hover:bg-muted/40 ${
+            selected?.id === r.id ? "bg-muted/60" : ""
+          }`}
+          style={{ paddingLeft: indent }}
+        >
+          <div className="flex items-center gap-2">
+            {level > 0 && (
+              <CornerDownRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
+            )}
+            <NodeTypeIcon type={runType(r.agent_node)} className="h-3.5 w-3.5" />
+            <span className="font-mono text-xs truncate">
+              {r.id.slice(0, 12)}
+            </span>
+            <Badge variant={statusVariant(r.status)} className="text-[10px]">
+              {r.status}
+            </Badge>
+            {level > 0 && (
+              <Badge
+                variant="outline"
+                className="text-[10px] shrink-0"
+                title={`Sub-agent at depth ${r.depth ?? level}`}
+              >
+                sub · d{r.depth ?? level}
+              </Badge>
+            )}
+            {kids.length > 0 && (
+              <span className="text-[10px] text-muted-foreground shrink-0" title="Sub-agents spawned">
+                {kids.length} child{kids.length === 1 ? "" : "ren"}
+              </span>
+            )}
+            {/* Row action — spawn a sub-agent under THIS run. Only running
+                runs can parent one; hidden when sub-agent runs are disabled,
+                and hidden once this run is at the depth OR fan-out cap (a
+                deeper/wider child would be rejected server-side). */}
+            {subagentRunsEnabled &&
+              r.status === "running" &&
+              (r.depth ?? 0) < SUBAGENT_MAX_DEPTH &&
+              childCount(r.id) < SUBAGENT_MAX_CHILDREN && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="ml-auto h-6 px-2 text-[11px] text-muted-foreground opacity-0 group-hover:opacity-100 shrink-0"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSpawnParent(spawnParent === r.id ? "" : r.id);
+                  setSpawnAgent("");
+                  setSpawnInputs("");
+                  setSpawnError(null);
+                }}
+                title="Spawn a sub-agent nested under this run"
+              >
+                <Plus className="h-3 w-3 mr-1" /> sub-agent
+              </Button>
+            )}
+          </div>
+          <div className="text-[11px] text-muted-foreground truncate">
+            {runLabel(r.agent_node)} · {timeOf(r.started_at)}
+          </div>
+          {r.status === "failed" && r.trace?.error && (
+            <div
+              className="text-[11px] text-destructive truncate mt-0.5"
+              title={String(r.trace.error)}
+            >
+              {String(r.trace.error).replace(/^\d+ /, "").slice(0, 110)}
+            </div>
+          )}
+        </div>
+
+        {/* Inline spawn form for this run — agent + inputs, nested under it. */}
+        {subagentRunsEnabled && spawnParent === r.id && (
+          <div
+            className="border-t bg-muted/20 px-3 py-2.5 space-y-2"
+            style={{ paddingLeft: `${0.75 + (level + 1) * 1.1}rem` }}
           >
-            <option value="">
-              {runnables.length ? "Choose an agent to run…" : "No runnable agents yet"}
-            </option>
-            {runnables.map((n) => (
-              <option key={n.id} value={n.id}>
-                {n.type === "agent" ? "🤖 " : "⚡ "}
-                {n.title || n.id}
-              </option>
-            ))}
-          </select>
+            <div className="text-[11px] font-medium text-muted-foreground">
+              New sub-agent under{" "}
+              <span className="font-mono">{r.id.slice(0, 12)}</span> —{" "}
+              {runLabel(r.agent_node)} · depth {r.depth ?? level} → child depth{" "}
+              {(r.depth ?? level) + 1}
+            </div>
+            <AgentSelect
+              value={spawnAgent}
+              onValueChange={setSpawnAgent}
+              runnables={runnables}
+              placeholder="Choose an agent…"
+              testId="spawn-agent-lookup"
+              disabledReason={(id) =>
+                chainAgents(r.id).has(id) ? "already in this chain" : null
+              }
+            />
+            <textarea
+              value={spawnInputs}
+              onChange={(e) => setSpawnInputs(e.target.value)}
+              placeholder='Inputs (optional) — plain text or JSON'
+              className="w-full rounded-md border bg-background px-2 py-1.5 text-xs font-mono min-h-[44px]"
+            />
+            {spawnError && (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-2.5 py-1.5 text-[11px] text-destructive">
+                {spawnError}
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                className="h-7"
+                disabled={spawning || !spawnAgent.trim()}
+                onClick={() => void spawnSub(r.id)}
+              >
+                {spawning ? (
+                  <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                ) : (
+                  <Plus className="h-3.5 w-3.5 mr-1" />
+                )}
+                Create sub-agent
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7"
+                onClick={() => {
+                  setSpawnParent("");
+                  setSpawnError(null);
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {kids.map((k) => renderRun(k, level + 1))}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Trigger a run — full-width form card at the top: a top-level run
+          (agent + inputs). Sub-agents are spawned per-row from the list
+          below, since there can be many running runs to parent under. */}
+      <div className="rounded-lg border p-4 space-y-3">
+        <div>
+          <h3 className="text-sm font-semibold">Trigger a run</h3>
+          <p className="text-xs text-muted-foreground">
+            Creates a run record + bundle (inputs ride along). The server
+            never executes — a runner (the contextnest-runner) walks the
+            bundle and posts each step back into the trace below.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-[11px] font-medium text-muted-foreground mb-1">
+            Agent / skill node
+          </label>
+          {/* Agent lookup, not a raw node-id field — pick from the nest's
+              runnable nodes. Same type icon as the document list. */}
+          <AgentSelect
+            value={triggerNode}
+            onValueChange={setTriggerNode}
+            runnables={runnables}
+            placeholder="Choose an agent to run…"
+            testId="run-agent-lookup"
+          />
+        </div>
+
+        {/* Optional parent → make this a sub-agent under a running run.
+            Only offered when the sub-agent feature is on. Running runs only
+            (the backend rejects closed parents). Per-row spawn stays too. */}
+        {subagentRunsEnabled && (
+          <div>
+            <label className="block text-[11px] font-medium text-muted-foreground mb-1">
+              Parent run (optional — spawn as a sub-agent)
+            </label>
+            <select
+              value={triggerParent}
+              onChange={(e) => setTriggerParent(e.target.value)}
+              className="w-full h-9 rounded-md border bg-background px-2 text-sm"
+              data-testid="run-parent-lookup"
+            >
+              <option value="">— None (top-level run)</option>
+              {runs
+                .filter((r) => r.status === "running")
+                .map((r) => {
+                  // Depth is shown because two runs can share an agent name
+                  // (same doc) — depth + id tells them apart. Ineligible
+                  // parents (depth cap, 16/16 full, or would loop given the
+                  // chosen agent) are disabled up front, not after submit.
+                  const reason = parentBlockedReason(r, triggerNode);
+                  return (
+                    <option key={r.id} value={r.id} disabled={!!reason}>
+                      ↳ under {runLabel(r.agent_node)} · depth {r.depth ?? 0} →{" "}
+                      {(r.depth ?? 0) + 1} ({r.id.replace(/^run_/, "").slice(0, 8)})
+                      {reason ? ` — ${reason}` : ""}
+                    </option>
+                  );
+                })}
+            </select>
+            {triggerParentReason && (
+              <p className="text-[11px] text-destructive mt-1">
+                This parent can't be used ({triggerParentReason}) — pick another
+                or change the agent.
+              </p>
+            )}
+          </div>
+        )}
+
+        <div>
+          <label className="block text-[11px] font-medium text-muted-foreground mb-1">
+            Inputs (optional — plain text or JSON)
+          </label>
+          <textarea
+            value={triggerInputs}
+            onChange={(e) => setTriggerInputs(e.target.value)}
+            placeholder='e.g. {"account":"Foley"}'
+            className="w-full rounded-md border bg-background px-2 py-1.5 text-xs font-mono min-h-[64px]"
+          />
+        </div>
+
+        {error && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            {error}
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
           <Button
-            size="sm"
-            disabled={triggering || !triggerNode.trim()}
+            disabled={triggering || !triggerNode.trim() || !!triggerParentReason}
             onClick={() => void trigger()}
             title="Create a run (a runner executes it)"
           >
             {triggering ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
             ) : (
-              <Play className="h-3.5 w-3.5" />
+              <Play className="h-3.5 w-3.5 mr-1.5" />
             )}
+            Create run
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => void load()}>
+            <RefreshCw className="h-3.5 w-3.5 mr-1" /> Refresh
           </Button>
         </div>
-        <textarea
-          value={triggerInputs}
-          onChange={(e) => setTriggerInputs(e.target.value)}
-          placeholder='Inputs (optional) — plain text or JSON, e.g. {"account":"Foley"}'
-          className="w-full mb-2 rounded-md border bg-background px-2 py-1.5 text-xs font-mono min-h-[52px]"
-        />
-        <p className="text-[11px] text-muted-foreground mb-2">
-          Triggering creates a run record + bundle (inputs ride along). A
-          runner (the contextnest-runner) walks it and posts each step back
-          here.
-        </p>
 
-        <details className="mb-3 rounded-md border bg-muted/30 px-3 py-2 text-[11px]">
+        <details className="rounded-md border bg-muted/30 px-3 py-2 text-[11px]">
           <summary className="cursor-pointer font-medium">
             How do I run one? (the runner is a separate process)
           </summary>
@@ -734,91 +1100,125 @@ function RunsPanel({ nestId }: { nestId: string }) {
   contextnest-runner:local poll`}
             </pre>
             <p>
-              <b>poll</b> claims every run this server creates (Schedules tab,
+              <b>poll</b> claims every run this server creates (Schedule tab,
               Run buttons) and executes it — one standing container per nest.
               No Anthropic key flag needed: set{" "}
               <code>ANTHROPIC_API_KEY</code> in Activity → Tool environment
               and the runner picks it up from the run bundle. Steps stream
-              back into the trace on the right — refresh to watch.
+              back into the trace below — refresh to watch.
             </p>
           </div>
         </details>
-
-        {error && (
-          <div className="mb-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-            {error}
-          </div>
-        )}
-
-        <div className="rounded-lg border divide-y">
-          {loading ? (
-            <div className="px-3 py-6 text-center text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin inline" />
-            </div>
-          ) : runs.length === 0 ? (
-            <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-              No runs yet. Trigger an agent above.
-            </div>
-          ) : (
-            runs.map((r) => (
-              <button
-                key={r.id}
-                onClick={() => void open(r.id)}
-                className={`w-full text-left px-3 py-2 hover:bg-muted/40 ${
-                  selected?.id === r.id ? "bg-muted/60" : ""
-                }`}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-xs truncate">
-                    {r.id.slice(0, 12)}
-                  </span>
-                  <Badge variant={statusVariant(r.status)} className="text-[10px]">
-                    {r.status}
-                  </Badge>
-                </div>
-                <div className="text-[11px] text-muted-foreground truncate">
-                  {r.agent_node} · {timeOf(r.started_at)}
-                </div>
-                {r.status === "failed" && r.trace?.error && (
-                  <div
-                    className="text-[11px] text-destructive truncate mt-0.5"
-                    title={String(r.trace.error)}
-                  >
-                    {String(r.trace.error).replace(/^\d+ /, "").slice(0, 110)}
-                  </div>
-                )}
-              </button>
-            ))
-          )}
-        </div>
       </div>
 
-      {/* Trace */}
-      <div className="rounded-lg border p-4">
-        {!selected ? (
-          <div className="text-sm text-muted-foreground">
-            Select a run to see its replayable trace.
+      {/* Run list — full width under the form. */}
+      <div className="rounded-lg border divide-y">
+        {loading ? (
+          <div className="px-3 py-6 text-center text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin inline" />
+          </div>
+        ) : runs.length === 0 ? (
+          <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+            No runs yet. Trigger an agent above.
           </div>
         ) : (
-          <RunTrace run={selected} />
+          roots.map((r) => renderRun(r, 0))
         )}
       </div>
+
+      {/* Trace / editor — full width, appears when a run is selected. */}
+      {selected && (
+        <div className="rounded-lg border p-4">
+          <RunTrace
+            run={selected}
+            children={runs.filter((r) => r.parent_run_id === selected.id)}
+            parent={
+              selected.parent_run_id
+                ? runs.find((r) => r.id === selected.parent_run_id) ?? null
+                : null
+            }
+            label={runLabel}
+            typeOf={runType}
+            onOpen={(id) => void open(id)}
+          />
+        </div>
+      )}
     </div>
   );
 }
 
-function RunTrace({ run }: { run: RunDetail }) {
+function RunTrace({
+  run,
+  children = [],
+  parent = null,
+  label = (id) => id,
+  typeOf = () => undefined,
+  onOpen,
+}: {
+  run: RunDetail;
+  children?: RunSummary[];
+  parent?: RunSummary | null;
+  label?: (id: string) => string;
+  typeOf?: (id: string) => string | undefined;
+  onOpen?: (id: string) => void;
+}) {
   return (
     <div>
       <div className="flex items-center gap-2 mb-1">
+        <NodeTypeIcon type={typeOf(run.agent_node)} className="h-4 w-4" />
         <span className="font-mono text-sm">{run.id}</span>
         <Badge variant={statusVariant(run.status)}>{run.status}</Badge>
+        {(run.depth ?? 0) > 0 && (
+          <Badge variant="outline" className="text-[10px]">
+            sub-agent · depth {run.depth}
+          </Badge>
+        )}
       </div>
       <div className="text-xs text-muted-foreground mb-4">
-        agent {run.agent_node} · started {timeOf(run.started_at)}
+        agent {label(run.agent_node)} · started {timeOf(run.started_at)}
         {run.finished_at ? ` · finished ${timeOf(run.finished_at)}` : ""} ·
         triggered by {run.triggered_by}
       </div>
+
+      {parent && (
+        <button
+          type="button"
+          onClick={() => onOpen?.(parent.id)}
+          className="mb-3 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+          title="Open the run that spawned this one"
+        >
+          <ArrowLeft className="h-3 w-3" /> Spawned by {label(parent.agent_node)}{" "}
+          <span className="font-mono">({parent.id.slice(0, 8)})</span>
+        </button>
+      )}
+
+      {children.length > 0 && (
+        <div className="mb-4 rounded-md border bg-muted/20 p-2.5">
+          <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">
+            Sub-agents spawned ({children.length})
+          </div>
+          <div className="space-y-1">
+            {children.map((k) => (
+              <button
+                key={k.id}
+                type="button"
+                onClick={() => onOpen?.(k.id)}
+                className="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left text-xs hover:bg-muted/50"
+              >
+                <CornerDownRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
+                <NodeTypeIcon type={typeOf(k.agent_node)} className="h-3.5 w-3.5" />
+                <span className="truncate">{label(k.agent_node)}</span>
+                <Badge variant={statusVariant(k.status)} className="text-[10px] shrink-0">
+                  {k.status}
+                </Badge>
+                <span className="ml-auto font-mono text-[10px] text-muted-foreground shrink-0">
+                  {k.id.slice(0, 8)}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {run.trace?.error && (
         <div className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive font-mono break-all">

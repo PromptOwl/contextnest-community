@@ -1500,11 +1500,20 @@ export async function triggerRun(
   nestId: string,
   agentNode: string,
   inputs?: Record<string, unknown>,
+  parentRunId?: string,
 ) {
   return request<{ run_id: string }>(
     `/nests/${nestId}/run/${agentNode}`,
-    // The route reads body.inputs — wrap, don't spread (a bare {foo:1} body
-    // would silently drop the inputs).
-    { method: "POST", body: JSON.stringify(inputs ? { inputs } : {}) },
+    // The route reads body.inputs / body.parent_run_id — wrap, don't spread
+    // (a bare {foo:1} body would silently drop the inputs). parent_run_id
+    // nests the new run under a still-running parent as a sub-agent
+    // (bounded server-side by depth / fan-out / re-entrancy caps).
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ...(inputs ? { inputs } : {}),
+        ...(parentRunId ? { parent_run_id: parentRunId } : {}),
+      }),
+    },
   );
 }

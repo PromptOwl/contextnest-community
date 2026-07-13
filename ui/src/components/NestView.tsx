@@ -22,7 +22,7 @@ import { ConnectModal } from "./ConnectModal";
 import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
 
 /** One icon per node type — agent/skill/artifact/document each read distinctly. */
-function NodeTypeIcon({
+export function NodeTypeIcon({
   type,
   className = "h-4 w-4",
 }: {
