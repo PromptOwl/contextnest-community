@@ -76,6 +76,8 @@ const TABS: {
       "max_body_bytes",
       "workflow_plane_enabled",
       "subagent_runs_enabled",
+      "subagent_max_depth",
+      "subagent_max_children",
     ],
   },
 ];
@@ -127,6 +129,37 @@ function MbField({
       />
       <span className="text-sm text-muted-foreground shrink-0">MB</span>
     </div>
+  );
+}
+
+/** Small integer input bound to the draft. Keeps a local string so the field
+ *  can go transiently empty while typing; only pushes valid integers up. */
+function NumField({
+  value,
+  onChange,
+  min,
+  max,
+}: {
+  value: number;
+  onChange: (n: number) => void;
+  min?: number;
+  max?: number;
+}) {
+  const [s, setS] = useState(String(value));
+  useEffect(() => setS(String(value)), [value]);
+  return (
+    <Input
+      type="number"
+      min={min}
+      max={max}
+      value={s}
+      className="max-w-[7rem]"
+      onChange={(e) => {
+        setS(e.target.value);
+        const n = Number(e.target.value);
+        if (Number.isInteger(n)) onChange(n);
+      }}
+    />
   );
 }
 
@@ -623,6 +656,40 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                     onCheckedChange={(v) => set({ subagent_runs_enabled: v })}
                   />
                 </div>
+
+                {/* Recursion caps — the numbers the Runs picker validates
+                    against. Editable here so an admin doesn't need env access;
+                    same [min,max] the server clamps to. */}
+                {draft.subagent_runs_enabled && (
+                  <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <div className="text-sm font-medium mb-1">Max depth</div>
+                      <NumField
+                        value={draft.subagent_max_depth}
+                        min={1}
+                        max={32}
+                        onChange={(n) => set({ subagent_max_depth: n })}
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        1–32 — how deep the sub-agent call tree may nest.
+                      </p>
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium mb-1">
+                        Max sub-agents per run
+                      </div>
+                      <NumField
+                        value={draft.subagent_max_children}
+                        min={1}
+                        max={128}
+                        onChange={(n) => set({ subagent_max_children: n })}
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        1–128 — fan-out a single run may spawn.
+                      </p>
+                    </div>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>

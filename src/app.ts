@@ -234,6 +234,12 @@ export function createApp(): Hono<AuthEnv> {
       // must clear a security review — NOT a UI toggle). Exposed read-only so
       // the Runs page shows the "spawn sub-agent" option only when it's live.
       subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+      // Recursion bounds (env-overridable in config.ts). Exposed so the Runs
+      // page validates a spawn against the SERVER's real caps instead of
+      // duplicating the defaults — an operator raising/lowering these stays
+      // in sync with the picker's grey-outs.
+      subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
+      subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     }),
   );
@@ -352,6 +358,8 @@ export function createApp(): Hono<AuthEnv> {
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+    subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
+    subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     // Server-wide runner default. NEVER the value — masked tail only.
     anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
       ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
@@ -449,6 +457,30 @@ export function createApp(): Hono<AuthEnv> {
           name: "FEATURE_SUBAGENT_RUNS",
           value: body.subagent_runs_enabled ? "true" : null,
         });
+      }
+    }
+    // Sub-agent recursion caps. Same [min,max] the config getters clamp to, so
+    // a UI-set value gates identically to an env-set one. null clears → default.
+    if ("subagent_max_depth" in body) {
+      const v = body.subagent_max_depth;
+      if (v === null || v === "") {
+        pending.push({ name: "SUBAGENT_MAX_DEPTH", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 1 || n > 32)
+          addError("subagent_max_depth", "Max sub-agent depth must be a whole number between 1 and 32.");
+        else pending.push({ name: "SUBAGENT_MAX_DEPTH", value: String(n) });
+      }
+    }
+    if ("subagent_max_children" in body) {
+      const v = body.subagent_max_children;
+      if (v === null || v === "") {
+        pending.push({ name: "SUBAGENT_MAX_CHILDREN", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 1 || n > 128)
+          addError("subagent_max_children", "Max sub-agents per run must be a whole number between 1 and 128.");
+        else pending.push({ name: "SUBAGENT_MAX_CHILDREN", value: String(n) });
       }
     }
     if ("slack_webhook_url" in body) {

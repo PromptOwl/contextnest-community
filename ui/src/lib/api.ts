@@ -144,6 +144,8 @@ export async function getHealth() {
     manual_sign_in?: "open" | "invite-only" | "disabled";
     workflow_plane_enabled?: boolean;
     subagent_runs_enabled?: boolean;
+    subagent_max_depth?: number;
+    subagent_max_children?: number;
     runner_key_configured?: boolean;
     suspended_reason?: string;
   }>("/health");
@@ -162,6 +164,8 @@ export interface AdminSettings {
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
   subagent_runs_enabled: boolean;
+  subagent_max_depth: number;
+  subagent_max_children: number;
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   smtp_url: string;
@@ -1480,10 +1484,17 @@ export async function queryContext(
   });
 }
 
-export async function listRuns(nestId: string, agent?: string) {
-  const q = agent ? `?agent=${encodeURIComponent(agent)}` : "";
+export async function listRuns(nestId: string, agent?: string, limit?: number) {
+  const params = new URLSearchParams();
+  if (agent) params.set("agent", agent);
+  // The Runs page derives child-count and ancestor-chain (re-entrancy) checks
+  // from this list, so it asks for more than the server's default 50 — a wider
+  // window keeps those client-side checks closer to the server's unbounded
+  // truth. Server clamps to 500.
+  if (limit) params.set("limit", String(limit));
+  const qs = params.toString();
   const r = await request<{ runs: RunSummary[] }>(
-    `/nests/${nestId}/runs${q}`,
+    `/nests/${nestId}/runs${qs ? `?${qs}` : ""}`,
   );
   return r.runs;
 }
@@ -1500,11 +1511,20 @@ export async function triggerRun(
   nestId: string,
   agentNode: string,
   inputs?: Record<string, unknown>,
+  parentRunId?: string,
 ) {
   return request<{ run_id: string }>(
     `/nests/${nestId}/run/${agentNode}`,
-    // The route reads body.inputs — wrap, don't spread (a bare {foo:1} body
-    // would silently drop the inputs).
-    { method: "POST", body: JSON.stringify(inputs ? { inputs } : {}) },
+    // The route reads body.inputs / body.parent_run_id — wrap, don't spread
+    // (a bare {foo:1} body would silently drop the inputs). parent_run_id
+    // nests the new run under a still-running parent as a sub-agent
+    // (bounded server-side by depth / fan-out / re-entrancy caps).
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ...(inputs ? { inputs } : {}),
+        ...(parentRunId ? { parent_run_id: parentRunId } : {}),
+      }),
+    },
   );
 }
