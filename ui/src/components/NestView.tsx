@@ -19,6 +19,7 @@ import {
   FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
+import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
 
 /** One icon per node type — agent/skill/artifact/document each read distinctly. */
 function NodeTypeIcon({
@@ -97,14 +98,6 @@ function timeAgo(dateStr: string) {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function prettyFolder(name: string) {
-  if (name === "Root") return "Root";
-  return name
-    .split(/[-_]/)
-    .map((s) => (s ? s[0].toUpperCase() + s.slice(1) : s))
-    .join(" ");
-}
-
 /** Compare paths segment-by-segment (not as flat strings) so children always
  *  sort directly under their parent — a sibling like "nodes-extra" would
  *  otherwise wedge between "nodes" and "nodes/a". */
@@ -116,12 +109,6 @@ function byPathSegments(a: string, b: string) {
     if (cmp !== 0) return cmp;
   }
   return as.length - bs.length;
-}
-
-/** "nodes/gtm/deals" → "Nodes / Gtm / Deals" for nested group headers. */
-function prettyFolderPath(path: string) {
-  if (path === "Root") return "Root";
-  return path.split("/").map(prettyFolder).join(" / ");
 }
 
 interface NestViewProps {
@@ -338,9 +325,22 @@ export function NestView({
   const [newFolderPath, setNewFolderPath] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
 
+  // Folder-nesting ceiling. Mirrors the server's folderToSegments guard
+  // (src/nodes/service.ts) — the leaf document doesn't count, only the folder
+  // segments. Kept in sync by hand; the server stays authoritative.
+  const MAX_FOLDER_DEPTH = 8;
+  const newFolderDepth = newFolderPath
+    .split("/")
+    .map((s) => s.trim())
+    .filter(Boolean).length;
+  const newFolderTooDeep = newFolderDepth > MAX_FOLDER_DEPTH;
+
   const createFolder = async () => {
     const folder = newFolderPath.trim().replace(/^\/+|\/+$/g, "");
     if (!folder) return;
+    // Block deeper than the server allows before the round-trip, so the user
+    // gets the reason inline instead of a swallowed 400.
+    if (newFolderTooDeep) return;
     setCreatingFolder(true);
     try {
       // Folders are path-derived — seed one with a starter node so it appears
@@ -353,8 +353,9 @@ export function NestView({
       setNewFolderPath("");
       setShowNewFolder(false);
       fetchData();
-    } catch (e) {
+    } catch (e: any) {
       console.error("[NestView] createFolder failed", e);
+      toast.error(e?.message || "Failed to create folder");
     } finally {
       setCreatingFolder(false);
     }
@@ -589,19 +590,6 @@ export function NestView({
         a.folder === "" ? -1 : b.folder === "" ? 1 : byPathSegments(a.folder, b.folder),
       );
   })();
-  /** A group is hidden when any strict ancestor folder (inside the current
-   *  scope) is collapsed. The folder's own collapsed state only hides its
-   *  doc rows — the header stays visible as the expand handle. */
-  const isUnderCollapsed = (folder: string) => {
-    if (!folder) return false;
-    const segs = folder.split("/");
-    for (let i = 1; i < segs.length; i++) {
-      const prefix = segs.slice(0, i).join("/");
-      if (baseFolder === prefix || baseFolder.startsWith(`${prefix}/`)) continue;
-      if (collapsedFolders.has(prefix)) return true;
-    }
-    return false;
-  };
 
   // Orphans + broken [[links]], client-side from the loaded list.
   const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
@@ -1631,85 +1619,76 @@ export function NestView({
                   </p>
                 </div>
               ) : (
-                <div className="space-y-5">
-                  {tocGroups.map((g) => (
-                    <div
-                      key={g.folder}
-                      style={{ marginLeft: `${g.depth * 1.25}rem` }}
+                <FolderTree
+                  className="space-y-1"
+                  groups={tocGroups}
+                  renderFolder={(node) => (
+                    // Overview folders navigate into the Documents tab scoped to
+                    // that folder — no collapse here; the whole tree stays open.
+                    <button
+                      type="button"
+                      onClick={() => openFolderInDocuments(node.path)}
+                      className="flex items-center gap-2 py-1 group/folder rounded px-1 -mx-1 hover:bg-muted/60 w-full text-left"
+                      title={`Browse ${prettyFolderPath(node.path)} in Documents`}
                     >
-                      {/* Root = docs directly under nodes/; no folder header.
-                          Folder headers open the Documents tab scoped to that
-                          folder — the Overview doubles as folder navigation. */}
-                      {g.folder !== "Root" && (
-                        <button
-                          type="button"
-                          onClick={() => openFolderInDocuments(g.folder)}
-                          className="flex items-center gap-2 mb-2 group/folder rounded px-1 -mx-1 hover:bg-muted/60"
-                          title={`Browse ${prettyFolderPath(g.folder)} in Documents`}
+                      <FolderOpen className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <span className="text-sm font-medium group-hover/folder:underline">
+                        {node.label}
+                      </span>
+                      <Badge
+                        variant="secondary"
+                        className="text-[10px] px-1.5 py-0 h-5"
+                      >
+                        {node.total}
+                      </Badge>
+                      <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover/folder:text-muted-foreground" />
+                      {canEditDocs && (
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/folder:opacity-100 hover:text-primary hover:bg-primary/10"
+                          title={`New document in ${prettyFolderPath(node.path)}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOpenDocument("new", { folder: node.path });
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.stopPropagation();
+                              onOpenDocument("new", { folder: node.path });
+                            }
+                          }}
                         >
-                          <FolderOpen className="h-4 w-4 text-muted-foreground" />
-                          <h4 className="text-sm font-medium group-hover/folder:underline">
-                            {prettyFolderPath(g.folder)}
-                          </h4>
-                          <Badge
-                            variant="secondary"
-                            className="text-[10px] px-1.5 py-0 h-5"
-                          >
-                            {g.items.length}
-                          </Badge>
-                          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover/folder:text-muted-foreground" />
-                          {canEditDocs && (
-                            <span
-                              role="button"
-                              tabIndex={0}
-                              className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/folder:opacity-100 hover:text-primary hover:bg-primary/10"
-                              title={`New document in ${prettyFolderPath(g.folder)}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onOpenDocument("new", { folder: g.folder });
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  e.stopPropagation();
-                                  onOpenDocument("new", { folder: g.folder });
-                                }
-                              }}
-                            >
-                              <Plus className="h-3.5 w-3.5" />
-                            </span>
-                          )}
-                        </button>
+                          <Plus className="h-3.5 w-3.5" />
+                        </span>
                       )}
-                      <div className="grid gap-1 sm:grid-cols-2">
-                        {g.items.map((n) => (
-                          <button
-                            key={n.id}
-                            onClick={() => onOpenDocument(n.id)}
-                            className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 text-left group min-w-0"
-                            title={n.title || n.id}
+                    </button>
+                  )}
+                  renderDoc={(n) => (
+                    <button
+                      onClick={() => onOpenDocument(n.id)}
+                      className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 text-left group min-w-0 w-full"
+                      title={n.title || n.id}
+                    >
+                      <NodeTypeIcon type={n.type} className="h-3.5 w-3.5" />
+                      <span className="text-sm truncate flex-1">
+                        {n.title || n.id}
+                      </span>
+                      {(() => {
+                        const p = typePill(n.type || "document");
+                        return p ? (
+                          <span
+                            className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${p.cls}`}
+                            title={p.title}
                           >
-                            <NodeTypeIcon type={n.type} className="h-3.5 w-3.5" />
-                            <span className="text-sm truncate flex-1">
-                              {n.title || n.id}
-                            </span>
-                            {(() => {
-                              const p = typePill(n.type || "document");
-                              return p ? (
-                                <span
-                                  className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${p.cls}`}
-                                  title={p.title}
-                                >
-                                  {p.label}
-                                </span>
-                              ) : null;
-                            })()}
-                            <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                            {p.label}
+                          </span>
+                        ) : null;
+                      })()}
+                      <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
+                    </button>
+                  )}
+                />
               )}
             </CardContent>
           </Card>
@@ -2327,78 +2306,92 @@ export function NestView({
                           Move to {baseFolder ? prettyFolderPath(baseFolder) : "nest root"}
                         </div>
                       )}
-                      {docGroups.map((g) => {
-                        if (g.folder && g.folder !== baseFolder && isUnderCollapsed(g.folder))
-                          return null;
-                        const showHeader = g.folder && g.folder !== baseFolder;
-                        const isCollapsed = collapsedFolders.has(g.folder);
-                        const isDropTarget = dropFolder === g.folder;
-                        return (
-                          <div key={g.folder || "__root"}>
-                            {showHeader && (
-                              <div
-                                className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none cursor-pointer transition-colors ${
-                                  isDropTarget
-                                    ? "bg-primary/10 ring-1 ring-primary"
-                                    : "hover:bg-muted/50"
-                                }`}
-                                style={{
-                                  marginLeft: `${Math.max(0, g.depth - 1) * 1.25}rem`,
-                                }}
-                                onClick={() => toggleFolderCollapsed(g.folder)}
-                                onDragOver={(e) => {
-                                  if (!dragNodeId) return;
-                                  e.preventDefault();
-                                  e.dataTransfer.dropEffect = "move";
-                                }}
-                                onDragEnter={() => dragNodeId && setDropFolder(g.folder)}
-                                onDragLeave={() =>
-                                  setDropFolder((d) => (d === g.folder ? null : d))
-                                }
-                                onDrop={(e) => {
-                                  e.preventDefault();
-                                  handleDropOnFolder(g.folder);
-                                }}
-                                data-testid={`folder-header-${g.folder}`}
-                              >
+                      <FolderTree
+                        className="space-y-1"
+                        groups={docGroups}
+                        baseFolder={baseFolder}
+                        isCollapsed={(p) => collapsedFolders.has(p)}
+                        renderFolder={(node, { collapsed }) => {
+                          const isDropTarget = dropFolder === node.path;
+                          // Only folders that DIRECTLY hold a document collapse.
+                          // A pure container (subfolders only, no node file) has
+                          // nothing of its own to hide, so it stays a static row
+                          // — no chevron, matching a file-tree's leaf folders.
+                          const collapsible = node.count > 0;
+                          return (
+                            <div
+                              className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none transition-colors ${
+                                collapsible ? "cursor-pointer" : ""
+                              } ${
+                                isDropTarget
+                                  ? "bg-primary/10 ring-1 ring-primary"
+                                  : "hover:bg-muted/50"
+                              }`}
+                              onClick={
+                                collapsible
+                                  ? () => toggleFolderCollapsed(node.path)
+                                  : undefined
+                              }
+                              onDragOver={(e) => {
+                                if (!dragNodeId) return;
+                                e.preventDefault();
+                                e.dataTransfer.dropEffect = "move";
+                              }}
+                              onDragEnter={() =>
+                                dragNodeId && setDropFolder(node.path)
+                              }
+                              onDragLeave={() =>
+                                setDropFolder((d) => (d === node.path ? null : d))
+                              }
+                              onDrop={(e) => {
+                                e.preventDefault();
+                                handleDropOnFolder(node.path);
+                              }}
+                              data-testid={`folder-header-${node.path}`}
+                            >
+                              {collapsible ? (
                                 <ChevronRight
                                   className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${
-                                    isCollapsed ? "" : "rotate-90"
+                                    collapsed ? "" : "rotate-90"
                                   }`}
                                 />
-                                <FolderOpen className="h-4 w-4 text-blue-500" />
-                                <span className="text-sm font-medium">
-                                  {prettyFolder(g.folder.split("/").pop()!)}
-                                </span>
+                              ) : (
+                                // Spacer so names still line up under sibling
+                                // collapsible folders.
+                                <span className="h-3.5 w-3.5 shrink-0" />
+                              )}
+                              <FolderOpen className="h-4 w-4 text-blue-500" />
+                              <span className="text-sm font-medium">
+                                {node.label}
+                              </span>
+                              {/* Direct doc count only. Container folders (no
+                                  node file of their own) show no badge. */}
+                              {node.count > 0 && (
                                 <Badge
                                   variant="secondary"
                                   className="text-[10px] px-1.5 py-0 h-5"
                                 >
-                                  {g.items.length}
+                                  {node.count}
                                 </Badge>
-                                {canEditDocs && (
-                                  <button
-                                    type="button"
-                                    className="ml-1 rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
-                                    title={`New document in ${prettyFolderPath(g.folder)}`}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      onOpenDocument("new", { folder: g.folder });
-                                    }}
-                                  >
-                                    <Plus className="h-3.5 w-3.5" />
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                            {!(showHeader && isCollapsed) && (
-                              <div className="space-y-1">
-                                {g.items.map((n) => renderDocRow(n, g.depth))}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
+                              )}
+                              {canEditDocs && (
+                                <button
+                                  type="button"
+                                  className="ml-1 rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
+                                  title={`New document in ${prettyFolderPath(node.path)}`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onOpenDocument("new", { folder: node.path });
+                                  }}
+                                >
+                                  <Plus className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          );
+                        }}
+                        renderDoc={(n) => renderDocRow(n, 0)}
+                      />
                     </div>
                   );
                 })()}
@@ -2865,13 +2858,20 @@ export function NestView({
             placeholder="e.g. gtm/deals"
             className="font-mono"
           />
+          {newFolderTooDeep && (
+            <p className="text-xs text-destructive">
+              Folders may nest at most {MAX_FOLDER_DEPTH} levels deep — this path
+              is {newFolderDepth}. Remove {newFolderDepth - MAX_FOLDER_DEPTH}{" "}
+              level{newFolderDepth - MAX_FOLDER_DEPTH === 1 ? "" : "s"}.
+            </p>
+          )}
           <DialogFooter>
             <Button variant="ghost" onClick={() => setShowNewFolder(false)}>
               Cancel
             </Button>
             <Button
               onClick={() => void createFolder()}
-              disabled={creatingFolder || !newFolderPath.trim()}
+              disabled={creatingFolder || !newFolderPath.trim() || newFolderTooDeep}
             >
               {creatingFolder ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
