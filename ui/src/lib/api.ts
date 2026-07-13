@@ -144,6 +144,8 @@ export async function getHealth() {
     manual_sign_in?: "open" | "invite-only" | "disabled";
     workflow_plane_enabled?: boolean;
     subagent_runs_enabled?: boolean;
+    subagent_max_depth?: number;
+    subagent_max_children?: number;
     runner_key_configured?: boolean;
     suspended_reason?: string;
   }>("/health");
@@ -1480,10 +1482,17 @@ export async function queryContext(
   });
 }
 
-export async function listRuns(nestId: string, agent?: string) {
-  const q = agent ? `?agent=${encodeURIComponent(agent)}` : "";
+export async function listRuns(nestId: string, agent?: string, limit?: number) {
+  const params = new URLSearchParams();
+  if (agent) params.set("agent", agent);
+  // The Runs page derives child-count and ancestor-chain (re-entrancy) checks
+  // from this list, so it asks for more than the server's default 50 — a wider
+  // window keeps those client-side checks closer to the server's unbounded
+  // truth. Server clamps to 500.
+  if (limit) params.set("limit", String(limit));
+  const qs = params.toString();
   const r = await request<{ runs: RunSummary[] }>(
-    `/nests/${nestId}/runs${q}`,
+    `/nests/${nestId}/runs${qs ? `?${qs}` : ""}`,
   );
   return r.runs;
 }

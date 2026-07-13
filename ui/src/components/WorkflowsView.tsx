@@ -614,13 +614,14 @@ function EdgesPanel({ nestId }: { nestId: string }) {
 
 // ─── Runs: list + replayable trace ───────────────────────────────────────
 
-// Mirror the server caps (src/config.ts). Root runs are depth 0, so a run
-// already at SUBAGENT_MAX_DEPTH can't parent a deeper child; a run already at
-// SUBAGENT_MAX_CHILDREN can't parent another. We surface both — plus the
-// re-entrancy (loop) rule — in the pickers so an ineligible parent/agent is
-// greyed out up front instead of failing only after submit.
-const SUBAGENT_MAX_DEPTH = 8;
-const SUBAGENT_MAX_CHILDREN = 16;
+// Fallback caps if /health hasn't loaded yet — the LIVE values come from the
+// server via useAuth (subagentMaxDepth/Children), so an operator's env
+// override (config.ts) stays in sync with the pickers. Root runs are depth 0,
+// so a run already at the depth cap can't parent a deeper child, and one at
+// the fan-out cap can't parent another; both — plus the re-entrancy (loop)
+// rule — are surfaced up front instead of failing only after submit.
+const SUBAGENT_MAX_DEPTH_FALLBACK = 8;
+const SUBAGENT_MAX_CHILDREN_FALLBACK = 16;
 
 /**
  * Agent/skill picker that renders the SAME type icon as the document list
@@ -731,7 +732,10 @@ function ParentSelect({
 }
 
 function RunsPanel({ nestId }: { nestId: string }) {
-  const { subagentRunsEnabled } = useAuth();
+  const { subagentRunsEnabled, subagentMaxDepth, subagentMaxChildren } = useAuth();
+  // Live server caps (fall back to defaults until /health resolves).
+  const maxDepth = subagentMaxDepth || SUBAGENT_MAX_DEPTH_FALLBACK;
+  const maxChildren = subagentMaxChildren || SUBAGENT_MAX_CHILDREN_FALLBACK;
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [selected, setSelected] = useState<RunDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -758,7 +762,9 @@ function RunsPanel({ nestId }: { nestId: string }) {
     setLoading(true);
     try {
       const [r, n] = await Promise.all([
-        listRuns(nestId),
+        // Wider window (server clamps to 500) so childCount/chainAgents see
+        // more of the tree — the eligibility checks derive from this list.
+        listRuns(nestId, undefined, 500),
         listNodes(nestId).then((x) => x.nodes).catch(() => []),
       ]);
       setRuns(r);
@@ -859,14 +865,20 @@ function RunsPanel({ nestId }: { nestId: string }) {
 
   // Eligibility, computed client-side so the pickers grey out ineligible
   // choices BEFORE submit (mirrors the server's resolveParentRun guards).
+  // Caveat: this is derived from the loaded run window (up to 500), NOT the
+  // full nest history — in a very busy nest childCount may undercount and an
+  // ancestor may fall outside the window, so these checks are ADVISORY. The
+  // server (unbounded COUNT / ancestor walk) is the authoritative guard; if a
+  // stale check slips through, the spawn just fails inline instead of silently.
   const runById = new Map(runs.map((r) => [r.id, r]));
   const childCount = (runId: string) => childrenOf.get(runId)?.length ?? 0;
   // Agent nodes in a run's own node + every ancestor — the re-entrancy set.
   // Spawning an agent already in here would create a cycle (server rejects).
+  // `break` on a missing ancestor = window edge; the server still catches it.
   const chainAgents = (runId: string): Set<string> => {
     const set = new Set<string>();
     let cur: string | null = runId;
-    for (let i = 0; cur && i <= SUBAGENT_MAX_DEPTH + 1; i++) {
+    for (let i = 0; cur && i <= maxDepth + 1; i++) {
       const r = runById.get(cur);
       if (!r) break;
       set.add(r.agent_node);
@@ -877,9 +889,9 @@ function RunsPanel({ nestId }: { nestId: string }) {
   // Why a run can't parent a NEW child of `childAgent` ("" = agent not chosen
   // yet, so only parent-side caps are checked). null = eligible.
   const parentBlockedReason = (p: RunSummary, childAgent: string): string | null => {
-    if ((p.depth ?? 0) >= SUBAGENT_MAX_DEPTH) return "at max depth";
-    if (childCount(p.id) >= SUBAGENT_MAX_CHILDREN)
-      return `${SUBAGENT_MAX_CHILDREN}/${SUBAGENT_MAX_CHILDREN} full`;
+    if ((p.depth ?? 0) >= maxDepth) return "at max depth";
+    if (childCount(p.id) >= maxChildren)
+      return `${maxChildren}/${maxChildren} full`;
     if (childAgent && chainAgents(p.id).has(childAgent)) return "would loop";
     return null;
   };
@@ -893,6 +905,11 @@ function RunsPanel({ nestId }: { nestId: string }) {
   const renderRun = (r: RunSummary, level: number): React.ReactNode => {
     const kids = childrenOf.get(r.id) ?? [];
     const indent = level ? `${0.75 + level * 1.1}rem` : undefined;
+    // Depth badges below prefer the server's `r.depth` and fall back to render
+    // `level` only if it's missing. These can differ when a run's parent is
+    // outside the loaded window (rendered as a root at level 0 though its true
+    // depth is higher) — the server value is authoritative; `level` is a
+    // last-resort label for that window-edge case.
     return (
       <div key={r.id}>
         <div
@@ -938,8 +955,8 @@ function RunsPanel({ nestId }: { nestId: string }) {
                 deeper/wider child would be rejected server-side). */}
             {subagentRunsEnabled &&
               r.status === "running" &&
-              (r.depth ?? 0) < SUBAGENT_MAX_DEPTH &&
-              childCount(r.id) < SUBAGENT_MAX_CHILDREN && (
+              (r.depth ?? 0) < maxDepth &&
+              childCount(r.id) < maxChildren && (
               <Button
                 variant="ghost"
                 size="sm"

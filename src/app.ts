@@ -234,6 +234,12 @@ export function createApp(): Hono<AuthEnv> {
       // must clear a security review — NOT a UI toggle). Exposed read-only so
       // the Runs page shows the "spawn sub-agent" option only when it's live.
       subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+      // Recursion bounds (env-overridable in config.ts). Exposed so the Runs
+      // page validates a spawn against the SERVER's real caps instead of
+      // duplicating the defaults — an operator raising/lowering these stays
+      // in sync with the picker's grey-outs.
+      subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
+      subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     }),
   );
