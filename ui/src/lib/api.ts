@@ -164,6 +164,8 @@ export interface AdminSettings {
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
   subagent_runs_enabled: boolean;
+  subagent_max_depth: number;
+  subagent_max_children: number;
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   smtp_url: string;
