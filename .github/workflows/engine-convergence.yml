@@ -1,0 +1,41 @@
+name: Engine Convergence
+
+# Guards the API convergence contract (docs/prds/api-convergence.md, Phase 3) and the
+# "Engine & CLI Sync Discipline" rule in CLAUDE.md: no new inline MCP schemas, and the
+# TypeScript surface stays green against the pinned engine.
+
+on:
+  push:
+    branches:
+      - development
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  convergence:
+    name: Schema guard + typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: MCP schema divergence guard
+        run: npm run lint:mcp-schemas
+
+      - name: Typecheck
+        run: npm run typecheck
