@@ -1457,26 +1457,55 @@ export function DocumentEditor({
                 </button>
                 {folder.split("/").filter(Boolean).map((seg, i, arr) => {
                   const path = arr.slice(0, i + 1).join("/");
+                  const parent = arr.slice(0, i).join("/");
                   const isLast = i === arr.length - 1;
                   return (
                     <span key={path} className="flex items-center gap-1">
                       <span className="text-muted-foreground/50 text-sm">/</span>
-                      <button
-                        type="button"
-                        disabled={fieldsDisabled}
-                        onClick={() => {
-                          setFolder(path);
-                          setTouched(true);
-                        }}
-                        className={`text-sm rounded px-1.5 py-0.5 ${
-                          isLast
-                            ? "font-medium bg-muted"
-                            : "text-primary hover:bg-muted"
+                      <span
+                        className={`flex items-center rounded ${
+                          isLast ? "bg-muted" : ""
                         }`}
-                        title={`Scope to ${path}`}
                       >
-                        {seg}
-                      </button>
+                        <button
+                          type="button"
+                          disabled={fieldsDisabled}
+                          onClick={() => {
+                            setFolder(path);
+                            setTouched(true);
+                          }}
+                          className={`text-sm rounded px-1.5 py-0.5 ${
+                            isLast
+                              ? "font-medium"
+                              : "text-primary hover:bg-muted"
+                          }`}
+                          title={`Scope to ${path}`}
+                        >
+                          {seg}
+                        </button>
+                        {/* Step OUT one level — pops just this (current) segment
+                            to its parent, so a deep path can be walked back up
+                            without jumping all the way to Root via the X. */}
+                        {isLast && (
+                          <button
+                            type="button"
+                            disabled={fieldsDisabled}
+                            onClick={() => {
+                              setFolder(parent);
+                              setTouched(true);
+                            }}
+                            className="mr-0.5 rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-background"
+                            title={
+                              parent
+                                ? `Go up to ${parent}`
+                                : "Go up to the nest root"
+                            }
+                            data-testid="folder-step-up"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        )}
+                      </span>
                     </span>
                   );
                 })}
@@ -2258,6 +2287,12 @@ function FolderStepPicker({
   onPick: (next: string) => void;
 }) {
   const [newName, setNewName] = useState("");
+  // Server caps folders at 8 segments deep (src/nodes/service.ts). Existing
+  // folders are already within that, so only a brand-new subfolder can push
+  // past it — block that here once the current path is at the limit.
+  const MAX_FOLDER_DEPTH = 8;
+  const atDepthLimit =
+    folder.split("/").filter(Boolean).length >= MAX_FOLDER_DEPTH;
   const children = useMemo(() => {
     const kids = new Set<string>();
     for (const f of folderOptions) {
@@ -2272,6 +2307,7 @@ function FolderStepPicker({
   }, [folder, folderOptions]);
 
   const commitNew = () => {
+    if (atDepthLimit) return;
     // Slashes would smuggle extra depth past the picker; fold them away.
     const seg = newName.trim().replace(/\/+/g, "-");
     if (!seg) return;
@@ -2312,24 +2348,30 @@ function FolderStepPicker({
             <DropdownMenuSeparator />
           </>
         )}
-        <div
-          className="flex items-center gap-1.5 px-2 py-1.5"
-          onKeyDown={(e) => e.stopPropagation()}
-        >
-          <FolderPlus className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-          <Input
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                commitNew();
-              }
-            }}
-            placeholder="New subfolder…"
-            className="h-7 text-sm"
-          />
-        </div>
+        {atDepthLimit ? (
+          <div className="px-2 py-1.5 text-xs text-muted-foreground">
+            Max folder depth ({MAX_FOLDER_DEPTH}) reached — can't nest deeper.
+          </div>
+        ) : (
+          <div
+            className="flex items-center gap-1.5 px-2 py-1.5"
+            onKeyDown={(e) => e.stopPropagation()}
+          >
+            <FolderPlus className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            <Input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitNew();
+                }
+              }}
+              placeholder="New subfolder…"
+              className="h-7 text-sm"
+            />
+          </div>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );
