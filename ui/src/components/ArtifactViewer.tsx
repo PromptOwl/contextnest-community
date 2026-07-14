@@ -137,11 +137,15 @@ export function ArtifactViewer({
   const [replyBody, setReplyBody] = useState("");
 
   const preRef = useRef<HTMLPreElement | null>(null);
-  // A pinned historical version wins over the served snapshot.
+  // A pinned historical version wins over the served snapshot. `iframeKey`
+  // doubles as a cache-buster: it bumps on every save/reload/restore, so the
+  // remounted iframe refetches instead of showing the browser's cached copy of
+  // the same URL (the served body changes under the same URL after a save).
   const hostedUrl = api.hostedArtifactUrl(
     nestId,
     nodeId,
     viewingVersion ?? snapshot,
+    iframeKey,
   );
 
   const loadVersions = useCallback(async () => {
@@ -153,14 +157,10 @@ export function ArtifactViewer({
     }
   }, [nestId, nodeId]);
 
-  const openVersions = useCallback(() => {
-    setShowVersions(true);
-    void loadVersions();
-  }, [loadVersions]);
-
   // Leaving Edit source with unsaved changes prompts first, then drops the
   // draft so the confirm is honest (native confirm matches the app's other
-  // destructive prompts). Guards Back, the mode toggle, and "View rendered".
+  // destructive prompts). Guards Back, the mode toggle, history, and "View
+  // rendered".
   const guardEditLeave = useCallback(
     (leave: () => void) => {
       if (mode === "edit" && editDirty) {
@@ -171,6 +171,16 @@ export function ArtifactViewer({
     },
     [mode, editDirty, nodeMeta],
   );
+
+  // Opening history from Edit mode must clear the unsaved-source guard first:
+  // a restore fired from the modal nulls nodeMeta, and if mode were still
+  // "edit" the source pane would strand on stale draft with Save wedged off.
+  const openVersions = useCallback(() => {
+    guardEditLeave(() => {
+      setShowVersions(true);
+      void loadVersions();
+    });
+  }, [guardEditLeave, loadVersions]);
 
   // Warn on tab close / reload while an unsaved source draft exists.
   useEffect(() => {
@@ -209,11 +219,17 @@ export function ArtifactViewer({
       await api.revertToVersion(nestId, nodeId, v);
       toast.success(`Restored from version ${v}`);
       setViewingVersion(null);
+      setShowVersions(false);
+      // A restore can fire from the history modal while the source editor is
+      // open; drop to preview so the edit pane can't linger over the now-null
+      // node body (Save would wedge off and the textarea show stale draft).
+      setMode("preview");
       // Serve the server's current default again and drop caches that now
       // describe the pre-restore body.
       setSnapshot(null);
       setExtractedText("");
       setNodeMeta(null);
+      setEditDraft("");
       setIframeKey((k) => k + 1);
       await loadVersions();
     },
@@ -296,10 +312,11 @@ export function ArtifactViewer({
     }
   }, [nodeMeta, editDirty, savingSource, nestId, nodeId, editDraft]);
 
+  // Cancel is an exit like any other — prompt on unsaved changes so it matches
+  // Back / the mode toggle rather than silently discarding.
   const cancelEdit = useCallback(() => {
-    if (nodeMeta) setEditDraft(nodeMeta.content);
-    setMode("preview");
-  }, [nodeMeta]);
+    guardEditLeave(() => setMode("preview"));
+  }, [guardEditLeave]);
 
   const loadThreads = useCallback(async () => {
     setLoadingThreads(true);
@@ -324,7 +341,7 @@ export function ArtifactViewer({
     setTextLoading(true);
     try {
       const { html, snapshot: served } = await api.fetchArtifactHtml(
-        nestId, nodeId, snapshot,
+        nestId, nodeId, snapshot, iframeKey,
       );
       setExtractedText(extractText(html));
       if (served != null) setSnapshot(served);
@@ -333,7 +350,7 @@ export function ArtifactViewer({
     } finally {
       setTextLoading(false);
     }
-  }, [extractedText, textLoading, nestId, nodeId, snapshot]);
+  }, [extractedText, textLoading, nestId, nodeId, snapshot, iframeKey]);
 
   useEffect(() => {
     if (mode === "annotate") void ensureText();
