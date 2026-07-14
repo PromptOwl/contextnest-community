@@ -1,5 +1,12 @@
 import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
 import { createLowlight, common } from "lowlight";
+import {
+  parseDelimited,
+  detectDelimiter,
+  detectHeaderRow,
+  rowsToMarkdownTable,
+  type Delimiter,
+} from "@/lib/csv-table";
 
 const lowlight = createLowlight(common);
 
@@ -12,6 +19,12 @@ const LANGUAGES: Array<{ id: string; label: string }> = [
   { id: "cpp", label: "C++" },
   { id: "csharp", label: "C#" },
   { id: "css", label: "CSS" },
+  // Delimited-data blocks: large CSV/TSV pastes land here instead of a live
+  // table (see MarkdownEditor's insertDelimitedTable). Highlighting is a
+  // no-op — lowlight has no csv/tsv grammar — but the label tells the user
+  // what the block holds and unlocks the "Convert to table" action.
+  { id: "csv", label: "CSV" },
+  { id: "tsv", label: "TSV" },
   { id: "diff", label: "Diff" },
   { id: "go", label: "Go" },
   { id: "graphql", label: "GraphQL" },
@@ -82,6 +95,36 @@ export const CodeBlock = CodeBlockLowlight.extend({
           .run();
       });
 
+      // Always-visible escape hatch for a delimited-data block: convert it to
+      // a live markdown table. Mirrors the post-insert toast action, but stays
+      // put so a user who missed (or dismissed) the toast can still convert.
+      // Shown only when the block is tagged csv/tsv.
+      const toTable = document.createElement("button");
+      toTable.type = "button";
+      toTable.className = "cn-code-copy cn-code-to-table";
+      toTable.textContent = "Convert to table";
+      toTable.addEventListener("click", () => {
+        const pos = typeof getPos === "function" ? getPos() : undefined;
+        if (pos === undefined) return;
+        const n = editor.state.doc.nodeAt(pos);
+        if (!n) return;
+        const raw = n.textContent.replace(/\n$/, "");
+        const lang = (n.attrs.language as string) || "";
+        const delimiter: Delimiter =
+          lang === "tsv" ? "\t" : (detectDelimiter(raw) ?? ",");
+        const rows = parseDelimited(raw, delimiter);
+        if (rows.length === 0) return;
+        const md = rowsToMarkdownTable(rows, {
+          hasHeader: detectHeaderRow(rows),
+        });
+        editor
+          .chain()
+          .focus()
+          .deleteRange({ from: pos, to: pos + n.nodeSize })
+          .insertContentAt(pos, md)
+          .run();
+      });
+
       const copy = document.createElement("button");
       copy.type = "button";
       copy.className = "cn-code-copy";
@@ -95,7 +138,16 @@ export const CodeBlock = CodeBlockLowlight.extend({
         }, 1200);
       });
 
-      header.append(select, copy);
+      // Reveal "Convert to table" only for delimited-data blocks.
+      const syncActions = (lang: string) => {
+        toTable.style.display = lang === "csv" || lang === "tsv" ? "" : "none";
+      };
+      syncActions(select.value);
+
+      const actions = document.createElement("div");
+      actions.className = "cn-code-actions";
+      actions.append(toTable, copy);
+      header.append(select, actions);
 
       const pre = document.createElement("pre");
       const code = document.createElement("code");
@@ -110,6 +162,7 @@ export const CodeBlock = CodeBlockLowlight.extend({
           if (updated.type !== node.type) return false;
           const lang = (updated.attrs.language as string) || "plaintext";
           if (select.value !== lang) select.value = lang;
+          syncActions(lang);
           return true;
         },
       };

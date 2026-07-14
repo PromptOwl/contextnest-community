@@ -16,6 +16,14 @@ import type { MarkdownSerializerState } from "prosemirror-markdown";
 function cellToMarkdown(cell: ProseMirrorNode): string {
   const parts: string[] = [];
   cell.descendants((n) => {
+    // In-cell line breaks round-trip as `<br>`, matching how csv-table.ts
+    // encodes newline-bearing cells on import. Without this a hardBreak is
+    // not `isText`, so it contributes nothing and the two lines are silently
+    // concatenated ("line1line2") on the next save.
+    if (n.type.name === "hardBreak") {
+      parts.push("<br>");
+      return false;
+    }
     if (n.isText && n.text) {
       // Escape backslash first so the pipe-escape's added `\` isn't re-escaped.
       let t = n.text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
