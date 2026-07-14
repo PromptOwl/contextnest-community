@@ -1070,6 +1070,8 @@ export function DocumentEditor({
         title={title}
         snapshotVersion={null}
         currentEmail={currentEmail}
+        viewOnly={isViewOnly}
+        reviewerOnly={isReviewerOnly}
         onBack={onBack}
       />
     );

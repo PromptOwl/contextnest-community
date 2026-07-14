@@ -24,8 +24,17 @@ import { extractText, buildAnchor } from "../lib/artifact-text";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { VersionHistoryModal, type VersionHistoryData } from "./governance";
+import {
   ArrowLeft, Loader2, MessageSquarePlus, ExternalLink, RefreshCw,
-  Eye, Highlighter, Check, RotateCcw, Send,
+  Eye, Highlighter, Check, RotateCcw, Send, History, Code2, X,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -39,6 +48,17 @@ interface ArtifactViewerProps {
   /** The approved/served snapshot version, if known (for the badge). */
   snapshotVersion?: number | null;
   currentEmail?: string;
+  /**
+   * Caller has no write access (mirrors DocumentEditor's isViewOnly).
+   * Hides restore and source editing; history stays readable.
+   */
+  viewOnly?: boolean;
+  /**
+   * Reviewer-scoped steward without editor rights (DocumentEditor's
+   * isReviewerOnly). May restore (a governance action the server gates)
+   * but not free-edit the source — same split DocumentEditor applies.
+   */
+  reviewerOnly?: boolean;
   onBack: () => void;
 }
 
@@ -53,15 +73,45 @@ export function ArtifactViewer({
   title,
   snapshotVersion,
   currentEmail,
+  viewOnly = false,
+  reviewerOnly = false,
   onBack,
 }: ArtifactViewerProps) {
-  const [mode, setMode] = useState<"preview" | "annotate">("preview");
+  const [mode, setMode] = useState<"preview" | "annotate" | "edit">("preview");
   const [threads, setThreads] = useState<AnnotationThread[]>([]);
   const [loadingThreads, setLoadingThreads] = useState(true);
   const [extractedText, setExtractedText] = useState<string>("");
   const [textLoading, setTextLoading] = useState(false);
   const [snapshot, setSnapshot] = useState<number | null>(snapshotVersion ?? null);
   const [iframeKey, setIframeKey] = useState(0);
+
+  // ── Version history (CU-wdqcpzw3u5) ────────────────────────────────────
+  // The server versions every artifact save like any node; this surfaces it.
+  const [showVersions, setShowVersions] = useState(false);
+  const [versionData, setVersionData] = useState<VersionHistoryData | null>(null);
+  // Historical version pinned into the iframe (?v=N), read-only. null = live.
+  const [viewingVersion, setViewingVersion] = useState<number | null>(null);
+  // Banner "Restore this version" confirm (the history modal has its own).
+  const [confirmRestore, setConfirmRestore] = useState<number | null>(null);
+  const [restoring, setRestoring] = useState(false);
+
+  // ── Source editing ──────────────────────────────────────────────────────
+  // Node body + version loaded lazily on first entering Edit mode. Saving
+  // goes through the normal PATCH path, so governance/review still applies.
+  const [nodeMeta, setNodeMeta] = useState<{
+    content: string;
+    version?: number;
+    status: string | null;
+  } | null>(null);
+  const [nodeLoading, setNodeLoading] = useState(false);
+  const [editDraft, setEditDraft] = useState("");
+  const [savingSource, setSavingSource] = useState(false);
+
+  const canRestore = !viewOnly;
+  const canEdit = !viewOnly && !reviewerOnly;
+  // Pending review locks writes server-side (423) — mirror DocumentEditor
+  // and disable the affordances instead of letting the user hit the error.
+  const isLocked = nodeMeta?.status === "pending_review";
 
   // Pending new-comment composition.
   const [selection, setSelection] = useState<
@@ -73,7 +123,141 @@ export function ArtifactViewer({
   const [replyBody, setReplyBody] = useState("");
 
   const preRef = useRef<HTMLPreElement | null>(null);
-  const hostedUrl = api.hostedArtifactUrl(nestId, nodeId, snapshot);
+  // A pinned historical version wins over the served snapshot.
+  const hostedUrl = api.hostedArtifactUrl(
+    nestId,
+    nodeId,
+    viewingVersion ?? snapshot,
+  );
+
+  const loadVersions = useCallback(async () => {
+    try {
+      setVersionData(await api.getNodeVersions(nestId, nodeId));
+    } catch (e: any) {
+      setVersionData(null);
+      toast.error(e?.message || "Failed to load version history");
+    }
+  }, [nestId, nodeId]);
+
+  const openVersions = useCallback(() => {
+    setShowVersions(true);
+    void loadVersions();
+  }, [loadVersions]);
+
+  // Pin a historical version into the iframe, read-only.
+  const viewVersion = useCallback((v: number) => {
+    setShowVersions(false);
+    setViewingVersion(v);
+    setMode("preview");
+    setIframeKey((k) => k + 1);
+  }, []);
+
+  const exitVersionView = useCallback(() => {
+    setViewingVersion(null);
+    setIframeKey((k) => k + 1);
+  }, []);
+
+  // Restore = the same server path DocumentEditor uses: /revert writes the
+  // old body as a NEW version ("Restored from version N") through the normal
+  // node update, so stewardship/review still applies.
+  const performRestore = useCallback(
+    async (v: number) => {
+      await api.revertToVersion(nestId, nodeId, v);
+      toast.success(`Restored from version ${v}`);
+      setViewingVersion(null);
+      // Serve the server's current default again and drop caches that now
+      // describe the pre-restore body.
+      setSnapshot(null);
+      setExtractedText("");
+      setNodeMeta(null);
+      setIframeKey((k) => k + 1);
+      await loadVersions();
+    },
+    [nestId, nodeId, loadVersions],
+  );
+
+  // Banner restore ("Restore this version" while previewing) — confirmed via
+  // the dialog below; the history modal's restore has its own confirm.
+  const confirmBannerRestore = useCallback(async () => {
+    if (confirmRestore == null) return;
+    setRestoring(true);
+    try {
+      await performRestore(confirmRestore);
+      setConfirmRestore(null);
+    } catch (e: any) {
+      toast.error(e?.message || "Restore failed");
+    } finally {
+      setRestoring(false);
+    }
+  }, [confirmRestore, performRestore]);
+
+  // Enter source-edit mode; fetch the node body on first entry (a later
+  // re-entry keeps the in-progress draft).
+  const enterEdit = useCallback(async () => {
+    setViewingVersion(null);
+    setMode("edit");
+    if (nodeMeta || nodeLoading) return;
+    setNodeLoading(true);
+    try {
+      const { node } = await api.getNode(nestId, nodeId);
+      const content = node?.content == null ? "" : String(node.content);
+      setNodeMeta({
+        content,
+        version: node?.version,
+        status: node?.status ?? null,
+      });
+      setEditDraft(content);
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to load artifact source");
+      setMode("preview");
+    } finally {
+      setNodeLoading(false);
+    }
+  }, [nodeMeta, nodeLoading, nestId, nodeId]);
+
+  const editDirty = nodeMeta != null && editDraft !== nodeMeta.content;
+
+  // Save through the normal node-update path (same call DocumentEditor makes)
+  // so versioning + governance behave exactly like a markdown edit.
+  const saveSource = useCallback(async () => {
+    if (!nodeMeta || !editDirty || savingSource) return;
+    setSavingSource(true);
+    try {
+      const res: any = await api.updateNode(
+        nestId,
+        nodeId,
+        { content: editDraft },
+        nodeMeta.version,
+      );
+      const nextVersion = res?.version ?? res?.node?.version;
+      setNodeMeta({
+        content: editDraft,
+        version: typeof nextVersion === "number" ? nextVersion : nodeMeta.version,
+        status: res?.node?.status ?? nodeMeta.status,
+      });
+      // Refresh the render + drop the stale extracted text; the served
+      // snapshot may lag behind under stewardship (until approved) — that is
+      // the governance path working, not a bug.
+      setSnapshot(null);
+      setExtractedText("");
+      setIframeKey((k) => k + 1);
+      setMode("preview");
+      toast.success(
+        typeof nextVersion === "number"
+          ? `Saved as version ${nextVersion}`
+          : "Artifact saved",
+      );
+    } catch (e: any) {
+      toast.error(e?.message || "Save failed");
+    } finally {
+      setSavingSource(false);
+    }
+  }, [nodeMeta, editDirty, savingSource, nestId, nodeId, editDraft]);
+
+  const cancelEdit = useCallback(() => {
+    if (nodeMeta) setEditDraft(nodeMeta.content);
+    setMode("preview");
+  }, [nodeMeta]);
 
   const loadThreads = useCallback(async () => {
     setLoadingThreads(true);
@@ -212,7 +396,15 @@ export function ArtifactViewer({
           <Badge variant="secondary" className="shrink-0 gap-1">
             Artifact
           </Badge>
-          {snapshot != null && (
+          {viewingVersion != null ? (
+            <Badge
+              variant="outline"
+              className="shrink-0 border-amber-300 bg-amber-50 text-amber-800"
+              title="Read-only view of a historical version."
+            >
+              Viewing v{viewingVersion}
+            </Badge>
+          ) : snapshot != null ? (
             <Badge
               variant="outline"
               className="shrink-0"
@@ -220,7 +412,7 @@ export function ArtifactViewer({
             >
               Snapshot v{snapshot}
             </Badge>
-          )}
+          ) : null}
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <div className="flex items-center rounded-md border h-9">
@@ -235,14 +427,40 @@ export function ArtifactViewer({
             </button>
             <button
               type="button"
-              className={`px-3 h-full rounded-r-md inline-flex items-center gap-1.5 text-sm ${
-                mode === "annotate" ? "bg-muted" : "hover:bg-muted/50"
-              }`}
+              className={`px-3 h-full inline-flex items-center gap-1.5 text-sm disabled:opacity-50 ${
+                canEdit ? "" : "rounded-r-md "
+              }${mode === "annotate" ? "bg-muted" : "hover:bg-muted/50"}`}
+              disabled={viewingVersion != null}
+              title={
+                viewingVersion != null
+                  ? "Return to the current version to annotate"
+                  : undefined
+              }
               onClick={() => setMode("annotate")}
             >
               <Highlighter className="h-4 w-4" /> Annotate
             </button>
+            {canEdit && (
+              <button
+                type="button"
+                className={`px-3 h-full rounded-r-md inline-flex items-center gap-1.5 text-sm ${
+                  mode === "edit" ? "bg-muted" : "hover:bg-muted/50"
+                }`}
+                title="Edit the artifact's raw HTML source"
+                onClick={() => void enterEdit()}
+              >
+                <Code2 className="h-4 w-4" /> Edit source
+              </button>
+            )}
           </div>
+          <Button
+            variant="outline"
+            size="icon"
+            title="Version history"
+            onClick={openVersions}
+          >
+            <History className="h-4 w-4" />
+          </Button>
           <Button
             variant="outline"
             size="icon"
@@ -262,7 +480,96 @@ export function ArtifactViewer({
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-4">
         {/* Artifact pane */}
         <div className="border rounded-lg overflow-hidden bg-background min-h-[70vh] flex flex-col">
-          {mode === "preview" ? (
+          {viewingVersion != null && (
+            <div className="px-3 py-2 border-b bg-amber-50 text-xs text-amber-900 flex items-center justify-between gap-2 flex-wrap">
+              <span>
+                <span className="font-medium">
+                  Viewing version {viewingVersion}
+                </span>{" "}
+                — read-only historical snapshot.
+              </span>
+              <span className="flex items-center gap-1.5">
+                {canRestore && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-6 px-2 text-xs border-amber-300 text-amber-900 hover:bg-amber-100"
+                    onClick={() => setConfirmRestore(viewingVersion)}
+                  >
+                    <RotateCcw className="h-3 w-3 mr-1" /> Restore this version
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 text-xs text-amber-900 hover:bg-amber-100"
+                  onClick={exitVersionView}
+                >
+                  <X className="h-3 w-3 mr-1" /> Back to current
+                </Button>
+              </span>
+            </div>
+          )}
+          {mode === "edit" ? (
+            <div className="flex-1 flex flex-col min-h-[70vh]">
+              <div className="px-3 py-2 border-b bg-muted/30 text-xs text-muted-foreground">
+                {isLocked
+                  ? "Locked while awaiting steward review — resolve the review before editing."
+                  : "Editing raw HTML source. Saving creates a new version, like any document edit."}
+              </div>
+              {nodeLoading ? (
+                <div className="flex items-center justify-center flex-1 text-muted-foreground">
+                  <Loader2 className="h-5 w-5 animate-spin mr-2" /> Loading source…
+                </div>
+              ) : (
+                <>
+                  <textarea
+                    value={editDraft}
+                    onChange={(e) => setEditDraft(e.target.value)}
+                    readOnly={isLocked}
+                    spellCheck={false}
+                    placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
+                    className="flex-1 w-full min-h-[50vh] bg-background p-3 font-mono text-xs leading-relaxed resize-none focus:outline-none"
+                  />
+                  <div className="px-3 py-2 border-t flex items-center justify-between gap-2">
+                    <span className="text-xs text-muted-foreground">
+                      {nodeMeta?.version != null ? `Editing v${nodeMeta.version}` : ""}
+                      {editDirty ? " · unsaved changes" : ""}
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={cancelEdit}
+                        disabled={savingSource}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => void saveSource()}
+                        disabled={
+                          isLocked || savingSource || !editDirty || !editDraft.trim()
+                        }
+                        title={
+                          isLocked
+                            ? "Locked while awaiting steward review"
+                            : undefined
+                        }
+                      >
+                        {savingSource ? (
+                          <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                        ) : (
+                          <Check className="h-4 w-4 mr-1.5" />
+                        )}
+                        Save
+                      </Button>
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : mode === "preview" ? (
             <iframe
               key={iframeKey}
               src={hostedUrl}
@@ -414,6 +721,61 @@ export function ArtifactViewer({
           </div>
         </div>
       </div>
+
+      {/* Version history — same modal DocumentEditor opens; artifact bodies
+          preview as raw source (they're HTML, not markdown) and "View
+          rendered" pins the version into the sandboxed iframe above. */}
+      {showVersions && (
+        <VersionHistoryModal
+          open
+          onClose={() => setShowVersions(false)}
+          title={title || nodeId}
+          versionData={versionData}
+          previewAs="source"
+          onView={viewVersion}
+          onRestore={
+            canRestore
+              ? async (v) => {
+                  try {
+                    await performRestore(v);
+                  } catch (e: any) {
+                    toast.error(e?.message || "Restore failed");
+                  }
+                }
+              : undefined
+          }
+        />
+      )}
+
+      {/* Confirm for the banner's "Restore this version" (the history modal
+          carries its own confirm inside VersionHistory). */}
+      <Dialog
+        open={confirmRestore != null}
+        onOpenChange={(o) => !o && setConfirmRestore(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Restore version {confirmRestore}?</DialogTitle>
+            <DialogDescription>
+              This writes version {confirmRestore}'s HTML as a new version
+              through the normal save path — review rules still apply and the
+              current content stays in history.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setConfirmRestore(null)}
+              disabled={restoring}
+            >
+              Cancel
+            </Button>
+            <Button onClick={() => void confirmBannerRestore()} disabled={restoring}>
+              {restoring ? "Restoring…" : "Restore"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

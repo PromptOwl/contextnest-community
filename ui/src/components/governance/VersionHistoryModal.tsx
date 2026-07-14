@@ -30,6 +30,10 @@ interface VersionHistoryModalProps {
   versionData: VersionHistoryData | null;
   /** Restore a version. Omit to render the history read-only. */
   onRestore?: (version: number) => Promise<void>;
+  /** Preview bodies as rendered markdown (default) or raw source (artifacts). */
+  previewAs?: "markdown" | "source";
+  /** "View rendered" hook — render a version in the caller's own surface. */
+  onView?: (version: number) => void;
 }
 
 export function VersionHistoryModal({
@@ -38,6 +42,8 @@ export function VersionHistoryModal({
   title,
   versionData,
   onRestore,
+  previewAs,
+  onView,
 }: VersionHistoryModalProps) {
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -52,6 +58,8 @@ export function VersionHistoryModal({
             currentVersion={versionData.currentVersion}
             approvedVersion={versionData.approvedVersion}
             onRestore={onRestore}
+            previewAs={previewAs}
+            onView={onView}
           />
         ) : (
           <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
