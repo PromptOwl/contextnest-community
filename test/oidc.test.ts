@@ -289,6 +289,68 @@ describe("GET /auth/oidc/callback", () => {
     expect(user).toBeTruthy();
   });
 
+  // email_verified policy: explicit false → refused (permissive IdPs like an
+  // open Keycloak realm let anyone self-register an arbitrary address — an
+  // attacker asserting an existing local user's email would otherwise sign
+  // straight into that account). true → allowed. ABSENT → allowed (see the
+  // happy-path tests above, which carry no email_verified claim at all) —
+  // Entra v2 tokens frequently omit it; trust assumption documented in
+  // CONFIGURATION.md.
+  it("refuses an ID token with email_verified: false — no session, no user", async () => {
+    const { privateKey, jwks } = await makeKeys();
+    const issuer = installMockIssuer(jwks);
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    configureOidc();
+
+    const flow = await startLogin(app);
+    issuer.tokenBody = {
+      id_token: await signIdToken(privateKey, {
+        nonce: flow.nonce,
+        email: "attacker.asserted@acme.com",
+        email_verified: false,
+      }),
+    };
+
+    const res = await app.request(
+      `/auth/oidc/callback?code=c&state=${flow.state}`,
+      { headers: { Cookie: flow.cookieHeader } },
+    );
+    expect(ssoError(res)).toBe("email_not_verified");
+
+    // No session cookie was set...
+    expect(cookiesOf(res)["cnst_session"]).toBeUndefined();
+    // ...and no user was provisioned.
+    const { getDb } = await import("../src/db/client.js");
+    const user = await getDb().get(
+      "SELECT id FROM users WHERE LOWER(email) = ?",
+      ["attacker.asserted@acme.com"],
+    );
+    expect(user).toBeUndefined();
+  });
+
+  it("accepts an ID token with email_verified: true", async () => {
+    const { privateKey, jwks } = await makeKeys();
+    const issuer = installMockIssuer(jwks);
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    configureOidc();
+
+    const flow = await startLogin(app);
+    issuer.tokenBody = {
+      id_token: await signIdToken(privateKey, {
+        nonce: flow.nonce,
+        email: "verified@acme.com",
+        email_verified: true,
+      }),
+    };
+
+    const res = await app.request(
+      `/auth/oidc/callback?code=c&state=${flow.state}`,
+      { headers: { Cookie: flow.cookieHeader } },
+    );
+    expect(res.headers.get("Location")).toBe("/");
+    expect(cookiesOf(res)["cnst_session"]).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it("rejects a state mismatch", async () => {
     const { jwks } = await makeKeys();
     installMockIssuer(jwks);

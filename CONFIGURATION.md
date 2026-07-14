@@ -136,10 +136,23 @@ Google Cloud console, add the same redirect URI under *Authorized redirect
 URIs*, and use the **Google** preset (issuer `https://accounts.google.com`)
 with that client ID/secret.
 
+### Email-verification trust assumption
+
+An ID token whose `email_verified` claim is **explicitly `false`** is refused
+(`?sso_error=email_not_verified`). When the claim is **absent**, the server
+trusts the email claim — Microsoft Entra ID v2 tokens frequently omit it, and
+both Entra and Google guarantee address ownership, so refusing on absence
+would break the primary providers. This is a deliberate trust assumption:
+**when your IdP allows unverified self-registered emails (e.g. an open
+Keycloak realm), configure `oidc_allowed_domains` and disable self-registration
+at the IdP** — otherwise anyone able to assert an arbitrary email at your IdP
+could sign in as the matching local account.
+
 Sign-in failures bounce back to the app as `/?sso_error=<code>` and surface as
 a toast; codes: `disabled`, `not_configured`, `discovery_failed`,
 `provider_error`, `state_mismatch`, `exchange_failed`, `invalid_token`,
-`domain_not_allowed`, `not_invited`, `rate_limited`, `service_error`.
+`email_not_verified`, `domain_not_allowed`, `not_invited`, `rate_limited`,
+`service_error`.
 
 ---
 

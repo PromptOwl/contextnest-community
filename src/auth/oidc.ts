@@ -30,6 +30,7 @@ import { config, isEmailish } from "../config.js";
 import { normalizeEmail } from "../shared/email.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { tryConsume } from "../shared/rate-limit.js";
+import { clientIp } from "../shared/request-ip.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { hashPassword } from "./keys.js";
 import {
@@ -41,7 +42,15 @@ import type { AuthEnv } from "./middleware.js";
 
 // Same window the other anonymous auth entry points use (see DEVICE_LIMIT in
 // routes.ts) — both endpoints are unauthenticated and hit the network/DB.
+// Buckets are split per endpoint (oidc-login:/oidc-cb:), matching the
+// per-endpoint convention in routes.ts, so one full sign-in burns a single
+// slot in each bucket rather than two in a shared one.
 const OIDC_LIMIT = { max: 10, windowMs: 15 * 60_000 }; // 10 / 15 min
+
+// Hard ceiling on outbound IdP calls (discovery, token exchange) so a hung
+// provider can't pin request handlers. Aborts surface as the same
+// discovery_failed / exchange_failed codes as any other IdP fault.
+const IDP_FETCH_TIMEOUT_MS = 10_000;
 
 // Flow cookies — short-lived carriers for the state/nonce/PKCE trio between
 // /login and /callback. httpOnly (JS never needs them), SameSite=Lax (the
@@ -96,6 +105,7 @@ async function discover(issuer: string): Promise<{
 
   const res = await fetch(`${issuer}/.well-known/openid-configuration`, {
     headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(IDP_FETCH_TIMEOUT_MS),
   });
   if (!res.ok) {
     throw new Error(`discovery fetch failed with status ${res.status}`);
@@ -167,14 +177,6 @@ function readCookie(c: any, name: string): string | null {
   return null;
 }
 
-function clientIp(c: any): string {
-  const xff = c.req.header("x-forwarded-for");
-  if (xff) return xff.split(",")[0].trim();
-  const realIp = c.req.header("x-real-ip");
-  if (realIp) return realIp.trim();
-  return "unknown";
-}
-
 /** This server's OIDC redirect URI — what the admin registers at the IdP. */
 export function oidcRedirectUri(reqUrl: string): string {
   return `${requestBaseUrl(reqUrl)}/auth/oidc/callback`;
@@ -188,7 +190,7 @@ oidcRoutes.get("/login", async (c) => {
 
   if (!config.OIDC_ENABLED) return bounce("disabled");
   if (!isOidcReady()) return bounce("not_configured");
-  if (!tryConsume(`oidc:ip:${clientIp(c)}`, OIDC_LIMIT)) {
+  if (!tryConsume(`oidc-login:ip:${clientIp(c)}`, OIDC_LIMIT)) {
     return bounce("rate_limited");
   }
 
@@ -252,7 +254,7 @@ oidcRoutes.get("/callback", async (c) => {
 
   if (!config.OIDC_ENABLED) return bounce("disabled");
   if (!isOidcReady()) return bounce("not_configured");
-  if (!tryConsume(`oidc:ip:${clientIp(c)}`, OIDC_LIMIT)) {
+  if (!tryConsume(`oidc-cb:ip:${clientIp(c)}`, OIDC_LIMIT)) {
     return bounce("rate_limited");
   }
 
@@ -300,6 +302,7 @@ oidcRoutes.get("/callback", async (c) => {
         client_secret: config.OIDC_CLIENT_SECRET,
         code_verifier: verifierCookie,
       }).toString(),
+      signal: AbortSignal.timeout(IDP_FETCH_TIMEOUT_MS),
     });
     if (!tokenRes.ok) {
       console.error(
@@ -333,6 +336,16 @@ oidcRoutes.get("/callback", async (c) => {
     return bounce("invalid_token");
   }
   if (claims.nonce !== nonceCookie) return bounce("invalid_token");
+
+  // email_verified policy: an EXPLICIT false is refused — on permissive IdPs
+  // (e.g. a default Keycloak realm with open self-registration) an attacker
+  // can self-register with an existing local user's address and would
+  // otherwise sign straight into that account. An ABSENT claim is allowed:
+  // Entra v2 tokens frequently omit it and Entra/Google both guarantee
+  // address ownership — refusing on absence would break the primary IdPs.
+  // The trust assumption for the absent case is documented in
+  // CONFIGURATION.md → Single sign-on (OIDC).
+  if (claims.email_verified === false) return bounce("email_not_verified");
 
   // Email: standard `email` claim; Entra ID often omits it and carries the
   // UPN in `preferred_username` instead. Normalize like the register path

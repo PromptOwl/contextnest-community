@@ -396,6 +396,7 @@ export default function App() {
       exchange_failed: "Sign-in couldn't be completed with the identity provider. Try again.",
       invalid_token: "The identity provider returned an invalid sign-in token. Try again.",
       domain_not_allowed: "Your email domain isn't allowed on this server. Contact your admin.",
+      email_not_verified: "Your identity provider reports your email address as unverified. Verify it with your provider, then try again.",
       not_invited: "No account exists for your email on this server. Ask your admin for an invite.",
     };
     const msg = messages[code] ?? "Sign-in failed. Please try again.";
