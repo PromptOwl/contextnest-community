@@ -369,7 +369,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   const response = toNodeResponse(node);
 
   // Author + collaborators (same additive fields as the list response).
-  // Single-node call takes resolveAuthorship's indexed fast path.
+  // Single-node call takes resolveAuthorship's IN-narrowed path. Public
+  // (non-collaborator) readers keep `author` — frontmatter already exposed
+  // it pre-enrichment — but never receive collaborator emails: the field is
+  // omitted entirely (undefined = hidden, [] = none).
+  const publicReader = await isPublicReader(nestId, userId);
   const people = (
     await resolveAuthorship(nestId, [
       { id: nodeId, frontmatterAuthor: node.frontmatter?.author ?? null },
@@ -377,11 +381,11 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   ).get(nodeId);
   if (people) {
     response.author = people.author;
-    response.collaborators = people.collaborators;
+    if (!publicReader) response.collaborators = people.collaborators;
   }
 
   // Public readers see approved version body only.
-  if (await isPublicReader(nestId, userId)) {
+  if (publicReader) {
     const approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       try {

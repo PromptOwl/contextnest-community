@@ -206,23 +206,29 @@ export async function resolveAuthorship(
   if (nodes.length === 0) return result;
   const db = getDb();
 
-  // Single-node fast path (the detail endpoint) narrows both scans by id;
-  // the list path scans the nest once, grouped.
-  const single = nodes.length === 1 ? nodes[0].id : null;
+  // Small sets (the detail endpoint, a grant-only caller's short list) narrow
+  // both scans to exactly the requested ids via a placeholder IN list — `?`
+  // placeholders stay dialect-portable (the adapter maps them to $n on
+  // Postgres) and 200 is far under SQLite's parameter cap. Larger sets fall
+  // back to one grouped nest-wide scan rather than a huge IN list.
+  const narrowIds = nodes.length <= 200 ? nodes.map((n) => n.id) : null;
+  const inList = narrowIds
+    ? `(${narrowIds.map(() => "?").join(", ")})`
+    : null;
   const versionRows = (await db.all(
     `SELECT node_id, author, MIN(version) AS first_version
        FROM node_versions
-      WHERE nest_id = ?${single ? " AND node_id = ?" : ""}
+      WHERE nest_id = ?${inList ? ` AND node_id IN ${inList}` : ""}
         AND author IS NOT NULL AND author NOT LIKE 'system:%'
       GROUP BY node_id, author`,
-    single ? [nestId, single] : [nestId],
+    narrowIds ? [nestId, ...narrowIds] : [nestId],
   )) as Array<{ node_id: string; author: string; first_version: number }>;
   const grantRows = (await db.all(
     `SELECT g.target AS node_id, u.email AS email
        FROM grants g
        JOIN users u ON u.id = g.user_id
-      WHERE g.nest_id = ? AND g.target_type = 'document'${single ? " AND g.target = ?" : ""}`,
-    single ? [nestId, single] : [nestId],
+      WHERE g.nest_id = ? AND g.target_type = 'document'${inList ? ` AND g.target IN ${inList}` : ""}`,
+    narrowIds ? [nestId, ...narrowIds] : [nestId],
   )) as Array<{ node_id: string; email: string }>;
 
   const editorsByNode = new Map<string, Array<{ author: string; first: number }>>();
@@ -257,7 +263,7 @@ export async function resolveAuthorship(
       seen.add(key);
       collaborators.push(email);
     }
-    collaborators.sort();
+    collaborators.sort((a, b) => a.localeCompare(b));
     result.set(n.id, { author: author ?? null, collaborators });
   }
   return result;
@@ -334,7 +340,10 @@ export async function listNodesForCaller(
       const people = authorship.get(doc.id);
       if (people) {
         r.author = people.author;
-        r.collaborators = people.collaborators;
+        // Public (non-collaborator) readers never receive collaborator
+        // emails — omit the field entirely (undefined = hidden, [] = none).
+        // `author` stays visible: frontmatter already exposed it pre-CU-wdqcpzw7hg.
+        if (!publicReader) r.collaborators = people.collaborators;
       }
 
       if (publicReader) {

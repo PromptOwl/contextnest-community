@@ -618,7 +618,10 @@ async function runTool(
       });
       if (!nodes.length) return "No nodes found with the given filters.";
       const list = nodes
-        .map((n, i) => `${i + 1}. **${n.title}** [${n.type}]`)
+        .map(
+          (n, i) =>
+            `${i + 1}. **${n.title}** [${n.type}]${n.author ? ` — by ${n.author}` : ""}`,
+        )
         .join("\n");
       return `${nodes.length} node(s):\n\n${list}`;
     }

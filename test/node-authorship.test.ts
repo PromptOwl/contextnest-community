@@ -11,6 +11,7 @@ import {
   createTestApp,
   registerUser,
   jsonRequest,
+  resetAuthRateLimit,
 } from "./helpers.js";
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -119,5 +120,50 @@ describe("node DETAIL response", () => {
     expect(res.status).toBe(200);
     expect(res.data.node.author).toBe(alice.email);
     expect(res.data.node.collaborators).toEqual([bob.email, carol.email]);
+  });
+});
+
+// Privacy gate: a public (non-collaborator) reader of a public nest keeps
+// `author` (frontmatter already exposed it pre-enrichment) but must NOT
+// receive collaborator emails — the field is omitted entirely, not [], so
+// clients can distinguish "hidden from you" from "genuinely none".
+describe("public reader — collaborators hidden, author kept", () => {
+  let dave: { apiKey: string; userId: string; email: string };
+
+  beforeAll(async () => {
+    await resetAuthRateLimit(); // 4th registration from the same test IP
+    dave = await registerUser(app, "d-dave@acme.com", "Dave");
+    const vis = await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`,
+      { visibility: "public" }, alice.apiKey);
+    expect(vis.status).toBe(200);
+  });
+
+  it("LIST: author present, collaborators field absent for the public reader", async () => {
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, dave.apiKey);
+    expect(res.status).toBe(200);
+    const team = res.data.nodes.find((n: any) => n.id === DOC);
+    expect(team).toBeDefined();
+    expect(team.author).toBe(alice.email);
+    expect(team.collaborators).toBeUndefined();
+    expect("collaborators" in team).toBe(false);
+  });
+
+  it("DETAIL: author present, collaborators field absent for the public reader", async () => {
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${DOC}`, undefined, dave.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.node.author).toBe(alice.email);
+    expect(res.data.node.collaborators).toBeUndefined();
+    expect("collaborators" in res.data.node).toBe(false);
+  });
+
+  it("a real collaborator still gets both fields on the now-public nest", async () => {
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, bob.apiKey);
+    const team = list.data.nodes.find((n: any) => n.id === DOC);
+    expect(team.author).toBe(alice.email);
+    expect(team.collaborators).toEqual([bob.email, carol.email]);
+
+    const detail = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${DOC}`, undefined, bob.apiKey);
+    expect(detail.status).toBe(200);
+    expect(detail.data.node.collaborators).toEqual([bob.email, carol.email]);
   });
 });

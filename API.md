@@ -286,6 +286,7 @@ Lists all readable docs.
 ```
 - `schedule` is present only on runnable nodes (`type` `agent`/`skill`); omitted otherwise.
 - `author` = the doc's creator (frontmatter author, else the first version's author); `null` for old imports with neither. `collaborators` = distinct version authors ∪ document-scope grant holders, minus the author, sorted. Both also appear on the single-node GET below.
+- **Public readers** (non-collaborators reading a `visibility: public` nest) still see `author` — the frontmatter field already exposed it before collaborators existed — but `collaborators` is **omitted entirely** for them (absent = hidden, `[]` = genuinely none), so version-author and grant-holder emails never leak outside the nest's membership.
 
 ### POST `/nests/:nestId/nodes`
 ```json
