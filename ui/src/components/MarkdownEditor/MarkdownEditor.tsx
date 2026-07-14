@@ -160,10 +160,19 @@ import {
   Trash2,
   Highlighter,
   Table as TableIcon,
+  FileSpreadsheet,
   Info,
   ChevronRight,
   Columns2,
 } from "lucide-react";
+import { toast } from "sonner";
+import {
+  looksLikeDelimitedTable,
+  detectHeaderRow,
+  rowsToMarkdownTable,
+  delimitedToMarkdownTable,
+  LARGE_TABLE_ROW_THRESHOLD,
+} from "@/lib/csv-table";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -332,6 +341,10 @@ export const MarkdownEditor = forwardRef<
     top: number;
   } | null>(null);
 
+  // Lets the static `handlePaste` (captured once at useEditor time) reach
+  // the live editor instance for markdown-aware insertion.
+  const editorRef = useRef<Editor | null>(null);
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -443,6 +456,38 @@ export const MarkdownEditor = forwardRef<
         class:
           "prose prose-sm dark:prose-invert max-w-none focus:outline-none min-h-[300px] px-6 py-4",
       },
+      // CSV/TSV paste → markdown table. Deliberately conservative: only
+      // fires on plain-text clipboards that look unambiguously tabular
+      // (see looksLikeDelimitedTable), never inside a code block or an
+      // existing table, and never when the clipboard carries an HTML
+      // <table> — Sheets/Excel provide one and ProseMirror's native HTML
+      // parsing already turns it into table nodes.
+      handlePaste: (_view, event) => {
+        const ed = editorRef.current;
+        if (!ed || !event.clipboardData) return false;
+        if (ed.isActive("codeBlock") || ed.isActive("table")) return false;
+        const html = event.clipboardData.getData("text/html");
+        if (html && /<table[\s>]/i.test(html)) return false;
+        const text = event.clipboardData.getData("text/plain");
+        if (!text) return false;
+        const detected = looksLikeDelimitedTable(text);
+        if (!detected) return false;
+        const hasHeader = detectHeaderRow(detected.rows);
+        const dataRows = detected.rows.length - (hasHeader ? 1 : 0);
+        if (dataRows > LARGE_TABLE_ROW_THRESHOLD) {
+          const ok = window.confirm(
+            `Insert a table with ${dataRows.toLocaleString()} rows? ` +
+              `Large tables can slow the editor down. ` +
+              `Cancel pastes the content as plain text instead.`,
+          );
+          if (!ok) return false; // fall through to the default text paste
+        }
+        const md = rowsToMarkdownTable(detected.rows, { hasHeader });
+        // tiptap-markdown patches insertContentAt, so the markdown string
+        // is parsed into real table nodes here.
+        ed.chain().focus().insertContent(md).run();
+        return true;
+      },
       handleKeyDown: (_view, event) => {
         const popup = wikiPopupRef.current;
         const results = wikiResultsRef.current;
@@ -498,6 +543,10 @@ export const MarkdownEditor = forwardRef<
       },
     },
   });
+
+  useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
 
   useEffect(() => {
     if (editor && editor.isEditable !== effectiveEditable) {
@@ -1504,6 +1553,40 @@ function Toolbar({
   previewing: boolean;
   onTogglePreview: () => void;
 }) {
+  // Hidden file input driven by the "Insert table from CSV" toolbar button.
+  const csvInputRef = useRef<HTMLInputElement>(null);
+  const pickCsv = () => csvInputRef.current?.click();
+  const onCsvPicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      toast.error("Couldn't read that file.");
+      return;
+    }
+    // .tsv extension pins the delimiter; otherwise auto-detect
+    // (tab → comma → semicolon).
+    const converted = delimitedToMarkdownTable(text, {
+      delimiter: /\.tsv$/i.test(file.name) ? "\t" : undefined,
+    });
+    if (!converted || !converted.markdown) {
+      toast.error("No table rows found in that file.");
+      return;
+    }
+    if (converted.dataRows > LARGE_TABLE_ROW_THRESHOLD) {
+      const ok = window.confirm(
+        `Insert a table with ${converted.dataRows.toLocaleString()} rows? ` +
+          `Large tables can slow the editor down.`,
+      );
+      if (!ok) return;
+    }
+    // tiptap-markdown parses the markdown string into real table nodes.
+    editor.chain().focus().insertContent(converted.markdown).run();
+  };
+
   // Hidden file input driven by the Image toolbar button.
   const imageInputRef = useRef<HTMLInputElement>(null);
   const pickImage = () => imageInputRef.current?.click();
@@ -1648,6 +1731,19 @@ function Toolbar({
       >
         <TableIcon className="h-3.5 w-3.5" />
       </ToolbarButton>
+      <ToolbarButton
+        onClick={pickCsv}
+        title="Insert table from CSV/TSV file"
+      >
+        <FileSpreadsheet className="h-3.5 w-3.5" />
+      </ToolbarButton>
+      <input
+        ref={csvInputRef}
+        type="file"
+        accept=".csv,.tsv,text/csv,text/tab-separated-values"
+        className="hidden"
+        onChange={onCsvPicked}
+      />
 
       <Divider />
 
