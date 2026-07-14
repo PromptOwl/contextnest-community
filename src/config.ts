@@ -252,6 +252,18 @@ export const config = {
     return parseInt(process.env.TELEMETRY_INTERVAL_MS || "3600000", 10);
   },
   /**
+   * Activity-trace retention window in days (the api_events table behind
+   * GET /admin/trace and GET /nests/:id/trace). 0 = keep forever (pruning is
+   * skipped entirely). Invalid / negative → default 14; capped at 3650 (ten
+   * years) so a typo can't schedule a prune cutoff in the distant past.
+   * Editable at runtime from the admin Settings page (/admin/settings).
+   */
+  get TRACE_RETENTION_DAYS(): number {
+    const n = parseInt(process.env.TRACE_RETENTION_DAYS || "14", 10);
+    if (!Number.isFinite(n) || n < 0) return 14;
+    return Math.min(n, 3650);
+  },
+  /**
    * Optional custom logo URL shown in UI header + login screen.
    * Must be an absolute https://, http://, or data:image/… URL. Other
    * schemes (file://, javascript:, relative paths) are rejected with a

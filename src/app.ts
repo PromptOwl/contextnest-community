@@ -10,7 +10,10 @@ import { listNests, listSharedNests } from "./nests/service.js";
 import { getReviewQueue } from "./governance/review-service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
-import { resolveStewardsForNode } from "./governance/stewardship-service.js";
+import {
+  resolveStewardsForNode,
+  canManageStewards,
+} from "./governance/stewardship-service.js";
 import { resolveNodeGrant, hasAnyGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
@@ -360,6 +363,7 @@ export function createApp(): Hono<AuthEnv> {
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
+    trace_retention_days: config.TRACE_RETENTION_DAYS,
     // Server-wide runner default. NEVER the value — masked tail only.
     anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
       ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
@@ -481,6 +485,20 @@ export function createApp(): Hono<AuthEnv> {
         if (!Number.isInteger(n) || n < 1 || n > 128)
           addError("subagent_max_children", "Max sub-agents per run must be a whole number between 1 and 128.");
         else pending.push({ name: "SUBAGENT_MAX_CHILDREN", value: String(n) });
+      }
+    }
+    // Activity-trace retention window in days. Same [0, 3650] range the config
+    // getter caps to, so a UI-set value gates identically to an env-set one.
+    // 0 = keep forever (pruning skipped). null clears → default (14).
+    if ("trace_retention_days" in body) {
+      const v = body.trace_retention_days;
+      if (v === null || v === "") {
+        pending.push({ name: "TRACE_RETENTION_DAYS", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || n > 3650)
+          addError("trace_retention_days", "Trace retention must be a whole number of days between 0 and 3650 (0 keeps activity forever).");
+        else pending.push({ name: "TRACE_RETENTION_DAYS", value: String(n) });
       }
     }
     if ("slack_webhook_url" in body) {
@@ -1065,6 +1083,40 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.use("/:nestId/nodes/:nodeId{.+}", async (c, next) => {
     assertSafeNodeId(c.req.param("nodeId")!);
     return next();
+  });
+
+  // GET /nests/:nestId/trace — the per-nest steward slice of the activity
+  // trace: same shape/pagination/filters as GET /admin/trace, but ALWAYS
+  // pinned to this nest server-side (a ?nest= query param can't widen it).
+  // Authorized for the nest owner / admin collaborators via the same
+  // canManageStewards rule the grants + steward-roster routes use (it folds
+  // the license admin and super_admins in, and open mode is always allowed).
+  // Registered before the sub-routers below so it matches first under the
+  // LinearRouter. The nest access middleware above already 404s callers with
+  // no access at all; this check downgrades read/write collaborators to 403.
+  nestsApp.get("/:nestId/trace", async (c) => {
+    const nestId = c.req.param("nestId")!;
+    if (!(await canManageStewards(nestId, c.get("userId")))) {
+      return c.json(
+        {
+          error:
+            "Only the nest owner, a nest admin, or the server admin can view this nest's activity.",
+        },
+        403,
+      );
+    }
+    const limitRaw = Number(c.req.query("limit"));
+    const offsetRaw = Number(c.req.query("offset"));
+    const limit = Number.isFinite(limitRaw) ? limitRaw : 25;
+    const offset = Number.isFinite(offsetRaw) ? offsetRaw : 0;
+    const { events, total } = await listTraceEvents({
+      limit,
+      offset,
+      kind: c.req.query("kind") as any,
+      nestId, // pinned — the caller cannot query outside their nest
+      user: c.req.query("user") || undefined,
+    });
+    return c.json({ count: events.length, total, limit, offset, events });
   });
 
   // Nest list/CRUD
