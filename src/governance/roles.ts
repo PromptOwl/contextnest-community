@@ -36,6 +36,26 @@ export function collabPermToRole(
   }
 }
 
+/**
+ * Map a team member's role to the nest permission it grants. Inverse of
+ * collabPermToRole for the non-owner roles: a team member resolves to this
+ * permission on every nest the team is shared to (see resolveNestPermission).
+ */
+export function teamRoleToPermission(
+  role: string | null | undefined,
+): "read" | "write" | "admin" | null {
+  switch (role) {
+    case "admin":
+      return "admin";
+    case "editor":
+      return "write";
+    case "viewer":
+      return "read";
+    default:
+      return null;
+  }
+}
+
 const includesAny = (roles: EffectiveRole[], wanted: EffectiveRole[]) =>
   roles.some((r) => wanted.includes(r));
 
