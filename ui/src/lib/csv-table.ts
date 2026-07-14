@@ -165,7 +165,10 @@ export function rowsToMarkdownTable(
   opts: { hasHeader?: boolean } = {},
 ): string {
   if (rows.length === 0) return "";
-  const width = Math.max(...rows.map((r) => r.length));
+  // reduce, not Math.max(...spread): spreading one argument per row can
+  // overflow the call stack on very large inputs (the row-count confirm is
+  // a warning, not a cap).
+  const width = rows.reduce((max, r) => Math.max(max, r.length), 0);
   if (width === 0) return "";
   const grid = rows.map((r) => {
     const cells = r.map(escapeCell);
@@ -195,10 +198,12 @@ const MAX_DETECTED_CELL_LENGTH = 200;
  *
  * TSV (contains tabs): ≥2 rows, ≥2 columns, every row the same width —
  * tab-delimited multi-row text is a strong spreadsheet-clipboard signal.
- * CSV (no tabs): commas appear constantly in prose, so the bar is higher —
- * ≥3 rows, ≥2 columns, consistent width, and no cell long enough to read
- * as a sentence. Anything ambiguous returns null so the paste falls through
- * to the editor's default plain-text handling.
+ * CSV / semicolon-SV (no tabs): those delimiters appear constantly in
+ * prose, so the bar is higher — ≥3 rows, ≥2 columns, consistent width, and
+ * no cell long enough to read as a sentence. Comma is tried before
+ * semicolon (mirroring detectDelimiter's order). Anything ambiguous returns
+ * null so the paste falls through to the editor's default plain-text
+ * handling.
  */
 export function looksLikeDelimitedTable(text: string): DetectedTable | null {
   const trimmed = text.replace(/\s+$/, "");
@@ -212,15 +217,17 @@ export function looksLikeDelimitedTable(text: string): DetectedTable | null {
     return null;
   }
 
-  if (trimmed.includes(",")) {
-    const rows = parseDelimited(trimmed, ",");
+  const proseyDelimiters: Delimiter[] = [",", ";"];
+  for (const delimiter of proseyDelimiters) {
+    if (!trimmed.includes(delimiter)) continue;
+    const rows = parseDelimited(trimmed, delimiter);
     if (
       rows.length >= 3 &&
       rows[0].length >= 2 &&
       consistentColumns(rows) &&
       rows.every((r) => r.every((c) => c.length <= MAX_DETECTED_CELL_LENGTH))
     ) {
-      return { delimiter: ",", rows };
+      return { delimiter, rows };
     }
   }
   return null;

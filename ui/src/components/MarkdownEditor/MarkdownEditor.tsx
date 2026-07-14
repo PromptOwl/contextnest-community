@@ -1556,10 +1556,20 @@ function Toolbar({
   // Hidden file input driven by the "Insert table from CSV" toolbar button.
   const csvInputRef = useRef<HTMLInputElement>(null);
   const pickCsv = () => csvInputRef.current?.click();
+  // Refuse to read absurdly large files into memory — a table this size
+  // would be unusable in the editor anyway.
+  const MAX_CSV_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
   const onCsvPicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
     if (!file) return;
+    if (file.size > MAX_CSV_FILE_BYTES) {
+      toast.error(
+        `That file is ${(file.size / (1024 * 1024)).toFixed(1)} MB — ` +
+          `the limit for table import is 10 MB.`,
+      );
+      return;
+    }
     let text: string;
     try {
       text = await file.text();

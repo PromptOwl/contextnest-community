@@ -257,6 +257,27 @@ describe("looksLikeDelimitedTable (paste detection)", () => {
     expect(hit!.rows).toHaveLength(3);
   });
 
+  it("accepts 3-row consistent semicolon-delimited text (same bar as CSV)", () => {
+    const hit = looksLikeDelimitedTable("Name;Score\nAda;99\nGrace;97");
+    expect(hit).not.toBeNull();
+    expect(hit!.delimiter).toBe(";");
+    expect(hit!.rows).toEqual([
+      ["Name", "Score"],
+      ["Ada", "99"],
+      ["Grace", "97"],
+    ]);
+  });
+
+  it("rejects 2-row semicolon text (below the CSV bar)", () => {
+    expect(looksLikeDelimitedTable("a;b\nc;d")).toBeNull();
+  });
+
+  it("prefers comma over semicolon when both form a grid", () => {
+    const hit = looksLikeDelimitedTable("a,x;y\nb,p;q\nc,m;n");
+    expect(hit).not.toBeNull();
+    expect(hit!.delimiter).toBe(",");
+  });
+
   it("rejects prose paragraphs that happen to contain commas", () => {
     const prose = [
       "In the beginning, the team shipped a small prototype that only handled the basics, and everyone was happy with it for a while, until the requirements grew well beyond what anyone had originally planned for the quarter",
