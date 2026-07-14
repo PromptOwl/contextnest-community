@@ -60,6 +60,7 @@ const HISTORICAL_MIGRATIONS = [
   "024_trigger_hooks",
   "025_run_claims",
   "020_server_settings",
+  "026_api_events_nest_index",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -471,6 +472,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       duration_ms INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_api_events_ts ON api_events(ts);
+    -- (nest_id, id) composite (migration 026): the per-nest trace view
+    -- (GET /nests/:id/trace) filters by nest_id and pages newest-first by id.
+    CREATE INDEX IF NOT EXISTS idx_api_events_nest_ts ON api_events(nest_id, id);
 
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
