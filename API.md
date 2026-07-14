@@ -275,7 +275,8 @@ Lists all readable docs.
     "tags": ["#api"],
     "status": "draft" | "pending_review" | "approved" | "rejected",
     "version": 1,
-    "author": "...",
+    "author": "creator@x.com",
+    "collaborators": ["editor@x.com", "grantee@x.com"],
     "created_at": "...",
     "updated_at": "...",
     "content": "# md body",
@@ -284,6 +285,7 @@ Lists all readable docs.
 }
 ```
 - `schedule` is present only on runnable nodes (`type` `agent`/`skill`); omitted otherwise.
+- `author` = the doc's creator (frontmatter author, else the first version's author); `null` for old imports with neither. `collaborators` = distinct version authors ∪ document-scope grant holders, minus the author, sorted. Both also appear on the single-node GET below.
 
 ### POST `/nests/:nestId/nodes`
 ```json

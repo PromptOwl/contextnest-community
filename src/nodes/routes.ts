@@ -36,6 +36,7 @@ import {
   updateNode,
   moveNode,
   listNodesForCaller,
+  resolveAuthorship,
   toNodeResponse,
   bodyOnly,
 } from "./service.js";
@@ -366,6 +367,18 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     }
   }
   const response = toNodeResponse(node);
+
+  // Author + collaborators (same additive fields as the list response).
+  // Single-node call takes resolveAuthorship's indexed fast path.
+  const people = (
+    await resolveAuthorship(nestId, [
+      { id: nodeId, frontmatterAuthor: node.frontmatter?.author ?? null },
+    ])
+  ).get(nodeId);
+  if (people) {
+    response.author = people.author;
+    response.collaborators = people.collaborators;
+  }
 
   // Public readers see approved version body only.
   if (await isPublicReader(nestId, userId)) {
