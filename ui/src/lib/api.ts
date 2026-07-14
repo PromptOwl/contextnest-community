@@ -787,14 +787,24 @@ export interface AnnotationThread {
   comments: AnnotationComment[];
 }
 
-/** URL of the sandboxed artifact render (iframe `src`). `v` pins a snapshot. */
+/**
+ * URL of the sandboxed artifact render (iframe `src`). `v` pins a snapshot.
+ * `cacheBust` appends an ignored param so a remount actually refetches instead
+ * of serving the browser's cached response for an identical URL (the served
+ * body changes under the same URL after a save/restore). The server ignores
+ * unknown query params, so this only defeats the HTTP cache.
+ */
 export function hostedArtifactUrl(
   nestId: string,
   nodeId: string,
   version?: number | null,
+  cacheBust?: number | string | null,
 ): string {
-  const v = version != null ? `?v=${version}` : "";
-  return `${API_BASE}/nests/${nestId}/nodes/${nodeId}/hosted${v}`;
+  const params = new URLSearchParams();
+  if (version != null) params.set("v", String(version));
+  if (cacheBust != null) params.set("_", String(cacheBust));
+  const qs = params.toString();
+  return `${API_BASE}/nests/${nestId}/nodes/${nodeId}/hosted${qs ? `?${qs}` : ""}`;
 }
 
 /**
@@ -806,9 +816,11 @@ export async function fetchArtifactHtml(
   nestId: string,
   nodeId: string,
   version?: number | null,
+  cacheBust?: number | string | null,
 ): Promise<{ html: string; snapshot: number | null }> {
-  const res = await fetch(hostedArtifactUrl(nestId, nodeId, version), {
+  const res = await fetch(hostedArtifactUrl(nestId, nodeId, version, cacheBust), {
     credentials: "include",
+    cache: "no-store",
   });
   if (!res.ok) {
     throw new Error(`Failed to load artifact (${res.status})`);
