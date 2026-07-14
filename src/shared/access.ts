@@ -1,6 +1,8 @@
 import { getDb } from "../db/client.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { isSuperAdmin } from "../governance/access-service.js";
+import { resolveTeamRolesForUser } from "../governance/teams-service.js";
+import { teamRoleToPermission } from "../governance/roles.js";
 import { ANON_USER_ID } from "./constants.js";
 
 export type NestPermission = "none" | "read" | "write" | "admin" | "owner";
@@ -58,13 +60,27 @@ export async function resolveNestPermission(
     return "admin";
   }
 
+  // Below owner/admin, several sources can grant access at once (direct
+  // collaborator, team membership, steward, public visibility). They combine
+  // by highest-wins rather than first-match, so e.g. a 'read' collaborator who
+  // is also an 'admin'-role member of a shared team resolves to 'admin'.
+  let best: NestPermission = "none";
+  const bump = (p: NestPermission | null | undefined) => {
+    if (p && PERMISSION_LEVELS[p] > PERMISSION_LEVELS[best]) best = p;
+  };
+
   const directGrant = await db
     .get(
       "SELECT permission FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
       [nestId, userId],
     ) as { permission: NestPermission } | undefined;
+  if (directGrant) bump(directGrant.permission);
 
-  if (directGrant) return directGrant.permission;
+  // Team membership: the highest permission across the roles the user holds in
+  // any team shared onto this nest (reviewer/editor both map to 'write').
+  for (const role of await resolveTeamRolesForUser(nestId, userId)) {
+    bump(teamRoleToPermission(role) as NestPermission);
+  }
 
   // Stewards get nest-level read so they can reach the documents/context they
   // govern, even without a collaborator grant. Matched by email because a
@@ -79,11 +95,11 @@ export async function resolveNestPermission(
         LIMIT 1`,
       [userId, nestId],
     );
-  if (stewardGrant) return "read";
+  if (stewardGrant) bump("read");
 
-  if (nest.visibility === "public") return "read";
+  if (nest.visibility === "public") bump("read");
 
-  return "none";
+  return best;
 }
 
 export function permissionLevel(p: NestPermission): number {
@@ -128,5 +144,8 @@ export async function isPublicReader(nestId: string, userId: string): Promise<bo
       [userId, nestId],
     );
   if (stewardGrant) return false;
+  // A member of a team shared onto this nest reaches it via that membership,
+  // not public visibility — they see drafts/pending like any collaborator.
+  if ((await resolveTeamRolesForUser(nestId, userId)).length > 0) return false;
   return true;
 }
