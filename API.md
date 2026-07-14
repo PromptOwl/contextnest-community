@@ -484,6 +484,63 @@ So Postman will see more rows than the UI; that's expected.
 ### GET `/nests/:nestId/nodes/:nodeId/reviews`
 Full review history for a node.
 
+### GET `/nests/:nestId/feed`
+Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200)
+
+Nest **activity feed** — pending change submissions (the exact rows
+`/review-queue` shows, every field intact, plus the caller's `canReview`)
+interleaved with annotation activity (new comment threads AND replies),
+newest first. Additive sibling of `/review-queue`; that endpoint and the MCP
+`context_review_queue` tool are unchanged.
+
+Comment items are access-filtered to documents the caller can read (same
+resolution as node listing: public readers see approved docs only; grants and
+steward scope honored). Change items mirror the queue (not access-filtered).
+
+```json
+{
+  "items": [
+    {
+      "type": "comment",
+      "id": "<commentId>",
+      "threadId": "<threadId>",
+      "nodeId": "nodes/foo",
+      "title": "Foo",
+      "author": "reviewer@x.com",
+      "snippet": "First ~200 chars of the comment…",
+      "createdAt": "2026-07-14 11:00:00",
+      "resolved": false,
+      "isReply": true
+    },
+    {
+      "type": "change",
+      "id": "<reviewRequestId>",
+      "nestId": "...",
+      "nodeId": "nodes/foo",
+      "title": "Foo",
+      "version": 3,
+      "requestedBy": "author@x.com",
+      "requestedAt": "2026-07-14 10:00:00",
+      "requestNote": "...",
+      "status": "pending",
+      "priority": "normal",
+      "canReview": true,
+      "createdAt": "2026-07-14 10:00:00"
+    }
+  ],
+  "total": 2,
+  "counts": { "changes": 1, "comments": 1 },
+  "filter": "all",
+  "limit": 50,
+  "offset": 0
+}
+```
+
+`counts` always carries both per-type totals regardless of `filter`; the UI
+tab badge binds to `counts.changes` (actionable items), not the feed length.
+The UI deep-links a comment item to its document with the thread focused via
+`?nest=<id>&doc=<nodeId>&thread=<threadId>`.
+
 ---
 
 ## 7. Versions

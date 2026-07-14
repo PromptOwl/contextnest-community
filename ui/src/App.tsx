@@ -75,6 +75,9 @@ type View =
       initialTitle?: string;
       /** Prior wiki-link hops, oldest first. Back pops the last entry. */
       breadcrumb?: BreadcrumbEntry[];
+      /** Open with this comment thread focused (activity-feed deep link;
+       *  also arrives via the ?thread= URL param). */
+      initialThreadId?: string;
     }
   | { page: "teammates" }
   | { page: "settings" }
@@ -258,6 +261,8 @@ export default function App() {
             nodeId: docId,
             isOwner: false,
             isAnonOwned: false,
+            // ?thread=<id> → open the doc with that comment thread focused.
+            initialThreadId: params.get("thread") || undefined,
           });
           return;
         }
@@ -310,10 +315,15 @@ export default function App() {
       params.set("nest", view.nestId);
       if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
       else params.delete("doc");
+      // Keep the focused-thread deep link shareable; drop it otherwise so a
+      // stale ?thread doesn't leak onto the next document.
+      if (view.initialThreadId) params.set("thread", view.initialThreadId);
+      else params.delete("thread");
       params.delete("view");
     } else if (view.page === "nest") {
       params.set("nest", view.nestId);
       params.delete("doc");
+      params.delete("thread");
       params.delete("view");
     } else if (
       // Nest-scoped sub-pages: keep ?nest and tag the sub-view so the address
@@ -325,6 +335,7 @@ export default function App() {
     ) {
       params.set("nest", view.nestId);
       params.delete("doc");
+      params.delete("thread");
       params.set(
         "view",
         view.page === "ontology-graph"
@@ -338,6 +349,7 @@ export default function App() {
     } else {
       params.delete("nest");
       params.delete("doc");
+      params.delete("thread");
       params.delete("view");
     }
     const qs = params.toString();
@@ -724,6 +736,7 @@ export default function App() {
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
                 initialFolder: opts?.folder,
+                initialThreadId: opts?.thread,
               })
             }
             onOpenTrace={() =>
@@ -787,6 +800,7 @@ export default function App() {
               nestName={doc.nestName}
               nodeId={doc.nodeId}
               initialFolder={(doc as any).initialFolder}
+              initialThreadId={doc.initialThreadId}
               isOwner={doc.isOwner}
               breadcrumb={doc.breadcrumb}
               onBack={() => {
