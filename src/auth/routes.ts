@@ -32,6 +32,7 @@ import {
 } from "./license.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
 import { verifySsoTicket } from "./sso-token.js";
+import { oidcRoutes } from "./oidc.js";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { ANON_USER_ID } from "../shared/constants.js";
 
@@ -240,6 +241,11 @@ async function provisionPromptowlUser(
 }
 
 export const authRoutes = new Hono<AuthEnv>();
+
+// Generic OIDC SSO (Microsoft Entra ID / Google / any spec-compliant IdP) —
+// GET /auth/oidc/login + GET /auth/oidc/callback. Separate from the PromptOwl
+// ticket flow at GET /auth/sso below. See src/auth/oidc.ts.
+authRoutes.route("/oidc", oidcRoutes);
 
 // POST /auth/register
 //

@@ -387,8 +387,18 @@ export default function App() {
       rate_limited: "Too many sign-in attempts. Wait a moment and try again.",
       sign_in_restricted: "Sign-in is restricted on this community. Contact an admin.",
       service_error: "Something went wrong signing you in. Please try again.",
+      // OIDC SSO (GET /auth/oidc/*) reuses the same ?sso_error= channel.
+      disabled: "Single sign-on is turned off on this server.",
+      not_configured: "Single sign-on isn't fully configured. Contact your admin.",
+      discovery_failed: "Couldn't reach the identity provider. Try again, or contact your admin.",
+      provider_error: "Your identity provider declined the sign-in. Try again.",
+      state_mismatch: "The sign-in attempt expired or didn't match this browser. Try again.",
+      exchange_failed: "Sign-in couldn't be completed with the identity provider. Try again.",
+      invalid_token: "The identity provider returned an invalid sign-in token. Try again.",
+      domain_not_allowed: "Your email domain isn't allowed on this server. Contact your admin.",
+      not_invited: "No account exists for your email on this server. Ask your admin for an invite.",
     };
-    const msg = messages[code] ?? "Sign-in failed. Try again from PromptOwl.";
+    const msg = messages[code] ?? "Sign-in failed. Please try again.";
     setTimeout(() => toast.error(msg), 0);
   }, []);
 

@@ -64,6 +64,7 @@ import {
   isLicenseAdminUserId,
 } from "./auth/license.js";
 import { persistSetting } from "./db/settings.js";
+import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
@@ -229,6 +230,12 @@ export function createApp(): Hono<AuthEnv> {
       // The login page reads this to show/hide the credential form, and to
       // switch the Register link to an "activate invite" affordance.
       manual_sign_in: config.MANUAL_SIGN_IN,
+      // OIDC SSO — true only when enabled AND fully configured, so the login
+      // page never shows a button that would bounce with an error. The issuer
+      // is exposed (when live) so the client can label the button by IdP
+      // (login.microsoftonline.com → Microsoft, accounts.google.com → Google).
+      oidc_enabled: isOidcReady(),
+      ...(isOidcReady() && { oidc_issuer: config.OIDC_ISSUER }),
       // Public feature flags the SPA needs before auth to decide what to
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
@@ -364,6 +371,14 @@ export function createApp(): Hono<AuthEnv> {
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
+    // OIDC SSO. The client secret is WRITE-ONLY: only its presence is
+    // reported, never the value (same discipline as the Anthropic key below).
+    oidc_enabled: config.OIDC_ENABLED,
+    oidc_issuer: config.OIDC_ISSUER,
+    oidc_client_id: config.OIDC_CLIENT_ID,
+    oidc_client_secret_set: !!config.OIDC_CLIENT_SECRET,
+    oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
+    oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     // Server-wide runner default. NEVER the value — masked tail only.
     anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
       ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
@@ -499,6 +514,89 @@ export function createApp(): Hono<AuthEnv> {
         if (!Number.isInteger(n) || n < 0 || n > 3650)
           addError("trace_retention_days", "Trace retention must be a whole number of days between 0 and 3650 (0 keeps activity forever).");
         else pending.push({ name: "TRACE_RETENTION_DAYS", value: String(n) });
+      }
+    }
+    // ── OIDC SSO ──
+    // The client secret is write-only: a non-empty string overwrites, null or
+    // "" clears, and GET only ever reports `oidc_client_secret_set`. Issuer
+    // must be a https URL (the trust root of the whole flow). Enabling
+    // requires the effective post-PATCH config to be complete, so the toggle
+    // can never be left on with a login button that just bounces errors.
+    if ("oidc_issuer" in body) {
+      const v = String(body.oidc_issuer ?? "").trim().replace(/\/$/, "");
+      let ok = false;
+      try {
+        ok = !v || new URL(v).protocol === "https:";
+      } catch {
+        ok = false;
+      }
+      if (!ok)
+        addError("oidc_issuer", "OIDC issuer must be a valid https:// URL (e.g. https://accounts.google.com), or empty to clear it.");
+      else pending.push({ name: "OIDC_ISSUER", value: v || null });
+    }
+    if ("oidc_client_id" in body) {
+      const v = String(body.oidc_client_id ?? "").trim();
+      pending.push({ name: "OIDC_CLIENT_ID", value: v || null });
+    }
+    if ("oidc_client_secret" in body) {
+      const v = body.oidc_client_secret;
+      if (v === null || v === "") {
+        pending.push({ name: "OIDC_CLIENT_SECRET", value: null });
+      } else if (typeof v !== "string") {
+        addError("oidc_client_secret", "OIDC client secret must be a string (or empty to clear it).");
+      } else {
+        pending.push({ name: "OIDC_CLIENT_SECRET", value: v.trim() });
+      }
+    }
+    if ("oidc_allowed_domains" in body) {
+      const raw = String(body.oidc_allowed_domains ?? "").trim();
+      const entries = raw
+        .split(",")
+        .map((d) => d.trim().toLowerCase())
+        .filter(Boolean);
+      // Bare hostnames only — an entry with "@", a scheme, a slash, or no dot
+      // is a typo'd email/URL, not a domain, and would silently never match.
+      const bad = entries.find((d) => !/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(d));
+      if (bad !== undefined)
+        addError("oidc_allowed_domains", `"${bad}" is not a valid domain — use bare domains, comma-separated (e.g. acme.com, contractors.acme.com), or leave empty to allow any.`);
+      else
+        pending.push({
+          name: "OIDC_ALLOWED_DOMAINS",
+          value: entries.length ? entries.join(",") : null,
+        });
+    }
+    if ("oidc_auto_provision" in body) {
+      pending.push({
+        name: "OIDC_AUTO_PROVISION",
+        value: body.oidc_auto_provision ? "true" : "false",
+      });
+    }
+    if ("oidc_enabled" in body) {
+      // Effective post-PATCH values: what this request sets, falling back to
+      // current config for fields it doesn't touch (same pattern as the
+      // sign-in lockout guard below).
+      const effIssuer =
+        "oidc_issuer" in body
+          ? String(body.oidc_issuer ?? "").trim()
+          : config.OIDC_ISSUER;
+      const effClientId =
+        "oidc_client_id" in body
+          ? String(body.oidc_client_id ?? "").trim()
+          : config.OIDC_CLIENT_ID;
+      const effSecret =
+        "oidc_client_secret" in body
+          ? String(body.oidc_client_secret ?? "").trim()
+          : config.OIDC_CLIENT_SECRET;
+      if (body.oidc_enabled && (!effIssuer || !effClientId || !effSecret)) {
+        addError(
+          "oidc_enabled",
+          "Set the OIDC issuer, client ID, and client secret before turning single sign-on on.",
+        );
+      } else {
+        pending.push({
+          name: "OIDC_ENABLED",
+          value: body.oidc_enabled ? "true" : null,
+        });
       }
     }
     if ("slack_webhook_url" in body) {

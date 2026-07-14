@@ -142,6 +142,10 @@ export async function getHealth() {
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
     manual_sign_in?: "open" | "invite-only" | "disabled";
+    /** True only when OIDC SSO is enabled AND fully configured server-side. */
+    oidc_enabled?: boolean;
+    /** Present when oidc_enabled — lets the login page label the button by IdP. */
+    oidc_issuer?: string;
     workflow_plane_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
@@ -167,6 +171,15 @@ export interface AdminSettings {
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
+  /** OIDC SSO. The client secret is write-only — only its presence comes back. */
+  oidc_enabled: boolean;
+  oidc_issuer: string;
+  oidc_client_id: string;
+  oidc_client_secret_set?: boolean;
+  oidc_allowed_domains: string;
+  oidc_auto_provision: boolean;
+  /** Write-only: string sets/replaces, null clears; never returned. */
+  oidc_client_secret?: string | null;
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   smtp_url: string;
