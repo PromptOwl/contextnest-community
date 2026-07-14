@@ -17,6 +17,7 @@ import {
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
+  Activity,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
@@ -118,6 +119,8 @@ interface NestViewProps {
   isAnonOwned: boolean;
   onBack: () => void;
   onOpenDocument: (nodeId: string | "new", opts?: { folder?: string }) => void;
+  /** Open this nest's activity trace (owner/nest-admin only). */
+  onOpenTrace?: () => void;
   /** Seed the search filter on mount. Used when arriving from a tag
    *  click on a document detail page. */
   initialSearch?: string;
@@ -130,6 +133,7 @@ export function NestView({
   isAnonOwned,
   onBack,
   onOpenDocument,
+  onOpenTrace,
   initialSearch,
 }: NestViewProps) {
   const { isAdmin, adminStatus, authMode } = useAuth();
@@ -1327,6 +1331,15 @@ export function NestView({
                 label: "Assign Steward",
                 icon: Shield,
                 onSelect: () => setShowAssignSteward(true),
+              });
+            // Nest-scoped activity trace — a read-only audit view, so not
+            // gated on isReadOnly. Same owner/nest-admin rule as the server's
+            // GET /nests/:id/trace (canManageStewards).
+            if (canManageGovernance && onOpenTrace)
+              actions.push({
+                label: "Activity trace",
+                icon: Activity,
+                onSelect: onOpenTrace,
               });
             if (!isReadOnly && canDeleteNest)
               actions.push({

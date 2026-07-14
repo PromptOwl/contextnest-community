@@ -1,7 +1,12 @@
 /**
- * Superadmin activity trace — every API request and MCP tool call in one
- * simple newest-first table. Operator audit surface: who, what, where,
- * outcome, how long. Server-admin only (the endpoint enforces it too).
+ * Activity trace — every API request and MCP tool call in one simple
+ * newest-first table. Operator audit surface: who, what, where, outcome,
+ * how long. Two modes:
+ *   - server-wide (default): GET /admin/trace, server-admin only.
+ *   - nest-scoped (`nestId` prop): GET /nests/:id/trace, owner/nest-admin
+ *     only — the server pins every row to that nest, so the nest column
+ *     and filter are hidden.
+ * The endpoints enforce authorization either way.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -38,7 +43,14 @@ interface TraceRow {
 
 const PAGE_SIZE = 25;
 
-export function ActivityTracePage({ onBack }: { onBack: () => void }) {
+export function ActivityTracePage({
+  onBack,
+  nestId,
+}: {
+  onBack: () => void;
+  /** Nest-scoped steward mode: fetch this nest's rows only, hide the nest column. */
+  nestId?: string;
+}) {
   const [rows, setRows] = useState<TraceRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0); // 0-based
@@ -71,12 +83,15 @@ export function ActivityTracePage({ onBack }: { onBack: () => void }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.getAdminTrace({
+      const params = {
         kind: kind === "all" ? undefined : kind,
         user: debouncedUser.trim() || undefined,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
-      });
+      };
+      const res = nestId
+        ? await api.getNestTrace(nestId, params)
+        : await api.getAdminTrace(params);
       if (seq !== reqSeq.current) return; // superseded by a newer request
       setRows(res.events);
       setTotal(res.total);
@@ -86,7 +101,7 @@ export function ActivityTracePage({ onBack }: { onBack: () => void }) {
     } finally {
       if (seq === reqSeq.current) setLoading(false);
     }
-  }, [kind, debouncedUser, page]);
+  }, [kind, debouncedUser, page, nestId]);
 
   useEffect(() => {
     load();
@@ -146,7 +161,7 @@ export function ActivityTracePage({ onBack }: { onBack: () => void }) {
               <th>Time</th>
               <th>Kind</th>
               <th>Call</th>
-              <th>Nest</th>
+              {!nestId && <th>Nest</th>}
               <th>Caller</th>
               <th>Status</th>
               <th className="text-right">ms</th>
@@ -155,7 +170,7 @@ export function ActivityTracePage({ onBack }: { onBack: () => void }) {
           <tbody>
             {rows.length === 0 && !loading && (
               <tr>
-                <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
+                <td colSpan={nestId ? 6 : 7} className="px-3 py-8 text-center text-muted-foreground">
                   No activity recorded yet.
                 </td>
               </tr>
@@ -179,9 +194,11 @@ export function ActivityTracePage({ onBack }: { onBack: () => void }) {
                 <td className="font-mono max-w-[340px] truncate" title={r.path || r.tool || ""}>
                   {r.kind === "mcp" ? r.tool : `${r.method} ${r.path}`}
                 </td>
-                <td className="font-mono max-w-[120px] truncate" title={r.nest_id || ""}>
-                  {r.nest_id || "—"}
-                </td>
+                {!nestId && (
+                  <td className="font-mono max-w-[120px] truncate" title={r.nest_id || ""}>
+                    {r.nest_id || "—"}
+                  </td>
+                )}
                 <td className="max-w-[180px] truncate" title={r.caller || ""}>
                   {r.caller || "—"}
                 </td>
@@ -203,7 +220,7 @@ export function ActivityTracePage({ onBack }: { onBack: () => void }) {
         </table>
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span>Rolling 14-day window, newest first.</span>
+        <span>Rolling retention window (server setting), newest first.</span>
         <div className="flex items-center gap-2">
           <span>
             {from}–{to} of {total}

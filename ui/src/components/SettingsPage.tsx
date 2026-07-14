@@ -74,6 +74,7 @@ const TABS: {
     keys: [
       "telemetry_enabled",
       "max_body_bytes",
+      "trace_retention_days",
       "workflow_plane_enabled",
       "subagent_runs_enabled",
       "subagent_max_depth",
@@ -590,6 +591,36 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   bytes={draft.max_body_bytes}
                   onChange={(bytes) => set({ max_body_bytes: bytes })}
                 />
+              </CardContent>
+            </Card>
+
+            {/* Activity-trace retention (api_events rolling window) */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Activity trace retention
+                </CardTitle>
+                <CardDescription>
+                  How many days of activity-trace rows (API requests and MCP
+                  tool calls) to keep. Older rows are pruned opportunistically.
+                  Set 0 to keep activity forever.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center gap-2">
+                  <NumField
+                    value={draft.trace_retention_days}
+                    min={0}
+                    max={3650}
+                    onChange={(n) => set({ trace_retention_days: n })}
+                  />
+                  <span className="text-sm text-muted-foreground shrink-0">
+                    days
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  0–3650 — 0 disables pruning entirely.
+                </p>
               </CardContent>
             </Card>
 

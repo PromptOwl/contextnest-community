@@ -7,11 +7,12 @@
  *
  * Writes are best-effort fire-and-forget: a broken trace table must never
  * fail a real request. Retention is a rolling window pruned opportunistically
- * every PRUNE_EVERY inserts.
+ * every PRUNE_EVERY inserts. The window is TRACE_RETENTION_DAYS (default 14,
+ * env or admin Settings); 0 disables pruning entirely (keep forever).
  */
 import { getDb } from "../db/client.js";
+import { config } from "../config.js";
 
-const RETENTION_DAYS = 14;
 const PRUNE_EVERY = 500;
 let insertsSincePrune = 0;
 
@@ -49,10 +50,15 @@ export async function logTraceEvent(e: TraceEvent): Promise<void> {
     );
     if (++insertsSincePrune >= PRUNE_EVERY) {
       insertsSincePrune = 0;
-      const cutoff = new Date(
-        Date.now() - RETENTION_DAYS * 86_400_000,
-      ).toISOString();
-      await db.run("DELETE FROM api_events WHERE ts < ?", [cutoff]);
+      // 0 = keep forever: skip the prune entirely. Read per prune (not
+      // module load) so the admin-settings override takes effect live.
+      const retentionDays = config.TRACE_RETENTION_DAYS;
+      if (retentionDays > 0) {
+        const cutoff = new Date(
+          Date.now() - retentionDays * 86_400_000,
+        ).toISOString();
+        await db.run("DELETE FROM api_events WHERE ts < ?", [cutoff]);
+      }
     }
   } catch {
     /* tracing must never break the request */

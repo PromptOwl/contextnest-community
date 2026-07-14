@@ -101,6 +101,15 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+    }
+  | {
+      /** Nest-scoped activity trace (owner/nest-admin) — ActivityTracePage
+       *  in nest mode, backed by GET /nests/:id/trace. */
+      page: "nest-trace";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
     };
 
 // Runs the ?sso_error toast exactly once per page load (survives React
@@ -260,6 +269,7 @@ export default function App() {
           sub === "graph" ? "ontology-graph"
           : sub === "workflows" && workflowPlaneEnabled ? "workflows"
           : sub === "definitions" ? "definitions"
+          : sub === "trace" ? "nest-trace"
           : null;
         if (subPage) {
           setView({
@@ -310,7 +320,8 @@ export default function App() {
       // bar stays shareable instead of dropping the nest context.
       view.page === "ontology-graph" ||
       view.page === "workflows" ||
-      view.page === "definitions"
+      view.page === "definitions" ||
+      view.page === "nest-trace"
     ) {
       params.set("nest", view.nestId);
       params.delete("doc");
@@ -320,7 +331,9 @@ export default function App() {
           ? "graph"
           : view.page === "workflows"
             ? "workflows"
-            : "definitions",
+            : view.page === "definitions"
+              ? "definitions"
+              : "trace",
       );
     } else {
       params.delete("nest");
@@ -711,6 +724,29 @@ export default function App() {
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
                 initialFolder: opts?.folder,
+              })
+            }
+            onOpenTrace={() =>
+              setView({
+                page: "nest-trace",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
+        )}
+        {view.page === "nest-trace" && (
+          <ActivityTracePage
+            nestId={view.nestId}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
               })
             }
           />

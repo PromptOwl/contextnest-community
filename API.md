@@ -927,7 +927,7 @@ Execute (the runner contract — the agent IS the runner):
 ### GET `/admin/trace` (server-admin only)
 Operator activity trail — one newest-first row per API request and per MCP tool call, so the server admin has a single place to audit what every client and agent did. Server-admin only: the license admin, or a `super_admin` in `access.yaml` (open mode: always allowed). Everyone else gets `403`. Cross-tenant data; not scoped to a nest.
 
-Rows are best-effort fire-and-forget writes to the `api_events` table (a broken trace table never fails a real request) on a rolling **14-day** retention window. API rows come from a global request-logging middleware; MCP rows are logged inside `handleToolCall`, so both per-nest and server-level tool calls — including ones that throw — are captured.
+Rows are best-effort fire-and-forget writes to the `api_events` table (a broken trace table never fails a real request) on a rolling retention window of **`TRACE_RETENTION_DAYS`** days (default **14**; `0` = keep forever — see `CONFIGURATION.md`; also editable from Settings → Advanced). API rows come from a global request-logging middleware; MCP rows are logged inside `handleToolCall`, so both per-nest and server-level tool calls — including ones that throw — are captured.
 
 Query params (all optional):
 - `kind` — `api` or `mcp`. Omit for both.
@@ -983,6 +983,13 @@ Response (200):
 - `duration_ms` — wall-clock duration of the call.
 
 Surfaced in the UI under the user menu → **Activity trace** (`ActivityTracePage`), with kind/user filters, 25-per-page pagination, and a refresh button.
+
+### GET `/nests/:id/trace` (nest owner / nest admin)
+The per-nest steward slice of the activity trace. Same response shape, pagination, and `kind` / `user` / `limit` / `offset` query params as `GET /admin/trace`, but every row is **always pinned to this nest server-side** — there is no `nest` param, and one supplied in the query is ignored, so a caller can never read another nest's activity through this endpoint.
+
+Authorization mirrors the grants / steward-roster rule (`canManageStewards`): the nest owner, an `admin` collaborator, the license admin, or an `access.yaml` `super_admin` (open mode: always allowed). Read/write collaborators get `403`; callers with no access to the nest get `404`.
+
+Surfaced in the UI from the nest view's overflow menu → **Activity trace** (owner/nest-admin only), which renders `ActivityTracePage` in nest-scoped mode (nest column hidden).
 
 ---
 

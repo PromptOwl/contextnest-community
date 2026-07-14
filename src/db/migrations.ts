@@ -1101,6 +1101,21 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("025_run_claims");
   }
+
+  // 026: composite index for the per-nest trace view (CU-wdqcpzw3u6).
+  //   GET /nests/:id/trace filters WHERE nest_id = ? and pages ORDER BY id
+  //   DESC — with only idx_api_events_ts (migration 014) that's a full table
+  //   scan per request, and with TRACE_RETENTION_DAYS=0 the table can grow
+  //   unbounded. (nest_id, id) serves both the filtered COUNT and the
+  //   newest-first page window in one index walk.
+  if (!hasMigration("026_api_events_nest_index")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_api_events_nest_ts ON api_events(nest_id, id);
+      `);
+    })();
+    recordMigration("026_api_events_nest_index");
+  }
 }
 
 /**
