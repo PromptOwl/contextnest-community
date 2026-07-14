@@ -57,6 +57,7 @@ import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { DeleteNestDialog } from "./DeleteNestDialog";
+import { RenameNestDialog } from "./RenameNestDialog";
 import { Button } from "@/components/ui/button";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
@@ -366,6 +367,10 @@ export function NestView({
   };
   const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
+  // Rename dialog (name + description) — complements the inline header
+  // rename, which only covers the name.
+  const [showRename, setShowRename] = useState(false);
+  const [nestDescription, setNestDescription] = useState<string | null>(null);
 
   // Documents-as-a-repo state: controlled tab (Overview folder clicks jump to
   // Documents), the folder the list is scoped to (null = whole nest, "" would
@@ -468,6 +473,7 @@ export function NestView({
     }
     if (nestMeta?.nest) {
       setIsImported(!!(nestMeta.nest as any).is_imported);
+      setNestDescription((nestMeta.nest as any).description ?? null);
     }
     if (nestMeta?.permission) {
       setPermission(nestMeta.permission);
@@ -1316,6 +1322,15 @@ export function NestView({
               destructive, write+admin gated. */}
           {(() => {
             const actions: OverflowAction[] = [];
+            // Same tier as the inline header rename (owner/nest-admin —
+            // matches the server's PATCH /nests/:nestId guard); the dialog
+            // additionally covers the description.
+            if (!isReadOnly && canManage)
+              actions.push({
+                label: "Rename nest",
+                icon: Pencil,
+                onSelect: () => setShowRename(true),
+              });
             if (!isReadOnly && canManageGovernance)
               actions.push({
                 label: "Nest settings",
@@ -2848,6 +2863,25 @@ export function NestView({
           open
           onOpenChange={setShowDelete}
           onDeleted={() => { setShowDelete(false); onBack(); }}
+        />
+      )}
+
+      {showRename && (
+        <RenameNestDialog
+          nestId={nestId}
+          nestName={editableName}
+          nestDescription={nestDescription}
+          open
+          onOpenChange={setShowRename}
+          onRenamed={(updated) => {
+            // Keep the inline header rename in sync so its autosave doesn't
+            // re-submit the old name on blur.
+            setEditableName(updated.name);
+            lastSavedName.current = updated.name;
+            setRenameError(null);
+            setNestDescription(updated.description);
+            setShowRename(false);
+          }}
         />
       )}
 
