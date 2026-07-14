@@ -23,6 +23,7 @@ import type { AnnotationThread } from "../lib/api";
 import { extractText, buildAnchor } from "../lib/artifact-text";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -112,6 +113,19 @@ export function ArtifactViewer({
   // Pending review locks writes server-side (423) — mirror DocumentEditor
   // and disable the affordances instead of letting the user hit the error.
   const isLocked = nodeMeta?.status === "pending_review";
+  const editDirty = nodeMeta != null && editDraft !== nodeMeta.content;
+  // Restore also writes a new version, so the same pending_review lock
+  // applies — the banner's "Restore this version" must gate like the history
+  // modal's button (VersionHistory's restoreLocked). Derived from whichever
+  // signal is loaded: the fetched node (edit mode), or the versions list's
+  // current row — always present when a version is pinned, since pinning
+  // goes through the history modal.
+  const restoreLocked =
+    isLocked ||
+    (versionData != null &&
+      versionData.versions.find(
+        (v) => v.version === versionData.currentVersion,
+      )?.status === "pending_review");
 
   // Pending new-comment composition.
   const [selection, setSelection] = useState<
@@ -144,13 +158,43 @@ export function ArtifactViewer({
     void loadVersions();
   }, [loadVersions]);
 
+  // Leaving Edit source with unsaved changes prompts first, then drops the
+  // draft so the confirm is honest (native confirm matches the app's other
+  // destructive prompts). Guards Back, the mode toggle, and "View rendered".
+  const guardEditLeave = useCallback(
+    (leave: () => void) => {
+      if (mode === "edit" && editDirty) {
+        if (!window.confirm("Discard unsaved source changes?")) return;
+        if (nodeMeta) setEditDraft(nodeMeta.content);
+      }
+      leave();
+    },
+    [mode, editDirty, nodeMeta],
+  );
+
+  // Warn on tab close / reload while an unsaved source draft exists.
+  useEffect(() => {
+    if (!editDirty) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [editDirty]);
+
   // Pin a historical version into the iframe, read-only.
-  const viewVersion = useCallback((v: number) => {
-    setShowVersions(false);
-    setViewingVersion(v);
-    setMode("preview");
-    setIframeKey((k) => k + 1);
-  }, []);
+  const viewVersion = useCallback(
+    (v: number) => {
+      guardEditLeave(() => {
+        setShowVersions(false);
+        setViewingVersion(v);
+        setMode("preview");
+        setIframeKey((k) => k + 1);
+      });
+    },
+    [guardEditLeave],
+  );
 
   const exitVersionView = useCallback(() => {
     setViewingVersion(null);
@@ -214,8 +258,6 @@ export function ArtifactViewer({
       setNodeLoading(false);
     }
   }, [nodeMeta, nodeLoading, nestId, nodeId]);
-
-  const editDirty = nodeMeta != null && editDraft !== nodeMeta.content;
 
   // Save through the normal node-update path (same call DocumentEditor makes)
   // so versioning + governance behave exactly like a markdown edit.
@@ -389,7 +431,11 @@ export function ArtifactViewer({
       {/* Header */}
       <div className="flex items-center justify-between gap-3 mb-4">
         <div className="flex items-center gap-2 min-w-0">
-          <Button variant="ghost" size="icon" onClick={onBack}>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => guardEditLeave(onBack)}
+          >
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <h1 className="text-xl font-semibold truncate">{title || nodeId}</h1>
@@ -421,22 +467,24 @@ export function ArtifactViewer({
               className={`px-3 h-full rounded-l-md inline-flex items-center gap-1.5 text-sm ${
                 mode === "preview" ? "bg-muted" : "hover:bg-muted/50"
               }`}
-              onClick={() => setMode("preview")}
+              onClick={() => guardEditLeave(() => setMode("preview"))}
             >
               <Eye className="h-4 w-4" /> Preview
             </button>
             <button
               type="button"
-              className={`px-3 h-full inline-flex items-center gap-1.5 text-sm disabled:opacity-50 ${
-                canEdit ? "" : "rounded-r-md "
-              }${mode === "annotate" ? "bg-muted" : "hover:bg-muted/50"}`}
+              className={cn(
+                "px-3 h-full inline-flex items-center gap-1.5 text-sm disabled:opacity-50",
+                !canEdit && "rounded-r-md",
+                mode === "annotate" ? "bg-muted" : "hover:bg-muted/50",
+              )}
               disabled={viewingVersion != null}
               title={
                 viewingVersion != null
                   ? "Return to the current version to annotate"
                   : undefined
               }
-              onClick={() => setMode("annotate")}
+              onClick={() => guardEditLeave(() => setMode("annotate"))}
             >
               <Highlighter className="h-4 w-4" /> Annotate
             </button>
@@ -494,9 +542,18 @@ export function ArtifactViewer({
                     size="sm"
                     variant="outline"
                     className="h-6 px-2 text-xs border-amber-300 text-amber-900 hover:bg-amber-100"
+                    disabled={restoreLocked}
+                    title={
+                      restoreLocked
+                        ? "Locked while awaiting steward review — resolve the review first"
+                        : undefined
+                    }
                     onClick={() => setConfirmRestore(viewingVersion)}
                   >
-                    <RotateCcw className="h-3 w-3 mr-1" /> Restore this version
+                    <RotateCcw className="h-3 w-3 mr-1" />
+                    {restoreLocked
+                      ? "Locked — review pending"
+                      : "Restore this version"}
                   </Button>
                 )}
                 <Button
