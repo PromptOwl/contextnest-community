@@ -61,6 +61,7 @@ const HISTORICAL_MIGRATIONS = [
   "025_run_claims",
   "020_server_settings",
   "026_api_events_nest_index",
+  "027_teams",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -89,6 +90,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       stewardship_enabled INTEGER NOT NULL DEFAULT 0,
       is_imported INTEGER NOT NULL DEFAULT 0,
       allow_self_approve INTEGER NOT NULL DEFAULT 0,
+      shared_teams TEXT NOT NULL DEFAULT '[]',
       UNIQUE(user_id, slug)
     );
     CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
@@ -313,6 +315,16 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_unique
       ON grants(nest_id, target_type, target, user_id);
     CREATE INDEX IF NOT EXISTS idx_grants_user ON grants(nest_id, user_id);
+
+    CREATE TABLE IF NOT EXISTS teams (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      members TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+    CREATE INDEX IF NOT EXISTS idx_teams_owner ON teams(owner_id);
 
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,
