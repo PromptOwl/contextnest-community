@@ -224,6 +224,17 @@
   color: hsl(var(--foreground));
 }
 
+.cn-code-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* "Convert to table" is an editing action — hide it on read-only surfaces. */
+.ProseMirror[contenteditable="false"] .cn-code-to-table {
+  display: none !important;
+}
+
 /* Read-only surfaces (review modal, view mode) set contenteditable="false"
    on the ProseMirror root. There the language picker is just a label — drop
    the dropdown chrome and disable interaction; the Copy button still works. */

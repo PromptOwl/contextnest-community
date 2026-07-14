@@ -133,6 +133,12 @@ import {
 } from "react";
 import { Button } from "@/components/ui/button";
 import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
+import {
   Bold,
   Italic,
   Strikethrough,
@@ -160,10 +166,22 @@ import {
   Trash2,
   Highlighter,
   Table as TableIcon,
+  FileSpreadsheet,
+  Upload,
   Info,
   ChevronRight,
   Columns2,
 } from "lucide-react";
+import { toast } from "sonner";
+import {
+  looksLikeDelimitedTable,
+  detectHeaderRow,
+  detectDelimiter,
+  parseDelimited,
+  rowsToMarkdownTable,
+  LARGE_TABLE_ROW_THRESHOLD,
+  type Delimiter,
+} from "@/lib/csv-table";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -332,6 +350,10 @@ export const MarkdownEditor = forwardRef<
     top: number;
   } | null>(null);
 
+  // Lets the static `handlePaste` (captured once at useEditor time) reach
+  // the live editor instance for markdown-aware insertion.
+  const editorRef = useRef<Editor | null>(null);
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -443,6 +465,29 @@ export const MarkdownEditor = forwardRef<
         class:
           "prose prose-sm dark:prose-invert max-w-none focus:outline-none min-h-[300px] px-6 py-4",
       },
+      // CSV/TSV paste → markdown table. Deliberately conservative: only
+      // fires on plain-text clipboards that look unambiguously tabular
+      // (see looksLikeDelimitedTable), never inside a code block or an
+      // existing table, and never when the clipboard carries an HTML
+      // <table> — Sheets/Excel provide one and ProseMirror's native HTML
+      // parsing already turns it into table nodes.
+      handlePaste: (_view, event) => {
+        const ed = editorRef.current;
+        if (!ed || !event.clipboardData) return false;
+        if (ed.isActive("codeBlock") || ed.isActive("table")) return false;
+        const html = event.clipboardData.getData("text/html");
+        if (html && /<table[\s>]/i.test(html)) return false;
+        const text = event.clipboardData.getData("text/plain");
+        if (!text) return false;
+        const detected = looksLikeDelimitedTable(text);
+        if (!detected) return false;
+        // Handled here → returns true, so the default plain-text paste is
+        // skipped (large inputs land as a code block, not a live table).
+        return insertDelimitedTable(ed, detected.rows, {
+          text,
+          delimiter: detected.delimiter,
+        });
+      },
       handleKeyDown: (_view, event) => {
         const popup = wikiPopupRef.current;
         const results = wikiResultsRef.current;
@@ -498,6 +543,10 @@ export const MarkdownEditor = forwardRef<
       },
     },
   });
+
+  useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
 
   useEffect(() => {
     if (editor && editor.isEditable !== effectiveEditable) {
@@ -869,15 +918,31 @@ export const MarkdownEditor = forwardRef<
     if (!editor || !blockTarget) return;
     const node = blockNodeAt(blockTarget.pos);
     if (!node) return;
-    editor
-      .chain()
-      .focus()
-      .deleteRange({
-        from: blockTarget.pos,
-        to: blockTarget.pos + node.nodeSize,
-      })
-      .run();
+    const from = blockTarget.pos;
+    const to = from + node.nodeSize;
     closeBlockMenu();
+    const run = () =>
+      editor.chain().focus().deleteRange({ from, to }).run();
+    // A big node (image, table, or a large CSV/code block) can stall the main
+    // thread while ProseMirror re-renders the delete. Show a loader and defer
+    // two frames so it paints before the synchronous delete freezes the UI;
+    // small blocks delete inline with no toast noise.
+    const heavy =
+      node.type.name === "image" ||
+      node.type.name === "table" ||
+      node.type.name === "codeBlock" ||
+      node.nodeSize > 400;
+    if (!heavy) {
+      run();
+      return;
+    }
+    const toastId = toast.loading("Deleting…");
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        run();
+        toast.success("Deleted.", { id: toastId });
+      }),
+    );
   };
 
   // Turn-into: put the caret inside the handle's block, then run the block
@@ -1489,6 +1554,72 @@ function BlockMenuItem({
 
 export default MarkdownEditor;
 
+/**
+ * Insert parsed CSV/TSV as editor content. Shared by the paste interceptor
+ * and the file-upload button so the guard copy and header UX stay in one
+ * place. Always returns true (the paste path returns it verbatim: the content
+ * is handled here, never left to the default plain-text paste).
+ *
+ * Small inputs become a live markdown table with a one-click header override.
+ * Large inputs (> LARGE_TABLE_ROW_THRESHOLD data rows) become a fenced
+ * `csv`/`tsv` code block instead: a live table that big stutters ProseMirror's
+ * render and typing, whereas a code block is a single cheap text node. Both
+ * are plain markdown — diffable, versioned, and readable by every downstream
+ * consumer — so nothing new is stored either way. The rejected form is offered
+ * as a one-click, informed opt-in.
+ */
+function insertDelimitedTable(
+  editor: Editor,
+  rows: string[][],
+  raw: { text: string; delimiter: Delimiter },
+): boolean {
+  const hasHeader = detectHeaderRow(rows);
+  const dataRows = rows.length - (hasHeader ? 1 : 0);
+  const insertTable = (header: boolean) =>
+    editor
+      .chain()
+      .focus()
+      .insertContent(rowsToMarkdownTable(rows, { hasHeader: header }))
+      .run();
+
+  if (dataRows > LARGE_TABLE_ROW_THRESHOLD) {
+    const lang = raw.delimiter === "\t" ? "tsv" : "csv";
+    // Fenced code block via markdown so tiptap-markdown parses it to a real
+    // codeBlock node (same insert path as the table markdown below).
+    const fence = "```" + lang + "\n" + raw.text.trim() + "\n```";
+    editor.chain().focus().insertContent(fence).run();
+    toast(
+      `${dataRows.toLocaleString()} rows kept as a ${lang.toUpperCase()} ` +
+        `code block — a live table this large slows the editor.`,
+      {
+        action: {
+          label: "Insert as table anyway",
+          onClick: () => {
+            editor.chain().focus().undo().run();
+            insertTable(hasHeader);
+          },
+        },
+      },
+    );
+    return true;
+  }
+
+  insertTable(hasHeader);
+  // Header detection is a heuristic, so surface the manual toggle the ticket
+  // asks for as a one-click correction. Undo drops the just-inserted table
+  // (one insertContent = one undo step); re-insert with the flipped choice.
+  toast("Table inserted.", {
+    action: {
+      label: hasHeader ? "First row is data" : "First row is header",
+      onClick: () => {
+        editor.chain().focus().undo().run();
+        insertTable(!hasHeader);
+      },
+    },
+  });
+  return true;
+}
+
 function Toolbar({
   editor,
   onLink,
@@ -1504,6 +1635,51 @@ function Toolbar({
   previewing: boolean;
   onTogglePreview: () => void;
 }) {
+  // Hidden file input driven by the "Insert table from CSV" toolbar button.
+  const csvInputRef = useRef<HTMLInputElement>(null);
+  const pickCsv = () => csvInputRef.current?.click();
+  // Refuse to read absurdly large files into memory — a table this size
+  // would be unusable in the editor anyway.
+  const MAX_CSV_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+  const onCsvPicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+    if (file.size > MAX_CSV_FILE_BYTES) {
+      toast.error(
+        `That file is ${(file.size / (1024 * 1024)).toFixed(1)} MB — ` +
+          `the limit for table import is 10 MB.`,
+      );
+      return;
+    }
+    const toastId = toast.loading("Processing file…");
+    // Let the loader actually paint before the (synchronous, possibly heavy)
+    // read + parse blocks the main thread — two frames clears the commit+paint.
+    await new Promise((r) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => r(null))),
+    );
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      toast.error("Couldn't read that file.", { id: toastId });
+      return;
+    }
+    // .tsv extension pins the delimiter; otherwise auto-detect
+    // (tab → comma → semicolon). Comma is a harmless single-column fallback.
+    const delimiter = /\.tsv$/i.test(file.name)
+      ? "\t"
+      : (detectDelimiter(text) ?? ",");
+    const rows = parseDelimited(text, delimiter);
+    if (rows.length === 0) {
+      toast.error("No table rows found in that file.", { id: toastId });
+      return;
+    }
+    // insertDelimitedTable pops its own result toast; drop the loader first.
+    toast.dismiss(toastId);
+    insertDelimitedTable(editor, rows, { text, delimiter });
+  };
+
   // Hidden file input driven by the Image toolbar button.
   const imageInputRef = useRef<HTMLInputElement>(null);
   const pickImage = () => imageInputRef.current?.click();
@@ -1511,6 +1687,7 @@ function Toolbar({
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
     if (!file || !onUploadImage) return;
+    const toastId = toast.loading("Uploading image…");
     try {
       const url = await onUploadImage(file);
       editor
@@ -1518,9 +1695,9 @@ function Toolbar({
         .focus()
         .setImage({ src: url, alt: file.name.replace(/\.[^.]+$/, "") })
         .run();
+      toast.success("Image uploaded.", { id: toastId });
     } catch (err: any) {
-      // Surface via the browser-native path — the editor has no toast scope.
-      alert(err?.message || "Image upload failed");
+      toast.error(err?.message || "Image upload failed", { id: toastId });
     }
   };
   // In preview mode every formatting affordance is irrelevant — collapse
@@ -1648,6 +1825,52 @@ function Toolbar({
       >
         <TableIcon className="h-3.5 w-3.5" />
       </ToolbarButton>
+      {/* One "Upload" control for every file the editor can ingest — image
+          and CSV/TSV share the same intent, so they share one menu instead
+          of two buttons in different toolbar groups. */}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            title="Upload a file"
+            // Match ToolbarButton: don't blur the editor before the menu opens.
+            onMouseDown={(e) => e.preventDefault()}
+            className="h-7 w-7 p-0"
+          >
+            <Upload className="h-3.5 w-3.5" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start">
+          {onUploadImage && (
+            <DropdownMenuItem onSelect={pickImage}>
+              <ImagePlus className="mr-2 h-4 w-4" />
+              Image
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuItem onSelect={pickCsv}>
+            <FileSpreadsheet className="mr-2 h-4 w-4" />
+            Table from CSV / TSV
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <input
+        ref={csvInputRef}
+        type="file"
+        accept=".csv,.tsv,text/csv,text/tab-separated-values"
+        className="hidden"
+        onChange={onCsvPicked}
+      />
+      {onUploadImage && (
+        <input
+          ref={imageInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp"
+          className="hidden"
+          onChange={onImagePicked}
+        />
+      )}
 
       <Divider />
 
@@ -1666,21 +1889,6 @@ function Toolbar({
           <FileText className="h-3.5 w-3.5" />
         </ToolbarButton>
       )}
-      {onUploadImage && (
-        <>
-          <ToolbarButton onClick={pickImage} title="Insert image (uploads to this nest)">
-            <ImagePlus className="h-3.5 w-3.5" />
-          </ToolbarButton>
-          <input
-            ref={imageInputRef}
-            type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp"
-            className="hidden"
-            onChange={onImagePicked}
-          />
-        </>
-      )}
-
       <Divider />
 
       <ToolbarButton

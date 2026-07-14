@@ -3,7 +3,7 @@
  * Adapted: `versions` and callbacks passed as props (no server-action imports).
  */
 import React, { useState } from "react";
-import { History, RotateCcw, ArrowLeft, ChevronRight, Loader2, CheckCircle2, XCircle } from "lucide-react";
+import { History, RotateCcw, ArrowLeft, ChevronRight, Loader2, CheckCircle2, XCircle, Eye } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -39,6 +39,19 @@ interface VersionHistoryProps {
   approvedVersion?: number | null;
   loading?: boolean;
   onRestore?: (versionNumber: number) => Promise<void>;
+  /**
+   * How the preview pane renders a version's full body. "markdown" (default)
+   * renders through DocumentViewer; "source" shows the raw text in a <pre> —
+   * used for HTML artifacts, whose body is not markdown. Diffs are raw-text
+   * either way.
+   */
+  previewAs?: "markdown" | "source";
+  /**
+   * Optional "view rendered" hook: the caller renders this version in its own
+   * surface (e.g. the artifact iframe, pinned to ?v=N). Shown in the preview
+   * pane for non-current versions.
+   */
+  onView?: (versionNumber: number) => void;
   className?: string;
 }
 
@@ -92,6 +105,8 @@ export function VersionHistory({
   approvedVersion,
   loading = false,
   onRestore,
+  previewAs = "markdown",
+  onView,
   className,
 }: VersionHistoryProps) {
   const [previewVersion, setPreviewVersion] = useState<Version | null>(null);
@@ -183,6 +198,17 @@ export function VersionHistory({
                 <ArrowLeft className="h-4 w-4 mr-1" /> Back
               </Button>
               <div className="flex items-center gap-1">
+                {onView && previewVersion.version !== currentVersion && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7"
+                    title="Render this version in the viewer"
+                    onClick={() => onView(previewVersion.version)}
+                  >
+                    <Eye className="h-4 w-4 mr-1" /> View rendered
+                  </Button>
+                )}
                 {previewVersion.content &&
                   currentContent !== undefined &&
                   previewVersion.version !== currentVersion && (
@@ -241,6 +267,10 @@ export function VersionHistory({
                     className="max-h-none"
                   />
                 </div>
+              ) : previewVersion.content && previewAs === "source" ? (
+                <pre className="whitespace-pre-wrap break-words bg-muted/30 rounded px-4 py-3 text-xs font-mono leading-relaxed">
+                  {previewVersion.content}
+                </pre>
               ) : previewVersion.content ? (
                 <DocumentViewer
                   content={previewVersion.content}
