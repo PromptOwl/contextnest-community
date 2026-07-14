@@ -8,7 +8,7 @@
  * inline in the dialog rather than as a toast so the user can fix the name
  * without losing their input.
  */
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -50,35 +50,61 @@ export function RenameNestDialog({
 }: RenameNestDialogProps) {
   const [name, setName] = useState(nestName);
   const [description, setDescription] = useState(nestDescription ?? "");
+  // Per-field touched flags — the PATCH payload only carries fields the user
+  // actually edited. Callers may open this dialog before their nest fetch
+  // has resolved (description prop still null); unconditionally sending
+  // `description` in that state would silently wipe the real value
+  // server-side.
+  const [nameTouched, setNameTouched] = useState(false);
+  const [descTouched, setDescTouched] = useState(false);
+  // Baselines captured when the dialog opened — compare edits against these,
+  // not the live props, which can move under an open dialog when the parent
+  // refreshes its nest data in the background.
+  const primed = useRef({ name: nestName, description: nestDescription ?? "" });
+  const wasOpen = useRef(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Re-prime from the current values every time the dialog opens so stale
-  // edits or a prior error don't leak across invocations.
+  // Prime from the current values only on the closed→open transition so
+  // stale edits or a prior error don't leak across invocations. Re-priming
+  // on every prop change while open would discard in-progress edits when a
+  // background refresh lands.
   useEffect(() => {
-    if (open) {
+    if (open && !wasOpen.current) {
+      primed.current = { name: nestName, description: nestDescription ?? "" };
       setName(nestName);
       setDescription(nestDescription ?? "");
+      setNameTouched(false);
+      setDescTouched(false);
       setError(null);
       setSaving(false);
     }
+    wasOpen.current = open;
   }, [open, nestName, nestDescription]);
 
   const trimmedName = name.trim();
-  const dirty =
-    trimmedName !== nestName.trim() ||
-    description.trim() !== (nestDescription ?? "").trim();
+  const nameChanged =
+    nameTouched && trimmedName !== primed.current.name.trim();
+  const descChanged =
+    descTouched && description.trim() !== primed.current.description.trim();
+  const dirty = nameChanged || descChanged;
 
   const handleSave = async () => {
     if (!trimmedName || saving) return;
+    if (!dirty) {
+      onOpenChange(false);
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      const { nest } = await api.updateNest(nestId, {
-        name: trimmedName,
-        // Empty string clears the description (server stores NULL).
-        description: description.trim() || null,
-      });
+      // Only the fields the user edited go on the wire — untouched fields
+      // stay out of the payload so the server keeps their current values.
+      const patch: { name?: string; description?: string | null } = {};
+      if (nameChanged) patch.name = trimmedName;
+      // Empty string clears the description (server stores NULL).
+      if (descChanged) patch.description = description.trim() || null;
+      const { nest } = await api.updateNest(nestId, patch);
       onRenamed(nest);
       onOpenChange(false);
     } catch (err: any) {
@@ -131,6 +157,7 @@ export function RenameNestDialog({
               value={name}
               onChange={(e) => {
                 setName(e.target.value);
+                setNameTouched(true);
                 setError(null);
               }}
               placeholder="Nest name"
@@ -148,7 +175,10 @@ export function RenameNestDialog({
             <Input
               id="rename-nest-description"
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={(e) => {
+                setDescription(e.target.value);
+                setDescTouched(true);
+              }}
               placeholder="What lives in this nest?"
               disabled={saving}
               autoComplete="off"

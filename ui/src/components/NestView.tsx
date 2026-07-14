@@ -1324,8 +1324,11 @@ export function NestView({
             const actions: OverflowAction[] = [];
             // Same tier as the inline header rename (owner/nest-admin —
             // matches the server's PATCH /nests/:nestId guard); the dialog
-            // additionally covers the description.
-            if (!isReadOnly && canManage)
+            // additionally covers the description. Also gated on !loading:
+            // isOwner is known synchronously (prop) but nestDescription only
+            // lands with fetchData, so opening the dialog earlier would
+            // prefill an empty description for a nest that has one.
+            if (!isReadOnly && canManage && !loading)
               actions.push({
                 label: "Rename nest",
                 icon: Pencil,
