@@ -1123,6 +1123,110 @@ export async function removeCollaborator(nestId: string, collabId: string) {
   );
 }
 
+// ─── Teams ──────────────────────────────────────────────────────────────
+// A team is a reusable, owner-managed group. Each member carries a role
+// (mirrors the server enum in src/shared/types.ts) applied on every nest the
+// team is shared to.
+
+export type TeamRole = "admin" | "editor" | "viewer";
+
+export interface TeamMember {
+  userId: string;
+  email: string;
+  role: TeamRole;
+  /** True = real registered account; false = invited placeholder (from API). */
+  registered?: boolean;
+}
+
+export interface Team {
+  id: string;
+  name: string;
+  owner_id: string;
+  /** Owner email for display ("Created by …"), from API. */
+  owner_email?: string;
+  members: TeamMember[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** Picker options for a team member's role. Mirrors TeamMemberRole server-side. */
+export const TEAM_ROLES: { value: TeamRole; label: string; hint: string }[] = [
+  { value: "viewer", label: "Viewer", hint: "Read only" },
+  { value: "editor", label: "Editor", hint: "Read and edit documents" },
+  { value: "admin", label: "Admin", hint: "Full access except deleting the nest" },
+];
+
+export async function listTeams() {
+  return request<{ teams: Team[] }>(`/teams`);
+}
+
+export async function getTeam(teamId: string) {
+  return request<{ team: Team }>(`/teams/${teamId}`);
+}
+
+export async function createTeam(name: string) {
+  return request<{ team: Team }>(`/teams`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function renameTeam(teamId: string, name: string) {
+  return request<{ team: Team }>(`/teams/${teamId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteTeam(teamId: string) {
+  return request<{ removed: boolean }>(`/teams/${teamId}`, { method: "DELETE" });
+}
+
+export async function addTeamMember(
+  teamId: string,
+  data: { email?: string; user_id?: string; role: TeamRole },
+) {
+  return request<{ team: Team }>(`/teams/${teamId}/members`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateTeamMemberRole(
+  teamId: string,
+  userId: string,
+  role: TeamRole,
+) {
+  return request<{ team: Team }>(`/teams/${teamId}/members/${userId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  });
+}
+
+export async function removeTeamMember(teamId: string, userId: string) {
+  return request<{ team: Team }>(`/teams/${teamId}/members/${userId}`, {
+    method: "DELETE",
+  });
+}
+
+/** Teams shared onto a nest, each enriched with its member roster. */
+export async function listNestTeams(nestId: string) {
+  return request<{
+    teams: { teamId: string; teamName: string; members: TeamMember[] }[];
+  }>(`/nests/${nestId}/teams`);
+}
+
+export async function shareNestWithTeam(nestId: string, teamId: string) {
+  return request(`/nests/${nestId}/teams`, {
+    method: "POST",
+    body: JSON.stringify({ team_id: teamId }),
+  });
+}
+
+export async function unshareNestTeam(nestId: string, teamId: string) {
+  return request(`/nests/${nestId}/teams/${teamId}`, { method: "DELETE" });
+}
+
 // ─── Ontology graph ───────────────────────────────────────────────────────
 
 export interface GraphNode {

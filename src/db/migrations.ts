@@ -1116,6 +1116,36 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("026_api_events_nest_index");
   }
+
+  // 027: teams (CU-wdqcpzw451). A reusable group primitive — a named set of
+  //   members, each with a role — owned/managed by its creator. Sharing a team
+  //   onto a nest records the team on `nests.shared_teams`; every member then
+  //   resolves to their own member role on that nest (see resolveNestPermission
+  //   / resolveUserRoles). Members are stored INLINE as a JSON roster rather
+  //   than a join table so a team is fetched/managed as one row. Role lives on
+  //   the member (uniform across every nest the team is shared to), not on the
+  //   share. `nests.shared_teams` holds [{teamId, teamName}] — teamId is
+  //   canonical, teamName a cached display label refreshed on team rename.
+  if (!hasMigration("027_teams")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS teams (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          members TEXT NOT NULL DEFAULT '[]',   -- JSON [{userId, email, role}]
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_teams_owner ON teams(owner_id);
+      `);
+      const nestColsNow = (db.prepare("PRAGMA table_info(nests)").all() as Array<{ name: string }>).map((c) => c.name);
+      if (!nestColsNow.includes("shared_teams")) {
+        db.exec("ALTER TABLE nests ADD COLUMN shared_teams TEXT NOT NULL DEFAULT '[]'");
+      }
+    })();
+    recordMigration("027_teams");
+  }
 }
 
 /**

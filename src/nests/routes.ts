@@ -30,6 +30,7 @@ import {
   getStewardRolesForUser,
 } from "../governance/stewardship-service.js";
 import { collabPermToRole } from "../governance/roles.js";
+import { resolveTeamRolesForUser } from "../governance/teams-service.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
@@ -104,8 +105,13 @@ nestRoutes.get("/", async (c) => {
         await getCollaboratorRole(n.id, callerEmail),
       );
       const stewardRoles = await getStewardRolesForUser(n.id, callerEmail);
+      // Team membership is a third grant path — include it so a team member's
+      // card shows their real role instead of a blank badge.
+      const teamRoles = await resolveTeamRolesForUser(n.id, userId);
       roles = [
-        ...new Set([grantRole, ...stewardRoles].filter(Boolean) as string[]),
+        ...new Set(
+          [grantRole, ...stewardRoles, ...teamRoles].filter(Boolean) as string[],
+        ),
       ];
     }
     if (!is_owner && n.user_id !== ANON_USER_ID) {
