@@ -31,6 +31,10 @@ const OIDC_ENV = [
   "OIDC_ALLOWED_DOMAINS",
   "OIDC_AUTO_PROVISION",
   "PUBLIC_BASE_URL",
+  // The lockout-guard tests PATCH these; scrub them so a leaked value can't
+  // bleed into other cases.
+  "MANUAL_SIGN_IN",
+  "PROMPTOWL_SIGN_IN_GATE",
 ];
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -69,7 +73,10 @@ async function makeKeys() {
  * endpoint returns (set it per test after minting an ID token); `captured`
  * records the last token-endpoint request body for asserting PKCE/secret.
  */
-function installMockIssuer(jwks: object) {
+function installMockIssuer(
+  jwks: object,
+  opts: { discoveryIssuer?: string } = {},
+) {
   const state: {
     tokenBody: Record<string, unknown> | null;
     tokenStatus: number;
@@ -86,7 +93,9 @@ function installMockIssuer(jwks: object) {
 
     if (url === `${ISSUER}/.well-known/openid-configuration`) {
       return json({
-        issuer: ISSUER,
+        // Overridable so tests can serve a document that claims a DIFFERENT
+        // issuer than the one asked for (issuer-mix-up guard).
+        issuer: opts.discoveryIssuer ?? ISSUER,
         authorization_endpoint: `${ISSUER}/authorize`,
         token_endpoint: `${ISSUER}/token`,
         jwks_uri: `${ISSUER}/jwks`,
@@ -206,6 +215,16 @@ describe("GET /auth/oidc/login", () => {
       expect(line).toMatch(/Path=\/auth\/oidc/);
       expect(line).toMatch(/SameSite=Lax/);
     }
+  });
+
+  it("rejects a discovery document that claims a different issuer (mix-up guard)", async () => {
+    const { jwks } = await makeKeys();
+    installMockIssuer(jwks, { discoveryIssuer: "https://evil.example" });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    configureOidc();
+
+    const res = await app.request("/auth/oidc/login");
+    expect(ssoError(res)).toBe("discovery_failed");
   });
 });
 
@@ -654,8 +673,133 @@ describe("/admin/settings — OIDC", () => {
     // login endpoint itself falls back to not_configured). Assert that
     // fallback instead of a validation error.
     expect(invalid.status).toBe(200);
+    // GET reflects the dead flow: still enabled, no longer ready.
+    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(after.data.oidc_enabled).toBe(true);
+    expect(after.data.oidc_ready).toBe(false);
     const login = await app.request("/auth/oidc/login");
     expect(login.status).toBe(302);
     expect(login.headers.get("Location")).toContain("sso_error=not_configured");
+  });
+
+  // ── Total-lockout guard × OIDC ──────────────────────────────────────────
+  // SSO-only servers are supported: the "can't disable both manual and
+  // PromptOwl sign-in" rule passes when the post-PATCH OIDC flow is
+  // enabled+configured, and symmetrically refuses killing OIDC when it's the
+  // only remaining way in.
+
+  it("allows an SSO-only server: both classic methods off while OIDC is ready", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const res = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      {
+        manual_sign_in: "disabled",
+        promptowl_sign_in_gate: "disabled",
+        oidc_enabled: true,
+        oidc_issuer: ISSUER,
+        oidc_client_id: CLIENT_ID,
+        oidc_client_secret: CLIENT_SECRET,
+      },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.settings.manual_sign_in).toBe("disabled");
+    expect(res.data.settings.promptowl_sign_in_gate).toBe("disabled");
+    expect(res.data.settings.oidc_enabled).toBe(true);
+    expect(res.data.settings.oidc_ready).toBe(true);
+  });
+
+  it("still rejects disabling both classic methods when OIDC is off or unready", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    // OIDC entirely off.
+    const off = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { manual_sign_in: "disabled", promptowl_sign_in_gate: "disabled" },
+      admin.apiKey,
+    );
+    expect(off.status).toBe(400);
+    expect(off.data.error).toMatch(/SSO \(OIDC\)/i);
+    expect(off.data.fieldErrors).toHaveProperty("manual_sign_in");
+
+    // OIDC enabled but UNREADY (no secret) in the same request — still a
+    // lockout: an enabled-but-dead flow can't sign anyone in.
+    const unready = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      {
+        manual_sign_in: "disabled",
+        promptowl_sign_in_gate: "disabled",
+        oidc_enabled: true,
+        oidc_issuer: ISSUER,
+        oidc_client_id: CLIENT_ID,
+        // no oidc_client_secret
+      },
+      admin.apiKey,
+    );
+    expect(unready.status).toBe(400);
+
+    // Nothing applied.
+    const after = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(after.data.manual_sign_in).toBe("open");
+  });
+
+  it("rejects turning OIDC off — or clearing its secret — when it's the only sign-in path", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    // Establish an SSO-only server (config getters read env live).
+    configureOidc();
+    process.env.MANUAL_SIGN_IN = "disabled";
+    process.env.PROMPTOWL_SIGN_IN_GATE = "disabled";
+
+    // Turning the flow off would lock everyone out.
+    const disable = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { oidc_enabled: false },
+      admin.apiKey,
+    );
+    expect(disable.status).toBe(400);
+    // Keyed to the SSO field (the body only touched OIDC) so the client
+    // focuses the Single sign-on tab.
+    expect(disable.data.fieldErrors).toHaveProperty("oidc_enabled");
+    expect(disable.data.error).toMatch(/SSO \(OIDC\)/i);
+
+    // Clearing the secret kills the flow just as dead — same refusal.
+    const clearSecret = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { oidc_client_secret: null },
+      admin.apiKey,
+    );
+    expect(clearSecret.status).toBe(400);
+    expect(clearSecret.data.fieldErrors).toHaveProperty("oidc_enabled");
+
+    // Nothing applied — the flow is still live.
+    const health = await app.request("/health");
+    expect((await health.json()).oidc_enabled).toBe(true);
+
+    // Re-opening a classic method in the SAME patch makes it legal.
+    const swap = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { oidc_enabled: false, manual_sign_in: "open" },
+      admin.apiKey,
+    );
+    expect(swap.status).toBe(200);
+    expect(swap.data.settings.oidc_enabled).toBe(false);
+    expect(swap.data.settings.manual_sign_in).toBe("open");
   });
 });

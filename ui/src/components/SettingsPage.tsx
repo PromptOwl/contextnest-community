@@ -8,6 +8,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -547,6 +548,37 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   />
                 </div>
 
+                {/* "On with a dead flow" is legal server state (e.g. the
+                    secret was cleared while enabled stayed true) — the login
+                    button simply hides. Make that legible instead of silent.
+                    Mirrors the server's oidc_ready rule against the DRAFT so
+                    it also warns live while the admin is staging the change. */}
+                {(() => {
+                  const secretPresent =
+                    draft.oidc_client_secret === null
+                      ? false
+                      : typeof draft.oidc_client_secret === "string" &&
+                          draft.oidc_client_secret.trim() !== ""
+                        ? true
+                        : !!settings?.oidc_client_secret_set;
+                  const ready =
+                    draft.oidc_enabled &&
+                    !!draft.oidc_issuer?.trim() &&
+                    !!draft.oidc_client_id?.trim() &&
+                    secretPresent;
+                  if (!draft.oidc_enabled || ready) return null;
+                  return (
+                    <div
+                      role="alert"
+                      className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+                    >
+                      Enabled but not configured — the SSO sign-in button stays
+                      hidden until the issuer, client ID, and client secret are
+                      all set.
+                    </div>
+                  );
+                })()}
+
                 {/* Presets — prefill the issuer for the two common IdPs. */}
                 <div>
                   <div className="text-sm font-medium mb-1">Issuer URL</div>
@@ -660,7 +692,30 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                           variant="outline"
                           size="sm"
                           onClick={async () => {
-                            await navigator.clipboard.writeText(redirectUri);
+                            // navigator.clipboard throws on insecure contexts
+                            // (plain-HTTP local setups) — fall back to the
+                            // legacy execCommand path, and if that fails too,
+                            // tell the admin to copy by hand.
+                            try {
+                              await navigator.clipboard.writeText(redirectUri);
+                            } catch {
+                              try {
+                                const ta = document.createElement("textarea");
+                                ta.value = redirectUri;
+                                ta.style.position = "fixed";
+                                ta.style.opacity = "0";
+                                document.body.appendChild(ta);
+                                ta.select();
+                                const ok = document.execCommand("copy");
+                                document.body.removeChild(ta);
+                                if (!ok) throw new Error("copy failed");
+                              } catch {
+                                toast.error(
+                                  "Couldn't copy automatically — select the URI text and copy it manually.",
+                                );
+                                return;
+                              }
+                            }
                             setCopiedRedirect(true);
                             setTimeout(() => setCopiedRedirect(false), 1500);
                           }}

@@ -215,8 +215,9 @@ export function createApp(): Hono<AuthEnv> {
   });
 
   // Health check (public)
-  app.get("/health", (c) =>
-    c.json({
+  app.get("/health", (c) => {
+    const oidcReady = isOidcReady();
+    return c.json({
       status: isSuspended() ? "suspended" : "ok",
       service: "contextnest-community",
       version: SERVICE_VERSION,
@@ -234,8 +235,8 @@ export function createApp(): Hono<AuthEnv> {
       // page never shows a button that would bounce with an error. The issuer
       // is exposed (when live) so the client can label the button by IdP
       // (login.microsoftonline.com → Microsoft, accounts.google.com → Google).
-      oidc_enabled: isOidcReady(),
-      ...(isOidcReady() && { oidc_issuer: config.OIDC_ISSUER }),
+      oidc_enabled: oidcReady,
+      ...(oidcReady && { oidc_issuer: config.OIDC_ISSUER }),
       // Public feature flags the SPA needs before auth to decide what to
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
@@ -251,8 +252,8 @@ export function createApp(): Hono<AuthEnv> {
       subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
       subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
-    }),
-  );
+    });
+  });
 
   // Admin-features gate: teammate management and governance routes are
   // blocked until a valid license is installed. Login/register/device/
@@ -379,6 +380,9 @@ export function createApp(): Hono<AuthEnv> {
     oidc_client_secret_set: !!config.OIDC_CLIENT_SECRET,
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
+    // Live readiness (enabled AND issuer+id+secret present) so the Settings
+    // UI can flag "enabled but not configured" without re-deriving the rule.
+    oidc_ready: isOidcReady(),
     // Server-wide runner default. NEVER the value — masked tail only.
     anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
       ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
@@ -571,23 +575,28 @@ export function createApp(): Hono<AuthEnv> {
         value: body.oidc_auto_provision ? "true" : "false",
       });
     }
+    // Effective post-PATCH OIDC state: what this request sets, falling back
+    // to current config for fields it doesn't touch. Shared by the enable
+    // guard here AND the total-lockout guard below (SSO-only servers are a
+    // supported configuration, so the lockout check must see OIDC too).
+    const effOidcIssuer =
+      "oidc_issuer" in body
+        ? String(body.oidc_issuer ?? "").trim()
+        : config.OIDC_ISSUER;
+    const effOidcClientId =
+      "oidc_client_id" in body
+        ? String(body.oidc_client_id ?? "").trim()
+        : config.OIDC_CLIENT_ID;
+    const effOidcSecret =
+      "oidc_client_secret" in body
+        ? String(body.oidc_client_secret ?? "").trim()
+        : config.OIDC_CLIENT_SECRET;
+    const effOidcEnabled =
+      "oidc_enabled" in body ? !!body.oidc_enabled : config.OIDC_ENABLED;
+    const effOidcReady =
+      effOidcEnabled && !!effOidcIssuer && !!effOidcClientId && !!effOidcSecret;
     if ("oidc_enabled" in body) {
-      // Effective post-PATCH values: what this request sets, falling back to
-      // current config for fields it doesn't touch (same pattern as the
-      // sign-in lockout guard below).
-      const effIssuer =
-        "oidc_issuer" in body
-          ? String(body.oidc_issuer ?? "").trim()
-          : config.OIDC_ISSUER;
-      const effClientId =
-        "oidc_client_id" in body
-          ? String(body.oidc_client_id ?? "").trim()
-          : config.OIDC_CLIENT_ID;
-      const effSecret =
-        "oidc_client_secret" in body
-          ? String(body.oidc_client_secret ?? "").trim()
-          : config.OIDC_CLIENT_SECRET;
-      if (body.oidc_enabled && (!effIssuer || !effClientId || !effSecret)) {
+      if (body.oidc_enabled && !effOidcReady) {
         addError(
           "oidc_enabled",
           "Set the OIDC issuer, client ID, and client secret before turning single sign-on on.",
@@ -640,11 +649,13 @@ export function createApp(): Hono<AuthEnv> {
       else pending.push({ name: "MAX_BODY_BYTES", value: String(Math.floor(n)) });
     }
 
-    // Total-lockout guard: manual and PromptOwl sign-in can't BOTH be off, or
-    // no one could ever log in. Evaluate the effective post-PATCH state —
-    // values this request sets, falling back to current config for fields it
-    // doesn't touch — so the combination is checked even when only one of the
-    // two is in the body.
+    // Total-lockout guard: at least ONE sign-in method must survive the
+    // PATCH — manual, PromptOwl, or a ready+enabled OIDC flow. Evaluated on
+    // the effective post-PATCH state (values this request sets, falling back
+    // to current config for untouched fields), so the combination is checked
+    // whichever side of it is in the body. This is symmetric: it blocks
+    // disabling both classic methods without SSO, AND it blocks turning off /
+    // un-configuring OIDC when it's the only remaining way in.
     const effManual =
       "manual_sign_in" in body
         ? String(body.manual_sign_in ?? "").trim().toLowerCase()
@@ -653,12 +664,20 @@ export function createApp(): Hono<AuthEnv> {
       "promptowl_sign_in_gate" in body
         ? String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase()
         : config.PROMPTOWL_SIGN_IN_GATE;
-    if (effManual === "disabled" && effGate === "disabled") {
-      // Cross-field rule — key it to a sign-in field so the client lands on the
-      // General tab where both toggles live.
+    if (effManual === "disabled" && effGate === "disabled" && !effOidcReady) {
+      // Cross-field rule — key it to the field group this request touched so
+      // the client focuses the tab the admin is actually editing: the SSO tab
+      // when the body only changes OIDC fields, else the General tab where
+      // the two classic sign-in toggles live.
+      const touchedOidcOnly =
+        !("manual_sign_in" in body) &&
+        !("promptowl_sign_in_gate" in body) &&
+        ["oidc_enabled", "oidc_issuer", "oidc_client_id", "oidc_client_secret"].some(
+          (k) => k in body,
+        );
       addError(
-        "manual_sign_in",
-        "Cannot disable both manual and PromptOwl sign-in — no one would be able to log in.",
+        touchedOidcOnly ? "oidc_enabled" : "manual_sign_in",
+        "Cannot disable both manual and PromptOwl sign-in unless SSO (OIDC) is enabled and configured — no one would be able to log in.",
       );
     }
 

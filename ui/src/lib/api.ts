@@ -178,6 +178,8 @@ export interface AdminSettings {
   oidc_client_secret_set?: boolean;
   oidc_allowed_domains: string;
   oidc_auto_provision: boolean;
+  /** Server-computed readiness: enabled AND issuer+client id+secret present. */
+  oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */
   oidc_client_secret?: string | null;
   anthropic_api_key_masked?: string | null;
