@@ -7,6 +7,7 @@
  */
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
+import { isLicenseAdminUserId } from "../auth/license.js";
 import { ValidationError } from "../shared/errors.js";
 import {
   listNestTeams,
@@ -40,9 +41,12 @@ nestTeamRoutes.post("/", async (c) => {
   if (!body.team_id) {
     throw new ValidationError("team_id is required");
   }
+  const userId = c.get("userId");
   const teams = await shareTeamWithNest({
     nestId: c.req.param("nestId")!,
     teamId: body.team_id,
+    callerUserId: userId,
+    allowAdmin: await isLicenseAdminUserId(userId),
   });
   return c.json({ teams }, 201);
 });

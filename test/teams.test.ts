@@ -159,6 +159,15 @@ describe("sharing a team onto a nest", () => {
     expect(t.members).toHaveLength(3);
   });
 
+  it("a nest admin cannot share a team they have no relationship to", async () => {
+    // outsider owns a team; owner administers the nest but isn't on that team.
+    // Nest-admin alone must not be enough to attach someone else's team (it
+    // would pull in their members and expose the roster via GET .../teams).
+    const foreign = await jsonRequest(app, "POST", "/teams", { name: "Foreign" }, outsider.apiKey);
+    const res = await jsonRequest(app, "POST", `/nests/${nestId}/teams`, { team_id: foreign.data.team.id }, owner.apiKey);
+    expect(res.status).toBe(403);
+  });
+
   it("a non-admin cannot share a team", async () => {
     // viewerU reaches the nest via the team (read), but sharing is admin-tier.
     const res = await jsonRequest(app, "POST", `/nests/${nestId}/teams`, { team_id: teamId }, viewerU.apiKey);

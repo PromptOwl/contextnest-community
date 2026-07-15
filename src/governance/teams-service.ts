@@ -394,6 +394,13 @@ export async function listNestTeams(nestId: string): Promise<SharedTeamRef[]> {
 /**
  * Share a team onto a nest — append a {teamId, teamName} ref.
  *
+ * Two authorization checks apply, and both matter: the route gates `admin` on
+ * the NEST, and this gates the caller's relationship to the TEAM. Without the
+ * latter, anyone who learned a team's id could attach it to a nest they
+ * administer — pulling in that team's members without their owner's say, and
+ * reading the full roster back out of GET /nests/:id/teams, which the ACL on
+ * GET /teams/:teamId otherwise denies to non-members.
+ *
  * The whole thing runs in one transaction: shared_teams is a single JSON cell
  * per nest (so a concurrent share/unshare would otherwise lose a write), and
  * the stewardship flip below must land with the share or not at all — a
@@ -403,13 +410,23 @@ export async function listNestTeams(nestId: string): Promise<SharedTeamRef[]> {
 export async function shareTeamWithNest(params: {
   nestId: string;
   teamId: string;
+  callerUserId: string;
+  allowAdmin?: boolean;
 }): Promise<SharedTeamRef[]> {
   const db = getDb();
   return db.transaction(async (tx) => {
-    const team = (await tx.get("SELECT id, name, members FROM teams WHERE id = ?", [
-      params.teamId,
-    ])) as { id: string; name: string; members?: string } | undefined;
+    const team = (await tx.get(
+      "SELECT id, name, owner_id, members FROM teams WHERE id = ?",
+      [params.teamId],
+    )) as TeamRow | undefined;
     if (!team) throw new NotFoundError("Team not found");
+    // Any relationship to the team (owner or member of any role) is enough to
+    // share it; the nest-side 'admin' gate is what limits who can grant access.
+    if (managementRank(team, params.callerUserId, !!params.allowAdmin) < 1) {
+      throw new ForbiddenError(
+        "You can only share a team you own or belong to.",
+      );
+    }
     const nest = (await tx.get("SELECT shared_teams FROM nests WHERE id = ?", [
       params.nestId,
     ])) as { shared_teams?: string } | undefined;
