@@ -257,7 +257,7 @@ export async function resolveAuthorship(
       seen.add(key);
       collaborators.push(email);
     }
-    collaborators.sort();
+    collaborators.sort((a, b) => a.localeCompare(b));
     result.set(n.id, { author: author ?? null, collaborators });
   }
   return result;
@@ -320,18 +320,23 @@ export async function listNodesForCaller(
 
   // Author + collaborators for exactly the post-filter set — two batched
   // queries for the whole list (see resolveAuthorship), never per-node.
-  const authorship = await resolveAuthorship(
-    nestId,
-    accessible.map((d) => ({
-      id: d.id,
-      frontmatterAuthor: d.frontmatter.author ?? null,
-    })),
-  );
+  // Withheld from public readers: the roster is the nest's people, not its
+  // published content, so it stays behind the same gate as the body. They
+  // keep the frontmatter-only `author` toNodeResponse already set.
+  const authorship = publicReader
+    ? null
+    : await resolveAuthorship(
+        nestId,
+        accessible.map((d) => ({
+          id: d.id,
+          frontmatterAuthor: d.frontmatter.author ?? null,
+        })),
+      );
 
   const enriched = await Promise.all(
     accessible.map(async (doc) => {
       const r = toNodeResponse(doc);
-      const people = authorship.get(doc.id);
+      const people = authorship?.get(doc.id);
       if (people) {
         r.author = people.author;
         r.collaborators = people.collaborators;

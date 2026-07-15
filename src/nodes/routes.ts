@@ -367,21 +367,27 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     }
   }
   const response = toNodeResponse(node);
+  const publicReader = await isPublicReader(nestId, userId);
 
   // Author + collaborators (same additive fields as the list response).
   // Single-node call takes resolveAuthorship's indexed fast path.
-  const people = (
-    await resolveAuthorship(nestId, [
-      { id: nodeId, frontmatterAuthor: node.frontmatter?.author ?? null },
-    ])
-  ).get(nodeId);
-  if (people) {
-    response.author = people.author;
-    response.collaborators = people.collaborators;
+  // Withheld from public readers: the roster is the nest's people, not its
+  // published content, so it stays behind the same gate as the body. They
+  // keep the frontmatter-only `author` toNodeResponse already set.
+  if (!publicReader) {
+    const people = (
+      await resolveAuthorship(nestId, [
+        { id: nodeId, frontmatterAuthor: node.frontmatter?.author ?? null },
+      ])
+    ).get(nodeId);
+    if (people) {
+      response.author = people.author;
+      response.collaborators = people.collaborators;
+    }
   }
 
   // Public readers see approved version body only.
-  if (await isPublicReader(nestId, userId)) {
+  if (publicReader) {
     const approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
       try {

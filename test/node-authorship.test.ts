@@ -121,3 +121,63 @@ describe("node DETAIL response", () => {
     expect(res.data.node.collaborators).toEqual([bob.email, carol.email]);
   });
 });
+
+/**
+ * The roster is the nest's people, not its published content. A public
+ * reader reaches the nest only via visibility='public' — they get the
+ * approved body, but must not learn who edited it or who holds a grant on
+ * it. `author` stays frontmatter-only for them, exactly as before this
+ * feature; `collaborators` is withheld entirely.
+ */
+describe("public reader", () => {
+  let pubNest: string;
+  // Carol is the outsider here: she holds a grant on the *private* nest
+  // above, but has no relationship to this one, so `visibility: public` is
+  // her only way in. (Registering a fourth user would trip the auth
+  // rate limiter — 3 registrations per window.)
+
+  beforeAll(async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Public" }, alice.apiKey);
+    pubNest = nest.data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${pubNest}/nodes`,
+      { title: "Team Doc", content: "# team" }, alice.apiKey);
+
+    // Bob edits it, so there IS a collaborator to leak.
+    await jsonRequest(app, "POST", `/nests/${pubNest}/collaborators`,
+      { email: bob.email, permission: "write" }, alice.apiKey);
+    const edit = await jsonRequest(app, "PATCH", `/nests/${pubNest}/nodes/${DOC}`,
+      { append: "edited by bob" }, bob.apiKey);
+    expect(edit.status).toBe(200);
+
+    const vis = await jsonRequest(app, "PATCH", `/nests/${pubNest}/visibility`,
+      { visibility: "public" }, alice.apiKey);
+    expect(vis.status).toBe(200);
+
+    // Guard the setup: Bob must actually be a collaborator on this doc, or
+    // the assertions below would pass against an empty roster.
+    const owner = await jsonRequest(app, "GET", `/nests/${pubNest}/nodes/${DOC}`, undefined, alice.apiKey);
+    expect(owner.data.node.collaborators).toEqual([bob.email]);
+  });
+
+  it("LIST withholds collaborators and does not fall back to a version author", async () => {
+    const res = await jsonRequest(app, "GET", `/nests/${pubNest}/nodes`, undefined, carol.apiKey);
+    expect(res.status).toBe(200);
+    const team = res.data.nodes.find((n: any) => n.id === DOC);
+    expect(team).toBeDefined();
+    expect(team.collaborators).toBeUndefined();
+    expect(JSON.stringify(team)).not.toContain(bob.email);
+  });
+
+  it("DETAIL withholds collaborators", async () => {
+    const res = await jsonRequest(app, "GET", `/nests/${pubNest}/nodes/${DOC}`, undefined, carol.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.node.collaborators).toBeUndefined();
+    expect(JSON.stringify(res.data.node)).not.toContain(bob.email);
+  });
+
+  it("the owner still sees the roster on the same public nest", async () => {
+    const res = await jsonRequest(app, "GET", `/nests/${pubNest}/nodes/${DOC}`, undefined, alice.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.node.collaborators).toEqual([bob.email]);
+  });
+});
