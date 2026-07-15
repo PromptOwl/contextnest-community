@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
+import { AuthorshipChips } from "./AuthorshipChips";
 
 /** One icon per node type — agent/skill/artifact/document each read distinctly. */
 export function NodeTypeIcon({
@@ -2227,6 +2228,15 @@ export function NestView({
                                     </button>
                                   ))}
                                 </span>
+                              </>
+                            )}
+                            {(node.author || node.collaborators?.length > 0) && (
+                              <>
+                                <span>·</span>
+                                <AuthorshipChips
+                                  author={node.author}
+                                  collaborators={node.collaborators}
+                                />
                               </>
                             )}
                           </div>

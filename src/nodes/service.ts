@@ -124,7 +124,12 @@ export interface NodeResponse {
   tags: string[];
   status: string;
   version: number;
-  author?: string;
+  /** Creator email — frontmatter author when present, else the author of the
+   *  node's first version. Null for old imported docs with neither. */
+  author?: string | null;
+  /** Everyone else with a hand in the doc: distinct node_versions authors
+   *  UNION document-scope grant holders, minus the author, sorted. */
+  collaborators?: string[];
   description?: string;
   created_at?: string;
   updated_at?: string;
@@ -170,6 +175,92 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
         ? String((fm.metadata as any).schedule)
         : undefined,
   };
+}
+
+export interface NodeAuthorship {
+  author: string | null;
+  collaborators: string[];
+}
+
+/**
+ * Batch author + collaborator resolution for a set of nodes.
+ *
+ * Author = the node's frontmatter author (passed in by the caller) or, when
+ * frontmatter lacks it (imports, older docs), the author of the node's first
+ * version. Collaborators = distinct node_versions authors UNION document-scope
+ * grant holders, MINUS the author, sorted.
+ *
+ * Exactly two queries regardless of node count (no per-node N+1): one grouped
+ * pass over node_versions — per (node, author) the earliest version that
+ * author touched, so the overall-earliest author doubles as the creator
+ * fallback — and one pass over document grants joined to users for emails.
+ * Both are plain GROUP BY / JOIN SQL, portable across SQLite and Postgres.
+ * `system:*` version authors (auto-publish bumps, drift scans) mirror
+ * machine activity, not a person — they're excluded.
+ */
+export async function resolveAuthorship(
+  nestId: string,
+  nodes: Array<{ id: string; frontmatterAuthor?: string | null }>,
+): Promise<Map<string, NodeAuthorship>> {
+  const result = new Map<string, NodeAuthorship>();
+  if (nodes.length === 0) return result;
+  const db = getDb();
+
+  // Single-node fast path (the detail endpoint) narrows both scans by id;
+  // the list path scans the nest once, grouped.
+  const single = nodes.length === 1 ? nodes[0].id : null;
+  const versionRows = (await db.all(
+    `SELECT node_id, author, MIN(version) AS first_version
+       FROM node_versions
+      WHERE nest_id = ?${single ? " AND node_id = ?" : ""}
+        AND author IS NOT NULL AND author NOT LIKE 'system:%'
+      GROUP BY node_id, author`,
+    single ? [nestId, single] : [nestId],
+  )) as Array<{ node_id: string; author: string; first_version: number }>;
+  const grantRows = (await db.all(
+    `SELECT g.target AS node_id, u.email AS email
+       FROM grants g
+       JOIN users u ON u.id = g.user_id
+      WHERE g.nest_id = ? AND g.target_type = 'document'${single ? " AND g.target = ?" : ""}`,
+    single ? [nestId, single] : [nestId],
+  )) as Array<{ node_id: string; email: string }>;
+
+  const editorsByNode = new Map<string, Array<{ author: string; first: number }>>();
+  for (const r of versionRows) {
+    let list = editorsByNode.get(r.node_id);
+    if (!list) editorsByNode.set(r.node_id, (list = []));
+    list.push({ author: r.author, first: Number(r.first_version) });
+  }
+  const granteesByNode = new Map<string, string[]>();
+  for (const g of grantRows) {
+    let list = granteesByNode.get(g.node_id);
+    if (!list) granteesByNode.set(g.node_id, (list = []));
+    list.push(g.email);
+  }
+
+  for (const n of nodes) {
+    const editors = editorsByNode.get(n.id) ?? [];
+    const firstAuthor = editors.length
+      ? editors.reduce((a, b) => (b.first < a.first ? b : a)).author
+      : null;
+    const author = n.frontmatterAuthor || firstAuthor;
+    const authorKey = author ? author.toLowerCase() : null;
+    // Distinct (case-insensitive), author excluded, sorted.
+    const seen = new Set<string>();
+    const collaborators: string[] = [];
+    for (const email of [
+      ...editors.map((e) => e.author),
+      ...(granteesByNode.get(n.id) ?? []),
+    ]) {
+      const key = email.toLowerCase();
+      if (key === authorKey || seen.has(key)) continue;
+      seen.add(key);
+      collaborators.push(email);
+    }
+    collaborators.sort((a, b) => a.localeCompare(b));
+    result.set(n.id, { author: author ?? null, collaborators });
+  }
+  return result;
 }
 
 export interface ListNodesFilters {
@@ -227,9 +318,29 @@ export async function listNodesForCaller(
   }
   const publicReader = await isPublicReader(nestId, userId);
 
+  // Author + collaborators for exactly the post-filter set — two batched
+  // queries for the whole list (see resolveAuthorship), never per-node.
+  // Withheld from public readers: the roster is the nest's people, not its
+  // published content, so it stays behind the same gate as the body. They
+  // keep the frontmatter-only `author` toNodeResponse already set.
+  const authorship = publicReader
+    ? null
+    : await resolveAuthorship(
+        nestId,
+        accessible.map((d) => ({
+          id: d.id,
+          frontmatterAuthor: d.frontmatter.author ?? null,
+        })),
+      );
+
   const enriched = await Promise.all(
     accessible.map(async (doc) => {
       const r = toNodeResponse(doc);
+      const people = authorship?.get(doc.id);
+      if (people) {
+        r.author = people.author;
+        r.collaborators = people.collaborators;
+      }
 
       if (publicReader) {
         const approved = await versions.getApprovedVersion(nestId, doc.id);
