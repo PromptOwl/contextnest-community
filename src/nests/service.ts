@@ -333,10 +333,14 @@ export function isAnonymousNest(nest: Pick<Nest, "user_id">): boolean {
  */
 async function nestsSharedViaTeams(userId: string): Promise<Nest[]> {
   const db = getDb();
-  const teams = (await db.all("SELECT id, members FROM teams")) as Array<{
-    id: string;
-    members: string;
-  }>;
+  // Narrow in SQL first — this runs on every dashboard load, so it must never
+  // pull every team (or every team-shared nest) in the deployment into memory.
+  // The LIKE prefilter can't false-negative (a member id always appears
+  // verbatim in the JSON); the JS pass below confirms real membership.
+  const teams = (await db.all(
+    "SELECT id, members FROM teams WHERE members LIKE ?",
+    [`%${userId}%`],
+  )) as Array<{ id: string; members: string }>;
   const myTeamIds = new Set<string>();
   for (const t of teams) {
     try {
@@ -349,9 +353,12 @@ async function nestsSharedViaTeams(userId: string): Promise<Nest[]> {
     }
   }
   if (myTeamIds.size === 0) return [];
+  const ids = [...myTeamIds];
   const candidates = (await db.all(
-    "SELECT * FROM nests WHERE user_id != ? AND shared_teams IS NOT NULL AND shared_teams != '[]'",
-    [userId],
+    `SELECT * FROM nests
+       WHERE user_id != ?
+         AND (${ids.map(() => "shared_teams LIKE ?").join(" OR ")})`,
+    [userId, ...ids.map((id) => `%${id}%`)],
   )) as Array<Nest & { shared_teams?: string }>;
   return candidates.filter((n) => {
     try {
@@ -407,7 +414,9 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
       seen.add(n.id);
     }
   }
-  direct.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  direct.sort((a, b) =>
+    a.created_at === b.created_at ? 0 : a.created_at < b.created_at ? 1 : -1,
+  );
   return direct;
 }
 
