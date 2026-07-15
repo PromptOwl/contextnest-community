@@ -258,6 +258,70 @@ Removing a collaborator stays admin-only.
 
 ---
 
+## 3a. Teams (group sharing)
+
+A **team** is a reusable, owner-managed group of users. Each member carries a
+**role** (`admin` / `editor` / `viewer`) set on the membership and applied
+uniformly on every nest the team is shared to. Sharing a team onto a nest
+records a `{teamId, teamName}` ref on `nests.shared_teams` (no join table);
+every member then resolves to their own role there, combined highest-wins with
+any direct collaborator / steward grant.
+
+Member role → access mapping:
+
+| role | nest permission | governance role |
+|------|-----------------|-----------------|
+| `viewer` | `read` | viewer |
+| `editor` | `write` | editor |
+| `admin` | `admin` | admin |
+
+Sharing a team whose members carry a governance role (`viewer`/`editor`) turns
+`stewardship_enabled` on for the nest (parity with assigning an individual
+steward). An `admin`-only team is collaborator-style and does not.
+
+### Team management (global)
+
+Auth is the shared session/key auth. Management is gated by the caller's role on
+the team (the server/license admin may manage any team): **add people** =
+editor/admin members + owner (escalation-capped — can't grant above your own
+role); **rename / change-role / remove** = admin members + owner; **delete** =
+owner only. Unregistered member emails mint a placeholder user (`is_invited = 1`),
+same as collaborator/steward invites.
+
+- **POST `/teams`** — `{ "name": "Platform" }` → `201 { team }`. Any user may
+  create a team (they become its owner).
+- **GET `/teams`** — teams the caller owns **or is a member of** → `{ teams: [...] }`.
+  Each member is enriched with `registered` (real account vs invited placeholder)
+  and the team with `owner_email`.
+- **GET `/teams/:teamId`** — owner, a member, or the server admin may view →
+  `{ team: { id, name, owner_id, owner_email, members: [{ userId, email, role, registered }], ... } }`.
+- **PATCH `/teams/:teamId`** — `{ "name": "..." }` rename (admin/owner). Also
+  refreshes the cached `teamName` in every nest that shares this team.
+- **DELETE `/teams/:teamId`** — delete (owner/server-admin); strips the team's
+  ref from every nest's `shared_teams`.
+- **POST `/teams/:teamId/members`** — `{ "email"|"user_id", "role" }` add a
+  member (`role` ∈ `admin`/`editor`/`viewer`) → `201 { team }`. Editor/admin
+  members + owner, capped to the caller's own role. Duplicate member → `409`;
+  invalid role → `400`; above your level → `403`.
+- **PATCH `/teams/:teamId/members/:userId`** — `{ "role": "..." }` change role
+  (admin/owner, capped).
+- **DELETE `/teams/:teamId/members/:userId`** — remove a member (admin/owner);
+  their access to every shared nest is revoked immediately (no per-user rows).
+
+A team-shared nest also appears on each member's dashboard (`GET /nests`) with
+their role, so they can open it and act per their role.
+
+### Nest team-share (`/nests/:nestId/teams`)
+
+- **GET** `(write+)` — teams shared onto the nest, enriched with members:
+  `{ teams: [{ teamId, teamName, members: [{ userId, email, role }] }] }`.
+  Write-tier (like the collaborator roster) so a read tier can't enumerate emails.
+- **POST** `(admin)` — `{ "team_id": "..." }` share a team → `201 { teams }`.
+  Already shared → `409`.
+- **DELETE `/nests/:nestId/teams/:teamId`** `(admin)` — unshare → `{ teams }`.
+
+---
+
 ## 4. Nodes (documents)
 
 `nodeId` = relative path without `.md`, e.g. `nodes/api-design`.

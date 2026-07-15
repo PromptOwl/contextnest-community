@@ -1,5 +1,63 @@
 # @promptowl/contextnest-community
 
+## 1.10.0
+
+### Minor Changes
+
+- v1.10.0 — a live workflow canvas with schedules and claimable runs, a data-driven connector/trigger layer, governed CSV tables, documents-as-a-repo folders, artifact version history, and configurable trace retention.
+
+  ### Workflow orchestration
+
+  - **Live workflow canvas** (`ui/src/components/WorkflowsView.tsx`) — an n8n-feel canvas wired to the edges API, with a 2-tab model (Canvas | Activity), a canvas shelf search, and grab-as-context commands. Replaces the standalone Runs and Edge-Types pages, which are folded into the canvas surface.
+  - **Schedules** (`src/workflow/schedule-routes.ts`, `src/workflow/scheduler.ts`) — a Schedules tab separate from Runs, backed by a server-side scheduler.
+  - **Claimable run queue** (`src/workflow/run-routes.ts`) — `?unclaimed=true` plus `GET /runs/:id/bundle` let external runners claim and pull work; run inputs, review-verdict notifications, and failed-run errors surface in the list.
+  - **Sub-agent controls** — a dedicated Run tab with a sub-agent tree and upfront cap validation, a richer parent-run picker on the Run trigger form, and admin-editable sub-agent recursion caps driven from the server (`src/config.ts`, `ui/src/components/SettingsPage.tsx`).
+  - **Tool node type + HITL watchers** (`src/workflow/run-routes.ts`, `src/workflow/env-routes.ts`) — a tool node type, a per-nest env store, and human-in-the-loop watcher notifications.
+
+  ### Connectors & triggers
+
+  - **Connector dispatch engine** (`src/notify/dispatch.ts`, `src/notify/connector-routes.ts`) — channels modeled as data, one brick per direction, surfaced as a connectors card in Activity and on the agent panel.
+  - **Inbound trigger hooks** (`src/workflow/hook-routes.ts`) — tokenized listener URLs with platform presets for inbound triggers.
+  - **Email connector** (`src/notify/email.ts`) — SMTP dispatch with credential verification before save.
+
+  ### Governed tables
+
+  - **Table content type** (`src/tables/service.ts`, `src/tables/query.ts`) — CSV as a governed, deterministically queryable fact store.
+  - **CSV/TSV input** (`ui/src/lib/csv-table.ts`, `ui/src/components/TableViewer.tsx`, `ui/src/components/MarkdownEditor/TableControls.tsx`) — table input via CSV/TSV paste and file upload, with CSV round-trip and a large-table fallback.
+
+  ### Documents as a repo
+
+  - **Folder tree + move API** (`src/nodes/service.ts`, `ui/src/components/FolderTree.tsx`) — documents as a real repo: folder tree with drag-and-drop, a move API that relocates a document (and everything under it) to another folder, a breadcrumb folder picker, type-icon chips, and a nestable New Folder dialog.
+
+  ### Artifacts
+
+  - **Artifact version history** (`ui/src/components/ArtifactViewer.tsx`, `ui/src/components/governance/VersionHistoryModal.tsx`) — version history, preview, rollback, and source editing, with preview cache-busting on restore.
+
+  ### Telemetry
+
+  - **Configurable trace retention** (`src/telemetry/trace-log.ts`) — configurable retention plus a per-nest steward trace view, backed by an `api_events(nest_id, id)` index for per-nest trace queries.
+
+  ### Settings & configuration
+
+  - **Server settings in the database** (`src/db/settings.ts`, `src/config.ts`) — every server option lives in Settings (Anthropic key, Slack connector, public base URL); server settings and the license key persist to the DB instead of an ephemeral `.env`. A `MANUAL_SIGN_IN` flag gates email/password sign-in separately from PromptOwl.
+
+  ### Engine convergence (Phase 0)
+
+  - **Engine sync + MCP guard** (`src/mcp/tools.ts`, `scripts/check-mcp-schemas.mjs`) — engine 1.2.1 bump with the engine/CLI sync discipline, a per-node access gate enforced on MCP retrieval (`resolveLlmBody`), and a divergence guard against new inline MCP schemas.
+
+  ### Guide
+
+  - **In-app manual** (`ui/src/components/GuidePage.tsx`) — a "How it works" page from the user menu covering concepts, the governed loop, and the APIs.
+
+  ### Fixes
+
+  - Proper email validation with field-keyed errors on notification config; SMTP credentials verified before saving.
+  - Dropped a misspelled Vercel automation bypass-cookie header.
+  - Hierarchical folder tree keeps indenting past level 6.
+  - Save on blur instead of every keystroke, with a Save/Saved state; per-node writes serialized so versions stay consistent.
+  - `[[` autocomplete stays on-screen and instant; table controls stay inside the editor viewport; version-history content stays on-screen in a wider dialog.
+  - Pinned LinearRouter for upstream routing parity.
+
 ## 1.9.0
 
 ### Minor Changes

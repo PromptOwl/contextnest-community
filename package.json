@@ -1,6 +1,6 @@
 {
   "name": "@promptowl/contextnest-community",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "ContextNest Community Edition — self-hosted context governance server for AI workflows. Commercial software by Promptowl LLC.",
   "private": false,
   "type": "module",

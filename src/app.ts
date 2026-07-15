@@ -6,6 +6,8 @@ import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
+import { nestTeamRoutes } from "./nests/nest-team-routes.js";
+import { teamRoutes } from "./governance/team-routes.js";
 import { listNests, listSharedNests } from "./nests/service.js";
 import { getReviewQueue } from "./governance/review-service.js";
 import { engineCache } from "./nodes/engine.js";
@@ -656,6 +658,12 @@ export function createApp(): Hono<AuthEnv> {
   // you across every nest you can act in. Reuses the governance review queue
   // (an agent's write-back lands here too, once the runner submits governed
   // changes). flexAuth so it works in open mode and with a key.
+  // Teams — global, owner-managed group primitive (not nest-scoped). Auth via
+  // flexAuth; ownership + admin bypass enforced inside the service/handlers.
+  app.use("/teams/*", flexAuthMiddleware);
+  app.use("/teams", flexAuthMiddleware);
+  app.route("/teams", teamRoutes);
+
   app.use("/me/*", flexAuthMiddleware);
   app.get("/me/work", async (c) => {
     const userId = c.get("userId");
@@ -977,6 +985,11 @@ export function createApp(): Hono<AuthEnv> {
       required = c.req.method === "GET" || c.req.method === "POST"
         ? "write"
         : "admin";
+    } else if (resource === "teams") {
+      // Team shares change who can reach the nest. Listing exposes member
+      // emails (like the collaborator roster) → 'write'; sharing/unsharing a
+      // whole team (which may include admin-role members) → 'admin'.
+      required = c.req.method === "GET" ? "write" : "admin";
     } else if (parts[1] === "hooks") {
       // Hook rows carry trigger capability (the token fires runs, which is
       // a write-tier action) — reading the list must not be a read-tier
@@ -1142,6 +1155,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
+  nestsApp.route("/:nestId/teams", nestTeamRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);

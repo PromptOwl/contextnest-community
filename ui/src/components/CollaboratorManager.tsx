@@ -1,5 +1,6 @@
 /**
- * CollaboratorManager — list + add/change-role/remove collaborators on a nest.
+ * CollaboratorManager — list + add/change-role/remove collaborators on a nest,
+ * and (when `showTeams` is set) share whole teams from the same panel.
  *
  * Shared by ShareNestDialog (modal) and NestView's Collaborators tab so the
  * sharing logic lives in one place. Does NOT render the visibility toggle —
@@ -9,6 +10,11 @@
  * Each collaborator may also hold steward roles (returned by the API as
  * `stewardRoles`); we surface those as read-only badges so the admin sees the
  * person's full effective access, not just their plain sharing permission.
+ *
+ * Teams: the "Add" control has a Person/Team toggle and a "Teams with access"
+ * list. A shared team brings its members in at their own role (set on the Teams
+ * page). Gated by `showTeams` so teams surface only where wanted (the Share
+ * dialog), not in every place the collaborator roster renders.
  */
 import React, { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -19,9 +25,10 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { Trash2, Loader2, AlertCircle, UserPlus } from "lucide-react";
+import { Trash2, Loader2, AlertCircle, UserPlus, Users, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
+import type { Team, TeamMember } from "../lib/api";
 
 export interface Collaborator {
   id: string;
@@ -30,6 +37,12 @@ export interface Collaborator {
   email?: string;
   /** Steward roles the same user holds on this nest (read-only, from API). */
   stewardRoles?: string[];
+}
+
+interface SharedTeam {
+  teamId: string;
+  teamName: string;
+  members: TeamMember[];
 }
 
 // Mirrors the server's enum in src/shared/types.ts (read | write | admin).
@@ -64,6 +77,9 @@ interface CollaboratorManagerProps {
    *  stay admin-only server-side. Defaults to admin for legacy admin-gated
    *  call sites (e.g. ShareNestDialog) that don't pass it. */
   callerPermission?: string;
+  /** Surface team-sharing (add a team, list shared teams) in this panel. Off
+   *  by default so teams appear only in the Share dialog. */
+  showTeams?: boolean;
 }
 
 export function CollaboratorManager({
@@ -72,6 +88,7 @@ export function CollaboratorManager({
   onChanged,
   currentUserEmail,
   callerPermission = "admin",
+  showTeams = false,
 }: CollaboratorManagerProps) {
   const self = (currentUserEmail || "").toLowerCase();
   const callerRank = PERM_RANK[callerPermission] ?? PERM_RANK.read;
@@ -90,6 +107,13 @@ export function CollaboratorManager({
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Team-sharing state (only used when showTeams).
+  const [addMode, setAddMode] = useState<"person" | "team">("person");
+  const [sharedTeams, setSharedTeams] = useState<SharedTeam[]>([]);
+  const [myTeams, setMyTeams] = useState<Team[]>([]);
+  const [selectedTeam, setSelectedTeam] = useState("");
+  const [teamBusy, setTeamBusy] = useState(false);
+
   const loadCollaborators = async () => {
     setLoading(true);
     try {
@@ -102,8 +126,22 @@ export function CollaboratorManager({
     }
   };
 
+  const loadTeams = async () => {
+    try {
+      const [nestTeams, owned] = await Promise.all([
+        api.listNestTeams(nestId),
+        api.listTeams().catch(() => ({ teams: [] as Team[] })),
+      ]);
+      setSharedTeams(nestTeams.teams);
+      setMyTeams(owned.teams);
+    } catch (err: any) {
+      setError(err?.message || "Failed to load teams");
+    }
+  };
+
   useEffect(() => {
     loadCollaborators();
+    if (showTeams) loadTeams();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nestId]);
 
@@ -123,6 +161,45 @@ export function CollaboratorManager({
       setError(err?.message || "Failed to add collaborator");
     } finally {
       setAdding(false);
+    }
+  };
+
+  const shareableTeams = myTeams.filter(
+    (t) => !sharedTeams.some((s) => s.teamId === t.id),
+  );
+
+  const handleShareTeam = async () => {
+    if (!selectedTeam) return;
+    setTeamBusy(true);
+    setError(null);
+    try {
+      await api.shareNestWithTeam(nestId, selectedTeam);
+      setSelectedTeam("");
+      toast.success("Team shared");
+      await loadTeams();
+      onChanged();
+    } catch (err: any) {
+      setError(err?.message || "Failed to share team");
+    } finally {
+      setTeamBusy(false);
+    }
+  };
+
+  const handleUnshareTeam = async (teamId: string, teamName: string) => {
+    const ok = window.confirm(
+      `Unshare "${teamName}" from "${nestName}"? Its members lose the access this share granted.`,
+    );
+    if (!ok) return;
+    setTeamBusy(true);
+    setError(null);
+    try {
+      await api.unshareNestTeam(nestId, teamId);
+      await loadTeams();
+      onChanged();
+    } catch (err: any) {
+      setError(err?.message || "Failed to unshare team");
+    } finally {
+      setTeamBusy(false);
     }
   };
 
@@ -175,47 +252,156 @@ export function CollaboratorManager({
         </Alert>
       )}
 
-      {/* Add collaborator */}
-      <form onSubmit={handleAdd} className="rounded-lg border p-4 space-y-3">
-        <Label className="flex items-center gap-2 text-sm font-medium">
-          <UserPlus className="h-4 w-4" />
-          Add a person
-        </Label>
-        <div className="flex flex-col sm:flex-row gap-2">
-          <Input
-            type="email"
-            placeholder="teammate@example.com"
-            value={inviteEmail}
-            onChange={(e) => setInviteEmail(e.target.value)}
-            disabled={adding}
-            className="flex-1"
-          />
-          <Select
-            value={invitePermission}
-            onValueChange={(v) =>
-              setInvitePermission(v as Collaborator["permission"])
-            }
-          >
-            <SelectTrigger className="w-full sm:w-[130px]">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {grantablePermissions.map((p) => (
-                <SelectItem key={p.value} value={p.value}>
-                  {p.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Button type="submit" disabled={adding || !inviteEmail.trim()}>
-            {adding ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add"}
-          </Button>
+      {/* Add collaborator / team */}
+      <div className="rounded-lg border p-4 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <Label className="flex items-center gap-2 text-sm font-medium">
+            {showTeams && addMode === "team" ? (
+              <>
+                <Users className="h-4 w-4" />
+                Add a team
+              </>
+            ) : (
+              <>
+                <UserPlus className="h-4 w-4" />
+                Add a person
+              </>
+            )}
+          </Label>
+          {showTeams && (
+            <div className="flex gap-1">
+              <Button
+                type="button"
+                size="sm"
+                variant={addMode === "person" ? "secondary" : "ghost"}
+                className="h-7 px-2 text-xs"
+                onClick={() => setAddMode("person")}
+              >
+                Person
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={addMode === "team" ? "secondary" : "ghost"}
+                className="h-7 px-2 text-xs"
+                onClick={() => setAddMode("team")}
+              >
+                Team
+              </Button>
+            </div>
+          )}
         </div>
-        <p className="text-xs text-muted-foreground">
-          If they don't have an account yet, they'll get access when they
-          register with this email.
-        </p>
-      </form>
+
+        {showTeams && addMode === "team" ? (
+          <>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <Select
+                value={selectedTeam}
+                onValueChange={setSelectedTeam}
+                disabled={shareableTeams.length === 0}
+              >
+                <SelectTrigger className="flex-1">
+                  <SelectValue
+                    placeholder={
+                      shareableTeams.length === 0
+                        ? "No teams available to share"
+                        : "Select a team…"
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {shareableTeams.map((t) => (
+                    <SelectItem key={t.id} value={t.id}>
+                      {t.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button onClick={handleShareTeam} disabled={teamBusy || !selectedTeam}>
+                {teamBusy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    <Share2 className="h-4 w-4 mr-1" />
+                    Share
+                  </>
+                )}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Every member gets the role you gave them on the Teams page. Manage
+              members there.
+            </p>
+          </>
+        ) : (
+          <form onSubmit={handleAdd} className="space-y-3">
+            <div className="flex flex-col sm:flex-row gap-2">
+              <Input
+                type="email"
+                placeholder="teammate@example.com"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                disabled={adding}
+                className="flex-1"
+              />
+              <Select
+                value={invitePermission}
+                onValueChange={(v) =>
+                  setInvitePermission(v as Collaborator["permission"])
+                }
+              >
+                <SelectTrigger className="w-full sm:w-[130px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {grantablePermissions.map((p) => (
+                    <SelectItem key={p.value} value={p.value}>
+                      {p.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button type="submit" disabled={adding || !inviteEmail.trim()}>
+                {adding ? <Loader2 className="h-4 w-4 animate-spin" /> : "Add"}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              If they don't have an account yet, they'll get access when they
+              register with this email.
+            </p>
+          </form>
+        )}
+      </div>
+
+      {/* Teams with access */}
+      {showTeams && sharedTeams.length > 0 && (
+        <div className="rounded-lg border p-4 space-y-2">
+          <Label className="text-sm font-medium flex items-center gap-2">
+            <Users className="h-4 w-4" />
+            Teams with access
+          </Label>
+          <div className="space-y-1">
+            {sharedTeams.map((t) => (
+              <div key={t.teamId} className="flex items-center gap-2 py-1.5">
+                <span className="flex-1 min-w-0 truncate text-sm">{t.teamName}</span>
+                <Badge variant="secondary" className="text-[11px]">
+                  {t.members.length} member{t.members.length === 1 ? "" : "s"}
+                </Badge>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={teamBusy}
+                  onClick={() => handleUnshareTeam(t.teamId, t.teamName)}
+                  title="Unshare team"
+                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Collaborator list */}
       <div className="rounded-lg border p-4 space-y-2">

@@ -2769,6 +2769,7 @@ export function NestView({
                   onChanged={fetchData}
                   currentUserEmail={currentEmail}
                   callerPermission={permission ?? undefined}
+                  showTeams
                 />
               </CardContent>
             </Card>

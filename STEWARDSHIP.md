@@ -76,6 +76,38 @@ What a super-admin **cannot** do (owner-only operations):
 
 Use this for a small set of platform operators — a CEO, a head of governance, an internal compliance admin — not as a default broad-access mechanism. Day-to-day governance should still flow through per-nest stewards.
 
+## Teams — sharing with a group
+
+Instead of adding people one at a time, you can create a **team** — a reusable,
+owner-managed group — and share it onto a nest. Each team member carries a
+**role** set on the membership (not on the share), and that role applies on
+**every** nest the team is shared to:
+
+| Member role | Nest access | Governance |
+|---|---|---|
+| **viewer** | read | viewer |
+| **editor** | write | editor |
+| **admin** | admin | admin |
+
+Key points:
+
+- A member's role is uniform across nests — set it once on the team. To vary
+  access per nest, use a different team (or a direct collaborator/steward grant).
+- When a user reaches a nest by several paths (a direct collaborator grant **and**
+  team membership), the **highest** access wins.
+- Sharing a team whose members carry a governance role (viewer/editor)
+  **enables stewardship** on the nest — same effect as assigning an individual
+  steward. An `admin`-only team is collaborator-style and doesn't.
+- Removing a member, deleting the team, or unsharing it **revokes access
+  immediately** — there are no per-user rows to clean up.
+- Managing a team is gated by your role on it: editor/admin members (and the
+  owner) can add people, capped to their own level; admins can also change
+  roles and remove members; only the owner can delete the team.
+
+Members see the teams they belong to on the **Teams** page and any team-shared
+nest on their dashboard. Manage teams there (create, add/remove members with a
+role); share them from a nest's sharing panel. See `API.md` §3a for the endpoints.
+
 ## Picking a scope when you assign a steward
 
 Rules of thumb:
