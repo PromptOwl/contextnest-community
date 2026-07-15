@@ -31,13 +31,20 @@ interface RenameNestDialogProps {
   nestDescription?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Called with the server's updated nest after a successful save. */
-  onRenamed: (nest: {
-    id: string;
-    name: string;
-    slug: string;
-    description: string | null;
-  }) => void;
+  /** Called with the server's updated nest after a successful save, plus
+   *  which fields the dialog actually submitted — callers with their own
+   *  name state (e.g. NestView's inline header rename) must only sync it
+   *  when the dialog really sent a name; on a description-only save the
+   *  server's `name` can be stale relative to an unflushed inline edit. */
+  onRenamed: (
+    nest: {
+      id: string;
+      name: string;
+      slug: string;
+      description: string | null;
+    },
+    changed: { nameChanged: boolean; descChanged: boolean },
+  ) => void;
 }
 
 export function RenameNestDialog({
@@ -105,7 +112,7 @@ export function RenameNestDialog({
       // Empty string clears the description (server stores NULL).
       if (descChanged) patch.description = description.trim() || null;
       const { nest } = await api.updateNest(nestId, patch);
-      onRenamed(nest);
+      onRenamed(nest, { nameChanged, descChanged });
       onOpenChange(false);
     } catch (err: any) {
       console.error("[RenameNestDialog] updateNest failed", nestId, err);

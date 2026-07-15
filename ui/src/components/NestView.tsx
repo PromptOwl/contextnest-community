@@ -1332,7 +1332,13 @@ export function NestView({
               actions.push({
                 label: "Rename nest",
                 icon: Pencil,
-                onSelect: () => setShowRename(true),
+                onSelect: () => {
+                  // Flush any pending inline header rename first so the
+                  // dialog primes from (and the server holds) the user's
+                  // latest text instead of racing the 1200ms debounce.
+                  flushRename();
+                  setShowRename(true);
+                },
               });
             if (!isReadOnly && canManageGovernance)
               actions.push({
@@ -2876,12 +2882,18 @@ export function NestView({
           nestDescription={nestDescription}
           open
           onOpenChange={setShowRename}
-          onRenamed={(updated) => {
-            // Keep the inline header rename in sync so its autosave doesn't
-            // re-submit the old name on blur.
-            setEditableName(updated.name);
-            lastSavedName.current = updated.name;
-            setRenameError(null);
+          onRenamed={(updated, changed) => {
+            // Sync the inline header rename ONLY when the dialog actually
+            // sent a name — on a description-only save `updated.name` can be
+            // stale relative to an in-flight inline edit, and overwriting
+            // editableName/lastSavedName with it would both visually revert
+            // the header and make the pending debounce a no-op (silently
+            // dropping the rename).
+            if (changed.nameChanged) {
+              setEditableName(updated.name);
+              lastSavedName.current = updated.name;
+              setRenameError(null);
+            }
             setNestDescription(updated.description);
             setShowRename(false);
           }}
