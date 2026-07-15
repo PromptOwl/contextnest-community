@@ -13,6 +13,7 @@
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import type { Querier } from "../db/adapter.js";
 import { normalizeEmail } from "../shared/email.js";
 import {
   ValidationError,
@@ -186,13 +187,17 @@ export async function renameTeam(params: {
   }
 
   const db = getDb();
-  await db.run("UPDATE teams SET name = ?, updated_at = ? WHERE id = ?", [
-    name,
-    new Date().toISOString(),
-    params.teamId,
-  ]);
-  // Keep the cached teamName in every nest's shared_teams consistent.
-  await refreshTeamNameRefs(params.teamId, name);
+  // Rename + cached-name refresh land together, so the roster can't be left
+  // advertising the old name on some nests and the new one on others.
+  await db.transaction(async (tx) => {
+    await tx.run("UPDATE teams SET name = ?, updated_at = ? WHERE id = ?", [
+      name,
+      new Date().toISOString(),
+      params.teamId,
+    ]);
+    // Keep the cached teamName in every nest's shared_teams consistent.
+    await refreshTeamNameRefs(tx, params.teamId, name);
+  });
   return enrichTeam(rowToTeam(await loadTeamRow(params.teamId)));
 }
 
@@ -206,10 +211,13 @@ export async function deleteTeam(params: {
     throw new ForbiddenError("Only the team owner can delete this team.");
   }
   const db = getDb();
-  await db.run("DELETE FROM teams WHERE id = ?", [params.teamId]);
-  // shared_teams is a JSON blob with no FK — strip the dangling refs so the
-  // nest rosters stay clean (resolution ignores unknown teamIds regardless).
-  await removeTeamRefs(params.teamId);
+  // Delete + ref cleanup are one unit: shared_teams is a JSON blob with no FK,
+  // so a crash between them would strand a {teamId, teamName} ref pointing at a
+  // row that no longer exists, with nothing left to self-heal from.
+  await db.transaction(async (tx) => {
+    await tx.run("DELETE FROM teams WHERE id = ?", [params.teamId]);
+    await removeTeamRefs(tx, params.teamId);
+  });
 }
 
 export async function addMember(params: {
@@ -235,28 +243,36 @@ export async function addMember(params: {
 
   // Resolve the target user, minting a placeholder for an unregistered email
   // (claimed by registering the same address — same flow as collaborators).
+  //
+  // The stored email ALWAYS comes from the resolved account, never from the
+  // request: when a user_id is supplied, a caller-provided email is ignored
+  // entirely. Trusting it would let anyone who knows a user's id pin an
+  // arbitrary address onto that membership, which then renders as their
+  // identity across the roster UIs.
   let userId = params.userId;
-  let email = params.email ? normalizeEmail(params.email) : undefined;
-  if (!userId && email) {
+  let email: string | undefined;
+  if (!userId) {
+    const requested = params.email ? normalizeEmail(params.email) : undefined;
+    if (!requested) {
+      throw new ValidationError("user_id or email is required");
+    }
     const existing = (await db.get(
-      "SELECT id FROM users WHERE LOWER(email) = ?",
-      [email],
-    )) as { id: string } | undefined;
+      "SELECT id, email FROM users WHERE LOWER(email) = ?",
+      [requested],
+    )) as { id: string; email?: string } | undefined;
     if (existing) {
       userId = existing.id;
+      email = normalizeEmail(existing.email ?? requested);
     } else {
       const { hashPassword } = await import("../auth/keys.js");
       userId = uuid();
       await db.run(
         "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-        [userId, email, null, await hashPassword(uuid())],
+        [userId, requested, null, await hashPassword(uuid())],
       );
+      email = requested;
     }
-  }
-  if (!userId) {
-    throw new ValidationError("user_id or email is required");
-  }
-  if (!email) {
+  } else {
     const u = (await db.get("SELECT email FROM users WHERE id = ?", [
       userId,
     ])) as { email?: string } | undefined;
@@ -264,14 +280,19 @@ export async function addMember(params: {
     email = normalizeEmail(u.email ?? "");
   }
 
-  const members = parseMembers(row.members);
-  if (members.some((m) => m.userId === userId)) {
-    throw new ConflictError(
-      `${email || "This user"} is already a member of this team. Change their role instead of adding them again.`,
-    );
-  }
-  members.push({ userId, email, role: params.role });
-  await persistMembers(params.teamId, members);
+  const resolvedId = userId;
+  const resolvedEmail = email;
+  await mutateMembers(params.teamId, (members) => {
+    if (members.some((m) => m.userId === resolvedId)) {
+      throw new ConflictError(
+        `${resolvedEmail || "This user"} is already a member of this team. Change their role instead of adding them again.`,
+      );
+    }
+    return [
+      ...members,
+      { userId: resolvedId, email: resolvedEmail, role: params.role as TeamMemberRole },
+    ];
+  });
   return enrichTeam(rowToTeam(await loadTeamRow(params.teamId)));
 }
 
@@ -291,11 +312,12 @@ export async function updateMemberRole(params: {
   if (rank < OWNER_RANK && ROLE_RANK[params.role] > rank) {
     throw new ForbiddenError("You can't set a role higher than your own.");
   }
-  const members = parseMembers(row.members);
-  const member = members.find((m) => m.userId === params.userId);
-  if (!member) throw new NotFoundError("Team member not found");
-  member.role = params.role;
-  await persistMembers(params.teamId, members);
+  await mutateMembers(params.teamId, (members) => {
+    const member = members.find((m) => m.userId === params.userId);
+    if (!member) throw new NotFoundError("Team member not found");
+    member.role = params.role as TeamMemberRole;
+    return members;
+  });
   return enrichTeam(rowToTeam(await loadTeamRow(params.teamId)));
 }
 
@@ -309,25 +331,42 @@ export async function removeMember(params: {
   if (managementRank(row, params.callerUserId, !!params.allowAdmin) < ROLE_RANK.admin) {
     throw new ForbiddenError("Only a team admin or the owner can remove members.");
   }
-  const members = parseMembers(row.members);
-  const next = members.filter((m) => m.userId !== params.userId);
-  if (next.length === members.length) {
-    throw new NotFoundError("Team member not found");
-  }
-  await persistMembers(params.teamId, next);
+  await mutateMembers(params.teamId, (members) => {
+    const next = members.filter((m) => m.userId !== params.userId);
+    if (next.length === members.length) {
+      throw new NotFoundError("Team member not found");
+    }
+    return next;
+  });
   return enrichTeam(rowToTeam(await loadTeamRow(params.teamId)));
 }
 
-async function persistMembers(
+/**
+ * Atomically read-modify-write a team's inline member roster.
+ *
+ * The roster is a single JSON cell per team, not one row per member, so two
+ * concurrent membership writes would otherwise clobber each other (a genuine
+ * lost update on a pooled Postgres backend; SQLite's single writer largely
+ * hides it). Re-reading inside the transaction means `mutate` always sees
+ * committed state, and a throw from `mutate` rolls the whole thing back.
+ */
+async function mutateMembers(
   teamId: string,
-  members: TeamMember[],
+  mutate: (members: TeamMember[]) => TeamMember[],
 ): Promise<void> {
   const db = getDb();
-  await db.run("UPDATE teams SET members = ?, updated_at = ? WHERE id = ?", [
-    JSON.stringify(members),
-    new Date().toISOString(),
-    teamId,
-  ]);
+  await db.transaction(async (tx) => {
+    const row = (await tx.get("SELECT members FROM teams WHERE id = ?", [
+      teamId,
+    ])) as { members?: string } | undefined;
+    if (!row) throw new NotFoundError("Team not found");
+    const next = mutate(parseMembers(row.members));
+    await tx.run("UPDATE teams SET members = ?, updated_at = ? WHERE id = ?", [
+      JSON.stringify(next),
+      new Date().toISOString(),
+      teamId,
+    ]);
+  });
 }
 
 // ─── Nest share side (nests.shared_teams) ───
@@ -352,49 +391,55 @@ export async function listNestTeams(nestId: string): Promise<SharedTeamRef[]> {
   return parseSharedTeams(row.shared_teams);
 }
 
-/** Share a team onto a nest — append a {teamId, teamName} ref (idempotent). */
+/**
+ * Share a team onto a nest — append a {teamId, teamName} ref.
+ *
+ * The whole thing runs in one transaction: shared_teams is a single JSON cell
+ * per nest (so a concurrent share/unshare would otherwise lose a write), and
+ * the stewardship flip below must land with the share or not at all — a
+ * half-applied share would leave governance-role members on a nest that isn't
+ * actually gated.
+ */
 export async function shareTeamWithNest(params: {
   nestId: string;
   teamId: string;
 }): Promise<SharedTeamRef[]> {
   const db = getDb();
-  const team = (await db.get("SELECT id, name FROM teams WHERE id = ?", [
-    params.teamId,
-  ])) as { id: string; name: string } | undefined;
-  if (!team) throw new NotFoundError("Team not found");
-  const nest = (await db.get("SELECT shared_teams FROM nests WHERE id = ?", [
-    params.nestId,
-  ])) as { shared_teams?: string } | undefined;
-  if (!nest) throw new NotFoundError("Nest not found");
+  return db.transaction(async (tx) => {
+    const team = (await tx.get("SELECT id, name, members FROM teams WHERE id = ?", [
+      params.teamId,
+    ])) as { id: string; name: string; members?: string } | undefined;
+    if (!team) throw new NotFoundError("Team not found");
+    const nest = (await tx.get("SELECT shared_teams FROM nests WHERE id = ?", [
+      params.nestId,
+    ])) as { shared_teams?: string } | undefined;
+    if (!nest) throw new NotFoundError("Nest not found");
 
-  const refs = parseSharedTeams(nest.shared_teams);
-  if (refs.some((r) => r.teamId === params.teamId)) {
-    throw new ConflictError("This team is already shared with the nest.");
-  }
-  refs.push({ teamId: team.id, teamName: team.name });
-  await db.run("UPDATE nests SET shared_teams = ? WHERE id = ?", [
-    JSON.stringify(refs),
-    params.nestId,
-  ]);
+    const refs = parseSharedTeams(nest.shared_teams);
+    if (refs.some((r) => r.teamId === params.teamId)) {
+      throw new ConflictError("This team is already shared with the nest.");
+    }
+    refs.push({ teamId: team.id, teamName: team.name });
+    await tx.run("UPDATE nests SET shared_teams = ? WHERE id = ?", [
+      JSON.stringify(refs),
+      params.nestId,
+    ]);
 
-  // Sharing a team whose members carry a governance role (viewer/editor) turns
-  // stewardship on for the nest — mirrors assigning an individual steward.
-  // Without this, an editor-via-team would gate nothing (stewardship-disabled
-  // nests are open read/write). An admin-only team is collaborator-style and
-  // does not force stewardship.
-  const memberRow = (await db.get("SELECT members FROM teams WHERE id = ?", [
-    params.teamId,
-  ])) as { members?: string } | undefined;
-  const hasGovernanceRole = parseMembers(memberRow?.members).some(
-    (m) => m.role === "viewer" || m.role === "editor",
-  );
-  if (hasGovernanceRole) {
-    await db.run(
-      "UPDATE nests SET stewardship_enabled = 1 WHERE id = ?",
-      [params.nestId],
+    // Sharing a team whose members carry a governance role (viewer/editor) turns
+    // stewardship on for the nest — mirrors assigning an individual steward.
+    // Without this, an editor-via-team would gate nothing (stewardship-disabled
+    // nests are open read/write). An admin-only team is collaborator-style and
+    // does not force stewardship.
+    const hasGovernanceRole = parseMembers(team.members).some(
+      (m) => m.role === "viewer" || m.role === "editor",
     );
-  }
-  return refs;
+    if (hasGovernanceRole) {
+      await tx.run("UPDATE nests SET stewardship_enabled = 1 WHERE id = ?", [
+        params.nestId,
+      ]);
+    }
+    return refs;
+  });
 }
 
 /** Remove a team's share from a nest. */
@@ -403,29 +448,31 @@ export async function unshareTeamFromNest(params: {
   teamId: string;
 }): Promise<SharedTeamRef[]> {
   const db = getDb();
-  const nest = (await db.get("SELECT shared_teams FROM nests WHERE id = ?", [
-    params.nestId,
-  ])) as { shared_teams?: string } | undefined;
-  if (!nest) throw new NotFoundError("Nest not found");
-  const refs = parseSharedTeams(nest.shared_teams);
-  const next = refs.filter((r) => r.teamId !== params.teamId);
-  if (next.length === refs.length) {
-    throw new NotFoundError("Team is not shared with this nest.");
-  }
-  await db.run("UPDATE nests SET shared_teams = ? WHERE id = ?", [
-    JSON.stringify(next),
-    params.nestId,
-  ]);
-  return next;
+  return db.transaction(async (tx) => {
+    const nest = (await tx.get("SELECT shared_teams FROM nests WHERE id = ?", [
+      params.nestId,
+    ])) as { shared_teams?: string } | undefined;
+    if (!nest) throw new NotFoundError("Nest not found");
+    const refs = parseSharedTeams(nest.shared_teams);
+    const next = refs.filter((r) => r.teamId !== params.teamId);
+    if (next.length === refs.length) {
+      throw new NotFoundError("Team is not shared with this nest.");
+    }
+    await tx.run("UPDATE nests SET shared_teams = ? WHERE id = ?", [
+      JSON.stringify(next),
+      params.nestId,
+    ]);
+    return next;
+  });
 }
 
 /** Refresh the cached teamName in every nest that shares this team. */
 async function refreshTeamNameRefs(
+  tx: Querier,
   teamId: string,
   newName: string,
 ): Promise<void> {
-  const db = getDb();
-  const nests = (await db.all(
+  const nests = (await tx.all(
     "SELECT id, shared_teams FROM nests WHERE shared_teams LIKE ?",
     [`%${teamId}%`],
   )) as Array<{ id: string; shared_teams?: string }>;
@@ -439,7 +486,7 @@ async function refreshTeamNameRefs(
       }
     }
     if (changed) {
-      await db.run("UPDATE nests SET shared_teams = ? WHERE id = ?", [
+      await tx.run("UPDATE nests SET shared_teams = ? WHERE id = ?", [
         JSON.stringify(refs),
         n.id,
       ]);
@@ -448,9 +495,8 @@ async function refreshTeamNameRefs(
 }
 
 /** Strip a team's ref from every nest that shares it (used on delete). */
-async function removeTeamRefs(teamId: string): Promise<void> {
-  const db = getDb();
-  const nests = (await db.all(
+async function removeTeamRefs(tx: Querier, teamId: string): Promise<void> {
+  const nests = (await tx.all(
     "SELECT id, shared_teams FROM nests WHERE shared_teams LIKE ?",
     [`%${teamId}%`],
   )) as Array<{ id: string; shared_teams?: string }>;
@@ -458,7 +504,7 @@ async function removeTeamRefs(teamId: string): Promise<void> {
     const refs = parseSharedTeams(n.shared_teams);
     const next = refs.filter((r) => r.teamId !== teamId);
     if (next.length !== refs.length) {
-      await db.run("UPDATE nests SET shared_teams = ? WHERE id = ?", [
+      await tx.run("UPDATE nests SET shared_teams = ? WHERE id = ?", [
         JSON.stringify(next),
         n.id,
       ]);
