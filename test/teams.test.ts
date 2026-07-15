@@ -108,6 +108,25 @@ describe("team CRUD + membership", () => {
     await jsonRequest(app, "DELETE", `/teams/${teamId}/members/${added.userId}`, undefined, owner.apiKey);
   });
 
+  it("ignores a caller-supplied email when user_id is given (no spoofing)", async () => {
+    // Adding by user_id with a bogus email must store the account's real
+    // address — otherwise the roster would display a forged identity.
+    const res = await jsonRequest(app, "POST", `/teams/${teamId}/members`, { user_id: outsider.userId, email: "ceo@acme.com", role: "viewer" }, owner.apiKey);
+    expect(res.status).toBe(201);
+    const member = res.data.team.members.find((m: any) => m.userId === outsider.userId);
+    expect(member.email).toBe(outsider.email);
+    expect(res.data.team.members.some((m: any) => m.email === "ceo@acme.com")).toBe(false);
+    // cleanup so later member-count assertions stay stable
+    await jsonRequest(app, "DELETE", `/teams/${teamId}/members/${outsider.userId}`, undefined, owner.apiKey);
+  });
+
+  it("a non-admin member cannot rename the team or change roles", async () => {
+    const rename = await jsonRequest(app, "PATCH", `/teams/${teamId}`, { name: "Hijacked" }, editorU.apiKey);
+    expect(rename.status).toBe(403);
+    const role = await jsonRequest(app, "PATCH", `/teams/${teamId}/members/${viewerU.userId}`, { role: "admin" }, editorU.apiKey);
+    expect(role.status).toBe(403);
+  });
+
   it("lists teams the caller owns or is a member of", async () => {
     // owner sees it because they own it; a member sees it because they're on it
     const asOwner = await jsonRequest(app, "GET", "/teams", undefined, owner.apiKey);
