@@ -7,7 +7,7 @@
  * and the MCP context_review_queue tool built on the same service — must keep
  * their exact shape (regression-asserted below).
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import {
   setupTestEnv,
   createTestApp,
@@ -364,5 +364,67 @@ describe("activity feed: comments are access-filtered", () => {
     const nodeIds = data.items.map((i: any) => i.nodeId).sort();
     expect(nodeIds).toEqual([secretDocId, openDocId].sort());
     expect(data.counts.comments).toBe(2);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// License gate: /feed is governance surface, locked like /review-queue
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("activity feed: license gate", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+
+  /**
+   * An app with the REAL license module (no PROMPTOWL_KEY → unlicensed).
+   * createTestApp (used by the suites above) doMock's the license module to
+   * report valid; drop that mock so the gate actually closes. Open mode so
+   * requests don't need auth fixtures — the license gate sits before the
+   * permission/404 resolution, so no nest needs to exist.
+   */
+  async function createUnlicensedApp() {
+    process.env.AUTH_MODE = "open";
+    vi.resetModules();
+    vi.doUnmock("../src/auth/license.js");
+    const dbClient = await import("../src/db/client.js");
+    await dbClient.resetDb();
+    await dbClient.initDb();
+    const { createApp } = await import("../src/app.js");
+    return createApp();
+  }
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createUnlicensedApp();
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("503s /review-queue without a license (the gate the feed must match)", async () => {
+    const res = await app.request("/nests/some-nest/review-queue");
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe("License required");
+  });
+
+  it("503s /feed without a license — including filter=changes", async () => {
+    // Bare feed…
+    const res = await app.request("/nests/some-nest/feed");
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toBe("License required");
+
+    // …and the shape that would otherwise leak the review queue's rows
+    // through the side door.
+    const changes = await app.request("/nests/some-nest/feed?filter=changes");
+    expect(changes.status).toBe(503);
+    expect((await changes.json()).error).toBe("License required");
+  });
+
+  it("does NOT trip the gate for a node whose slug contains 'feed'", async () => {
+    // Plain node reads stay open unlicensed. The guard matches the exact
+    // /nests/:id/feed route shape, so nodes/product-feed must pass the
+    // license gate (and then 404 on the missing nest — anything but 503).
+    const res = await app.request("/nests/some-nest/nodes/nodes%2Fproduct-feed");
+    expect(res.status).not.toBe(503);
   });
 });

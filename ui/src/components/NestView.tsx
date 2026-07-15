@@ -474,9 +474,16 @@ export function NestView({
           console.error("[NestView] getCommentCounts failed", nestId, e);
           return { counts: {} };
         }),
-        // Comment side of the activity feed. Changes still come from the
-        // existing review-queue call above (badge/actions untouched); the
-        // interleave happens client-side in the queue tab.
+        // Comment side of the activity feed — deliberately NOT filter=all.
+        // The server's change items are the RAW pending set, but this view
+        // renders reviewableQueue: the review-queue response post-filtered
+        // client-side by canReview + separation-of-duties (own submissions
+        // get their own card). Fetching filter=all would return change rows
+        // we'd have to re-filter and dedupe against that queue state, so the
+        // client pulls comments only and lets ReviewQueue interleave them
+        // with the already-filtered changes, using the same (createdAt, id)
+        // ordering as the server merge. If reviewable filtering ever moves
+        // server-side, collapse this into a single filter=all call.
         api.getNestFeed(nestId, "comments").catch((e) => {
           console.error("[NestView] getNestFeed failed", nestId, e);
           return {

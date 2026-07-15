@@ -109,24 +109,32 @@ export function ReviewQueue({
   // for change requests, exactly as before.
   const feedMode = comments !== undefined;
   const rows: Array<
-    | { kind: "change"; at: string; request: ReviewRequest }
-    | { kind: "comment"; at: string; comment: FeedComment }
+    | { kind: "change"; at: string; id: string; request: ReviewRequest }
+    | { kind: "comment"; at: string; id: string; comment: FeedComment }
   > = feedMode
     ? [
         ...requests.map((r) => ({
           kind: "change" as const,
           at: r.requestedAt,
+          id: r.id,
           request: r,
         })),
         ...(comments ?? []).map((c) => ({
           kind: "comment" as const,
           at: c.createdAt,
+          id: c.id,
           comment: c,
         })),
-      ].sort((a, b) => b.at.localeCompare(a.at))
+        // Same (createdAt DESC, id DESC) ordering as the server-side feed
+        // merge, so a page fetched from /feed and this client interleave
+        // agree on same-second ties.
+      ].sort(
+        (a, b) => b.at.localeCompare(a.at) || b.id.localeCompare(a.id),
+      )
     : requests.map((r) => ({
         kind: "change" as const,
         at: r.requestedAt,
+        id: r.id,
         request: r,
       }));
 

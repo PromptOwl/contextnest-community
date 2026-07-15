@@ -14,7 +14,6 @@ import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
 import * as feed from "./feed-service.js";
-import { resolveCallerEmail } from "./access-guard.js";
 import * as comments from "./comment-service.js";
 import * as versions from "./version-service.js";
 import * as externalEdits from "./external-edit-service.js";
@@ -217,7 +216,10 @@ governanceRoutes.get("/feed", async (c) => {
       ? 0
       : Math.min(offsetRaw, 10_000);
   const userId = c.get("userId");
-  const userEmail = await resolveCallerEmail(userId);
+  // Same identity resolution as the review-queue handler above — the feed's
+  // canReview must agree with the queue's for the same caller (the
+  // access-guard resolver falls back to a different anonymous identity).
+  const userEmail = await getUserEmail(c);
 
   const result = await feed.getNestFeed({
     nestId,
