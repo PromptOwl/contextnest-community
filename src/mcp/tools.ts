@@ -8,12 +8,14 @@ import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
+import { canReadNode } from "../governance/access-guard.js";
 import {
   resolveNestPermission,
   permissionLevel,
 } from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { addCollaborator } from "../nests/sharing-service.js";
+import { queryTableNode } from "../tables/query.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -95,6 +97,26 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "context_table_query",
+    description:
+      "Deterministic lookup against a TABLE node (CSV fact store). Fetch exact rows instead of reading the whole table: where <col> <op> <value> [and …] [select cols] [limit N]. Ops: = != > >= < <= contains. Same query + same version = same rows, always.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        table: {
+          type: "string",
+          description: 'The table node — "[[Title]]" or a node id like nodes/price-list',
+        },
+        query: {
+          type: "string",
+          description:
+            'e.g. where region = "EU" and price > 100 select sku, price limit 5. Empty = all rows.',
+        },
+      },
+      required: ["table"],
     },
   },
   {
@@ -401,6 +423,14 @@ async function resolveLlmBody(
   ctx: McpToolContext,
   node: ContextNode,
 ): Promise<string | null> {
+  // Enforce the SAME per-node access gate as the REST retrieval path. This was
+  // missing here — MCP callers bypassed canUserAccess and could read every
+  // approved node's body regardless of document/tag/steward scope. Route through
+  // canReadNode (the REST helper); deny → return null so callers skip the node
+  // instead of leaking it. Strictly more restrictive; can only remove access.
+  if (!(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail))) {
+    return null;
+  }
   if (!(await isStewardshipEnabled(ctx.nestId))) return node.body || "";
   const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
   if (approved == null) return null;
@@ -507,6 +537,21 @@ async function runTool(
         )
         .join("\n\n");
       return `Found ${matches.length} node(s) matching "${args.query}":\n\n${results}`;
+    }
+
+    case "context_table_query": {
+      const result = await queryTableNode(
+        nestId,
+        String(args.table ?? ""),
+        String(args.query ?? ""),
+        false,
+      );
+      // Compact CSV back out — models read it fine and it round-trips.
+      const lines = [
+        result.columns.join(","),
+        ...result.rows.map((r: string[]) => r.join(",")),
+      ];
+      return `${result.returned} of ${result.matched} matching rows (table ${result.table} v${result.version}, ${result.total} total):\n${lines.join("\n")}`;
     }
 
     case "context_query": {

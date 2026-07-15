@@ -6,17 +6,17 @@ import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
 import { SettingsPage } from "./components/SettingsPage";
+import { WorkflowsView } from "./components/WorkflowsView";
+import { GuidePage } from "./components/GuidePage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, BookOpen, ScrollText, BookMarked, Workflow, Activity } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
 import { DefinitionsPage } from "./components/DefinitionsPage";
-import { EdgeTypesPage } from "./components/EdgeTypesPage";
-import { RunsPage } from "./components/RunsPage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -68,6 +68,8 @@ type View =
       nodeId: string | "new";
       isOwner: boolean;
       isAnonOwned: boolean;
+      /** Pre-file a NEW doc into this folder (folder-tree + buttons). */
+      initialFolder?: string;
       /** Pre-fill the title when arriving via a broken-wikilink click.
        *  Only meaningful when nodeId === "new". */
       initialTitle?: string;
@@ -76,10 +78,18 @@ type View =
     }
   | { page: "teammates" }
   | { page: "settings" }
+  | { page: "guide" }
   | { page: "trace" }
   | { page: "docs" }
   | {
       page: "ontology-graph";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    }
+  | {
+      page: "workflows";
       nestId: string;
       nestName: string;
       isOwner: boolean;
@@ -93,14 +103,9 @@ type View =
       isAnonOwned: boolean;
     }
   | {
-      page: "edge-types";
-      nestId: string;
-      nestName: string;
-      isOwner: boolean;
-      isAnonOwned: boolean;
-    }
-  | {
-      page: "runs";
+      /** Nest-scoped activity trace (owner/nest-admin) — ActivityTracePage
+       *  in nest mode, backed by GET /nests/:id/trace. */
+      page: "nest-trace";
       nestId: string;
       nestName: string;
       isOwner: boolean;
@@ -115,6 +120,7 @@ export default function App() {
   const {
     authMode,
     logoUrl,
+    serverVersion,
     adminStatus,
     authenticated,
     isAdmin,
@@ -158,7 +164,9 @@ export default function App() {
       .then(setServerSettings)
       .catch(() => {});
   }, [isAdmin]);
-  const updateServerSettings = useCallback(async (patch: Partial<AdminSettings>) => {
+  const updateServerSettings = useCallback(async (
+    patch: Partial<AdminSettings> & { anthropic_api_key?: string | null },
+  ) => {
     try {
       const res = await updateAdminSettings(patch);
       setServerSettings(res.settings);
@@ -171,8 +179,11 @@ export default function App() {
       toast.success("Settings saved");
     } catch (e: any) {
       toast.error(e?.message || "Failed to save settings");
-      // Re-sync from server so the UI reflects the true state.
-      getAdminSettings().then(setServerSettings).catch(() => {});
+      // A rejected save (validation / SMTP verify) persisted nothing server-side,
+      // so DON'T re-sync — that would reset the draft and wipe what the admin
+      // typed. Re-throw the original error (with its `body.fieldErrors`) so the
+      // Settings page can focus the offending field's tab and show the message.
+      throw e;
     }
   }, [refreshHealth]);
   // Cmd/Ctrl+K quick-open — active anywhere inside a nest context.
@@ -256,9 +267,9 @@ export default function App() {
         const sub = params.get("view");
         const subPage =
           sub === "graph" ? "ontology-graph"
-          : sub === "edge" && workflowPlaneEnabled ? "edge-types"
-          : sub === "runs" && workflowPlaneEnabled ? "runs"
+          : sub === "workflows" && workflowPlaneEnabled ? "workflows"
           : sub === "definitions" ? "definitions"
+          : sub === "trace" ? "nest-trace"
           : null;
         if (subPage) {
           setView({
@@ -308,9 +319,9 @@ export default function App() {
       // Nest-scoped sub-pages: keep ?nest and tag the sub-view so the address
       // bar stays shareable instead of dropping the nest context.
       view.page === "ontology-graph" ||
-      view.page === "edge-types" ||
-      view.page === "runs" ||
-      view.page === "definitions"
+      view.page === "workflows" ||
+      view.page === "definitions" ||
+      view.page === "nest-trace"
     ) {
       params.set("nest", view.nestId);
       params.delete("doc");
@@ -318,11 +329,11 @@ export default function App() {
         "view",
         view.page === "ontology-graph"
           ? "graph"
-          : view.page === "edge-types"
-            ? "edge"
-            : view.page === "runs"
-              ? "runs"
-              : "definitions",
+          : view.page === "workflows"
+            ? "workflows"
+            : view.page === "definitions"
+              ? "definitions"
+              : "trace",
       );
     } else {
       params.delete("nest");
@@ -614,7 +625,7 @@ export default function App() {
                 size="sm"
                 onClick={() =>
                   setView({
-                    page: "edge-types",
+                    page: "workflows",
                     nestId: view.nestId,
                     nestName: view.nestName,
                     isOwner: view.isOwner,
@@ -623,26 +634,7 @@ export default function App() {
                 }
               >
                 <Workflow className="h-3.5 w-3.5 mr-1" />
-                Edge Types
-              </Button>
-            )}
-
-            {view.page === "nest" && workflowPlaneEnabled && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  setView({
-                    page: "runs",
-                    nestId: view.nestId,
-                    nestName: view.nestName,
-                    isOwner: view.isOwner,
-                    isAnonOwned: view.isAnonOwned,
-                  })
-                }
-              >
-                <Activity className="h-3.5 w-3.5 mr-1" />
-                Runs
+                Workflows
               </Button>
             )}
 
@@ -652,6 +644,7 @@ export default function App() {
                 isAdmin={isAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
                 onSettings={() => setView({ page: "settings" })}
+                onGuide={() => setView({ page: "guide" })}
                 onTrace={() => setView({ page: "trace" })}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
@@ -683,6 +676,16 @@ export default function App() {
                 isAnonOwned,
               })
             }
+            onOpenReview={(nestId, nestName, nodeId) =>
+              setView({
+                page: "document",
+                nestId,
+                nestName,
+                nodeId,
+                isOwner: true,
+                isAnonOwned: true,
+              })
+            }
           />
         )}
         {view.page === "nest" && (
@@ -712,12 +715,36 @@ export default function App() {
               }
               setView({ page: "dashboard" });
             }}
-            onOpenDocument={(nodeId) =>
+            onOpenDocument={(nodeId, opts) =>
               setView({
                 page: "document",
                 nestId: view.nestId,
                 nestName: view.nestName,
                 nodeId,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+                initialFolder: opts?.folder,
+              })
+            }
+            onOpenTrace={() =>
+              setView({
+                page: "nest-trace",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
+        )}
+        {view.page === "nest-trace" && (
+          <ActivityTracePage
+            nestId={view.nestId}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
               })
@@ -755,10 +782,11 @@ export default function App() {
               // doc's body renders under the new doc's chrome — and
               // isNew flips true with stale state, hiding the status
               // badge + Submit-for-review button on the original doc.
-              key={`${doc.nestId}/${doc.nodeId}`}
+              key={`${doc.nestId}/${doc.nodeId}/${(doc as any).initialFolder ?? ""}`}
               nestId={doc.nestId}
               nestName={doc.nestName}
               nodeId={doc.nodeId}
+              initialFolder={(doc as any).initialFolder}
               isOwner={doc.isOwner}
               breadcrumb={doc.breadcrumb}
               onBack={() => {
@@ -860,37 +888,6 @@ export default function App() {
             }
           />
         )}
-        {view.page === "edge-types" && workflowPlaneEnabled && (
-          <EdgeTypesPage
-            nestId={view.nestId}
-            nestName={view.nestName}
-            onBack={() =>
-              setView({
-                page: "nest",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-              })
-            }
-          />
-        )}
-        {view.page === "runs" && workflowPlaneEnabled && (
-          <RunsPage
-            nestId={view.nestId}
-            nestName={view.nestName}
-            subagentEnabled={subagentRunsEnabled}
-            onBack={() =>
-              setView({
-                page: "nest",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-              })
-            }
-          />
-        )}
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}
@@ -923,7 +920,31 @@ export default function App() {
             }
           />
         )}
+
+        {view.page === "guide" && (
+          <GuidePage onBack={() => setView({ page: "dashboard" })} />
+        )}
+
+        {view.page === "workflows" && (
+          <WorkflowsView
+            nestId={view.nestId}
+            nestName={view.nestName}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
+        )}
       </main>
+
+      <footer className="max-w-6xl mx-auto px-4 py-4 text-xs text-muted-foreground text-center">
+        ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
+      </footer>
 
       {showAdminLogin && (
         <AdminLoginModal
@@ -941,6 +962,7 @@ interface UserMenuProps {
   isAdmin: boolean;
   onTeammates: () => void;
   onSettings: () => void;
+  onGuide: () => void;
   onTrace: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
@@ -951,6 +973,7 @@ function UserMenu({
   isAdmin,
   onTeammates,
   onSettings,
+  onGuide,
   onTrace,
   onChangePassword,
   onLogout,
@@ -1016,6 +1039,11 @@ function UserMenu({
             </DropdownMenuItem>
           </>
         )}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onGuide} className="cursor-pointer">
+          <BookOpen className="h-3.5 w-3.5 mr-2" />
+          How it works
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
           onSelect={onChangePassword}

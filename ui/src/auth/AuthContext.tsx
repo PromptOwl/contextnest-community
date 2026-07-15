@@ -44,6 +44,7 @@ export type LoginSuccessUser = {
 export interface AuthContextValue {
   authMode: AuthMode;
   logoUrl: string | null;
+  serverVersion: string | null;
   adminStatus: AdminStatus | null;
   authenticated: boolean;
   isAdmin: boolean;
@@ -54,6 +55,11 @@ export interface AuthContextValue {
    *  separately from the plane; when off the UI hides the "spawn sub-agent"
    *  option exactly when the API would reject a parent_run_id (400). */
   subagentRunsEnabled: boolean;
+  /** Server's sub-agent recursion caps from /health (env-overridable). The
+   *  Runs picker validates against these real values, not hardcoded defaults,
+   *  so an operator's override stays in sync with the grey-outs. */
+  subagentMaxDepth: number;
+  subagentMaxChildren: number;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -70,8 +76,13 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: PropsWithChildren) {
   const [authMode, setAuthMode] = useState<AuthMode>(null);
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [workflowPlaneEnabled, setWorkflowPlaneEnabled] = useState(false);
   const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
+  // Defaults mirror config.ts; overwritten by /health so operator overrides
+  // flow through to the picker.
+  const [subagentMaxDepth, setSubagentMaxDepth] = useState(8);
+  const [subagentMaxChildren, setSubagentMaxChildren] = useState(16);
   const [adminStatus, setAdminStatus] = useState<AdminStatus | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -96,6 +107,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
       setLogoUrl(h.logo_url ?? null);
       setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
       setSubagentRunsEnabled(!!h.subagent_runs_enabled);
+      if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
+      if (typeof h.subagent_max_children === "number") setSubagentMaxChildren(h.subagent_max_children);
     } catch {
       /* keep the last-known flags on a transient health failure */
     }
@@ -128,8 +141,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
         const mode = h.auth_mode as AuthMode;
         setAuthMode(mode);
         setLogoUrl(h.logo_url ?? null);
+        setServerVersion(h.version ?? null);
         setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
         setSubagentRunsEnabled(!!h.subagent_runs_enabled);
+        if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
+        if (typeof h.subagent_max_children === "number") setSubagentMaxChildren(h.subagent_max_children);
 
         const status = await api.getAdminStatus();
         if (cancelled) return;
@@ -262,11 +278,14 @@ export function AuthProvider({ children }: PropsWithChildren) {
       value={{
         authMode,
         logoUrl,
+        serverVersion,
         adminStatus,
         authenticated,
         isAdmin,
         workflowPlaneEnabled,
         subagentRunsEnabled,
+        subagentMaxDepth,
+        subagentMaxChildren,
         loading,
         error,
         refresh,

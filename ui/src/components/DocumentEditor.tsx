@@ -22,6 +22,13 @@ import {
   AlertCircle,
   Send,
   X,
+  FolderOpen,
+  FolderPlus,
+  FileText,
+  Bot,
+  Zap,
+  Wrench,
+  Table2,
   Pencil,
   Users,
   Link as LinkIcon,
@@ -42,6 +49,7 @@ import {
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
+import { TableViewer } from "./TableViewer";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
@@ -52,7 +60,7 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
-import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistory, DiffViewer } from "./governance";
+import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
 import { unifiedDiff } from "./governance/diff-util";
 import {
   DropdownMenu,
@@ -112,6 +120,8 @@ interface DocumentEditorProps {
   onCreateDocument?: (nestId: string, title: string) => void;
   /** Pre-fill title when nodeId === "new" (wiki-create flow). */
   initialTitle?: string;
+  /** Pre-file a NEW doc into this folder (folder-tree + buttons). */
+  initialFolder?: string;
   /** Prior wiki-link hops, oldest first; rendered as clickable chips. */
   breadcrumb?: BreadcrumbEntry[];
   /** Jump to ancestor at `index`; drops entries after it. */
@@ -122,6 +132,7 @@ export function DocumentEditor({
   nestId,
   nestName,
   nodeId,
+  initialFolder,
   isOwner = false,
   onBack,
   onSaved,
@@ -133,7 +144,7 @@ export function DocumentEditor({
   onJumpBreadcrumb,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
-  const { adminStatus, isAdmin } = useAuth();
+  const { adminStatus, isAdmin, workflowPlaneEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
   // you're reading it" instead of bouncing back to the nest. Same dialog
@@ -155,7 +166,7 @@ export function DocumentEditor({
   const [title, setTitle] = useState(isNew && initialTitle ? initialTitle : "");
   // Folder path under nodes/ for new docs (e.g. "gtm/deals"). Create-only:
   // moving an existing doc is a rename with backlink fallout, handled elsewhere.
-  const [folder, setFolder] = useState("");
+  const [folder, setFolder] = useState(initialFolder ?? "");
   const [content, setContent] = useState("");
   const [tags, setTags] = useState<string[]>([]);
   // Orchestrator schedule (free-form cron/interval). Only meaningful for
@@ -223,7 +234,7 @@ export function DocumentEditor({
   // New-document kind picker. "artifact" = paste raw HTML (hosted + annotated);
   // "document" = the normal markdown editor. Only meaningful while isNew.
   const [newType, setNewType] = useState<
-    "document" | "artifact" | "agent" | "skill"
+    "document" | "artifact" | "agent" | "skill" | "tool" | "table"
   >("document");
   const isArtifactDraft = isNew && newType === "artifact";
   // Runnable = orchestrator-facing node (agent/skill) that carries a schedule.
@@ -600,6 +611,14 @@ export function DocumentEditor({
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
   const [touched, setTouched] = useState(false);
 
+  // Save on blur, not on every keystroke. Per-keystroke autosave spun up
+  // dozens of versions for one editing session; instead we persist once when
+  // the user clicks out of the editor. Unlike the old SILENT autosave this is
+  // visible — it drives the Save button's spinner + "Saved" state so the user
+  // can see their changes landed. Skips new docs (a silent create is
+  // surprising), locked/reviewer/view-only sessions, and clean state.
+  const [justSaved, setJustSaved] = useState(false);
+
   // Settings → Submit-for-Review visibility; permission → read-only gate.
   useEffect(() => {
     let cancelled = false;
@@ -825,6 +844,9 @@ export function DocumentEditor({
   } | null>(null);
 
   // Single save path; afterSave continuation feeds onSaved or stashed intent.
+  // Shares the blur-autosave in-flight guard (saveInFlight/savePending, defined
+  // below) so a field blur that fires right before a Save click — or a blur
+  // save already running — can't double-write the same edit into two versions.
   const runSave = async (afterSave: (savedId: string) => void) => {
     if (!canSave) {
       setError(
@@ -834,59 +856,69 @@ export function DocumentEditor({
       );
       return;
     }
+    saveInFlight.current = true;
     setSaving(true);
     setError(null);
     try {
       const { savedId } = await persistCurrent();
+      setJustSaved(true);
       afterSave(savedId ?? "");
     } catch (err: any) {
       setError(err.message);
     } finally {
+      saveInFlight.current = false;
       setSaving(false);
+      // A blur that arrived mid-save was parked; run one trailing save so the
+      // latest edit lands (no-ops if already clean).
+      if (savePending.current) {
+        savePending.current = false;
+        void saveOnBlurRef.current();
+      }
     }
   };
 
   const handleSave = () => runSave((savedId) => onSaved?.(savedId));
 
-  // Silent debounced autosave — fires on a typing pause and on click-out
-  // (editor blur). No spinner, no "saving…" so the always-editable surface
-  // never flickers. Skips new docs (a silent create is surprising),
-  // locked/reviewer/view-only sessions, and clean state. autosaveRef is
-  // reassigned every render so the debounce timer always runs the latest
-  // closure (current title/content/tags).
-  const autosaveTimer = useRef<number | null>(null);
-  const autosaveRef = useRef<() => void>(() => { });
-  autosaveRef.current = async () => {
-    if (isNew || saving) return;
+  // Clear the "Saved" hint the moment the doc is edited again.
+  useEffect(() => {
+    if (isDirty) setJustSaved(false);
+  }, [isDirty]);
+
+  // Coalesce to one save at a time. The server serializes version writes, but
+  // a second in-flight request is wasted work — mark it pending and run one
+  // trailing save after the current finishes so the latest edit still lands.
+  const saveInFlight = useRef(false);
+  const savePending = useRef(false);
+  const saveOnBlurRef = useRef<() => void>(() => { });
+  saveOnBlurRef.current = async () => {
+    if (isNew) return;
     if (isLocked || isReviewerOnly || isViewOnly) return;
     if (title.trim().length === 0 || content.trim().length === 0) return;
     if (!isDirty) return;
+    if (saveInFlight.current) {
+      savePending.current = true;
+      return;
+    }
+    saveInFlight.current = true;
+    setSaving(true);
+    setError(null);
     try {
       await persistCurrent();
-    } catch {
-      /* stay dirty; the manual Save path surfaces the error */
+      setJustSaved(true);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      saveInFlight.current = false;
+      setSaving(false);
+      if (savePending.current) {
+        savePending.current = false;
+        void saveOnBlurRef.current();
+      }
     }
   };
-  const scheduleAutosave = useCallback(() => {
-    if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
-    autosaveTimer.current = window.setTimeout(() => {
-      autosaveTimer.current = null;
-      void autosaveRef.current();
-    }, 1200);
+  const saveOnBlur = useCallback(() => {
+    void saveOnBlurRef.current();
   }, []);
-  const flushAutosave = useCallback(() => {
-    if (autosaveTimer.current) {
-      window.clearTimeout(autosaveTimer.current);
-      autosaveTimer.current = null;
-    }
-    void autosaveRef.current();
-  }, []);
-  useEffect(
-    () => () => {
-      if (autosaveTimer.current) window.clearTimeout(autosaveTimer.current);
-    },
-    [],
-  );
 
   // Confirm before unmount when dirty; read-only sessions skip the prompt.
   const confirmLeave = (label: string, run: () => void) => {
@@ -1038,6 +1070,8 @@ export function DocumentEditor({
         title={title}
         snapshotVersion={null}
         currentEmail={currentEmail}
+        viewOnly={isViewOnly}
+        reviewerOnly={isReviewerOnly}
         onBack={onBack}
       />
     );
@@ -1115,10 +1149,10 @@ export function DocumentEditor({
               variant="outline"
               onClick={() => setShowSubmitModal(true)}
               data-testid="document-editor-submit"
-              title="With stewardship on, &quot;publishing&quot; in this nest means submitting for steward approval."
+              title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
             >
               <Send className="h-4 w-4 mr-2" />
-              Publish (requires approval)
+              Publish
             </Button>
           )}
           {!isViewOnly && canReviewHere && (
@@ -1132,16 +1166,28 @@ export function DocumentEditor({
           {!isViewOnly && !isReviewerOnly && !isLocked && (
             mode === "edit" ? (
               <Button
+                // Keep focus in the editor field so clicking Save doesn't fire
+                // the field's blur (which would trigger a second, concurrent
+                // save alongside this click). One save per click.
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={handleSave}
                 disabled={!canSave}
                 data-testid="document-editor-save"
               >
                 {saving ? (
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : justSaved && !isDirty ? (
+                  <Check className="h-4 w-4 mr-2 text-green-600" />
                 ) : (
                   <Save className="h-4 w-4 mr-2" />
                 )}
-                {isNew ? "Create" : "Save"}
+                {saving
+                  ? "Saving…"
+                  : justSaved && !isDirty
+                    ? "Saved"
+                    : isNew
+                      ? "Create"
+                      : "Save"}
               </Button>
             ) : (
               <Button
@@ -1152,19 +1198,6 @@ export function DocumentEditor({
                 Start Editing
               </Button>
             )
-          )}
-          {/* Version history — opens modal w/ highlighted diffs (CU-wdqcpztgwn).
-              Icon-only; lives next to the overflow menu in the header. */}
-          {!isNew && (
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={openVersions}
-              title="Version history"
-              data-testid="document-editor-history"
-            >
-              <History className="h-4 w-4" />
-            </Button>
           )}
           {/* Compare ▾ — pick a past version; the doc area renders an
               ever-present current↔vN diff inline (no modal). */}
@@ -1227,42 +1260,44 @@ export function DocumentEditor({
               </DropdownMenuContent>
             </DropdownMenu>
           )}
-          {/* Raw markdown source toggle — view/edit the underlying .md. */}
-          <Button
-            variant={rawMode ? "secondary" : "outline"}
-            size="icon"
-            onClick={() => setRawMode((v) => !v)}
-            title={rawMode ? "Rich editor" : "Markdown source"}
-            aria-pressed={rawMode}
-            data-testid="document-editor-markdown-toggle"
-          >
-            <Code2 className="h-4 w-4" />
-          </Button>
-          {/* Visible document-share action — copies the deep link the App's
-              ?nest=&doc= probe understands. Promoted out of the overflow menu
-              so sharing a single document is discoverable. */}
-          {!isNew && (
-            <Button
-              variant="outline"
-              size="sm"
-              title="Copy a shareable link to this document"
-              data-testid="document-editor-copy-link"
-              onClick={() => {
-                const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
-                navigator.clipboard.writeText(url);
-                toast.success("Link copied — recipient needs access to this nest");
-              }}
-            >
-              <LinkIcon className="h-4 w-4 mr-1" /> Share
-            </Button>
-          )}
-          {/* Share-nest (collaborators / visibility) stays in the overflow. */}
+          {/* Secondary actions collapse into one ⋮ menu to keep the header
+              uncluttered. Grouped by use: version history + markdown-source
+              view toggle, then sharing (copy link, share nest). Compare stays
+              a visible button because it carries active "Comparing vN" state
+              the flat menu can't surface. */}
           {(() => {
             const moreActions: OverflowAction[] = [];
+            if (!isNew)
+              moreActions.push({
+                label: "Version history",
+                icon: History,
+                testId: "document-editor-history",
+                onSelect: openVersions,
+              });
+            moreActions.push({
+              // Toggle: the label names the mode you switch TO.
+              label: rawMode ? "Rich editor" : "Markdown source",
+              icon: Code2,
+              testId: "document-editor-markdown-toggle",
+              onSelect: () => setRawMode((v) => !v),
+            });
+            if (!isNew)
+              moreActions.push({
+                label: "Copy link",
+                icon: LinkIcon,
+                separatorBefore: true,
+                testId: "document-editor-copy-link",
+                onSelect: () => {
+                  const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
+                  navigator.clipboard.writeText(url);
+                  toast.success("Link copied — recipient needs access to this nest");
+                },
+              });
             if (canShare)
               moreActions.push({
                 label: "Share nest",
                 icon: Users,
+                separatorBefore: !isNew ? false : true,
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
               });
@@ -1332,6 +1367,7 @@ export function DocumentEditor({
                   setTitle(e.target.value);
                   setTouched(true);
                 }}
+                onBlur={saveOnBlur}
                 placeholder="Untitled"
                 disabled={fieldsDisabled}
                 data-testid="document-editor-title"
@@ -1396,26 +1432,109 @@ export function DocumentEditor({
             </Alert>
           )}
 
-          {/* Folder (create-only): files the doc under nodes/<path>/ */}
+          {/* Folder (create-only): files the doc under nodes/<path>/.
+              Breadcrumbed selector — walk into existing folders level by
+              level or add a new subfolder at the current level; no raw path
+              typing. */}
           {isNew && (
             <div>
               <label className="block mb-1 text-sm font-medium">Folder</label>
-              <Input
-                list="document-editor-folder-options"
-                value={folder}
-                onChange={(e) => {
-                  setFolder(e.target.value);
-                  setTouched(true);
-                }}
-                placeholder='Optional — e.g. "gtm/deals" to nest this document'
-                disabled={fieldsDisabled}
+              <div
+                className="flex items-center flex-wrap gap-1 rounded-md border px-2 py-1.5 min-h-9"
                 data-testid="document-editor-folder-input"
-              />
-              <datalist id="document-editor-folder-options">
-                {folderOptions.map((f) => (
-                  <option key={f} value={f} />
-                ))}
-              </datalist>
+              >
+                <button
+                  type="button"
+                  disabled={fieldsDisabled}
+                  onClick={() => {
+                    setFolder("");
+                    setTouched(true);
+                  }}
+                  className={`text-sm rounded px-1.5 py-0.5 ${
+                    folder ? "text-primary hover:bg-muted" : "font-medium bg-muted"
+                  }`}
+                  title="File directly under the nest root"
+                >
+                  Root
+                </button>
+                {folder.split("/").filter(Boolean).map((seg, i, arr) => {
+                  const path = arr.slice(0, i + 1).join("/");
+                  const parent = arr.slice(0, i).join("/");
+                  const isLast = i === arr.length - 1;
+                  return (
+                    <span key={path} className="flex items-center gap-1">
+                      <span className="text-muted-foreground/50 text-sm">/</span>
+                      <span
+                        className={`flex items-center rounded ${
+                          isLast ? "bg-muted" : ""
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          disabled={fieldsDisabled}
+                          onClick={() => {
+                            setFolder(path);
+                            setTouched(true);
+                          }}
+                          className={`text-sm rounded px-1.5 py-0.5 ${
+                            isLast
+                              ? "font-medium"
+                              : "text-primary hover:bg-muted"
+                          }`}
+                          title={`Scope to ${path}`}
+                        >
+                          {seg}
+                        </button>
+                        {/* Step OUT one level — pops just this (current) segment
+                            to its parent, so a deep path can be walked back up
+                            without jumping all the way to Root via the X. */}
+                        {isLast && (
+                          <button
+                            type="button"
+                            disabled={fieldsDisabled}
+                            onClick={() => {
+                              setFolder(parent);
+                              setTouched(true);
+                            }}
+                            className="mr-0.5 rounded p-0.5 text-muted-foreground hover:text-foreground hover:bg-background"
+                            title={
+                              parent
+                                ? `Go up to ${parent}`
+                                : "Go up to the nest root"
+                            }
+                            data-testid="folder-step-up"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        )}
+                      </span>
+                    </span>
+                  );
+                })}
+                <FolderStepPicker
+                  folder={folder}
+                  folderOptions={folderOptions}
+                  disabled={fieldsDisabled}
+                  onPick={(next) => {
+                    setFolder(next);
+                    setTouched(true);
+                  }}
+                />
+                {folder && (
+                  <button
+                    type="button"
+                    disabled={fieldsDisabled}
+                    onClick={() => {
+                      setFolder("");
+                      setTouched(true);
+                    }}
+                    className="ml-auto text-muted-foreground hover:text-foreground"
+                    title="Clear folder (file under the nest root)"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -1522,38 +1641,105 @@ export function DocumentEditor({
               );
             })()}
 
-          {/* Type + Schedule share one row: Type (new-doc kind) on the left,
-              Schedule (runnable orchestrator hint) on the right. Each takes half
-              when both show; a lone field spans the row. Existing artifacts open
-              straight into the ArtifactViewer (handled above), so Type is
-              create-only; Schedule shows for any agent/skill node. */}
+          {/* Type + Schedule share one row: Type (new-doc kind, icon segmented
+              control) on the left, Schedule (runnable orchestrator hint) on the
+              right. Each takes half when both show; a lone field spans the row.
+              Existing artifacts open straight into the ArtifactViewer (handled
+              above), so Type is create-only; Schedule shows for any agent/skill
+              node. */}
           {!isViewOnly && (isNew || isRunnable) && (
             <div className="flex flex-col sm:flex-row gap-4 w-full">
               {isNew && (
                 <div className="flex-1 min-w-0">
-                  <label className="block text-sm font-medium mb-1">Type</label>
-                  <Select
-                    value={newType}
-                    onValueChange={(v) =>
-                      setNewType(
-                        v as "document" | "artifact" | "agent" | "skill",
-                      )
-                    }
-                  >
-                    <SelectTrigger data-testid="document-editor-type">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="document">
-                        Document (markdown)
-                      </SelectItem>
-                      <SelectItem value="artifact">
-                        Artifact (hosted HTML)
-                      </SelectItem>
-                      <SelectItem value="agent">Agent (runnable)</SelectItem>
-                      <SelectItem value="skill">Skill (runnable)</SelectItem>
-                    </SelectContent>
-                  </Select>
+              <label className="block text-sm font-medium mb-1">Type</label>
+              {/* Icon segmented control, not a dropdown: all choices are
+                  visible at once and carry the same type color language as
+                  the list icons (document slate / artifact amber / agent
+                  violet / skill blue). Runnable types only when the workflow
+                  plane is on. */}
+              <div
+                className="inline-flex rounded-md border overflow-hidden"
+                role="radiogroup"
+                data-testid="document-editor-type"
+              >
+                {(
+                  [
+                    { value: "document", label: "Document", Icon: FileText,
+                      on: "bg-slate-500/15 text-slate-700 dark:text-slate-300" },
+                    { value: "artifact", label: "Artifact", Icon: Code2,
+                      on: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },
+                    { value: "table", label: "Table", Icon: Table2,
+                      on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300" },
+                    ...(workflowPlaneEnabled
+                      ? [
+                          { value: "agent", label: "Agent", Icon: Bot,
+                            on: "bg-violet-500/15 text-violet-700 dark:text-violet-300" },
+                          { value: "skill", label: "Skill", Icon: Zap,
+                            on: "bg-blue-500/15 text-blue-700 dark:text-blue-300" },
+                          { value: "tool", label: "Tool", Icon: Wrench,
+                            on: "bg-teal-500/15 text-teal-700 dark:text-teal-300" },
+                        ]
+                      : []),
+                  ] as const
+                ).map(({ value, label, Icon, on }, i) => {
+                  const active = newType === value;
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      title={
+                        value === "document"
+                          ? "Markdown document"
+                          : value === "artifact"
+                            ? "Hosted HTML artifact"
+                            : value === "table"
+                              ? "Table — CSV fact store, queryable deterministically"
+                              : value === "tool"
+                                ? "Tool — the body is code an agent can call"
+                                : `${label} (runnable)`
+                      }
+                      onClick={() =>
+                        setNewType(
+                          value as "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+                        )
+                      }
+                      className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${
+                        i > 0 ? "border-l" : ""
+                      } ${active ? `${on} font-medium` : "text-muted-foreground hover:bg-muted/60"}`}
+                      data-testid={`document-editor-type-${value}`}
+                    >
+                      <Icon className="h-4 w-4" />
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+              {newType === "artifact" && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Hosted HTML — the body is served as a sandboxed page.
+                </p>
+              )}
+              {(newType === "agent" || newType === "skill") && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  The body is the instructions. Add flow edges from it in the
+                  Workflows tab, then trigger a run.
+                </p>
+              )}
+              {newType === "table" && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  The body is CSV — header first, directives welcome
+                  (<code>sku:key, price:number, region</code>). Agents fetch
+                  exact rows with table-query instead of reading it whole.
+                </p>
+              )}
+              {newType === "tool" && (
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  The body is code. Wire it to an agent on the canvas and the
+                  runner ships it (plus the nest's env vars) in the run bundle.
+                </p>
+              )}
                 </div>
               )}
 
@@ -1577,8 +1763,8 @@ export function DocumentEditor({
                     onChange={(e) => {
                       setSchedule(e.target.value);
                       setTouched(true);
-                      scheduleAutosave();
                     }}
+                    onBlur={saveOnBlur}
                     className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -1743,9 +1929,8 @@ export function DocumentEditor({
                   if (fieldsDisabled) return;
                   setContent(e.target.value);
                   setTouched(true);
-                  scheduleAutosave();
                 }}
-                onBlur={flushAutosave}
+                onBlur={saveOnBlur}
                 readOnly={fieldsDisabled}
                 spellCheck={false}
                 placeholder="# Raw markdown"
@@ -1759,6 +1944,7 @@ export function DocumentEditor({
                   setContent(e.target.value);
                   setTouched(true);
                 }}
+                onBlur={saveOnBlur}
                 placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
                 spellCheck={false}
                 className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
@@ -1771,13 +1957,19 @@ export function DocumentEditor({
                 onMouseMove={isNew ? undefined : onDocMouseMove}
                 className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text"
               >
-                <DocumentViewer
-                  content={content}
-                  onWikiLinkClick={(title) =>
-                    handleWikiLinkClick(title, null)
-                  }
-                  previewFor={previewFor}
-                />
+                {nodeType === "table" && !isNew ? (
+                  <div className="p-4">
+                    <TableViewer nestId={nestId} nodeId={nodeId} csv={content} />
+                  </div>
+                ) : (
+                  <DocumentViewer
+                    content={content}
+                    onWikiLinkClick={(title) =>
+                      handleWikiLinkClick(title, null)
+                    }
+                    previewFor={previewFor}
+                  />
+                )}
               </div>
             ) : (
               <MarkdownEditor
@@ -1787,10 +1979,9 @@ export function DocumentEditor({
                   setContent(next);
                   // TipTap onUpdate fires only on real user input here.
                   setTouched(true);
-                  scheduleAutosave();
                 }}
                 onSave={handleSave}
-                onBlur={flushAutosave}
+                onBlur={saveOnBlur}
                 nestId={nestId}
                 currentNodeId={isNew ? undefined : nodeId}
                 editable={!fieldsDisabled}
@@ -1940,39 +2131,25 @@ export function DocumentEditor({
       )}
 
       {showVersions && !isNew && (
-        <Dialog open onOpenChange={(o) => !o && setShowVersions(false)}>
-          <DialogContent className="sm:max-w-[600px] max-h-[85vh] overflow-hidden flex flex-col">
-            <DialogHeader>
-              <DialogTitle>{title || nodeId}</DialogTitle>
-            </DialogHeader>
-            {versionData ? (
-              <VersionHistory
-                className="flex-1 min-h-0 overflow-hidden"
-                versions={versionData.versions}
-                currentVersion={versionData.currentVersion}
-                approvedVersion={versionData.approvedVersion}
-                onRestore={
-                  isViewOnly
-                    ? undefined
-                    : async (v) => {
-                      try {
-                        await api.revertToVersion(nestId, nodeId, v);
-                        toast.success(`Reverted to version ${v}`);
-                        await Promise.all([loadNode(), loadVersions()]);
-                      } catch (e: any) {
-                        toast.error(e?.message || "Revert failed");
-                      }
-                    }
+        <VersionHistoryModal
+          open
+          onClose={() => setShowVersions(false)}
+          title={title || nodeId}
+          versionData={versionData}
+          onRestore={
+            isViewOnly
+              ? undefined
+              : async (v) => {
+                try {
+                  await api.revertToVersion(nestId, nodeId, v);
+                  toast.success(`Reverted to version ${v}`);
+                  await Promise.all([loadNode(), loadVersions()]);
+                } catch (e: any) {
+                  toast.error(e?.message || "Revert failed");
                 }
-              />
-            ) : (
-              <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                Loading versions…
-              </div>
-            )}
-          </DialogContent>
-        </Dialog>
+              }
+          }
+        />
       )}
 
       {!isNew && (
@@ -2091,5 +2268,113 @@ function StatusBadge({ status }: { status: string }) {
     >
       {info.label}
     </span>
+  );
+}
+
+/**
+ * Step-wise folder chooser for the create-form breadcrumb: lists existing
+ * subfolders of the current path (derived from sibling doc ids) and takes a
+ * new-subfolder name inline. Descending and creating both go through onPick
+ * with the full new path — the breadcrumb above renders the result.
+ */
+function FolderStepPicker({
+  folder,
+  folderOptions,
+  disabled,
+  onPick,
+}: {
+  folder: string;
+  folderOptions: string[];
+  disabled?: boolean;
+  onPick: (next: string) => void;
+}) {
+  const [newName, setNewName] = useState("");
+  // Server caps folders at 8 segments deep (src/nodes/service.ts). Existing
+  // folders are already within that, so only a brand-new subfolder can push
+  // past it — block that here once the current path is at the limit.
+  const MAX_FOLDER_DEPTH = 8;
+  const atDepthLimit =
+    folder.split("/").filter(Boolean).length >= MAX_FOLDER_DEPTH;
+  const children = useMemo(() => {
+    const kids = new Set<string>();
+    for (const f of folderOptions) {
+      if (folder) {
+        if (f === folder || !f.startsWith(`${folder}/`)) continue;
+        kids.add(f.slice(folder.length + 1).split("/")[0]);
+      } else {
+        kids.add(f.split("/")[0]);
+      }
+    }
+    return [...kids].sort();
+  }, [folder, folderOptions]);
+
+  const commitNew = () => {
+    if (atDepthLimit) return;
+    // Slashes would smuggle extra depth past the picker; fold them away.
+    const seg = newName.trim().replace(/\/+/g, "-");
+    if (!seg) return;
+    onPick(folder ? `${folder}/${seg}` : seg);
+    setNewName("");
+  };
+
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-6 px-1.5 text-muted-foreground"
+          disabled={disabled}
+          title="Open a subfolder or create a new one"
+          data-testid="folder-step-picker"
+        >
+          <ChevronDown className="h-3.5 w-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-56">
+        {children.length > 0 && (
+          <>
+            <DropdownMenuLabel>
+              {folder ? "Subfolders" : "Existing folders"}
+            </DropdownMenuLabel>
+            {children.map((k) => (
+              <DropdownMenuItem
+                key={k}
+                onSelect={() => onPick(folder ? `${folder}/${k}` : k)}
+              >
+                <FolderOpen className="h-3.5 w-3.5 mr-2 text-blue-500" />
+                {k}
+              </DropdownMenuItem>
+            ))}
+            <DropdownMenuSeparator />
+          </>
+        )}
+        {atDepthLimit ? (
+          <div className="px-2 py-1.5 text-xs text-muted-foreground">
+            Max folder depth ({MAX_FOLDER_DEPTH}) reached — can't nest deeper.
+          </div>
+        ) : (
+          <div
+            className="flex items-center gap-1.5 px-2 py-1.5"
+            onKeyDown={(e) => e.stopPropagation()}
+          >
+            <FolderPlus className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            <Input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitNew();
+                }
+              }}
+              placeholder="New subfolder…"
+              className="h-7 text-sm"
+            />
+          </div>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

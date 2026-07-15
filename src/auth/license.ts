@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "fs";
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
+import { persistSetting } from "../db/settings.js";
 
 export interface LicenseInfo {
   valid: boolean;
@@ -82,9 +83,9 @@ export function upsertEnvVar(
  * the file is touched, so a bad key never ends up on disk.
  */
 export interface InstallResult extends LicenseInfo {
-  /** Whether the validated key was durably written to ENV_FILE_PATH. When
-   *  false the key works for this process but is lost on restart — the
-   *  caller MUST surface this (it was previously swallowed). */
+  /** Whether the validated key was durably written to the database. When false
+   *  the key works for this process but is lost on restart — the caller MUST
+   *  surface this (it was previously swallowed). */
   persisted: boolean;
   /** Why the write failed, when persisted is false. */
   persistError?: string;
@@ -114,16 +115,18 @@ export async function installLicenseKey(key: string): Promise<InstallResult> {
     return { ...info, persisted: false };
   }
 
-  // Validated — write the line into .env so a restart picks it up. Report
-  // (don't swallow) a write failure: the key is live in-memory now, but if it
-  // didn't reach disk the operator is one restart away from silently losing it.
+  // Validated — persist the key to the database so a restart (and every other
+  // instance) picks it up. Report (don't swallow) a write failure: the key is
+  // live in-memory now, but if it didn't reach the DB the operator is one
+  // restart away from silently losing it. The DB is durable on Cloud Run where
+  // the container filesystem is not (see db/settings.ts).
   try {
-    upsertEnvVar(config.ENV_FILE_PATH, "PROMPTOWL_KEY", trimmed);
+    await persistSetting("PROMPTOWL_KEY", trimmed);
     return { ...info, persisted: true };
   } catch (err) {
     const persistError = err instanceof Error ? err.message : String(err);
     console.warn(
-      `[license] validated but FAILED to persist to ${config.ENV_FILE_PATH}: ${persistError}`,
+      `[license] validated but FAILED to persist to the database: ${persistError}`,
     );
     return { ...info, persisted: false, persistError };
   }
@@ -164,7 +167,7 @@ export function startLicenseSafetyPoll(): void {
 /**
  * Hard cleanup when PromptOwl revokes/deactivates the installed
  * license. Wipes all browser sessions so existing logins lose their
- * cookies, deletes the on-disk license env file so a restart doesn't
+ * cookies, tombstones the persisted license key so a restart doesn't
  * resurrect the dead key, and clears the in-process PROMPTOWL_KEY so
  * the next validate call starts from "unlicensed".
  */
@@ -179,12 +182,12 @@ async function handleLicenseRevoked(): Promise<void> {
     console.warn("[license] failed to wipe sessions:", err);
   }
   try {
-    upsertEnvVar(config.ENV_FILE_PATH, "PROMPTOWL_KEY", null);
+    await persistSetting("PROMPTOWL_KEY", null);
     console.warn(
-      `[license] revoked — removed PROMPTOWL_KEY from ${config.ENV_FILE_PATH}`,
+      "[license] revoked — cleared persisted PROMPTOWL_KEY from the database",
     );
   } catch (err) {
-    console.warn("[license] failed to strip key from .env:", err);
+    console.warn("[license] failed to clear persisted key:", err);
   }
   process.env.PROMPTOWL_KEY = "";
   currentLicense = {
@@ -298,7 +301,7 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
     const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
     const res = await fetch(`${promptowlUrl}/api/license/validate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: config.PROMPTOWL_FETCH_HEADERS,
       body: JSON.stringify({ key }),
     });
 

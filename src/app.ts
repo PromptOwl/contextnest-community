@@ -7,9 +7,13 @@ import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { listNests, listSharedNests } from "./nests/service.js";
+import { getReviewQueue } from "./governance/review-service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
-import { resolveStewardsForNode } from "./governance/stewardship-service.js";
+import {
+  resolveStewardsForNode,
+  canManageStewards,
+} from "./governance/stewardship-service.js";
 import { resolveNodeGrant, hasAnyGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
@@ -22,6 +26,14 @@ import {
   runListRoutes,
   runDetailRoutes,
 } from "./workflow/run-routes.js";
+import { scheduleRoutes } from "./workflow/schedule-routes.js";
+import { envRoutes } from "./workflow/env-routes.js";
+import { connectorRoutes } from "./notify/connector-routes.js";
+import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
+import {
+  listNotifications,
+  markNotificationsRead,
+} from "./governance/notify-service.js";
 import { definitionRoutes } from "./definitions/routes.js";
 import { assetRoutes } from "./nests/asset-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
@@ -41,6 +53,7 @@ import {
 } from "./shared/access.js";
 import { AppError } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
+import { verifySmtp } from "./notify/email.js";
 import { getDb } from "./db/client.js";
 import { ensureAnonymousUser } from "./auth/anonymous.js";
 import {
@@ -49,12 +62,12 @@ import {
   getCurrentLicense,
   installLicenseKey,
   isLicenseAdminUserId,
-  upsertEnvVar,
 } from "./auth/license.js";
+import { persistSetting } from "./db/settings.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 // Resolve UI static files. In built mode this file lives at dist/index.js,
 // so siblings of __dirname include dist/web3. In dev (`tsx src/index.ts`)
@@ -62,6 +75,17 @@ import { existsSync } from "node:fs";
 // (vite build output) so `npm run dev` serves the freshly-built bundle.
 // serveStatic wants a path relative to CWD.
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+// Built mode puts this file at dist/app.js, dev at src/app.ts — package.json
+// is one level up from either.
+const SERVICE_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"))
+      .version as string;
+  } catch {
+    return "unknown";
+  }
+})();
 const UI_DIR_CANDIDATES = [
   join(HERE, "web3"),
   join(process.cwd(), "dist", "web3"),
@@ -122,15 +146,14 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 });
 
 export function createApp(): Hono<AuthEnv> {
-  // LinearRouter, not the default RegExpRouter. Node ids are multi-segment
-  // paths ("nodes/<folder>/<slug>") captured by greedy `/:nodeId{.+}` params.
-  // RegExpRouter merges all same-method routes into one automaton and, for a
-  // node id spanning >1 segment, lets the bare `/:nodeId{.+}` catch-all win
-  // over suffix routes like `/:nodeId{.+}/hosted` or `/versions` — so opening
-  // a foldered artifact 404s ("Node not found: …/hosted"). LinearRouter matches
-  // in registration order with correct per-route backtracking, so the suffix
-  // routes (mounted first) match regardless of id depth. Route count is small
-  // and QPS low, so the linear scan cost is negligible here.
+  // LinearRouter, not the default SmartRouter — parity with upstream
+  // development (bb96ca8), which hit the same bug class this branch fixed
+  // structurally: greedy `/:nodeId{.+}` params vs suffix routes. SmartRouter
+  // picks RegExpRouter (catch-all shadows suffix routes) or, when any route
+  // pattern is unsupported, silently falls back to TrieRouter (suffix routes
+  // dead for ids nested 3+ segments). LinearRouter matches in registration
+  // order with per-route backtracking, so mount order = specificity order and
+  // both failure modes disappear. Route count is small; the scan is cheap.
   const app = new Hono<AuthEnv>({ router: new LinearRouter() });
 
   // Hono request logger disabled — keep terminal clean. Re-enable by
@@ -195,10 +218,17 @@ export function createApp(): Hono<AuthEnv> {
     c.json({
       status: isSuspended() ? "suspended" : "ok",
       service: "contextnest-community",
-      version: "0.1.0",
+      version: SERVICE_VERSION,
       auth_mode: config.AUTH_MODE,
       logo_url: config.LOGO_URL,
+      // Presence only, never the value: lets the UI stop prompting for a
+      // runner key once the server-wide one exists.
+      runner_key_configured: !!process.env.ANTHROPIC_API_KEY,
       promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+      // Manual (email/password) sign-in mode (open | invite-only | disabled).
+      // The login page reads this to show/hide the credential form, and to
+      // switch the Register link to an "activate invite" affordance.
+      manual_sign_in: config.MANUAL_SIGN_IN,
       // Public feature flags the SPA needs before auth to decide what to
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
@@ -207,6 +237,12 @@ export function createApp(): Hono<AuthEnv> {
       // must clear a security review — NOT a UI toggle). Exposed read-only so
       // the Runs page shows the "spawn sub-agent" option only when it's live.
       subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+      // Recursion bounds (env-overridable in config.ts). Exposed so the Runs
+      // page validates a spawn against the SERVER's real caps instead of
+      // duplicating the defaults — an operator raising/lowering these stays
+      // in sync with the picker's grey-outs.
+      subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
+      subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
     }),
   );
@@ -290,16 +326,16 @@ export function createApp(): Hono<AuthEnv> {
         tier: info.tier,
         org: info.org,
         limits: info.limits,
-        // The key validated and is live now, but if it couldn't be written to
-        // disk it'll be lost on restart — surface that instead of pretending
+        // The key validated and is live now, but if it couldn't be saved to the
+        // database it'll be lost on restart — surface that instead of pretending
         // the setup is durable (the old behavior silently swallowed this).
         persisted: info.persisted,
         ...(info.persisted
           ? {}
           : {
-              warning: `License validated, but it could not be saved to disk (${
+              warning: `License validated, but it could not be saved to the database (${
                 info.persistError || "unknown error"
-              }). It will be LOST on the next restart. Set ENV_FILE_PATH to a writable, persisted path (e.g. under DATA_ROOT) or provide PROMPTOWL_KEY via the container environment.`,
+              }). It will be LOST on the next restart. Check the database connection, or provide PROMPTOWL_KEY via the container environment.`,
             }),
       });
     } catch (err) {
@@ -318,12 +354,20 @@ export function createApp(): Hono<AuthEnv> {
     (await isLicenseAdminUserId(c.get("userId")));
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
+    manual_sign_in: config.MANUAL_SIGN_IN,
     logo_url: config.LOGO_URL,
     telemetry_enabled: config.TELEMETRY_ENABLED,
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
+    subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
+    subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
+    trace_retention_days: config.TRACE_RETENTION_DAYS,
+    // Server-wide runner default. NEVER the value — masked tail only.
+    anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
+      ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
+      : null,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
     smtp_url: config.SMTP_URL ?? "",
     notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
@@ -349,14 +393,26 @@ export function createApp(): Hono<AuthEnv> {
     // applied (live env or disk) until all fields pass, so a single bad field
     // can't leave the server in a half-updated state that disagrees with the
     // 400 response. null value deletes the line (setting falls to its default).
-    const errors: string[] = [];
+    // Validation failures are keyed by the request field name (the same key the
+    // UI sends and groups under a tab) so the client can focus the offending
+    // field's tab deterministically instead of scraping the message text.
+    const fieldErrors: Record<string, string> = {};
+    const addError = (field: string, message: string) => {
+      fieldErrors[field] = message;
+    };
     const pending: Array<{ name: string; value: string | null }> = [];
 
     if ("promptowl_sign_in_gate" in body) {
       const v = String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase();
       if (!["open", "admin-only", "disabled"].includes(v))
-        errors.push("promptowl_sign_in_gate must be open | admin-only | disabled");
+        addError("promptowl_sign_in_gate", "PromptOwl sign-in must be set to Everyone, Admins only, or Off.");
       else pending.push({ name: "PROMPTOWL_SIGN_IN_GATE", value: v });
+    }
+    if ("manual_sign_in" in body) {
+      const v = String(body.manual_sign_in ?? "").trim().toLowerCase();
+      if (!["open", "invite-only", "disabled"].includes(v))
+        addError("manual_sign_in", "Manual sign-in must be set to Everyone, Invite only, or Off.");
+      else pending.push({ name: "MANUAL_SIGN_IN", value: v });
     }
     if ("logo_url" in body) {
       const v = String(body.logo_url ?? "").trim();
@@ -375,6 +431,16 @@ export function createApp(): Hono<AuthEnv> {
         value: body.workflow_plane_enabled ? "true" : null,
       });
     }
+    if ("anthropic_api_key" in body) {
+      const v = body.anthropic_api_key;
+      if (v === null || v === "") {
+        pending.push({ name: "ANTHROPIC_API_KEY", value: null });
+      } else if (typeof v !== "string" || !v.trim().startsWith("sk-")) {
+        addError("anthropic_api_key", 'Anthropic API key must start with "sk-" (or be empty to clear it).');
+      } else {
+        pending.push({ name: "ANTHROPIC_API_KEY", value: v.trim() });
+      }
+    }
     if ("subagent_runs_enabled" in body) {
       // Depends on the plane: enabling recursion without the plane's run routes
       // is inert (they'd 404). Honour the plane state THIS request sets, so a
@@ -386,8 +452,9 @@ export function createApp(): Hono<AuthEnv> {
           ? !!body.workflow_plane_enabled
           : config.FEATURE_WORKFLOW_PLANE;
       if (body.subagent_runs_enabled && !planeOn) {
-        errors.push(
-          "subagent_runs_enabled requires workflow_plane_enabled to be on",
+        addError(
+          "subagent_runs_enabled",
+          "Sub-agent runs require the Workflow plane to be turned on.",
         );
       } else {
         pending.push({
@@ -396,53 +463,147 @@ export function createApp(): Hono<AuthEnv> {
         });
       }
     }
+    // Sub-agent recursion caps. Same [min,max] the config getters clamp to, so
+    // a UI-set value gates identically to an env-set one. null clears → default.
+    if ("subagent_max_depth" in body) {
+      const v = body.subagent_max_depth;
+      if (v === null || v === "") {
+        pending.push({ name: "SUBAGENT_MAX_DEPTH", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 1 || n > 32)
+          addError("subagent_max_depth", "Max sub-agent depth must be a whole number between 1 and 32.");
+        else pending.push({ name: "SUBAGENT_MAX_DEPTH", value: String(n) });
+      }
+    }
+    if ("subagent_max_children" in body) {
+      const v = body.subagent_max_children;
+      if (v === null || v === "") {
+        pending.push({ name: "SUBAGENT_MAX_CHILDREN", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 1 || n > 128)
+          addError("subagent_max_children", "Max sub-agents per run must be a whole number between 1 and 128.");
+        else pending.push({ name: "SUBAGENT_MAX_CHILDREN", value: String(n) });
+      }
+    }
+    // Activity-trace retention window in days. Same [0, 3650] range the config
+    // getter caps to, so a UI-set value gates identically to an env-set one.
+    // 0 = keep forever (pruning skipped). null clears → default (14).
+    if ("trace_retention_days" in body) {
+      const v = body.trace_retention_days;
+      if (v === null || v === "") {
+        pending.push({ name: "TRACE_RETENTION_DAYS", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || n > 3650)
+          addError("trace_retention_days", "Trace retention must be a whole number of days between 0 and 3650 (0 keeps activity forever).");
+        else pending.push({ name: "TRACE_RETENTION_DAYS", value: String(n) });
+      }
+    }
     if ("slack_webhook_url" in body) {
       const v = String(body.slack_webhook_url ?? "").trim();
       // Empty clears (connector off). A webhook URL carries an implicit
       // secret in its path — https only.
       if (v && !/^https:\/\//i.test(v))
-        errors.push("slack_webhook_url must be an https:// URL (or empty to disable)");
+        addError("slack_webhook_url", "Slack webhook must be an https:// URL (or leave it empty to turn Slack notifications off).");
       else pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
     }
     if ("smtp_url" in body) {
       const v = String(body.smtp_url ?? "").trim();
       if (v && !/^smtps?:\/\//i.test(v))
-        errors.push("smtp_url must be an smtp:// or smtps:// URL (or empty to disable)");
+        addError("smtp_url", "SMTP connection URL must start with smtp:// or smtps:// (or leave it empty to turn email notifications off).");
       else pending.push({ name: "SMTP_URL", value: v || null });
     }
-    // Shape check (something@something, no CR/LF) — these flow into
-    // nodemailer's envelope, so junk and header-injection shapes stop here.
-    // Same guard the config getters apply, so env-set and UI-set values gate
-    // identically.
+    // Shape check (local@domain.tld, no CR/LF) — these flow into nodemailer's
+    // envelope, so junk and header-injection shapes stop here. Same guard the
+    // config getters apply, so env-set and UI-set values gate identically.
     if ("notify_email_from" in body) {
       const v = String(body.notify_email_from ?? "").trim();
-      if (v && !isEmailish(v))
-        errors.push("notify_email_from must be a plain email address");
+      // From is the envelope sender — exactly one address. Call out a list
+      // explicitly (recipients go in the To field) rather than a generic shape
+      // error, since a comma also trips isEmailish.
+      if (v && v.includes(","))
+        addError("notify_email_from", "From address must be a single email address — put multiple addresses in Recipients (To) instead.");
+      else if (v && !isEmailish(v))
+        addError("notify_email_from", "From address must be a valid email like nest@company.com.");
       else pending.push({ name: "NOTIFY_EMAIL_FROM", value: v || null });
     }
     if ("notify_email_to" in body) {
       const v = String(body.notify_email_to ?? "").trim();
       if (v && !isEmailListish(v))
-        errors.push("notify_email_to must be a comma-separated list of email addresses");
+        addError("notify_email_to", "Recipients must be valid emails, comma-separated (e.g. team@company.com, ops@company.com).");
       else pending.push({ name: "NOTIFY_EMAIL_TO", value: v || null });
     }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);
       if (!Number.isFinite(n) || n < 1024 * 1024 || n > 500 * 1024 * 1024)
-        errors.push("max_body_bytes must be between 1MB and 500MB");
+        addError("max_body_bytes", "Max upload size must be between 1 MB and 500 MB.");
       else pending.push({ name: "MAX_BODY_BYTES", value: String(Math.floor(n)) });
     }
 
+    // Total-lockout guard: manual and PromptOwl sign-in can't BOTH be off, or
+    // no one could ever log in. Evaluate the effective post-PATCH state —
+    // values this request sets, falling back to current config for fields it
+    // doesn't touch — so the combination is checked even when only one of the
+    // two is in the body.
+    const effManual =
+      "manual_sign_in" in body
+        ? String(body.manual_sign_in ?? "").trim().toLowerCase()
+        : config.MANUAL_SIGN_IN;
+    const effGate =
+      "promptowl_sign_in_gate" in body
+        ? String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase()
+        : config.PROMPTOWL_SIGN_IN_GATE;
+    if (effManual === "disabled" && effGate === "disabled") {
+      // Cross-field rule — key it to a sign-in field so the client lands on the
+      // General tab where both toggles live.
+      addError(
+        "manual_sign_in",
+        "Cannot disable both manual and PromptOwl sign-in — no one would be able to log in.",
+      );
+    }
+
     // Reject the whole request if any field failed validation — apply nothing.
-    if (errors.length)
-      return c.json({ error: errors.join("; "), settings: currentServerSettings() }, 400);
+    // `error` is the flat message for the banner; `fieldErrors` lets the client
+    // focus the offending field's tab by key (no message-text scraping).
+    const errorMessages = Object.values(fieldErrors);
+    if (errorMessages.length)
+      return c.json(
+        { error: errorMessages.join("; "), fieldErrors, settings: currentServerSettings() },
+        400,
+      );
+
+    // Shape is good — now prove the SMTP credentials actually work before we
+    // persist them. A prefix-valid URL can still point at the wrong host or
+    // carry a bad password; connect + authenticate so junk is blocked at save
+    // instead of silently failing on the first governance event. Only runs when
+    // the URL is being set to a non-empty value (empty = disabling the
+    // connector, nothing to verify).
+    const smtpChange = pending.find((p) => p.name === "SMTP_URL");
+    if (smtpChange && smtpChange.value) {
+      const result = await verifySmtp(smtpChange.value);
+      if (!result.ok) {
+        const message = `SMTP connection failed: ${result.error}`;
+        return c.json(
+          {
+            error: message,
+            fieldErrors: { smtp_url: message },
+            settings: currentServerSettings(),
+          },
+          400,
+        );
+      }
+    }
 
     // All valid: persist first, then mutate live env. Ordering persist-before-
-    // live means a disk failure aborts before the running server changes, so a
-    // 500 never leaves a live setting that was never written to disk.
+    // live means a DB failure aborts before the running server changes, so a
+    // 500 never leaves a live setting that was never durably stored. The store
+    // is the database (durable + shared across instances) rather than a .env
+    // file, which Cloud Run wipes on rebuild — see db/settings.ts.
     for (const { name, value } of pending) {
       try {
-        upsertEnvVar(config.ENV_FILE_PATH, name, value);
+        await persistSetting(name, value);
       } catch (e) {
         return c.json(
           {
@@ -490,6 +651,59 @@ export function createApp(): Hono<AuthEnv> {
 
   // GET /stats — dashboard summary counts: nests visible to caller,
   // documents across those nests, total users on the server. Uses
+  // ─── My Work — cross-nest inbox of things that need this person ──────────
+  // The dashboard shows this above the nest list: reviews/approvals waiting on
+  // you across every nest you can act in. Reuses the governance review queue
+  // (an agent's write-back lands here too, once the runner submits governed
+  // changes). flexAuth so it works in open mode and with a key.
+  app.use("/me/*", flexAuthMiddleware);
+  app.get("/me/work", async (c) => {
+    const userId = c.get("userId");
+    const me = await resolveCallerEmail(userId);
+    const nestName = new Map<string, string>();
+    for (const n of [
+      ...(await listNests(userId)),
+      ...(await listSharedNests(userId)),
+    ])
+      nestName.set(n.id, n.name ?? n.id);
+
+    const { requests } = await getReviewQueue({ status: "pending", limit: 200 });
+    const toItem = (r: (typeof requests)[number]) => ({
+      type: "review" as const,
+      nest_id: r.nestId,
+      nest_name: nestName.get(r.nestId)!,
+      node_id: r.nodeId,
+      title: r.title || r.nodeId,
+      requested_by: r.requestedBy,
+      requested_at: r.requestedAt,
+      priority: r.priority,
+    });
+    const mine = requests.filter((r) => nestName.has(r.nestId));
+    const byNewest = (a: { requested_at: string }, b: { requested_at: string }) =>
+      a.requested_at < b.requested_at ? 1 : -1;
+    // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
+    const items = mine.filter((r) => r.requestedBy !== me).map(toItem).sort(byNewest);
+    const waiting = mine.filter((r) => r.requestedBy === me).map(toItem).sort(byNewest);
+    // Watcher notifications (HITL tags) ride along so the inbox is one call.
+    const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });
+    return c.json({ items, waiting, notifications });
+  });
+
+  // Watcher notifications — read + mark-read (auth via the /me/* middleware).
+  app.get("/me/notifications", async (c) => {
+    const me = await resolveCallerEmail(c.get("userId"));
+    const unreadOnly = c.req.query("unread") === "true";
+    return c.json({ notifications: await listNotifications(me, { unreadOnly }) });
+  });
+  app.post("/me/notifications/read", async (c) => {
+    const me = await resolveCallerEmail(c.get("userId"));
+    const body = await c.req
+      .json<{ ids?: string[] | "all" }>()
+      .catch(() => ({}) as { ids?: string[] | "all" });
+    await markNotificationsRead(me, body.ids === "all" ? "all" : body.ids ?? []);
+    return c.json({ ok: true });
+  });
+
   // flexAuthMiddleware so it works without auth in open mode and with
   // a Bearer/cookie in key mode.
   app.use("/stats", flexAuthMiddleware);
@@ -530,6 +744,10 @@ export function createApp(): Hono<AuthEnv> {
   // === Runner-facing run detail routes (turing) ===
   app.use("/runs/*", flexAuthMiddleware);
   app.route("/runs", runDetailRoutes);
+  // Inbound trigger hooks — public by design: the unguessable token in the
+  // path is the capability; presets add platform signature verification on
+  // top (see workflow/hook-routes.ts).
+  app.route("/hooks", hookFireRoutes);
 
   // === Agent entry point: /llms.txt (public manual), /index (person nest
   // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
@@ -759,6 +977,11 @@ export function createApp(): Hono<AuthEnv> {
       required = c.req.method === "GET" || c.req.method === "POST"
         ? "write"
         : "admin";
+    } else if (parts[1] === "hooks") {
+      // Hook rows carry trigger capability (the token fires runs, which is
+      // a write-tier action) — reading the list must not be a read-tier
+      // privilege escalation.
+      required = "write";
     } else if (
       c.req.method !== "GET" &&
       !isStewardActionPath &&
@@ -770,22 +993,24 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     // Editor steward bypass for nest-read callers: PATCH/DELETE (and the
-    // POST .../revert action) allowed when an editor row covers the node;
-    // POST to create a node allowed only for nest-scope editors.
-    const isNodeRevert =
+    // POST .../revert and .../move actions) allowed when an editor row
+    // covers the node; POST to create a node allowed only for nest-scope
+    // editors.
+    const isNodeAction =
       c.req.method === "POST" &&
       parts.length >= 4 &&
-      parts[parts.length - 1] === "revert";
+      (parts[parts.length - 1] === "revert" ||
+        parts[parts.length - 1] === "move");
     let stewardEditorBypass = false;
     if (required === "write" && permission === "read" && parts[1] === "nodes") {
       const userEmail = await resolveCallerEmail(userId);
       if (
         parts.length >= 3 &&
-        (c.req.method === "PATCH" || c.req.method === "DELETE" || isNodeRevert)
+        (c.req.method === "PATCH" || c.req.method === "DELETE" || isNodeAction)
       ) {
-        // Revert path carries a trailing /revert segment — drop it to
-        // recover the node id; PATCH/DELETE take the id as-is.
-        const idParts = isNodeRevert ? parts.slice(2, -1) : parts.slice(2);
+        // Action paths carry a trailing /revert or /move segment — drop it
+        // to recover the node id; PATCH/DELETE take the id as-is.
+        const idParts = isNodeAction ? parts.slice(2, -1) : parts.slice(2);
         const rawNodeId = idParts.join("/");
         let nodeId = rawNodeId;
         try {
@@ -860,6 +1085,40 @@ export function createApp(): Hono<AuthEnv> {
     return next();
   });
 
+  // GET /nests/:nestId/trace — the per-nest steward slice of the activity
+  // trace: same shape/pagination/filters as GET /admin/trace, but ALWAYS
+  // pinned to this nest server-side (a ?nest= query param can't widen it).
+  // Authorized for the nest owner / admin collaborators via the same
+  // canManageStewards rule the grants + steward-roster routes use (it folds
+  // the license admin and super_admins in, and open mode is always allowed).
+  // Registered before the sub-routers below so it matches first under the
+  // LinearRouter. The nest access middleware above already 404s callers with
+  // no access at all; this check downgrades read/write collaborators to 403.
+  nestsApp.get("/:nestId/trace", async (c) => {
+    const nestId = c.req.param("nestId")!;
+    if (!(await canManageStewards(nestId, c.get("userId")))) {
+      return c.json(
+        {
+          error:
+            "Only the nest owner, a nest admin, or the server admin can view this nest's activity.",
+        },
+        403,
+      );
+    }
+    const limitRaw = Number(c.req.query("limit"));
+    const offsetRaw = Number(c.req.query("offset"));
+    const limit = Number.isFinite(limitRaw) ? limitRaw : 25;
+    const offset = Number.isFinite(offsetRaw) ? offsetRaw : 0;
+    const { events, total } = await listTraceEvents({
+      limit,
+      offset,
+      kind: c.req.query("kind") as any,
+      nestId, // pinned — the caller cannot query outside their nest
+      user: c.req.query("user") || undefined,
+    });
+    return c.json({ count: events.length, total, limit, offset, events });
+  });
+
   // Nest list/CRUD
   nestsApp.route("/", nestRoutes);
 
@@ -887,6 +1146,10 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);
   nestsApp.route("/:nestId/runs", runListRoutes);
+  nestsApp.route("/:nestId/schedules", scheduleRoutes);
+  nestsApp.route("/:nestId/env", envRoutes);
+  nestsApp.route("/:nestId/connectors", connectorRoutes);
+  nestsApp.route("/:nestId/hooks", hookNestRoutes);
   nestsApp.route("/:nestId/definitions", definitionRoutes);
   nestsApp.route("/:nestId/assets", assetRoutes);
   nestsApp.route("/:nestId/mcp", mcpRoutes);
@@ -894,8 +1157,26 @@ export function createApp(): Hono<AuthEnv> {
   app.route("/nests", nestsApp);
 
   // ─── Dashboard UI (static files served from the bundled dist/web3 dir) ──
-  app.use("/assets/*", serveStatic({ root: UI_DIR_REL }));
-  app.get("*", serveStatic({ root: UI_DIR_REL, path: "index.html" }));
+  // Hashed asset files are content-addressed — safe to cache forever.
+  app.use(
+    "/assets/*",
+    serveStatic({
+      root: UI_DIR_REL,
+      onFound: (_p, c) =>
+        c.header("Cache-Control", "public, max-age=31536000, immutable"),
+    }),
+  );
+  // index.html is NOT hashed and points at the current bundle — it must never
+  // be cached, or a browser keeps loading a stale bundle after every deploy
+  // (the workflow-plane UI "not showing up" bug). Always revalidate.
+  app.get(
+    "*",
+    serveStatic({
+      root: UI_DIR_REL,
+      path: "index.html",
+      onFound: (_p, c) => c.header("Cache-Control", "no-cache"),
+    }),
+  );
 
   // Error handler — translate common low-level errors into messages
   // the UI can show as-is so users don't see "Internal server error"

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Editor } from "@tiptap/react";
 import { Plus, Trash2, ArrowLeft, ArrowRight, ArrowUp, ArrowDown } from "lucide-react";
+import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
 interface Edge {
@@ -131,114 +132,175 @@ export function TableControls({ editor }: { editor: Editor }) {
     if (!cell) return;
     const pos = editor.view.posAtDOM(cell, 0);
     editor.chain().focus().setTextSelection(pos).run();
-    cmd(editor);
     setMenu(null);
-    window.requestAnimationFrame(measure);
+
+    // Row/column edits on a big table trigger a full ProseMirror re-render
+    // that briefly freezes the thread. For large grids show a loader and
+    // defer two frames so it paints before the (synchronous) command runs.
+    const cells = rowEls.length * (rowEls[0]?.children.length ?? 0);
+    if (cells <= 400) {
+      cmd(editor);
+      window.requestAnimationFrame(measure);
+      return;
+    }
+    const toastId = toast.loading("Updating table…");
+    window.requestAnimationFrame(() =>
+      window.requestAnimationFrame(() => {
+        cmd(editor);
+        window.requestAnimationFrame(measure);
+        toast.dismiss(toastId);
+      }),
+    );
   };
 
   if (!geo) return null;
 
-  // Off-screen (scrolled out of the editor viewport) → don't render.
+  // Off-screen (scrolled out of the editor viewport, either axis) → skip.
   const visible =
-    geo.table.bottom > geo.clip.top && geo.table.top < geo.clip.bottom;
+    geo.table.bottom > geo.clip.top &&
+    geo.table.top < geo.clip.bottom &&
+    geo.table.right > geo.clip.left &&
+    geo.table.left < geo.clip.right;
   if (!visible) return null;
 
+  // Keep every overlay inside the editor's visible box. Controls are
+  // fixed-positioned from live table rects; without clamping to the scroll
+  // container the add-column bar and any table wider than the editor spill
+  // past its right/bottom edge (autocomplete is the only popup allowed out).
   const clampY = (y: number) => Math.max(geo.clip.top, Math.min(geo.clip.bottom, y));
+  const clampX = (x: number) => Math.max(geo.clip.left, Math.min(geo.clip.right, x));
+
+  // The "add row/column" bars belong at the table's real bottom/right edge.
+  // Show each only when that edge is actually inside the visible box —
+  // otherwise clampY/clampX would pin the bar to the viewport edge, leaving it
+  // floating outside the table (e.g. the add-row bar stuck in the footer when
+  // the table runs taller than the screen).
+  const bottomInView =
+    geo.table.bottom >= geo.clip.top && geo.table.bottom + 3 <= geo.clip.bottom;
+  const rightInView =
+    geo.table.right >= geo.clip.left && geo.table.right + 3 <= geo.clip.right;
+
+  // Visible vertical band of the table, clamped to the editor box. The
+  // add-column bar spans this — never the table's full (possibly off-screen)
+  // height, which would overflow past the viewport and cover the next table.
+  const bandTop = Math.max(geo.clip.top, geo.table.top);
+  const bandBottom = Math.min(geo.clip.bottom, geo.table.bottom);
 
   return (
     <>
       {/* Column grips (above each column). */}
-      {geo.cols.map((c, i) => (
-        <button
-          key={`col-${i}`}
-          data-table-control
-          type="button"
-          title="Column actions"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() =>
-            setMenu({ kind: "col", index: i, x: c.center, y: geo.table.top })
-          }
-          className="fixed z-40 flex items-center justify-center rounded-sm bg-border/70 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
-          style={{
-            left: c.start + 1,
-            top: clampY(geo.table.top - 12),
-            width: c.size - 2,
-            height: 9,
-          }}
-        >
-          <span className="text-[8px] leading-none">⋯</span>
-        </button>
-      ))}
+      {geo.cols.map((c, i) => {
+        const left = Math.max(geo.clip.left, c.start + 1);
+        const right = Math.min(geo.clip.right, c.start + c.size - 1);
+        if (right <= left) return null; // column scrolled out horizontally
+        return (
+          <button
+            key={`col-${i}`}
+            data-table-control
+            type="button"
+            title="Column actions"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() =>
+              setMenu({ kind: "col", index: i, x: clampX(c.center), y: geo.table.top })
+            }
+            className="fixed z-40 flex items-center justify-center rounded-sm bg-border/70 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
+            style={{
+              left,
+              top: clampY(geo.table.top - 12),
+              width: right - left,
+              height: 9,
+            }}
+          >
+            <span className="text-[8px] leading-none">⋯</span>
+          </button>
+        );
+      })}
 
       {/* Row grips (left of each row). */}
-      {geo.rows.map((r, i) => (
+      {geo.rows.map((r, i) => {
+        // Skip rows scrolled out of the editor's visible band (mirrors the
+        // column grips' horizontal skip). Clamping an off-screen row instead
+        // piles ghost grips at the viewport edge, detached from any row — the
+        // clutter seen on a table taller than the viewport.
+        if (r.start + r.size <= geo.clip.top || r.start >= geo.clip.bottom) {
+          return null;
+        }
+        return (
+          <button
+            key={`row-${i}`}
+            data-table-control
+            type="button"
+            title="Row actions"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() =>
+              setMenu({ kind: "row", index: i, x: clampX(geo.table.left), y: r.center })
+            }
+            className="fixed z-40 flex items-center justify-center rounded-sm bg-border/70 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
+            style={{
+              left: clampX(geo.table.left - 12),
+              top: clampY(r.start + 1),
+              width: 9,
+              height: r.size - 2,
+            }}
+          >
+            <span className="rotate-90 text-[8px] leading-none">⋯</span>
+          </button>
+        );
+      })}
+
+      {/* Add-column bar (right edge) — only when that edge is in view. */}
+      {rightInView && (
         <button
-          key={`row-${i}`}
           data-table-control
           type="button"
-          title="Row actions"
+          title="Add column"
           onMouseDown={(e) => e.preventDefault()}
-          onClick={() =>
-            setMenu({ kind: "row", index: i, x: geo.table.left, y: r.center })
-          }
-          className="fixed z-40 flex items-center justify-center rounded-sm bg-border/70 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
+          onClick={() => runAtCell(0, geo.cols.length - 1, (e) =>
+            e.chain().focus().addColumnAfter().run(),
+          )}
+          className="fixed z-40 flex items-center justify-center rounded-sm bg-border/50 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
           style={{
-            left: geo.table.left - 12,
-            top: clampY(r.start + 1),
-            width: 9,
-            height: r.size - 2,
+            left: geo.table.right + 3,
+            top: bandTop,
+            width: 14,
+            height: bandBottom - bandTop,
           }}
         >
-          <span className="rotate-90 text-[8px] leading-none">⋯</span>
+          <Plus className="h-3 w-3" />
         </button>
-      ))}
+      )}
 
-      {/* Add-column bar (right edge). */}
-      <button
-        data-table-control
-        type="button"
-        title="Add column"
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => runAtCell(0, geo.cols.length - 1, (e) =>
-          e.chain().focus().addColumnAfter().run(),
-        )}
-        className="fixed z-40 flex items-center justify-center rounded-sm bg-border/50 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
-        style={{
-          left: geo.table.right + 3,
-          top: clampY(geo.table.top),
-          width: 14,
-          height: Math.min(geo.table.height, geo.clip.bottom - geo.table.top),
-        }}
-      >
-        <Plus className="h-3 w-3" />
-      </button>
-
-      {/* Add-row bar (bottom edge). */}
-      <button
-        data-table-control
-        type="button"
-        title="Add row"
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => runAtCell(geo.rows.length - 1, 0, (e) =>
-          e.chain().focus().addRowAfter().run(),
-        )}
-        className="fixed z-40 flex items-center justify-center rounded-sm bg-border/50 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
-        style={{
-          left: geo.table.left,
-          top: clampY(geo.table.bottom + 3),
-          width: geo.table.width,
-          height: 14,
-        }}
-      >
-        <Plus className="h-3 w-3" />
-      </button>
+      {/* Add-row bar (bottom edge) — only when that edge is in view. */}
+      {bottomInView && (
+        <button
+          data-table-control
+          type="button"
+          title="Add row"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => runAtCell(geo.rows.length - 1, 0, (e) =>
+            e.chain().focus().addRowAfter().run(),
+          )}
+          className="fixed z-40 flex items-center justify-center rounded-sm bg-border/50 text-muted-foreground hover:bg-primary hover:text-primary-foreground"
+          style={{
+            // Span only the visible width of the table inside the editor box.
+            left: Math.max(geo.clip.left, geo.table.left),
+            top: geo.table.bottom + 3,
+            width:
+              Math.min(geo.clip.right, geo.table.right) -
+              Math.max(geo.clip.left, geo.table.left),
+            height: 14,
+          }}
+        >
+          <Plus className="h-3 w-3" />
+        </button>
+      )}
 
       {/* Grip menu. */}
       {menu && (
         <div
           data-table-control
           className="fixed z-50 min-w-40 overflow-hidden rounded-md border bg-popover py-1 text-popover-foreground shadow-md"
-          style={{ left: menu.x, top: clampY(menu.y) }}
+          style={{ left: clampX(menu.x), top: clampY(menu.y) }}
           onMouseDown={(e) => e.preventDefault()}
         >
           {menu.kind === "col" ? (

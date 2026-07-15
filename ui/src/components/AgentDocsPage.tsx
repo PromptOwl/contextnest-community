@@ -28,7 +28,7 @@ export function AgentDocsPage({ onBack }: { onBack: () => void }) {
   }, []);
 
   return (
-    <div className="max-w-3xl mx-auto space-y-4">
+    <div className="w-full space-y-4">
       <div className="flex items-center justify-between gap-2">
         <Button variant="ghost" size="sm" onClick={onBack}>
           <ArrowLeft className="h-4 w-4 mr-1" /> Back

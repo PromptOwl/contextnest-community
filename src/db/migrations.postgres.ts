@@ -53,6 +53,14 @@ const HISTORICAL_MIGRATIONS = [
   "017_workflow_runs",
   "018_subagent_runs",
   "019_grants",
+  "020_schedules",
+  "021_schedule_bounds",
+  "022_tools_and_watchers",
+  "023_connectors",
+  "024_trigger_hooks",
+  "025_run_claims",
+  "020_server_settings",
+  "026_api_events_nest_index",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -306,6 +314,79 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON grants(nest_id, target_type, target, user_id);
     CREATE INDEX IF NOT EXISTS idx_grants_user ON grants(nest_id, user_id);
 
+    CREATE TABLE IF NOT EXISTS schedules (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      agent_node TEXT NOT NULL,
+      every_minutes INTEGER NOT NULL CHECK(every_minutes >= 5),
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_run_at TEXT,
+      max_runs INTEGER,
+      runs_created INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_agent
+      ON schedules(nest_id, agent_node);
+
+    CREATE TABLE IF NOT EXISTS nest_env (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_by TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, key)
+    );
+    CREATE TABLE IF NOT EXISTS watchers (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      user_email TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_watchers_unique
+      ON watchers(nest_id, node_id, user_email);
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      user_email TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      subject_id TEXT,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      read_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_user
+      ON notifications(user_email, read_at, created_at);
+
+    CREATE TABLE IF NOT EXISTS connectors (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      channel TEXT NOT NULL CHECK(channel IN ('slack', 'teams', 'webhook')),
+      url TEXT NOT NULL,
+      events TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_connectors_nest ON connectors(nest_id);
+
+    CREATE TABLE IF NOT EXISTS trigger_hooks (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      agent_node TEXT NOT NULL,
+      preset TEXT NOT NULL CHECK(preset IN ('slack', 'teams', 'webhook')),
+      enabled INTEGER NOT NULL DEFAULT 1,
+      fire_count INTEGER NOT NULL DEFAULT 0,
+      last_fired_at TEXT,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_hooks_nest ON trigger_hooks(nest_id);
+
     CREATE TABLE IF NOT EXISTS edge_types (
       id TEXT PRIMARY KEY,
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
@@ -391,6 +472,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       duration_ms INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_api_events_ts ON api_events(ts);
+    -- (nest_id, id) composite (migration 026): the per-nest trace view
+    -- (GET /nests/:id/trace) filters by nest_id and pages newest-first by id.
+    CREATE INDEX IF NOT EXISTS idx_api_events_nest_ts ON api_events(nest_id, id);
 
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
@@ -402,7 +486,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       inputs TEXT,
       trace TEXT,
       started_at TEXT NOT NULL,
-      finished_at TEXT
+      finished_at TEXT,
+      claimed_by TEXT,
+      claimed_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_runs_nest ON runs(nest_id, started_at);
     CREATE INDEX IF NOT EXISTS idx_runs_agent ON runs(nest_id, agent_node);
@@ -421,6 +507,18 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS parent_run_id TEXT;
     ALTER TABLE runs ADD COLUMN IF NOT EXISTS depth INTEGER NOT NULL DEFAULT 0;
     CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id);
+
+    -- server_settings (migration 020): durable store for runtime-mutable server
+    -- config (admin Settings + installed license key), loaded into process.env
+    -- at boot. Replaces the ephemeral .env-file persistence. value NULL is a
+    -- tombstone (explicitly cleared); env_at_write is the deploy-env baseline
+    -- for reconcile precedence — see db/settings.ts.
+    CREATE TABLE IF NOT EXISTS server_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      env_at_write TEXT,
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

@@ -38,14 +38,17 @@ let emailFromWarned = false;
 let emailToWarned = false;
 
 /**
- * Loose email shape gate for the notification envelope: something@something,
- * no whitespace, no CR/LF. `\s` already excludes interior newlines; the extra
- * CR/LF reject closes the JS quirk where a non-`m` `$` still matches before a
- * single trailing "\n" (header-injection shape). Shared by config getters and
- * the /admin/settings validator so env-set and UI-set values gate identically.
+ * Email shape gate for the notification envelope: local@domain.tld, no
+ * whitespace, no CR/LF. The domain MUST carry a dot + tail so junk with a bare
+ * `@` (e.g. "a@b", "test@test") is refused — a value that passes the transport
+ * envelope but isn't a real address. `\s` already excludes interior newlines;
+ * the extra CR/LF reject closes the JS quirk where a non-`m` `$` still matches
+ * before a single trailing "\n" (header-injection shape). Shared by config
+ * getters and the /admin/settings validator so env-set and UI-set values gate
+ * identically.
  */
 export function isEmailish(v: string): boolean {
-  return /^[^\s@]+@[^\s@]+$/.test(v) && !/[\r\n]/.test(v);
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) && !/[\r\n]/.test(v);
 }
 /** Comma-separated recipient list where every entry is isEmailish(). */
 export function isEmailListish(v: string): boolean {
@@ -152,6 +155,21 @@ export const config = {
   get PROMPTOWL_KEY() {
     return process.env.PROMPTOWL_KEY || "";
   },
+  /** Vercel automation-bypass secret for PO calls; unset = no bypass. */
+  get PROMPTOWL_BYPASS_SECRET(): string {
+    return process.env.PROMPTOWL_BYPASS_SECRET || "";
+  },
+  /** Outbound headers for PO fetches; bypass header only when secret set. */
+  get PROMPTOWL_FETCH_HEADERS(): Record<string, string> {
+    const h: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.PROMPTOWL_BYPASS_SECRET) {
+      // Server-side one-shot calls: only the bypass header is needed. The
+      // x-vercel-set-bypass-cookie header is for in-browser follow-up
+      // requests, which these are not — so it's omitted.
+      h["x-vercel-protection-bypass"] = this.PROMPTOWL_BYPASS_SECRET;
+    }
+    return h;
+  },
   /**
    * Shared secret for one-click SSO auto-login from PromptOwl (PO).
    *
@@ -197,6 +215,26 @@ export const config = {
       : "open";
   },
   /**
+   * Manual (email + password) sign-in. Three modes, independent of
+   * `PROMPTOWL_SIGN_IN_GATE` (the two methods are controlled separately):
+   *   "open"        — anyone may log in and self-register (default).
+   *   "invite-only" — existing + admin-invited users may log in and an invited
+   *                   placeholder may set its password ("claim"), but brand-new
+   *                   self-registration is refused. Use this when the admin
+   *                   provisions accounts (invite / share / steward) and users
+   *                   shouldn't be able to create their own.
+   *   "disabled"    — no email/password sign-in at all (PromptOwl only).
+   * Enforced at POST /auth/login and POST /auth/register. The /admin/settings
+   * validator refuses "disabled" while PromptOwl is also disabled, so a server
+   * can never be left with no way to sign in.
+   */
+  get MANUAL_SIGN_IN(): "open" | "invite-only" | "disabled" {
+    const v = (process.env.MANUAL_SIGN_IN || "open").trim().toLowerCase();
+    return v === "invite-only" || v === "disabled"
+      ? (v as "invite-only" | "disabled")
+      : "open";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path
@@ -212,6 +250,18 @@ export const config = {
   },
   get TELEMETRY_INTERVAL_MS() {
     return parseInt(process.env.TELEMETRY_INTERVAL_MS || "3600000", 10);
+  },
+  /**
+   * Activity-trace retention window in days (the api_events table behind
+   * GET /admin/trace and GET /nests/:id/trace). 0 = keep forever (pruning is
+   * skipped entirely). Invalid / negative → default 14; capped at 3650 (ten
+   * years) so a typo can't schedule a prune cutoff in the distant past.
+   * Editable at runtime from the admin Settings page (/admin/settings).
+   */
+  get TRACE_RETENTION_DAYS(): number {
+    const n = parseInt(process.env.TRACE_RETENTION_DAYS || "14", 10);
+    if (!Number.isFinite(n) || n < 0) return 14;
+    return Math.min(n, 3650);
   },
   /**
    * Optional custom logo URL shown in UI header + login screen.
@@ -238,6 +288,27 @@ export const config = {
    * This flag is also the future license-tier hook: gating a paid tier here
    * is a one-line change because every plane route checks it per request.
    */
+  /**
+   * Optional Slack incoming-webhook URL for team notifications (review
+   * submitted/approved/rejected). Empty/unset = connector off. https only —
+   * a webhook carries an implicit secret in its path, so it never travels
+   * plaintext. (Ported from development PR #105.)
+   */
+  get SLACK_WEBHOOK_URL(): string | null {
+    const raw = process.env.SLACK_WEBHOOK_URL?.trim();
+    if (!raw) return null;
+    if (!/^https:\/\//i.test(raw)) {
+      if (!slackUrlWarned) {
+        slackUrlWarned = true;
+        console.warn(
+          "[config] SLACK_WEBHOOK_URL rejected: must be an https:// URL. Slack notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
+  },
+
   get FEATURE_WORKFLOW_PLANE(): boolean {
     return process.env.FEATURE_WORKFLOW_PLANE === "true";
   },
@@ -269,6 +340,13 @@ export const config = {
   get RUN_MAX_STEPS(): number {
     const n = parseInt(process.env.RUN_MAX_STEPS || "10000", 10);
     return Number.isFinite(n) ? Math.min(100000, Math.max(10, n)) : 10000;
+  },
+  /** Max concurrently-RUNNING root (depth-0) runs per nest. The subagent
+   *  depth/fan-out caps bound a single tree; this bounds how many trees a
+   *  caller can start at once, so root triggers can't flood the nest. */
+  get RUN_MAX_CONCURRENT_ROOTS(): number {
+    const n = parseInt(process.env.RUN_MAX_CONCURRENT_ROOTS || "50", 10);
+    return Number.isFinite(n) ? Math.min(1000, Math.max(1, n)) : 50;
   },
   get AUTH_MODE(): "open" | "key" {
     // Default is "key" — requires an explicit AUTH_MODE=open to run
@@ -324,26 +402,6 @@ export const config = {
         emailToWarned = true;
         console.warn(
           "[config] NOTIFY_EMAIL_TO rejected: must be a comma-separated list of email addresses. Email notifications disabled.",
-        );
-      }
-      return null;
-    }
-    return raw;
-  },
-  /**
-   * Optional Slack incoming-webhook URL for team notifications (review
-   * submitted/approved/rejected, nest shared). Empty/unset = connector off.
-   * https only — a webhook carries an implicit secret in its path, so it
-   * never travels plaintext.
-   */
-  get SLACK_WEBHOOK_URL(): string | null {
-    const raw = process.env.SLACK_WEBHOOK_URL?.trim();
-    if (!raw) return null;
-    if (!/^https:\/\//i.test(raw)) {
-      if (!slackUrlWarned) {
-        slackUrlWarned = true;
-        console.warn(
-          "[config] SLACK_WEBHOOK_URL rejected: must be an https:// URL. Slack notifications disabled.",
         );
       }
       return null;

@@ -62,6 +62,39 @@ export function withTimeouts(url: string): string {
   return url + (url.includes("?") ? "&" : "?") + missing.join("&");
 }
 
+/**
+ * Live credential check for the /admin/settings save path: actually connect to
+ * the SMTP server and authenticate, so a wrong host/port/user/password is
+ * caught before the setting is persisted (a bare shape check can't know the
+ * password is wrong). Same hardening as the send path — timeouts ride the URL
+ * so a dead host can't hang the request, file/URL access disabled. Never
+ * throws: returns a typed result the caller turns into a 400.
+ */
+export async function verifySmtp(
+  url: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  let transporter: any = null;
+  try {
+    const nodemailer = await import("nodemailer");
+    transporter = nodemailer.default.createTransport(withTimeouts(url), {
+      disableFileAccess: true,
+      disableUrlAccess: true,
+    } as any);
+    await transporter.verify();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    // A verify transporter is throwaway — release its socket/pool so it can't
+    // linger. close() is best-effort (may not exist on a failed build).
+    try {
+      transporter?.close?.();
+    } catch {
+      /* nothing to release */
+    }
+  }
+}
+
 async function getTransporter(): Promise<any | null> {
   const url = config.SMTP_URL;
   if (!url) return null;

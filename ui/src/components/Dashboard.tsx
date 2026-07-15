@@ -5,7 +5,7 @@ import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import {
@@ -17,6 +17,18 @@ import { Label } from "@/components/ui/label";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
 
+function relTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (secs < 60) return "just now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
 interface DashboardProps {
   onSelectNest: (
     nestId: string,
@@ -24,6 +36,7 @@ interface DashboardProps {
     isOwner: boolean,
     isAnonOwned: boolean,
   ) => void;
+  onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
 }
 
 interface ServerStats {
@@ -32,9 +45,15 @@ interface ServerStats {
   users: number;
 }
 
-export function Dashboard({ onSelectNest }: DashboardProps) {
+export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
+  const [work, setWork] = useState<{
+    items: api.WorkItem[];
+    waiting: api.WorkItem[];
+    notifications?: api.WatcherNotification[];
+  }>({ items: [], waiting: [] });
+  const [acting, setActing] = useState<Record<string, boolean>>({});
   const [nests, setNests] = useState<any[]>([]);
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
@@ -60,17 +79,19 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
       // /stats and /unsynced are best-effort. /stats can 503 on license-gated
       // servers; /unsynced is admin-gated, so non-admin callers get 403. In
       // both cases the dashboard still renders with the rest of the data.
-      const [nestsData, statsData, unsyncedData] = await Promise.all([
+      const [nestsData, statsData, unsyncedData, workData] = await Promise.all([
         api.listNests(),
         api.getServerStats().catch((e) => {
           console.error("[Dashboard] getServerStats failed", e);
           return null;
         }),
         api.listUnsyncedFolders().catch(() => ({ folders: [] })),
+        api.getMyWork().catch(() => ({ items: [], waiting: [], notifications: [] })),
       ]);
       setNests(nestsData.nests);
       setStats(statsData);
       setUnsynced(unsyncedData.folders);
+      setWork(workData);
     } catch (e) {
       console.error("[Dashboard] fetchNests failed", e);
     } finally {
@@ -106,6 +127,35 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
   // so without this the list keeps showing the anonymous-admin view
   // until the page is manually reloaded.
   useEffect(() => { fetchNests(); }, [currentUserEmail]);
+
+  const actOnReview = async (
+    w: api.WorkItem,
+    action: "approve" | "reject",
+  ) => {
+    const key = `${w.nest_id}:${w.node_id}`;
+    setActing((s) => ({ ...s, [key]: true }));
+    try {
+      if (action === "approve")
+        await api.approveReview(w.nest_id, w.node_id);
+      else await api.rejectReview(w.nest_id, w.node_id, "Rejected from inbox");
+      // Optimistic: drop the row, then reconcile from the server.
+      setWork((prev) => ({
+        ...prev,
+        items: prev.items.filter(
+          (i) => !(i.nest_id === w.nest_id && i.node_id === w.node_id),
+        ),
+      }));
+      fetchNests();
+    } catch (e) {
+      console.error("[Dashboard] review action failed", e);
+    } finally {
+      setActing((s) => {
+        const next = { ...s };
+        delete next[key];
+        return next;
+      });
+    }
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -182,6 +232,135 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
           </div>
         </CardContent>
       </Card>
+
+      {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
+          row clicks straight to the document (circular nav), approve/reject
+          inline. "My Work" = waiting on you; "Waiting on" = you handed off. */}
+      <div className="space-y-5">
+        <div>
+          {(work.notifications?.length ?? 0) > 0 && (
+            <div className="mb-3 rounded-lg border border-amber-300/50 bg-amber-500/5">
+              <div className="px-4 py-2 flex items-center gap-2 text-sm font-medium">
+                🔔 Notifications
+                <span className="text-xs text-muted-foreground">
+                  ({work.notifications!.length})
+                </span>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  className="text-xs text-primary hover:underline"
+                  onClick={async () => {
+                    await api.markNotificationsRead("all");
+                    setWork((prev) => ({ ...prev, notifications: [] }));
+                  }}
+                >
+                  Mark all read
+                </button>
+              </div>
+              <div className="divide-y border-t">
+                {work.notifications!.slice(0, 8).map((n) => (
+                  <div key={n.id} className="px-4 py-2 text-xs flex items-center gap-2">
+                    <span className="flex-1">{n.message}</span>
+                    <span className="text-muted-foreground shrink-0">
+                      {new Date(n.created_at).toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="flex items-center gap-2 mb-2">
+            <Inbox className="h-5 w-5 text-muted-foreground" />
+            <h2 className="text-xl font-semibold">My Work</h2>
+            {work.items.length > 0 && (
+              <span className="rounded-full bg-primary text-primary-foreground text-xs font-semibold px-2 py-0.5">
+                {work.items.length}
+              </span>
+            )}
+          </div>
+          {work.items.length === 0 ? (
+            <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
+              You're all caught up — nothing waiting on you.
+            </div>
+          ) : (
+            <div className="rounded-lg border divide-y overflow-hidden">
+              {work.items.map((w) => {
+                const key = `${w.nest_id}:${w.node_id}`;
+                const busy = !!acting[key];
+                return (
+                  <div
+                    key={key}
+                    className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
+                  >
+                    <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0">
+                      Review
+                    </span>
+                    <button
+                      onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}
+                      className="flex items-center gap-2 min-w-0 flex-1 text-left"
+                    >
+                      <span className="font-medium truncate">{w.title}</span>
+                      <span className="text-xs text-muted-foreground shrink-0">
+                        in {w.nest_name} · {w.requested_by} · {relTime(w.requested_at)}
+                      </span>
+                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => actOnReview(w, "approve")}
+                      >
+                        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
+                        Approve
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy}
+                        className="text-muted-foreground hover:text-destructive"
+                        onClick={() => actOnReview(w, "reject")}
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {work.waiting.length > 0 && (
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+                Waiting on others
+              </h3>
+              <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-2 py-0.5">
+                {work.waiting.length}
+              </span>
+            </div>
+            <div className="rounded-lg border divide-y overflow-hidden">
+              {work.waiting.map((w) => (
+                <button
+                  key={`${w.nest_id}:${w.node_id}`}
+                  onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}
+                  className="w-full flex items-center gap-3 px-4 py-2 text-left hover:bg-muted/40 group text-sm"
+                >
+                  <span className="font-medium truncate">{w.title}</span>
+                  <span className="text-xs text-muted-foreground shrink-0">
+                    in {w.nest_name} · submitted {relTime(w.requested_at)}
+                  </span>
+                  <span className="flex-1" />
+                  <span className="text-xs text-muted-foreground">pending review</span>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-0.5 transition-transform shrink-0" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Nests header */}
       <div className="flex items-center justify-between">
@@ -479,26 +658,41 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                           <FileText className="h-3 w-3" />
                           {nest.document_count ?? 0}
                         </span>
-                        {(nest.collaborator_count ?? 0) > 0 && (
-                          <span
-                            className="inline-flex items-center gap-1"
-                            title={`${nest.collaborator_count} collaborator${
-                              nest.collaborator_count === 1 ? "" : "s"
-                            }`}
-                          >
-                            <Users className="h-3 w-3" />
-                            {nest.collaborator_count}
+                        {/* WHO, not just counts: shared-with (plain chips)
+                            and stewards (shield-tinted chips), initials with
+                            the email on hover. */}
+                        {(nest.collaborator_emails?.length ?? 0) > 0 && (
+                          <span className="inline-flex items-center gap-0.5" title="Shared with">
+                            <Users className="h-3 w-3 mr-0.5" />
+                            {nest.collaborator_emails!.slice(0, 4).map((e: string) => (
+                              <span
+                                key={e}
+                                title={`Shared with ${e}`}
+                                className="inline-flex h-4.5 min-w-[18px] items-center justify-center rounded-full bg-muted px-1 text-[9px] font-semibold uppercase"
+                              >
+                                {e.slice(0, 2)}
+                              </span>
+                            ))}
+                            {nest.collaborator_emails!.length > 4 && (
+                              <span className="text-[10px]">+{nest.collaborator_emails!.length - 4}</span>
+                            )}
                           </span>
                         )}
-                        {(nest.steward_count ?? 0) > 0 && (
-                          <span
-                            className="inline-flex items-center gap-1"
-                            title={`${nest.steward_count} steward${
-                              nest.steward_count === 1 ? "" : "s"
-                            }`}
-                          >
-                            <Shield className="h-3 w-3" />
-                            {nest.steward_count}
+                        {(nest.steward_emails?.length ?? 0) > 0 && (
+                          <span className="inline-flex items-center gap-0.5" title="Stewards">
+                            <Shield className="h-3 w-3 mr-0.5 text-emerald-600" />
+                            {nest.steward_emails!.slice(0, 4).map((e: string) => (
+                              <span
+                                key={e}
+                                title={`Steward: ${e}`}
+                                className="inline-flex h-4.5 min-w-[18px] items-center justify-center rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-1 text-[9px] font-semibold uppercase"
+                              >
+                                {e.slice(0, 2)}
+                              </span>
+                            ))}
+                            {nest.steward_emails!.length > 4 && (
+                              <span className="text-[10px]">+{nest.steward_emails!.length - 4}</span>
+                            )}
                           </span>
                         )}
                         {isAnonymous && !nest.stewardship_enabled && (

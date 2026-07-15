@@ -56,13 +56,15 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `DB_SSL_CA` | `""` | Path to a CA certificate (PEM) for verify-ca/verify-full TLS when `DB_SSL=true`. |
 | `AUTH_MODE` | `key` | `key` or `open`. See above. |
 | `PROMPTOWL_API_URL` | `https://app.promptowl.ai` | PromptOwl's API origin — used for device auth, license validation, telemetry. Override for air-gapped or test setups. |
-| `PROMPTOWL_KEY` | `""` | Your PromptOwl Community License key (`pk_...`). Unlicensed instances still run and serve reads, but every write returns `503` until a valid key is installed. Can also be set via the browser License Setup Page, which persists it to `ENV_FILE_PATH`. |
+| `PROMPTOWL_KEY` | `""` | Your PromptOwl Community License key (`pk_...`). Unlicensed instances still run and serve reads, but every write returns `503` until a valid key is installed. Can also be set via the browser License Setup Page, which persists it to the database (`server_settings` table) so it survives a rebuild and reaches every instance — see [Runtime settings persistence](#runtime-settings-persistence). Setting it here in the deploy environment takes precedence on the next boot. |
 | `PROMPTOWL_SIGN_IN_GATE` | `open` | Restrict "Sign in with PromptOwl". `open` = anyone may; `admin-only` = only the license owner (admin) may, everyone else uses email/password (admin opens the login page with `?admin=1`); `disabled` = nobody may. Enforced server-side at `POST /auth/promptowl` and surfaced on the health endpoint. Unknown values fall back to `open`. |
+| `MANUAL_SIGN_IN` | `open` | Email + password sign-in mode. `open` = anyone may log in and self-register a new account; `invite-only` = existing/invited users may log in but brand-new self-registration returns `403` (the admin provisions accounts via invite/share/steward and shares the password — there is no self-service "set password", which would be account takeover without email verification); `disabled` = no email/password sign-in at all (`POST /auth/login` and `POST /auth/register` return `403`). Independent of `PROMPTOWL_SIGN_IN_GATE`, so the two methods are controlled separately (e.g. `invite-only` manual + `admin-only` PromptOwl). Also settable from Settings → General. The server refuses `disabled` while PromptOwl sign-in is also `disabled` (that would leave no way to log in). Unknown values fall back to `open`. |
 | `OFFICIAL_COMMUNITY_SSO_SECRET` | `""` | **Official deployment only — leave unset on self-hosted.** Shared HMAC secret enabling the one-click "Open Community" SSO auto-login from PromptOwl. Must exactly match the same-named var on PromptOwl. When unset, `GET /auth/sso` returns `404` and the feature is disabled; self-hosted users keep using the manual device-code flow. |
 | `PUBLIC_BASE_URL` | `""` | This server's canonical external URL (e.g. `https://community.promptowl.ai`). Checked against the SSO ticket's `aud` claim so a ticket minted for this server can't be replayed against another. Only relevant when `OFFICIAL_COMMUNITY_SSO_SECRET` is set; when unset, the audience check is skipped. |
-| `ENV_FILE_PATH` | `$DATA_ROOT/.env` | Path to the `.env` file the license install flow writes `PROMPTOWL_KEY` into (alongside existing vars), and which the server also reads at boot. Defaults **under `DATA_ROOT`** so the browser License Setup Page persists durably in containers — `$cwd` is `/app` in the official image (root-owned, discarded on container recreate), which silently lost the key. Override only if your writable, persisted `.env` lives elsewhere. In containers, providing `PROMPTOWL_KEY` directly via the environment also works and is read at boot. |
+| `ENV_FILE_PATH` | `$DATA_ROOT/.env` | Path to an optional `.env` file the server reads at boot (in addition to `$cwd/.env`). **No longer used for persistence** — the License Setup Page and Settings page now write to the database, not this file (see [Runtime settings persistence](#runtime-settings-persistence)). Kept for operators who bootstrap config from a mounted `.env`. |
 | `TELEMETRY_ENABLED` | `"true"` (set to `"false"` to disable) | Batched, anonymized usage events sent to PromptOwl. Off disables the loop entirely. |
 | `TELEMETRY_INTERVAL_MS` | `3600000` (1 hour) | How often buffered telemetry is flushed to PromptOwl. |
+| `TRACE_RETENTION_DAYS` | `14` | Activity-trace retention window in days (the `api_events` rows behind `GET /admin/trace` and `GET /nests/:id/trace`). Rows older than this are pruned opportunistically (every ~500 inserts). `0` = keep forever (pruning is skipped entirely). Capped at `3650`; invalid/negative values fall back to `14`. Also editable from Settings → Advanced. |
 | `CORS_ORIGINS` | `*` in open mode; `http://localhost:5173,http://localhost:3838` in key mode | Comma-separated allowlist. Set to `*` to allow any origin (**only** safe in open mode — in key mode with Bearer tokens this enables CSRF). |
 | `MAX_BODY_BYTES` | `10485760` (10 MB) | Reject requests whose `Content-Length` exceeds this. Prevents giant-payload DoS. |
 | `LOGO_URL` | _(unset)_ | Custom logo shown in the UI header + login screen. Must start with `https://`, `http://`, or `data:image/` — other schemes (`file://`, relative, `javascript:`) are rejected with a warning and the bundled icon is used. |
@@ -102,6 +104,31 @@ Postgres backend starts empty.
 > Cloud Run deployment fully durable. You must also put `$DATA_ROOT` on persistent,
 > shared storage — e.g. mount a GCS bucket via Cloud Storage FUSE, or use a
 > persistent volume — otherwise documents will disappear on redeploy/scale-in.
+
+### Runtime settings persistence
+
+Settings you change at runtime — everything on the **Settings page** (`/admin/settings`:
+sign-in gate, logo, base URL, upload limit, feature flags, Slack/SMTP connectors)
+plus the **installed license key** — are stored in the database (`server_settings`
+table), **not** in a `.env` file. This is deliberate: on Cloud Run the container
+filesystem is ephemeral, so a file-based value was wiped by every rebuild, and each
+horizontally-scaled instance had its own filesystem, so a change on one never
+reached the others. The database (Cloud SQL in production) is durable **and** shared,
+so a UI change persists across rebuilds and is seen by every instance. Rows are
+loaded into the process environment at boot.
+
+**Precedence between the deploy environment and a UI change.** Each stored row
+remembers the deploy-env value in effect when it was written. At boot:
+
+- If the deploy env value for that key is **unchanged**, the stored UI change wins
+  (your Settings-page edit survives an identical rebuild).
+- If the deploy env value **changed** (you redeployed with a new value for that
+  variable), the deploy env wins and the stored row is re-synced to it.
+
+So you can always override any setting from the deploy config, while UI edits made
+to keys you don't set in the environment stay put. Clearing a setting in the UI
+writes a tombstone, so a value you removed is not resurrected from the environment
+on the next boot.
 
 ### Cloud Run + Cloud SQL (PostgreSQL)
 

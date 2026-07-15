@@ -9,7 +9,9 @@ import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helper
 import { withTimeouts } from "../src/notify/email.js";
 
 const sendMail = vi.fn(async () => ({ messageId: "test" }));
-const createTransport = vi.fn(() => ({ sendMail }));
+const verify = vi.fn(async () => true);
+const close = vi.fn();
+const createTransport = vi.fn(() => ({ sendMail, verify, close }));
 vi.mock("nodemailer", () => ({ default: { createTransport } }));
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -189,17 +191,78 @@ describe("admin settings validation", () => {
     process.env.NOTIFY_EMAIL_TO = "team@test.local";
   });
 
+  it("verifies SMTP credentials before saving — blocks a save when connect/auth fails", async () => {
+    const openApp = await createTestApp("open");
+    verify.mockClear();
+    close.mockClear();
+    verify.mockRejectedValueOnce(new Error("Invalid login: 535 auth failed"));
+    const bad = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      smtp_url: "smtps://user:wrongpass@smtp.test:465",
+    });
+    expect(bad.status).toBe(400);
+    expect(bad.data.error).toMatch(/SMTP connection failed/i);
+    expect(bad.data.error).toMatch(/535 auth failed/);
+    // Keyed to smtp_url so the client focuses the Notifications tab.
+    expect(bad.data.fieldErrors?.smtp_url).toMatch(/SMTP connection failed/i);
+    // Verify ran on the supplied URL and the throwaway transporter was closed.
+    expect(verify).toHaveBeenCalled();
+    expect(close).toHaveBeenCalled();
+    // Nothing persisted — the live SMTP_URL is unchanged.
+    expect(process.env.SMTP_URL).toBe("smtps://user:pass@smtp.test:465");
+  });
+
+  it("saves a new SMTP URL once verify() succeeds", async () => {
+    const openApp = await createTestApp("open");
+    verify.mockClear();
+    verify.mockResolvedValueOnce(true);
+    const ok = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      smtp_url: "smtps://user:pass@smtp.verified:465",
+    });
+    expect(ok.status).toBe(200);
+    expect(verify).toHaveBeenCalled();
+    expect(ok.data.settings.smtp_url).toBe("smtps://user:pass@smtp.verified:465");
+    // Restore the shared fixture URL for the remaining tests.
+    process.env.SMTP_URL = "smtps://user:pass@smtp.test:465";
+  });
+
+  it("skips verify when the SMTP URL is cleared (disabling the connector)", async () => {
+    const openApp = await createTestApp("open");
+    verify.mockClear();
+    const off = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      smtp_url: "",
+    });
+    expect(off.status).toBe(200);
+    expect(verify).not.toHaveBeenCalled();
+    process.env.SMTP_URL = "smtps://user:pass@smtp.test:465";
+  });
+
   it("rejects a malformed notify_email_from / notify_email_to", async () => {
     const openApp = await createTestApp("open");
     const badFrom = await jsonRequest(openApp, "PATCH", "/admin/settings", {
       notify_email_from: "not-an-email",
     });
     expect(badFrom.status).toBe(400);
+    // Errors are keyed by field name so the client can focus the right tab.
+    expect(badFrom.data.fieldErrors).toHaveProperty("notify_email_from");
     // A comma-list where one entry is malformed rejects the whole field.
     const badTo = await jsonRequest(openApp, "PATCH", "/admin/settings", {
       notify_email_to: "ok@acme.com, bogus",
     });
     expect(badTo.status).toBe(400);
+    expect(badTo.data.fieldErrors).toHaveProperty("notify_email_to");
+    // A bare @ with no dotted domain (e.g. "a@b", "test@test") is junk that
+    // passes a transport envelope but isn't a real address — rejected.
+    const noDot = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      notify_email_from: "test@test",
+    });
+    expect(noDot.status).toBe(400);
+    // From is a single sender — a comma-list (valid for To) is rejected with a
+    // message that points the admin at the Recipients field.
+    const multiFrom = await jsonRequest(openApp, "PATCH", "/admin/settings", {
+      notify_email_from: "a@acme.com, b@acme.com",
+    });
+    expect(multiFrom.status).toBe(400);
+    expect(multiFrom.data.fieldErrors.notify_email_from).toMatch(/single email/i);
     // A header-injection shape (interior CR/LF, survives .trim()) is rejected.
     const crlf = await jsonRequest(openApp, "PATCH", "/admin/settings", {
       notify_email_from: "nest@acme.com\nBcc: attacker@evil.com",
