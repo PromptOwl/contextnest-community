@@ -326,6 +326,12 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_teams_owner ON teams(owner_id);
 
+    -- nests.shared_teams is declared inline in the CREATE TABLE above, which is
+    -- a no-op on any database created before teams shipped. Every nest
+    -- permission check reads this column, so without the explicit ALTER an
+    -- existing deployment breaks on upgrade, not just the Teams feature.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS shared_teams TEXT NOT NULL DEFAULT '[]';
+
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
