@@ -204,8 +204,13 @@ export function NestView({
   const [myStewards, setMyStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
   // Comment activity (annotation threads + replies) for the feed, already
-  // access-filtered server-side to docs the caller can read.
+  // access-filtered server-side to docs the caller can read. Paged: the array
+  // holds the pages fetched so far; feedCommentsTotal is the server's
+  // authoritative counts.comments (array length undercounts once a nest
+  // outgrows one page — the default limit caps a page at 50).
   const [feedComments, setFeedComments] = useState<api.FeedCommentItem[]>([]);
+  const [feedCommentsTotal, setFeedCommentsTotal] = useState(0);
+  const [feedLoadingMore, setFeedLoadingMore] = useState(false);
   // Feed filter chips: All (default) / Changes / Comments.
   const [feedFilter, setFeedFilter] = useState<"all" | "changes" | "comments">(
     "all",
@@ -474,18 +479,23 @@ export function NestView({
         // interleave happens client-side in the queue tab.
         api.getNestFeed(nestId, "comments").catch((e) => {
           console.error("[NestView] getNestFeed failed", nestId, e);
-          return { items: [] as api.FeedItem[] };
+          return {
+            items: [] as api.FeedItem[],
+            counts: { changes: 0, comments: 0 },
+          };
         }),
       ]);
     setCommentCounts(countsData.counts);
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
-    setFeedComments(
-      feedData.items.filter(
-        (i): i is api.FeedCommentItem => i.type === "comment",
-      ),
+    const commentItems = feedData.items.filter(
+      (i): i is api.FeedCommentItem => i.type === "comment",
     );
+    setFeedComments(commentItems);
+    // Authoritative total (an older server without counts falls back to the
+    // page length, which is at least not wrong for single-page nests).
+    setFeedCommentsTotal(feedData.counts?.comments ?? commentItems.length);
     setStewardshipEnabled(settingsData.stewardship_enabled);
     setAllowSelfApprove(settingsData.allow_self_approve);
     setExternalEdits(externalData.entries);
@@ -502,6 +512,34 @@ export function NestView({
     setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
     setLoading(false);
   }, [nestId]);
+
+  // Next page of comment activity, appended under the feed. Offset by the
+  // rows already shown; a dedupe guard drops any row that slid into the next
+  // page because new comments landed above it between fetches.
+  const loadMoreComments = useCallback(async () => {
+    setFeedLoadingMore(true);
+    try {
+      const res = await api.getNestFeed(
+        nestId,
+        "comments",
+        50,
+        feedComments.length,
+      );
+      const fresh = res.items.filter(
+        (i): i is api.FeedCommentItem => i.type === "comment",
+      );
+      setFeedComments((prev) => {
+        const seen = new Set(prev.map((c) => c.id));
+        return [...prev, ...fresh.filter((c) => !seen.has(c.id))];
+      });
+      setFeedCommentsTotal(res.counts?.comments ?? res.total);
+    } catch (e: any) {
+      console.error("[NestView] getNestFeed load-more failed", nestId, e);
+      toast.error(e?.message || "Failed to load more comments");
+    } finally {
+      setFeedLoadingMore(false);
+    }
+  }, [nestId, feedComments.length]);
 
   const refreshExternalEdits = useCallback(async () => {
     setExternalEditsLoading(true);
@@ -887,7 +925,7 @@ export function NestView({
     reviewQueue.length > 0 ||
     // Comment activity renders in the same tab (the queue is now a feed) —
     // discussion must stay reachable even with stewardship off.
-    feedComments.length > 0;
+    feedCommentsTotal > 0;
 
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
@@ -2507,7 +2545,8 @@ export function NestView({
                 [
                   { key: "all", label: "All" },
                   { key: "changes", label: `Changes (${reviewableQueue.length})` },
-                  { key: "comments", label: `Comments (${feedComments.length})` },
+                  // Authoritative server count — the loaded array is paged.
+                  { key: "comments", label: `Comments (${feedCommentsTotal})` },
                 ] as const
               ).map((chip) => (
                 <button
@@ -2581,6 +2620,27 @@ export function NestView({
                 );
               }}
             />
+            {/* Comment activity is paged (50/page) — fetch the next page when
+                more exists than what's loaded. Changes need no pager: they're
+                the actionable pending set the queue already shows in full. */}
+            {feedFilter !== "changes" &&
+              feedComments.length < feedCommentsTotal && (
+                <div className="flex justify-center">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={loadMoreComments}
+                    disabled={feedLoadingMore}
+                    data-testid="feed-load-more"
+                  >
+                    {feedLoadingMore ? (
+                      <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                    ) : null}
+                    Load more comments (
+                    {feedCommentsTotal - feedComments.length} remaining)
+                  </Button>
+                </div>
+              )}
             {/* When the raw queue has entries but the reviewable filter
                 emptied it, the queue card says "All caught up!" — which
                 is wrong. Surface the gap so the user knows items exist

@@ -119,22 +119,22 @@ export async function getNestFeed(params: {
       )) as any[];
 
       // One authoritative approve-check per distinct node (mirrors the
-      // queue route), not per row.
-      const canReviewByNode = new Map<string, boolean>();
-      for (const r of rows) {
-        if (!canReviewByNode.has(r.node_id)) {
-          canReviewByNode.set(
-            r.node_id,
-            (
-              await canUserApprove(
-                params.nestId,
-                r.node_id,
-                params.userEmail,
-              )
-            ).allowed,
-          );
-        }
-      }
+      // queue route), not per row — resolved in parallel across nodes.
+      const distinctNodeIds = [
+        ...new Set(rows.map((r) => r.node_id as string)),
+      ];
+      const canReviewByNode = new Map<string, boolean>(
+        await Promise.all(
+          distinctNodeIds.map(
+            async (nodeId): Promise<[string, boolean]> => [
+              nodeId,
+              (
+                await canUserApprove(params.nestId, nodeId, params.userEmail)
+              ).allowed,
+            ],
+          ),
+        ),
+      );
 
       changes = rows.map((row) => ({
         type: "change" as const,

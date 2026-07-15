@@ -228,6 +228,40 @@ describe("activity feed: changes + comments, newest first", () => {
     expect(paged).toEqual(all.data.items.map((i: any) => `${i.type}:${i.id}`));
   });
 
+  it("returns an empty page with intact counts past the end of the feed", async () => {
+    const { status, data } = await getFeed("?filter=comments&limit=2&offset=10");
+    expect(status).toBe(200);
+    expect(data.items).toEqual([]);
+    // Totals stay authoritative even when the page is empty — the UI's
+    // chip badge and load-more affordance bind to these.
+    expect(data.total).toBe(4);
+    expect(data.counts).toEqual({ changes: 1, comments: 4 });
+    expect(data.offset).toBe(10);
+    expect(data.limit).toBe(2);
+  });
+
+  it("clamps out-of-range limit and offset", async () => {
+    // Negative / non-numeric values fall back to defaults, not errors.
+    const bad = await getFeed("?limit=-5&offset=-3");
+    expect(bad.status).toBe(200);
+    expect(bad.data.limit).toBe(50);
+    expect(bad.data.offset).toBe(0);
+    expect(bad.data.items).toHaveLength(5);
+
+    const junk = await getFeed("?limit=abc&offset=abc");
+    expect(junk.data.limit).toBe(50);
+    expect(junk.data.offset).toBe(0);
+    expect(junk.data.items).toHaveLength(5);
+
+    // Oversized values are capped (limit 200, offset 10_000) so the merge
+    // window can't be grown without bound.
+    const huge = await getFeed("?limit=99999&offset=99999999");
+    expect(huge.data.limit).toBe(200);
+    expect(huge.data.offset).toBe(10000);
+    expect(huge.data.items).toEqual([]);
+    expect(huge.data.total).toBe(5);
+  });
+
   it("REGRESSION: the existing review-queue endpoint is unchanged", async () => {
     const { status, data } = await jsonRequest(
       app, "GET", `/nests/${nestId}/review-queue`, undefined, alice.apiKey,

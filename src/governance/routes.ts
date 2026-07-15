@@ -209,8 +209,13 @@ governanceRoutes.get("/feed", async (c) => {
   const filter =
     filterRaw === "changes" || filterRaw === "comments" ? filterRaw : "all";
   const limit = parseLimit(c.req.query("limit"), 50, 200);
+  // Cap offset: each source over-fetches offset+limit rows for the merge, so
+  // an unbounded offset would grow that window (and the sort) without bound.
   const offsetRaw = parseInt(c.req.query("offset") ?? "", 10);
-  const offset = Number.isNaN(offsetRaw) || offsetRaw < 0 ? 0 : offsetRaw;
+  const offset =
+    Number.isNaN(offsetRaw) || offsetRaw < 0
+      ? 0
+      : Math.min(offsetRaw, 10_000);
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
 

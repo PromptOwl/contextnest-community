@@ -485,7 +485,7 @@ So Postman will see more rows than the UI; that's expected.
 Full review history for a node.
 
 ### GET `/nests/:nestId/feed`
-Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200)
+Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
 
 Nest **activity feed** — pending change submissions (the exact rows
 `/review-queue` shows, every field intact, plus the caller's `canReview`)
