@@ -606,47 +606,77 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   );
                 })()}
 
-                {/* Presets — prefill the issuer for the two common IdPs. */}
-                <div>
-                  <div className="text-sm font-medium mb-1">Issuer URL</div>
-                  <div className="flex gap-2 mb-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        const tenant = window.prompt(
-                          "Microsoft Entra tenant ID (Directory ID) — find it on your app registration's Overview page:",
-                        );
-                        if (tenant && tenant.trim())
-                          set({
-                            oidc_issuer: `https://login.microsoftonline.com/${tenant.trim()}/v2.0`,
-                          });
-                      }}
-                    >
-                      Microsoft Entra ID
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() =>
-                        set({ oidc_issuer: "https://accounts.google.com" })
-                      }
-                    >
-                      Google
-                    </Button>
-                  </div>
-                  <TextField
-                    value={draft.oidc_issuer ?? ""}
-                    placeholder="https://login.microsoftonline.com/{tenant}/v2.0"
-                    onChange={(v) => set({ oidc_issuer: v })}
-                  />
-                  <p className="text-xs text-muted-foreground mt-1">
-                    https:// only. Must serve
-                    /.well-known/openid-configuration.
-                  </p>
-                </div>
+                {/* Presets — prefill the issuer for the two common IdPs, and
+                    reflect which one the current issuer matches so the buttons
+                    read as a selector rather than two identical actions. The
+                    match is derived from draft.oidc_issuer, so it also lights
+                    up when the issuer was typed/pasted by hand or loaded from
+                    the server. Anything else (a custom IdP, or blank) leaves
+                    both unselected. */}
+                {(() => {
+                  const issuer = draft.oidc_issuer?.trim() ?? "";
+                  const preset: "entra" | "google" | null =
+                    /^https:\/\/login\.microsoftonline\.com\/[^/]+\/v2\.0$/.test(
+                      issuer,
+                    )
+                      ? "entra"
+                      : issuer === "https://accounts.google.com"
+                        ? "google"
+                        : null;
+                  return (
+                    <div>
+                      <div className="text-sm font-medium mb-1">Issuer URL</div>
+                      <div
+                        className="flex gap-2 mb-2"
+                        role="group"
+                        aria-label="Identity provider preset"
+                      >
+                        <Button
+                          type="button"
+                          variant={preset === "entra" ? "default" : "outline"}
+                          size="sm"
+                          aria-pressed={preset === "entra"}
+                          onClick={() => {
+                            const tenant = window.prompt(
+                              "Microsoft Entra tenant ID (Directory ID) — find it on your app registration's Overview page:",
+                            );
+                            if (tenant && tenant.trim())
+                              set({
+                                oidc_issuer: `https://login.microsoftonline.com/${tenant.trim()}/v2.0`,
+                              });
+                          }}
+                        >
+                          Microsoft Entra ID
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={preset === "google" ? "default" : "outline"}
+                          size="sm"
+                          aria-pressed={preset === "google"}
+                          onClick={() =>
+                            set({ oidc_issuer: "https://accounts.google.com" })
+                          }
+                        >
+                          Google
+                        </Button>
+                        {preset === null && issuer !== "" && (
+                          <span className="self-center text-xs text-muted-foreground">
+                            Custom issuer
+                          </span>
+                        )}
+                      </div>
+                      <TextField
+                        value={draft.oidc_issuer ?? ""}
+                        placeholder="https://login.microsoftonline.com/{tenant}/v2.0"
+                        onChange={(v) => set({ oidc_issuer: v })}
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        https:// only. Must serve
+                        /.well-known/openid-configuration.
+                      </p>
+                    </div>
+                  );
+                })()}
 
                 <div>
                   <div className="text-sm font-medium mb-1">Client ID</div>
