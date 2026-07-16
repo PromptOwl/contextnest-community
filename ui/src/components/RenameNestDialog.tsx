@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Loader2, Pencil } from "lucide-react";
 import * as api from "../lib/api";
@@ -179,7 +180,7 @@ export function RenameNestDialog({
               Description{" "}
               <span className="text-muted-foreground">(optional)</span>
             </Label>
-            <Input
+            <Textarea
               id="rename-nest-description"
               value={description}
               onChange={(e) => {
@@ -189,6 +190,7 @@ export function RenameNestDialog({
               placeholder="What lives in this nest?"
               disabled={saving}
               autoComplete="off"
+              rows={3}
             />
           </div>
 
