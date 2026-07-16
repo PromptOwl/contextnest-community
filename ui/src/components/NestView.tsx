@@ -120,7 +120,14 @@ interface NestViewProps {
   isOwner: boolean;
   isAnonOwned: boolean;
   onBack: () => void;
-  onOpenDocument: (nodeId: string | "new", opts?: { folder?: string }) => void;
+  onOpenDocument: (
+    nodeId: string | "new",
+    opts?: {
+      folder?: string;
+      /** Open the document with this comment thread focused (feed deep-link). */
+      thread?: string;
+    },
+  ) => void;
   /** Open this nest's activity trace (owner/nest-admin only). */
   onOpenTrace?: () => void;
   /** Seed the search filter on mount. Used when arriving from a tag
@@ -198,6 +205,18 @@ export function NestView({
   // affordances for non-admin reviewers/editors who can't read the roster.
   const [myStewards, setMyStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
+  // Comment activity (annotation threads + replies) for the feed, already
+  // access-filtered server-side to docs the caller can read. Paged: the array
+  // holds the pages fetched so far; feedCommentsTotal is the server's
+  // authoritative counts.comments (array length undercounts once a nest
+  // outgrows one page — the default limit caps a page at 50).
+  const [feedComments, setFeedComments] = useState<api.FeedCommentItem[]>([]);
+  const [feedCommentsTotal, setFeedCommentsTotal] = useState(0);
+  const [feedLoadingMore, setFeedLoadingMore] = useState(false);
+  // Feed filter chips: All (default) / Changes / Comments.
+  const [feedFilter, setFeedFilter] = useState<"all" | "changes" | "comments">(
+    "all",
+  );
   const [externalEdits, setExternalEdits] = useState<api.ExternalEditEntry[]>([]);
   const [externalEditsLoading, setExternalEditsLoading] = useState(false);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
@@ -430,7 +449,7 @@ export function NestView({
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta, countsData] =
+    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta, countsData, feedData] =
       await Promise.all([
         api.listNodes(nestId).catch((e) => {
           console.error("[NestView] listNodes failed", nestId, e);
@@ -461,11 +480,35 @@ export function NestView({
           console.error("[NestView] getCommentCounts failed", nestId, e);
           return { counts: {} };
         }),
+        // Comment side of the activity feed — deliberately NOT filter=all.
+        // The server's change items are the RAW pending set, but this view
+        // renders reviewableQueue: the review-queue response post-filtered
+        // client-side by canReview + separation-of-duties (own submissions
+        // get their own card). Fetching filter=all would return change rows
+        // we'd have to re-filter and dedupe against that queue state, so the
+        // client pulls comments only and lets ReviewQueue interleave them
+        // with the already-filtered changes, using the same (createdAt, id)
+        // ordering as the server merge. If reviewable filtering ever moves
+        // server-side, collapse this into a single filter=all call.
+        api.getNestFeed(nestId, "comments").catch((e) => {
+          console.error("[NestView] getNestFeed failed", nestId, e);
+          return {
+            items: [] as api.FeedItem[],
+            counts: { changes: 0, comments: 0 },
+          };
+        }),
       ]);
     setCommentCounts(countsData.counts);
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
+    const commentItems = feedData.items.filter(
+      (i): i is api.FeedCommentItem => i.type === "comment",
+    );
+    setFeedComments(commentItems);
+    // Authoritative total (an older server without counts falls back to the
+    // page length, which is at least not wrong for single-page nests).
+    setFeedCommentsTotal(feedData.counts?.comments ?? commentItems.length);
     setStewardshipEnabled(settingsData.stewardship_enabled);
     setAllowSelfApprove(settingsData.allow_self_approve);
     setExternalEdits(externalData.entries);
@@ -483,6 +526,34 @@ export function NestView({
     setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
     setLoading(false);
   }, [nestId]);
+
+  // Next page of comment activity, appended under the feed. Offset by the
+  // rows already shown; a dedupe guard drops any row that slid into the next
+  // page because new comments landed above it between fetches.
+  const loadMoreComments = useCallback(async () => {
+    setFeedLoadingMore(true);
+    try {
+      const res = await api.getNestFeed(
+        nestId,
+        "comments",
+        50,
+        feedComments.length,
+      );
+      const fresh = res.items.filter(
+        (i): i is api.FeedCommentItem => i.type === "comment",
+      );
+      setFeedComments((prev) => {
+        const seen = new Set(prev.map((c) => c.id));
+        return [...prev, ...fresh.filter((c) => !seen.has(c.id))];
+      });
+      setFeedCommentsTotal(res.counts?.comments ?? res.total);
+    } catch (e: any) {
+      console.error("[NestView] getNestFeed load-more failed", nestId, e);
+      toast.error(e?.message || "Failed to load more comments");
+    } finally {
+      setFeedLoadingMore(false);
+    }
+  }, [nestId, feedComments.length]);
 
   const refreshExternalEdits = useCallback(async () => {
     setExternalEditsLoading(true);
@@ -863,7 +934,12 @@ export function NestView({
   // reached the nest via public visibility where the settings flag reads
   // false client-side).
   const showReviewTab =
-    stewardshipEnabled || caps.canReviewDocs || reviewQueue.length > 0;
+    stewardshipEnabled ||
+    caps.canReviewDocs ||
+    reviewQueue.length > 0 ||
+    // Comment activity renders in the same tab (the queue is now a feed) —
+    // discussion must stay reachable even with stewardship off.
+    feedCommentsTotal > 0;
 
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
@@ -2503,10 +2579,36 @@ export function NestView({
 
         {showReviewTab && (
           <TabsContent value="review" className="space-y-4">
+            {/* Feed filter chips — All shows changes + comments interleaved;
+                Changes is the legacy queue; Comments is discussion only. */}
+            <div className="flex items-center gap-1.5" data-testid="feed-filter-chips">
+              {(
+                [
+                  { key: "all", label: "All" },
+                  { key: "changes", label: `Changes (${reviewableQueue.length})` },
+                  // Authoritative server count — the loaded array is paged.
+                  { key: "comments", label: `Comments (${feedCommentsTotal})` },
+                ] as const
+              ).map((chip) => (
+                <button
+                  key={chip.key}
+                  type="button"
+                  onClick={() => setFeedFilter(chip.key)}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                    feedFilter === chip.key
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
+                  }`}
+                  data-testid={`feed-filter-${chip.key}`}
+                >
+                  {chip.label}
+                </button>
+              ))}
+            </div>
             {/* The caller's own submissions, kept out of the actionable queue
                 by separation-of-duties. Shown read-only so "submit for review"
                 visibly lands somewhere. */}
-            {myPendingSubmissions.length > 0 && (
+            {feedFilter !== "comments" && myPendingSubmissions.length > 0 && (
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-lg flex items-center gap-2">
@@ -2535,7 +2637,13 @@ export function NestView({
               </Card>
             )}
             <ReviewQueue
-              requests={reviewableQueue}
+              requests={feedFilter === "comments" ? [] : reviewableQueue}
+              // Feed mode (interleaved comment rows) except on the Changes
+              // chip, which renders the legacy changes-only queue untouched.
+              comments={feedFilter === "changes" ? undefined : feedComments}
+              onSelectComment={(cm) =>
+                onOpenDocument(cm.nodeId, { thread: cm.threadId })
+              }
               loading={loading}
               onRefresh={fetchData}
               onSelect={(req) => {
@@ -2553,11 +2661,33 @@ export function NestView({
                 );
               }}
             />
+            {/* Comment activity is paged (50/page) — fetch the next page when
+                more exists than what's loaded. Changes need no pager: they're
+                the actionable pending set the queue already shows in full. */}
+            {feedFilter !== "changes" &&
+              feedComments.length < feedCommentsTotal && (
+                <div className="flex justify-center">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={loadMoreComments}
+                    disabled={feedLoadingMore}
+                    data-testid="feed-load-more"
+                  >
+                    {feedLoadingMore ? (
+                      <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                    ) : null}
+                    Load more comments (
+                    {feedCommentsTotal - feedComments.length} remaining)
+                  </Button>
+                </div>
+              )}
             {/* When the raw queue has entries but the reviewable filter
                 emptied it, the queue card says "All caught up!" — which
                 is wrong. Surface the gap so the user knows items exist
                 but aren't actionable by them (scope or SoD). */}
-            {reviewQueue.length > 0 && reviewableQueue.length === 0 && (
+            {feedFilter !== "comments" &&
+              reviewQueue.length > 0 && reviewableQueue.length === 0 && (
               <p className="text-xs text-muted-foreground text-center">
                 {reviewQueue.length} pending review
                 {reviewQueue.length === 1 ? "" : "s"} in this nest, but

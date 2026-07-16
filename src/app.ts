@@ -940,6 +940,13 @@ export function createApp(): Hono<AuthEnv> {
         /\/comments$/.test(path) ||
         /\/comments\/[^/]+\/resolve$/.test(path);
       const isActivityPath = /\/activity$/.test(path);
+      // The activity feed serves the review queue's rows under another URL
+      // (/nests/:id/feed?filter=changes), so it must sit behind the same
+      // license gate as /review-queue. Match the exact nest-scoped route
+      // shape via the already-split path segments — NOT includes("/feed"),
+      // which a node slug like nodes/product-feed would false-positive
+      // (parts = [nestId, "feed"] only for the real feed route).
+      const isFeedPath = parts.length === 2 && parts[1] === "feed";
       const isGovernance =
         path.includes("/stewards") ||
         path.includes("/review-queue") ||
@@ -953,7 +960,8 @@ export function createApp(): Hono<AuthEnv> {
         path.includes("/can-approve") ||
         path.includes("/can-edit") ||
         isCommentPath ||
-        isActivityPath;
+        isActivityPath ||
+        isFeedPath;
       const needsLicense = c.req.method !== "GET" || isGovernance;
       if (needsLicense) {
         const lic = getCurrentLicense();

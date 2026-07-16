@@ -123,6 +123,10 @@ interface DocumentEditorProps {
   initialTitle?: string;
   /** Pre-file a NEW doc into this folder (folder-tree + buttons). */
   initialFolder?: string;
+  /** Open with this comment thread focused — comment mode on, the thread
+   *  emphasized in the rail, and its anchored quote scrolled into view.
+   *  Set by the nest activity feed / ?thread= deep link. */
+  initialThreadId?: string;
   /** Prior wiki-link hops, oldest first; rendered as clickable chips. */
   breadcrumb?: BreadcrumbEntry[];
   /** Jump to ancestor at `index`; drops entries after it. */
@@ -134,6 +138,7 @@ export function DocumentEditor({
   nestName,
   nodeId,
   initialFolder,
+  initialThreadId,
   isOwner = false,
   onBack,
   onSaved,
@@ -277,6 +282,25 @@ export function DocumentEditor({
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const anchorRangesRef = useRef<{ id: string; range: Range }[]>([]);
   const pendingFocusRef = useRef<string | null>(null);
+
+  // Feed deep-link (?thread= / activity-feed click): once the rail has loaded
+  // threads (reported via onThreadsChange) and the target exists, flip into
+  // comment mode with that thread active. The rail scrolls the active thread
+  // into view; pendingFocusRef scrolls the doc to its anchored quote once the
+  // rendered view builds highlight ranges. Consumed once — later thread churn
+  // (replies, resolves) must not re-yank the view.
+  const initialThreadConsumedRef = useRef(false);
+  useEffect(() => {
+    if (!initialThreadId || initialThreadConsumedRef.current) return;
+    const hit = anchoredThreads.find((t) => t.id === initialThreadId);
+    if (!hit) return;
+    initialThreadConsumedRef.current = true;
+    setCommentMode(true);
+    setMode("view");
+    setActiveThreadId(hit.id);
+    if (hit.anchor?.quote) pendingFocusRef.current = hit.id;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchoredThreads, initialThreadId]);
 
   // Read the current selection inside the rendered doc and, if non-empty,
   // surface a floating "Comment" button at the selection. We build the anchor
@@ -1083,6 +1107,7 @@ export function DocumentEditor({
         currentEmail={currentEmail}
         viewOnly={isViewOnly}
         reviewerOnly={isReviewerOnly}
+        initialThreadId={initialThreadId}
         onBack={onBack}
       />
     );

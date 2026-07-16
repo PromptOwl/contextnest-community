@@ -736,6 +736,65 @@ export async function getReviewQueue(nestId: string, status = "pending") {
   );
 }
 
+// ── Nest activity feed (changes + comments) ───────────────────────────────
+
+export type FeedFilter = "all" | "changes" | "comments";
+
+/** A pending change submission — same fields the review queue returns. */
+export interface FeedChangeItem {
+  type: "change";
+  id: string;
+  nestId: string;
+  nodeId: string;
+  title?: string;
+  version: number;
+  requestedBy: string;
+  requestedAt: string;
+  requestNote?: string;
+  status: string;
+  priority: string;
+  canReview: boolean;
+  createdAt: string;
+}
+
+/** One comment event — a new annotation thread, or a reply on one. */
+export interface FeedCommentItem {
+  type: "comment";
+  id: string;
+  threadId: string;
+  nodeId: string;
+  title?: string;
+  author: string;
+  snippet: string;
+  createdAt: string;
+  resolved: boolean;
+  isReply: boolean;
+}
+
+export type FeedItem = FeedChangeItem | FeedCommentItem;
+
+/** Activity feed: pending changes + annotation activity, newest first. */
+export async function getNestFeed(
+  nestId: string,
+  filter: FeedFilter = "all",
+  limit = 50,
+  offset = 0,
+) {
+  const params = new URLSearchParams({
+    filter,
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return request<{
+    items: FeedItem[];
+    total: number;
+    counts: { changes: number; comments: number };
+    filter: FeedFilter;
+    limit: number;
+    offset: number;
+  }>(`/nests/${nestId}/feed?${params.toString()}`);
+}
+
 export async function submitForReview(
   nestId: string,
   nodeId: string,
