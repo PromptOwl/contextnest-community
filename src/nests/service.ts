@@ -323,6 +323,53 @@ export function isAnonymousNest(nest: Pick<Nest, "user_id">): boolean {
   return nest.user_id === ANON_USER_ID;
 }
 
+/**
+ * Nests reachable because the user is a member of a team shared onto them.
+ * Read-only listing helper — access + role for every action still resolve
+ * through resolveNestPermission/resolveUserRoles (which already fold in teams),
+ * so this only makes those nests visible on the dashboard. Pure JS filtering so
+ * it works identically on SQLite and Postgres (shared_teams/members are TEXT
+ * JSON on both).
+ */
+async function nestsSharedViaTeams(userId: string): Promise<Nest[]> {
+  const db = getDb();
+  // Narrow in SQL first — this runs on every dashboard load, so it must never
+  // pull every team (or every team-shared nest) in the deployment into memory.
+  // The LIKE prefilter can't false-negative (a member id always appears
+  // verbatim in the JSON); the JS pass below confirms real membership.
+  const teams = (await db.all(
+    "SELECT id, members FROM teams WHERE members LIKE ?",
+    [`%${userId}%`],
+  )) as Array<{ id: string; members: string }>;
+  const myTeamIds = new Set<string>();
+  for (const t of teams) {
+    try {
+      const members = JSON.parse(t.members || "[]");
+      if (Array.isArray(members) && members.some((m: any) => m?.userId === userId)) {
+        myTeamIds.add(t.id);
+      }
+    } catch {
+      /* skip malformed roster */
+    }
+  }
+  if (myTeamIds.size === 0) return [];
+  const ids = [...myTeamIds];
+  const candidates = (await db.all(
+    `SELECT * FROM nests
+       WHERE user_id != ?
+         AND (${ids.map(() => "shared_teams LIKE ?").join(" OR ")})`,
+    [userId, ...ids.map((id) => `%${id}%`)],
+  )) as Array<Nest & { shared_teams?: string }>;
+  return candidates.filter((n) => {
+    try {
+      const refs = JSON.parse(n.shared_teams || "[]");
+      return Array.isArray(refs) && refs.some((r: any) => myTeamIds.has(r?.teamId));
+    } catch {
+      return false;
+    }
+  });
+}
+
 export async function listSharedNests(userId: string): Promise<Nest[]> {
   const db = getDb();
   // Server admin (license admin or access.yaml super_admin) administers every
@@ -342,9 +389,9 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
     )) as Nest[];
   }
   // Shared = collaborator grant OR active steward assignment (matched by
-  // email, since steward rows may predate the account). Both are
-  // independent paths to a nest the user doesn't own.
-  return (await db.all(
+  // email, since steward rows may predate the account) OR membership of a team
+  // shared onto the nest. Independent paths to a nest the user doesn't own.
+  const direct = (await db.all(
     `SELECT DISTINCT n.* FROM nests n
        LEFT JOIN nest_collaborators nc
          ON nc.nest_id = n.id AND nc.user_id = ?
@@ -357,6 +404,20 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
        ORDER BY n.created_at DESC`,
     [userId, userId, userId],
   )) as Nest[];
+
+  // Fold in team-shared nests, deduped by id. Re-sort newest-first so the
+  // merged list keeps the same ordering as the direct query.
+  const seen = new Set(direct.map((n) => n.id));
+  for (const n of await nestsSharedViaTeams(userId)) {
+    if (!seen.has(n.id)) {
+      direct.push(n);
+      seen.add(n.id);
+    }
+  }
+  direct.sort((a, b) =>
+    a.created_at === b.created_at ? 0 : a.created_at < b.created_at ? 1 : -1,
+  );
+  return direct;
 }
 
 /** Public nests not owned/shared by caller. Route dedupes vs listNests. */

@@ -12,6 +12,7 @@ describe("PATCH /nests/:nestId", () => {
   let alice: { apiKey: string; userId: string };
   let bob: { apiKey: string; userId: string };
   let aliceNestId: string;
+  let bobCollabId: string;
 
   beforeAll(async () => {
     env = setupTestEnv();
@@ -98,5 +99,49 @@ describe("PATCH /nests/:nestId", () => {
     // Bob cannot see Alice's private nest at all → 404 is the right answer,
     // and matches how every other nest-scoped route behaves.
     expect(status).toBe(404);
+  });
+
+  it("403s a write collaborator (visible but below owner/admin)", async () => {
+    const share = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${aliceNestId}/collaborators`,
+      { email: "bob@test.com", permission: "write" },
+      alice.apiKey,
+    );
+    expect(share.status).toBe(201);
+    bobCollabId = share.data.collaborator.id;
+    const { status, data } = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${aliceNestId}`,
+      { name: "Hijacked By Editor" },
+      bob.apiKey,
+    );
+    // Bob can now SEE the nest, so this exercises the real ForbiddenError
+    // branch (owner/admin-only) rather than the 404 invisibility path.
+    expect(status).toBe(403);
+    expect(String(data.error ?? "")).toMatch(/owner or an admin/i);
+  });
+
+  it("allows a nest-admin collaborator to rename", async () => {
+    const upgrade = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${aliceNestId}/collaborators/${bobCollabId}`,
+      { permission: "admin" },
+      alice.apiKey,
+    );
+    expect(upgrade.status).toBe(200);
+    const { status, data } = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${aliceNestId}`,
+      { name: "Admin Renamed" },
+      bob.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.nest.name).toBe("Admin Renamed");
+    expect(data.nest.slug).toBe("admin-renamed");
   });
 });

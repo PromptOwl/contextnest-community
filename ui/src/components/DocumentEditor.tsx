@@ -49,6 +49,7 @@ import {
   type MarkdownEditorHandle,
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
+import { AuthorshipChips } from "./AuthorshipChips";
 import { TableViewer } from "./TableViewer";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
@@ -191,6 +192,10 @@ export function DocumentEditor({
   const [tagInput, setTagInput] = useState("");
   const [baseVersion, setBaseVersion] = useState<number | undefined>(undefined);
   const [status, setStatus] = useState<string | null>(null);
+  // Creator + everyone else with a hand in the doc (version authors ∪
+  // document-scope grantees) — server-resolved on GET /nodes/:id.
+  const [author, setAuthor] = useState<string | null>(null);
+  const [collaborators, setCollaborators] = useState<string[]>([]);
   const [pendingChange, setPendingChange] = useState<PendingChange | null>(null);
   // Submitter of the active pending review (null when not pending).
   // Drives SoD on the inline approve/reject: the user who submitted
@@ -690,6 +695,12 @@ export function DocumentEditor({
       setSchedule(loadedSchedule);
       setBaseVersion(node?.version);
       setStatus(node?.status ?? null);
+      setAuthor(node?.author ?? null);
+      setCollaborators(
+        Array.isArray(node?.collaborators)
+          ? node.collaborators.map((e: unknown) => String(e))
+          : [],
+      );
       setPendingChange((node as any)?.pendingChange ?? null);
       setPendingReviewBy(
         ((node as any)?.pendingReviewBy as string | null | undefined) ?? null,
@@ -1607,6 +1618,33 @@ export function DocumentEditor({
               </div>
             )}
           </div>
+
+          {/* People — "Created by" + collaborator chips (version authors ∪
+              document grantees, server-resolved). Hidden entirely for docs
+              with no recorded author (old imports) and no collaborators. */}
+          {!isNew && (author || collaborators.length > 0) && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              {author && (
+                <span className="inline-flex items-center gap-1.5">
+                  Created by <span className="font-medium text-foreground/80">{author}</span>
+                </span>
+              )}
+              {collaborators.length > 0 && (
+                <span
+                  className="inline-flex items-center gap-1.5"
+                  title={collaborators.join(", ")}
+                >
+                  <AuthorshipChips
+                    collaborators={collaborators}
+                    max={5}
+                    size="md"
+                  />
+                  {collaborators.length} collaborator
+                  {collaborators.length !== 1 ? "s" : ""}
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Outline/TOC — view mode, only when the doc has real structure. */}
           {mode === "view" &&

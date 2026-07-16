@@ -11,6 +11,7 @@ import { isSuperAdmin } from "./access-service.js";
 import { ConflictError, ValidationError } from "../shared/errors.js";
 import { buildTitleMap } from "./title-resolver.js";
 import { resolveNestPermission } from "../shared/access.js";
+import { resolveTeamRolesForUser } from "./teams-service.js";
 import { nestAllowsSelfApprove } from "../nests/service.js";
 import { config } from "../config.js";
 import {
@@ -568,6 +569,15 @@ export async function resolveUserRoles(
   if (userId) {
     const collabRole = collabPermToRole(await resolveNestPermission(nestId, userId));
     if (collabRole) roles.add(collabRole);
+
+    // Team membership contributes governance roles directly (nest-wide, not
+    // node-scoped). Added as the raw member role — NOT flattened through
+    // resolveNestPermission/collabPermToRole, which would collapse 'reviewer'
+    // to 'editor' and strip approval rights. All roles the user holds across
+    // shared teams count (editor via one + reviewer via another → both).
+    for (const role of await resolveTeamRolesForUser(nestId, userId)) {
+      roles.add(role);
+    }
   }
 
   // Steward assignments — scoped to the node when one is given.

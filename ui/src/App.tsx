@@ -5,6 +5,7 @@ import { NestView } from "./components/NestView";
 import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
+import { TeamsPage } from "./components/TeamsPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { WorkflowsView } from "./components/WorkflowsView";
 import { GuidePage } from "./components/GuidePage";
@@ -77,6 +78,7 @@ type View =
       breadcrumb?: BreadcrumbEntry[];
     }
   | { page: "teammates" }
+  | { page: "teams" }
   | { page: "settings" }
   | { page: "guide" }
   | { page: "trace" }
@@ -654,6 +656,7 @@ export default function App() {
                 me={adminStatus.me}
                 isAdmin={isAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
+                onTeams={() => setView({ page: "teams" })}
                 onSettings={() => setView({ page: "settings" })}
                 onGuide={() => setView({ page: "guide" })}
                 onTrace={() => setView({ page: "trace" })}
@@ -902,6 +905,9 @@ export default function App() {
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}
+        {view.page === "teams" && (
+          <TeamsPage onBack={() => setView({ page: "dashboard" })} />
+        )}
 
         {view.page === "settings" && (
           <SettingsPage
@@ -972,6 +978,7 @@ interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
   onTeammates: () => void;
+  onTeams: () => void;
   onSettings: () => void;
   onGuide: () => void;
   onTrace: () => void;
@@ -983,6 +990,7 @@ function UserMenu({
   me,
   isAdmin,
   onTeammates,
+  onTeams,
   onSettings,
   onGuide,
   onTrace,
@@ -1051,6 +1059,10 @@ function UserMenu({
           </>
         )}
         <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onTeams} className="cursor-pointer">
+          <Users className="h-3.5 w-3.5 mr-2" />
+          Teams
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={onGuide} className="cursor-pointer">
           <BookOpen className="h-3.5 w-3.5 mr-2" />
           How it works
