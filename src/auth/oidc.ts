@@ -34,8 +34,12 @@ import { clientIp } from "../shared/request-ip.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { hashPassword } from "./keys.js";
 import {
+  buildClearSessionCookie,
+  buildOidcMarkerCookie,
   buildSessionCookie,
   createSession,
+  deleteSession,
+  getSessionIdFromRequest,
   isSecureRequest,
 } from "./sessions.js";
 import type { AuthEnv } from "./middleware.js";
@@ -74,6 +78,10 @@ interface DiscoveryDoc {
   authorization_endpoint: string;
   token_endpoint: string;
   jwks_uri: string;
+  // Optional (OIDC RP-initiated logout, and not all IdPs advertise it —
+  // Google notably omits it). Present → GET /auth/oidc/logout can bounce the
+  // browser through the IdP so its session ends too; absent → local-only.
+  end_session_endpoint?: string;
 }
 
 // In-module discovery cache with a short TTL — one metadata fetch per window
@@ -294,6 +302,11 @@ oidcRoutes.get("/callback", async (c) => {
   }
 
   // ── Code exchange (confidential client + PKCE) ─────────────────────────
+  // Client authentication is client_secret_post (secret in the body). Every
+  // shipped preset — Entra v2, Google, Okta, Keycloak — accepts it. An IdP
+  // configured to REQUIRE client_secret_basic (secret in an Authorization:
+  // Basic header) is unsupported for now; add discovery-driven negotiation
+  // (token_endpoint_auth_methods_supported) if a real client needs it.
   let idToken: string;
   try {
     const tokenRes = await fetch(doc.token_endpoint, {
@@ -406,26 +419,86 @@ oidcRoutes.get("/callback", async (c) => {
       // possible only after an admin reset).
       const userId = uuid();
       const placeholderHash = await hashPassword(uuid());
-      await db.run(
-        "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
-        [userId, email, name, placeholderHash],
-      );
-      user = { id: userId, email, name };
-      trackEvent("user.register", { userId, email, method: "oidc" });
+      try {
+        await db.run(
+          "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+          [userId, email, name, placeholderHash],
+        );
+        user = { id: userId, email, name };
+        trackEvent("user.register", { userId, email, method: "oidc" });
+      } catch (insErr) {
+        // Two callbacks for the same brand-new email can race: the unique
+        // index on users.email rejects the loser's INSERT. That's not a
+        // failure — the row now exists — so re-read and sign them in rather
+        // than bouncing service_error. Any OTHER error is a real fault.
+        const raced = (await db.get(
+          "SELECT id, email, name FROM users WHERE LOWER(email) = ?",
+          [email],
+        )) as { id: string; email: string; name: string | null } | undefined;
+        if (!raced) throw insErr;
+        user = raced;
+        trackEvent("user.login", { userId: user.id, method: "oidc" });
+      }
     } else {
       trackEvent("user.login", { userId: user.id, method: "oidc" });
     }
 
     // Same session mechanics as a successful password login: sessions-table
-    // row + httpOnly cookie (Secure on HTTPS), then land on the app.
+    // row + httpOnly cookie (Secure on HTTPS), then land on the app. Plus the
+    // non-secret SSO marker so the SPA routes logout through the IdP.
     const sessionId = await createSession(user.id, c.req.header("User-Agent"));
     clearFlowCookies();
     c.header("Set-Cookie", buildSessionCookie(sessionId, { secure }), {
       append: true,
     });
+    c.header("Set-Cookie", buildOidcMarkerCookie({ secure }), { append: true });
     return c.redirect("/", 302);
   } catch (err) {
     console.error("[oidc] provisioning/session failed:", err);
     return bounce("service_error");
   }
+});
+
+// GET /auth/oidc/logout — RP-initiated logout. Tear down the local session
+// (same as POST /auth/logout), then, if the IdP advertises an
+// end_session_endpoint, bounce the browser through it so the IdP session ends
+// too — otherwise a "sign out" leaves the IdP logged in and the next SSO
+// click silently re-authenticates. Only SSO sessions reach here: the SPA
+// routes to this URL solely when the cnst_sso_session marker is set.
+//
+// Always clears cookies and always lands the user back on "/", even if
+// discovery is down or the IdP has no logout endpoint (Google) — logout must
+// never leave the user stuck signed-in locally because the IdP was
+// unreachable.
+oidcRoutes.get("/logout", async (c) => {
+  const secure = isSecureRequest(c);
+  const sessionId = getSessionIdFromRequest(c);
+  if (sessionId) {
+    try {
+      await deleteSession(sessionId);
+    } catch (err) {
+      console.error("[oidc] logout: failed to delete session:", err);
+    }
+  }
+  c.header("Set-Cookie", buildClearSessionCookie({ secure }), { append: true });
+  c.header("Set-Cookie", buildOidcMarkerCookie({ secure, clear: true }), {
+    append: true,
+  });
+
+  const home = `${requestBaseUrl(c.req.url)}/`;
+  if (isOidcReady()) {
+    try {
+      const { doc } = await discover(config.OIDC_ISSUER);
+      if (doc.end_session_endpoint) {
+        const url = new URL(doc.end_session_endpoint);
+        url.searchParams.set("post_logout_redirect_uri", home);
+        url.searchParams.set("client_id", config.OIDC_CLIENT_ID);
+        return c.redirect(url.toString(), 302);
+      }
+    } catch (err) {
+      // Discovery down → fall through to a clean local logout.
+      console.error("[oidc] logout: discovery failed, local-only:", err);
+    }
+  }
+  return c.redirect(home, 302);
 });

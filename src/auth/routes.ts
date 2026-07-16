@@ -13,6 +13,7 @@ import {
 import { authMiddleware, type AuthEnv } from "./middleware.js";
 import {
   buildClearSessionCookie,
+  buildOidcMarkerCookie,
   buildSessionCookie,
   createSession,
   deleteAllSessionsForUser,
@@ -445,6 +446,14 @@ authRoutes.post("/logout", async (c) => {
   const sessionId = getSessionIdFromRequest(c);
   if (sessionId) await deleteSession(sessionId);
   clearSessionCookie(c);
+  // Also clear the OIDC SSO marker so it can't linger past a local logout.
+  // (SSO sessions normally sign out via GET /auth/oidc/logout, which does
+  // the IdP round-trip; this is the fallback path.)
+  c.header(
+    "Set-Cookie",
+    buildOidcMarkerCookie({ secure: isSecureRequest(c), clear: true }),
+    { append: true },
+  );
   return c.json({ ok: true });
 });
 

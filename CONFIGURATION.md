@@ -136,6 +136,23 @@ Google Cloud console, add the same redirect URI under *Authorized redirect
 URIs*, and use the **Google** preset (issuer `https://accounts.google.com`)
 with that client ID/secret.
 
+### Revoking access (offboarding)
+
+Disabling a user **at the IdP** only blocks *new* sign-ins — an existing
+ContextNest session stays valid until it expires (30 days). To cut access
+immediately, **remove the user in ContextNest** (Settings → users): that wipes
+all of their active sessions at once. Real offboarding is therefore two steps —
+disable at the IdP *and* remove in ContextNest — with the ContextNest step being
+the one that ends live sessions.
+
+When a user signs themselves out, ContextNest performs an **RP-initiated
+logout**: if the IdP advertises an `end_session_endpoint` (Entra, Okta,
+Keycloak do; Google does not), the browser is bounced through it so the IdP
+session ends too and the next "Sign in with SSO" click doesn't silently
+re-authenticate. Where the IdP has no logout endpoint, the local session is
+cleared and the user lands back on the login page (the IdP session persists —
+that's the IdP's own timeout to manage).
+
 ### Email-verification trust assumption
 
 An ID token whose `email_verified` claim is **explicitly `false`** is refused

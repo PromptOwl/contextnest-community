@@ -75,7 +75,7 @@ async function makeKeys() {
  */
 function installMockIssuer(
   jwks: object,
-  opts: { discoveryIssuer?: string } = {},
+  opts: { discoveryIssuer?: string; endSessionEndpoint?: string } = {},
 ) {
   const state: {
     tokenBody: Record<string, unknown> | null;
@@ -99,6 +99,11 @@ function installMockIssuer(
         authorization_endpoint: `${ISSUER}/authorize`,
         token_endpoint: `${ISSUER}/token`,
         jwks_uri: `${ISSUER}/jwks`,
+        // Only advertised when a test opts in (mirrors Entra/Okta/Keycloak;
+        // Google omits it). Drives RP-initiated logout.
+        ...(opts.endSessionEndpoint && {
+          end_session_endpoint: opts.endSessionEndpoint,
+        }),
       });
     }
     if (url === `${ISSUER}/jwks`) return json(jwks);
@@ -258,6 +263,8 @@ describe("GET /auth/oidc/callback", () => {
     // Session cookie set exactly like a password login (opaque 64-hex id).
     const cookies = cookiesOf(res);
     expect(cookies["cnst_session"]).toMatch(/^[0-9a-f]{64}$/);
+    // SSO marker set so the SPA routes logout through the IdP.
+    expect(cookies["cnst_sso_session"]).toBe("1");
     // Flow cookies cleared.
     expect(cookies["cnst_oidc_state"]).toBe("");
 
@@ -607,6 +614,127 @@ describe("GET /auth/oidc/callback", () => {
       { headers: { Cookie: flow.cookieHeader } },
     );
     expect(ssoError(res)).toBe("exchange_failed");
+  });
+
+  // Two callbacks for the same brand-new email race; the loser's INSERT hits
+  // the unique index on users.email. The flow must re-read the now-existing
+  // row and sign the second request in, NOT bounce service_error. Simulated
+  // by pre-creating the user between login and callback so the JIT INSERT
+  // deterministically collides.
+  it("signs in gracefully when JIT provisioning loses the unique-email race", async () => {
+    const { privateKey, jwks } = await makeKeys();
+    const issuer = installMockIssuer(jwks);
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    configureOidc();
+
+    const flow = await startLogin(app);
+    issuer.tokenBody = {
+      id_token: await signIdToken(privateKey, {
+        nonce: flow.nonce,
+        email: "raced@acme.com",
+        name: "Raced User",
+      }),
+    };
+
+    // The concurrent callback already created the row.
+    const { getDb } = await import("../src/db/client.js");
+    const { v4: uuid } = await import("uuid");
+    const winnerId = uuid();
+    await getDb().run(
+      "INSERT INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+      [winnerId, "raced@acme.com", "Raced User", "x"],
+    );
+
+    const res = await app.request(
+      `/auth/oidc/callback?code=c&state=${flow.state}`,
+      { headers: { Cookie: flow.cookieHeader } },
+    );
+    // Signed in against the existing row — no service_error, no duplicate.
+    expect(res.headers.get("Location")).toBe("/");
+    expect(cookiesOf(res)["cnst_session"]).toMatch(/^[0-9a-f]{64}$/);
+    const rows = (await getDb().all(
+      "SELECT id FROM users WHERE LOWER(email) = ?",
+      ["raced@acme.com"],
+    )) as unknown[];
+    expect(rows.length).toBe(1);
+  });
+});
+
+// ─── /auth/oidc/logout (RP-initiated logout) ──────────────────────────────
+
+describe("GET /auth/oidc/logout", () => {
+  it("redirects through the IdP end_session_endpoint and kills the session", async () => {
+    const { privateKey, jwks } = await makeKeys();
+    const issuer = installMockIssuer(jwks, {
+      endSessionEndpoint: `${ISSUER}/logout`,
+    });
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    configureOidc();
+
+    const flow = await startLogin(app);
+    issuer.tokenBody = {
+      id_token: await signIdToken(privateKey, {
+        nonce: flow.nonce,
+        email: "member@acme.com",
+      }),
+    };
+    const cb = await app.request(
+      `/auth/oidc/callback?code=c&state=${flow.state}`,
+      { headers: { Cookie: flow.cookieHeader } },
+    );
+    const sid = cookiesOf(cb)["cnst_session"];
+    expect(sid).toMatch(/^[0-9a-f]{64}$/);
+
+    const res = await app.request("/auth/oidc/logout", {
+      headers: { Cookie: `cnst_session=${sid}` },
+    });
+    expect(res.status).toBe(302);
+    const loc = new URL(res.headers.get("Location")!);
+    expect(loc.origin + loc.pathname).toBe(`${ISSUER}/logout`);
+    expect(loc.searchParams.get("post_logout_redirect_uri")).toContain(
+      "/",
+    );
+    expect(loc.searchParams.get("client_id")).toBe(CLIENT_ID);
+
+    // Session gone; both cookies cleared.
+    const cookies = cookiesOf(res);
+    expect(cookies["cnst_session"]).toBe("");
+    expect(cookies["cnst_sso_session"]).toBe("");
+    const { getDb } = await import("../src/db/client.js");
+    const row = await getDb().get("SELECT id FROM sessions WHERE id = ?", [sid]);
+    expect(row).toBeUndefined();
+  });
+
+  it("falls back to a local logout when the IdP has no end_session_endpoint (Google)", async () => {
+    const { privateKey, jwks } = await makeKeys();
+    const issuer = installMockIssuer(jwks); // no endSessionEndpoint
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    configureOidc();
+
+    const flow = await startLogin(app);
+    issuer.tokenBody = {
+      id_token: await signIdToken(privateKey, {
+        nonce: flow.nonce,
+        email: "member@acme.com",
+      }),
+    };
+    const cb = await app.request(
+      `/auth/oidc/callback?code=c&state=${flow.state}`,
+      { headers: { Cookie: flow.cookieHeader } },
+    );
+    const sid = cookiesOf(cb)["cnst_session"];
+
+    const res = await app.request("/auth/oidc/logout", {
+      headers: { Cookie: `cnst_session=${sid}` },
+    });
+    expect(res.status).toBe(302);
+    // Straight home, not to any IdP endpoint.
+    expect(new URL(res.headers.get("Location")!).pathname).toBe("/");
+    expect(cookiesOf(res)["cnst_session"]).toBe("");
+    expect(cookiesOf(res)["cnst_sso_session"]).toBe("");
+    const { getDb } = await import("../src/db/client.js");
+    const row = await getDb().get("SELECT id FROM sessions WHERE id = ?", [sid]);
+    expect(row).toBeUndefined();
   });
 });
 

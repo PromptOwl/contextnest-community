@@ -260,6 +260,19 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const logout = useCallback(async () => {
     ++seqRef.current;
+    // If this session was started via OIDC SSO, the server set a readable
+    // marker cookie. Route logout through GET /auth/oidc/logout so the IdP
+    // session ends too (RP-initiated logout) — otherwise the next "Sign in
+    // with SSO" click silently re-authenticates. That endpoint tears the
+    // local session down server-side and redirects back to "/", so we hand
+    // the whole tab over to it rather than calling api.logout().
+    const ssoSession = document.cookie
+      .split(";")
+      .some((c) => c.trim().startsWith("cnst_sso_session="));
+    if (ssoSession) {
+      window.location.assign("/auth/oidc/logout");
+      return;
+    }
     try {
       await api.logout();
     } catch {
