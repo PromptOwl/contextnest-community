@@ -96,6 +96,29 @@ const TABS: {
   },
 ];
 
+/**
+ * Attributes that keep credential managers out of the settings fields.
+ *
+ * Nothing on this page is the admin's OWN credential — they're server-side
+ * secrets (OIDC client secret, Anthropic key, SMTP URL). Left alone, Chrome
+ * and the password-manager extensions read a `type="password"` box as a login
+ * form and stuff the admin's saved password into it, which then SAVES as the
+ * server's config on the next PATCH. Silent, and confusing to unpick.
+ *
+ * Three different opt-outs because they honour different things:
+ *   - autoComplete="new-password" — the only value Chrome/Safari respect on a
+ *     password input; plain "off" is ignored there by design.
+ *   - data-1p-ignore / data-lpignore — 1Password and LastPass ignore the
+ *     autocomplete attribute entirely and need their own vendor opt-out.
+ */
+const noAutofill = (type: string) =>
+  ({
+    autoComplete: type === "password" ? "new-password" : "off",
+    "data-1p-ignore": true,
+    "data-lpignore": "true",
+    "data-form-type": "other",
+  }) as const;
+
 /** Controlled text input bound straight to the draft (no per-field Save). */
 function TextField({
   value,
@@ -115,6 +138,7 @@ function TextField({
       placeholder={placeholder}
       onChange={(e) => onChange(e.target.value)}
       className="flex-1"
+      {...noAutofill(type)}
     />
   );
 }
@@ -140,6 +164,7 @@ function MbField({
           if (Number.isFinite(n) && n > 0)
             onChange(Math.floor(n * 1024 * 1024));
         }}
+        {...noAutofill("number")}
       />
       <span className="text-sm text-muted-foreground shrink-0">MB</span>
     </div>
@@ -173,6 +198,7 @@ function NumField({
         const n = Number(e.target.value);
         if (Number.isInteger(n)) onChange(n);
       }}
+      {...noAutofill("number")}
     />
   );
 }
@@ -551,8 +577,9 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                 {/* "On with a dead flow" is legal server state (e.g. the
                     secret was cleared while enabled stayed true) — the login
                     button simply hides. Make that legible instead of silent.
-                    Mirrors the server's oidc_ready rule against the DRAFT so
-                    it also warns live while the admin is staging the change. */}
+                    Mirrors the server's readiness rule (isOidcReady) against
+                    the DRAFT rather than reading the saved `oidc_ready`, so it
+                    warns live while the admin is staging the change. */}
                 {(() => {
                   const secretPresent =
                     draft.oidc_client_secret === null
@@ -769,6 +796,28 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                     onCheckedChange={(v) => set({ oidc_auto_provision: v })}
                   />
                 </div>
+
+                {/* Auto-provision + no allowlist = anyone the issuer will
+                    authenticate gets an account. Harmless on a single-tenant
+                    Entra directory (the issuer IS the allowlist), wide open on
+                    a multi-tenant or consumer issuer like Google. The two
+                    settings are individually reasonable, so warn on the
+                    combination — an admin reading either field alone won't see
+                    it, and it silently overrides an invite-only server. */}
+                {draft.oidc_enabled &&
+                  draft.oidc_auto_provision &&
+                  !draft.oidc_allowed_domains?.trim() && (
+                    <div
+                      role="alert"
+                      className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+                    >
+                      Anyone your issuer can authenticate will get an account on
+                      first sign-in — with a consumer or multi-tenant issuer
+                      (e.g. Google), that's any account on the internet, and it
+                      applies even when manual sign-in is invite-only. Set
+                      allowed email domains above, or turn auto-provision off.
+                    </div>
+                  )}
               </CardContent>
             </Card>
           </TabsContent>
