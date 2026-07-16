@@ -58,6 +58,7 @@ import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { DeleteNestDialog } from "./DeleteNestDialog";
+import { RenameNestDialog } from "./RenameNestDialog";
 import { Button } from "@/components/ui/button";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
@@ -367,6 +368,10 @@ export function NestView({
   };
   const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
+  // Rename dialog (name + description) — complements the inline header
+  // rename, which only covers the name.
+  const [showRename, setShowRename] = useState(false);
+  const [nestDescription, setNestDescription] = useState<string | null>(null);
 
   // Documents-as-a-repo state: controlled tab (Overview folder clicks jump to
   // Documents), the folder the list is scoped to (null = whole nest, "" would
@@ -469,6 +474,7 @@ export function NestView({
     }
     if (nestMeta?.nest) {
       setIsImported(!!(nestMeta.nest as any).is_imported);
+      setNestDescription((nestMeta.nest as any).description ?? null);
     }
     if (nestMeta?.permission) {
       setPermission(nestMeta.permission);
@@ -1317,6 +1323,24 @@ export function NestView({
               destructive, write+admin gated. */}
           {(() => {
             const actions: OverflowAction[] = [];
+            // Same tier as the inline header rename (owner/nest-admin —
+            // matches the server's PATCH /nests/:nestId guard); the dialog
+            // additionally covers the description. Also gated on !loading:
+            // isOwner is known synchronously (prop) but nestDescription only
+            // lands with fetchData, so opening the dialog earlier would
+            // prefill an empty description for a nest that has one.
+            if (!isReadOnly && canManage && !loading)
+              actions.push({
+                label: "Rename nest",
+                icon: Pencil,
+                onSelect: () => {
+                  // Flush any pending inline header rename first so the
+                  // dialog primes from (and the server holds) the user's
+                  // latest text instead of racing the 1200ms debounce.
+                  flushRename();
+                  setShowRename(true);
+                },
+              });
             if (!isReadOnly && canManageGovernance)
               actions.push({
                 label: "Nest settings",
@@ -2859,6 +2883,31 @@ export function NestView({
           open
           onOpenChange={setShowDelete}
           onDeleted={() => { setShowDelete(false); onBack(); }}
+        />
+      )}
+
+      {showRename && (
+        <RenameNestDialog
+          nestId={nestId}
+          nestName={editableName}
+          nestDescription={nestDescription}
+          open
+          onOpenChange={setShowRename}
+          onRenamed={(updated, changed) => {
+            // Sync the inline header rename ONLY when the dialog actually
+            // sent a name — on a description-only save `updated.name` can be
+            // stale relative to an in-flight inline edit, and overwriting
+            // editableName/lastSavedName with it would both visually revert
+            // the header and make the pending debounce a no-op (silently
+            // dropping the rename).
+            if (changed.nameChanged) {
+              setEditableName(updated.name);
+              lastSavedName.current = updated.name;
+              setRenameError(null);
+            }
+            setNestDescription(updated.description);
+            setShowRename(false);
+          }}
         />
       )}
 
