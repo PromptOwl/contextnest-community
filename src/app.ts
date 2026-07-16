@@ -382,8 +382,10 @@ export function createApp(): Hono<AuthEnv> {
     oidc_client_secret_set: !!config.OIDC_CLIENT_SECRET,
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
-    // Live readiness (enabled AND issuer+id+secret present) so the Settings
-    // UI can flag "enabled but not configured" without re-deriving the rule.
+    // Live readiness (enabled AND issuer+id+secret present) — the SAVED state,
+    // i.e. whether the login button is currently live. The Settings UI derives
+    // its own "enabled but not configured" warning from the unsaved draft
+    // instead, so this is for API consumers (and tests) rather than that badge.
     oidc_ready: isOidcReady(),
     // Server-wide runner default. NEVER the value — masked tail only.
     anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY

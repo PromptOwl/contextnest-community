@@ -347,6 +347,39 @@ describe("GET /auth/oidc/callback", () => {
     expect(user).toBeUndefined();
   });
 
+  // Same refusal for the stringified claim. It's a boolean per spec, but
+  // non-compliant IdPs emit "false", and treating that as "absent" would turn
+  // an explicit refusal into a trust.
+  it('refuses an ID token with email_verified: "false" (stringified)', async () => {
+    const { privateKey, jwks } = await makeKeys();
+    const issuer = installMockIssuer(jwks);
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    configureOidc();
+
+    const flow = await startLogin(app);
+    issuer.tokenBody = {
+      id_token: await signIdToken(privateKey, {
+        nonce: flow.nonce,
+        email: "stringy.claim@acme.com",
+        email_verified: "false",
+      }),
+    };
+
+    const res = await app.request(
+      `/auth/oidc/callback?code=c&state=${flow.state}`,
+      { headers: { Cookie: flow.cookieHeader } },
+    );
+    expect(ssoError(res)).toBe("email_not_verified");
+    expect(cookiesOf(res)["cnst_session"]).toBeUndefined();
+
+    const { getDb } = await import("../src/db/client.js");
+    const user = await getDb().get(
+      "SELECT id FROM users WHERE LOWER(email) = ?",
+      ["stringy.claim@acme.com"],
+    );
+    expect(user).toBeUndefined();
+  });
+
   it("accepts an ID token with email_verified: true", async () => {
     const { privateKey, jwks } = await makeKeys();
     const issuer = installMockIssuer(jwks);
@@ -425,6 +458,42 @@ describe("GET /auth/oidc/callback", () => {
       { headers: { Cookie: flow.cookieHeader } },
     );
     expect(ssoError(res)).toBe("invalid_token");
+  });
+
+  // The signature check itself: a token that is well-formed and carries every
+  // correct claim (issuer, audience, nonce, expiry) but is signed by a key the
+  // issuer's JWKS doesn't publish. The foreign key reuses the SAME kid, so
+  // this exercises the cryptographic verification rather than key lookup —
+  // i.e. an attacker who can mint tokens but can't sign as the IdP.
+  it("rejects an ID token signed by a key outside the issuer's JWKS", async () => {
+    const { jwks } = await makeKeys();
+    const foreign = await makeKeys();
+    const issuer = installMockIssuer(jwks); // serves the FIRST key only
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    configureOidc();
+
+    const flow = await startLogin(app);
+    issuer.tokenBody = {
+      id_token: await signIdToken(foreign.privateKey, {
+        nonce: flow.nonce,
+        email: "forged@acme.com",
+        email_verified: true,
+      }),
+    };
+
+    const res = await app.request(
+      `/auth/oidc/callback?code=c&state=${flow.state}`,
+      { headers: { Cookie: flow.cookieHeader } },
+    );
+    expect(ssoError(res)).toBe("invalid_token");
+    expect(cookiesOf(res)["cnst_session"]).toBeUndefined();
+
+    const { getDb } = await import("../src/db/client.js");
+    const user = await getDb().get(
+      "SELECT id FROM users WHERE LOWER(email) = ?",
+      ["forged@acme.com"],
+    );
+    expect(user).toBeUndefined();
   });
 
   it("enforces the email-domain allowlist", async () => {

@@ -45,7 +45,15 @@ import type { AuthEnv } from "./middleware.js";
 // Buckets are split per endpoint (oidc-login:/oidc-cb:), matching the
 // per-endpoint convention in routes.ts, so one full sign-in burns a single
 // slot in each bucket rather than two in a shared one.
-const OIDC_LIMIT = { max: 10, windowMs: 15 * 60_000 }; // 10 / 15 min
+//
+// The cap is deliberately far looser than the credential endpoints': the key
+// is the client IP, and an SSO tenant is an office behind ONE NAT egress IP —
+// a 10/15min cap would lock out the 11th colleague signing in on a Monday
+// morning. There is no secret to guess here (no password, no token), so this
+// bucket exists only to stop a flood of discovery/token round-trips to the
+// IdP; replay and CSRF are already blocked by state + nonce + PKCE, and the
+// IdP enforces its own per-account limits behind us.
+const OIDC_LIMIT = { max: 100, windowMs: 15 * 60_000 }; // 100 / 15 min
 
 // Hard ceiling on outbound IdP calls (discovery, token exchange) so a hung
 // provider can't pin request handlers. Aborts surface as the same
@@ -329,6 +337,13 @@ oidcRoutes.get("/callback", async (c) => {
     const { payload } = await jwtVerify(idToken, jwks, {
       issuer: doc.issuer,
       audience: config.OIDC_CLIENT_ID,
+      // Explicit allowlist on top of the JWKS constraint. createRemoteJWKSet
+      // already refuses keys the issuer doesn't publish, so alg-confusion is
+      // blocked either way; this pins the header alg so a JWKS that ever
+      // starts publishing an unexpected key type can't shift us onto it.
+      // RS256 is what every supported preset emits (Entra v2, Google, Okta,
+      // Keycloak default) and is the OIDC-mandated baseline.
+      algorithms: ["RS256"],
     });
     claims = payload as Record<string, unknown>;
   } catch (err) {
@@ -345,7 +360,13 @@ oidcRoutes.get("/callback", async (c) => {
   // address ownership — refusing on absence would break the primary IdPs.
   // The trust assumption for the absent case is documented in
   // CONFIGURATION.md → Single sign-on (OIDC).
-  if (claims.email_verified === false) return bounce("email_not_verified");
+  //
+  // The string "false" counts as false: the claim is a boolean per spec, but
+  // non-compliant IdPs do emit it stringified, and reading that as "absent"
+  // would silently flip a refusal into a trust.
+  if (claims.email_verified === false || claims.email_verified === "false") {
+    return bounce("email_not_verified");
+  }
 
   // Email: standard `email` claim; Entra ID often omits it and carries the
   // UPN in `preferred_username` instead. Normalize like the register path
