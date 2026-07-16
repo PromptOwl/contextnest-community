@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
@@ -402,10 +403,11 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
               </div>
               <div className="space-y-1">
                 <Label>Description (optional)</Label>
-                <Input
+                <Textarea
                   placeholder="Shared docs for the engineering team"
                   value={newDesc}
                   onChange={(e) => setNewDesc(e.target.value)}
+                  rows={3}
                 />
               </div>
               <div className="flex gap-2">
