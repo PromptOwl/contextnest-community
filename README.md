@@ -105,7 +105,8 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 | Steward version revert | ✅ | ✅ |
 | MCP server for AI agents | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
-| SSO / SAML / SCIM | — | ✅ |
+| Single sign-on (OIDC — Entra ID, Google, Okta, Keycloak) | ✅ | ✅ |
+| SAML / SCIM provisioning | — | ✅ |
 | Audit log streaming | — | ✅ |
 | Policy transforms (redaction, summarization) | — | ✅ |
 | Priority support and SLA | — | ✅ |

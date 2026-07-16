@@ -36,6 +36,7 @@ let canonicalEnvLoaded: string | null = null;
 let slackUrlWarned = false;
 let emailFromWarned = false;
 let emailToWarned = false;
+let oidcIssuerWarned = false;
 
 /**
  * Email shape gate for the notification envelope: local@domain.tld, no
@@ -233,6 +234,71 @@ export const config = {
     return v === "invite-only" || v === "disabled"
       ? (v as "invite-only" | "disabled")
       : "open";
+  },
+  /**
+   * Generic OIDC single sign-on (Microsoft Entra ID, Google, any spec-
+   * compliant IdP). Off by default; superadmin-configurable at runtime via
+   * /admin/settings. When enabled AND fully configured (issuer + client id +
+   * client secret), GET /auth/oidc/login starts an authorization-code + PKCE
+   * flow and GET /auth/oidc/callback finishes it with a normal browser
+   * session — exactly like a password login.
+   */
+  get OIDC_ENABLED(): boolean {
+    return process.env.OIDC_ENABLED === "true";
+  },
+  /**
+   * OIDC issuer URL, e.g. "https://login.microsoftonline.com/<tenant>/v2.0"
+   * or "https://accounts.google.com". https only — tokens and the client
+   * secret ride this trust root, so a plaintext issuer is refused (warn once,
+   * treated as unset). Trailing slash stripped so discovery-doc comparison is
+   * canonical.
+   */
+  get OIDC_ISSUER(): string {
+    const raw = (process.env.OIDC_ISSUER || "").trim().replace(/\/$/, "");
+    if (!raw) return "";
+    let ok = false;
+    try {
+      ok = new URL(raw).protocol === "https:";
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      if (!oidcIssuerWarned) {
+        oidcIssuerWarned = true;
+        console.warn(
+          "[config] OIDC_ISSUER rejected: must be a valid https:// URL. OIDC sign-in disabled.",
+        );
+      }
+      return "";
+    }
+    return raw;
+  },
+  get OIDC_CLIENT_ID(): string {
+    return (process.env.OIDC_CLIENT_ID || "").trim();
+  },
+  get OIDC_CLIENT_SECRET(): string {
+    return (process.env.OIDC_CLIENT_SECRET || "").trim();
+  },
+  /**
+   * Comma-separated email-domain allowlist for OIDC sign-in (e.g.
+   * "acme.com, contractors.acme.com"). Empty = any domain the IdP asserts.
+   * Entries are normalized to lowercase; matching is on the part after the
+   * final "@" of the asserted email.
+   */
+  get OIDC_ALLOWED_DOMAINS(): string[] {
+    return (process.env.OIDC_ALLOWED_DOMAINS || "")
+      .split(",")
+      .map((d) => d.trim().toLowerCase())
+      .filter(Boolean);
+  },
+  /**
+   * Auto-provision (JIT-create) an unknown user on first successful OIDC
+   * sign-in. Default true. When false, only emails that already have a user
+   * row (invited / registered) may sign in via OIDC — everyone else bounces
+   * with ?sso_error=not_invited.
+   */
+  get OIDC_AUTO_PROVISION(): boolean {
+    return process.env.OIDC_AUTO_PROVISION !== "false";
   },
   /**
    * Path to the .env file the server reads its config from and the license

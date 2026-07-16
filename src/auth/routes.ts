@@ -13,6 +13,7 @@ import {
 import { authMiddleware, type AuthEnv } from "./middleware.js";
 import {
   buildClearSessionCookie,
+  buildOidcMarkerCookie,
   buildSessionCookie,
   createSession,
   deleteAllSessionsForUser,
@@ -32,7 +33,8 @@ import {
 } from "./license.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
 import { verifySsoTicket } from "./sso-token.js";
-import { getConnInfo } from "@hono/node-server/conninfo";
+import { oidcRoutes } from "./oidc.js";
+import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 
 // Auth-endpoint rate limits. Keyed on IP for anonymous attempts + email
@@ -60,23 +62,9 @@ function assertValidPassword(password: string, label = "password"): void {
   }
 }
 
-function clientIp(c: any): string {
-  // Respect reverse-proxy headers; fall back to the raw socket address if
-  // none. Intentionally trusts the first forwarded IP — deploy behind a
-  // proxy you control.
-  const xff = c.req.header("x-forwarded-for");
-  if (xff) return xff.split(",")[0].trim();
-  const realIp = c.req.header("x-real-ip");
-  if (realIp) return realIp.trim();
-  // No proxy (e.g. running locally) — read the TCP peer address directly.
-  try {
-    const addr = getConnInfo(c).remote.address;
-    if (addr) return addr;
-  } catch {
-    // Runtime without conninfo support — fall through to "unknown".
-  }
-  return "unknown";
-}
+// clientIp lives in ../shared/request-ip.ts (proxy headers → TCP peer →
+// "unknown") — shared with the OIDC endpoints so every auth entry point
+// keys its rate limits identically.
 
 /**
  * Resolve the caller's userId from either an httpOnly session cookie
@@ -240,6 +228,11 @@ async function provisionPromptowlUser(
 }
 
 export const authRoutes = new Hono<AuthEnv>();
+
+// Generic OIDC SSO (Microsoft Entra ID / Google / any spec-compliant IdP) —
+// GET /auth/oidc/login + GET /auth/oidc/callback. Separate from the PromptOwl
+// ticket flow at GET /auth/sso below. See src/auth/oidc.ts.
+authRoutes.route("/oidc", oidcRoutes);
 
 // POST /auth/register
 //
@@ -453,6 +446,14 @@ authRoutes.post("/logout", async (c) => {
   const sessionId = getSessionIdFromRequest(c);
   if (sessionId) await deleteSession(sessionId);
   clearSessionCookie(c);
+  // Also clear the OIDC SSO marker so it can't linger past a local logout.
+  // (SSO sessions normally sign out via GET /auth/oidc/logout, which does
+  // the IdP round-trip; this is the fallback path.)
+  c.header(
+    "Set-Cookie",
+    buildOidcMarkerCookie({ secure: isSecureRequest(c), clear: true }),
+    { append: true },
+  );
   return c.json({ ok: true });
 });
 

@@ -135,6 +135,30 @@ export function buildClearSessionCookie(opts: { secure?: boolean } = {}): string
 }
 
 /**
+ * Non-httpOnly marker cookie identifying a session that was started via OIDC
+ * SSO. It carries no secret — just the flag "1" — so the SPA can read it and
+ * route logout through the IdP (GET /auth/oidc/logout, RP-initiated logout)
+ * instead of the plain POST /auth/logout, ending the IdP session too. Path=/
+ * (the SPA reads it anywhere) and lifetime tied to the session cookie so the
+ * two live and die together on the SSO logout path. A password sign-in never
+ * sets it, so those users keep the plain logout.
+ */
+export const OIDC_SESSION_MARKER_COOKIE = "cnst_sso_session";
+
+export function buildOidcMarkerCookie(
+  opts: { secure?: boolean; clear?: boolean } = {},
+): string {
+  const parts = [
+    `${OIDC_SESSION_MARKER_COOKIE}=${opts.clear ? "" : "1"}`,
+    "Path=/",
+    "SameSite=Lax",
+    `Max-Age=${opts.clear ? 0 : SESSION_TTL_SECS}`,
+  ];
+  if (opts.secure) parts.push("Secure");
+  return parts.join("; ");
+}
+
+/**
  * Best-effort detection of whether the current request is over HTTPS,
  * so cookies can flip `Secure` automatically.
  */

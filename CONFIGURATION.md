@@ -60,7 +60,13 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `PROMPTOWL_SIGN_IN_GATE` | `open` | Restrict "Sign in with PromptOwl". `open` = anyone may; `admin-only` = only the license owner (admin) may, everyone else uses email/password (admin opens the login page with `?admin=1`); `disabled` = nobody may. Enforced server-side at `POST /auth/promptowl` and surfaced on the health endpoint. Unknown values fall back to `open`. |
 | `MANUAL_SIGN_IN` | `open` | Email + password sign-in mode. `open` = anyone may log in and self-register a new account; `invite-only` = existing/invited users may log in but brand-new self-registration returns `403` (the admin provisions accounts via invite/share/steward and shares the password — there is no self-service "set password", which would be account takeover without email verification); `disabled` = no email/password sign-in at all (`POST /auth/login` and `POST /auth/register` return `403`). Independent of `PROMPTOWL_SIGN_IN_GATE`, so the two methods are controlled separately (e.g. `invite-only` manual + `admin-only` PromptOwl). Also settable from Settings → General. The server refuses `disabled` while PromptOwl sign-in is also `disabled` (that would leave no way to log in). Unknown values fall back to `open`. |
 | `OFFICIAL_COMMUNITY_SSO_SECRET` | `""` | **Official deployment only — leave unset on self-hosted.** Shared HMAC secret enabling the one-click "Open Community" SSO auto-login from PromptOwl. Must exactly match the same-named var on PromptOwl. When unset, `GET /auth/sso` returns `404` and the feature is disabled; self-hosted users keep using the manual device-code flow. |
-| `PUBLIC_BASE_URL` | `""` | This server's canonical external URL (e.g. `https://community.promptowl.ai`). Checked against the SSO ticket's `aud` claim so a ticket minted for this server can't be replayed against another. Only relevant when `OFFICIAL_COMMUNITY_SSO_SECRET` is set; when unset, the audience check is skipped. |
+| `PUBLIC_BASE_URL` | `""` | This server's canonical external URL (e.g. `https://community.promptowl.ai`). Two uses. (1) Checked against the SSO ticket's `aud` claim so a ticket minted for this server can't be replayed against another — only when `OFFICIAL_COMMUNITY_SSO_SECRET` is set; when unset, the audience check is skipped. (2) **Set this whenever `OIDC_ENABLED=true`.** It's the base for the OIDC `redirect_uri` sent to your IdP and replayed at token exchange. Unset, that URI is derived from the incoming request's `Host` header — fine when your proxy overwrites `Host` with a trusted value, but a proxy that passes an attacker-supplied `Host` through would feed it straight into the redirect URI. Setting this pins the value regardless of what the proxy forwards. (Your IdP's own redirect-URI allowlist is a second line of defence, not a substitute.) |
+| `OIDC_ENABLED` | `false` | Turn on generic OIDC single sign-on (`GET /auth/oidc/login` / `GET /auth/oidc/callback`). Requires `OIDC_ISSUER`, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` — the login-page button only appears once all three are set. Also editable from Settings → Single sign-on. See [Single sign-on (OIDC)](#single-sign-on-oidc). |
+| `OIDC_ISSUER` | `""` | OIDC issuer URL, e.g. `https://login.microsoftonline.com/<tenant>/v2.0` (Microsoft Entra ID) or `https://accounts.google.com` (Google). **`https://` only** — a non-https value is rejected with a warning and SSO stays off. Must serve `<issuer>/.well-known/openid-configuration`. |
+| `OIDC_CLIENT_ID` | `""` | Application (client) ID from your IdP app registration. |
+| `OIDC_CLIENT_SECRET` | `""` | Client secret from your IdP app registration. Write-only on the Settings API — `GET /admin/settings` reports only `oidc_client_secret_set: true/false`, never the value. |
+| `OIDC_ALLOWED_DOMAINS` | `""` (any) | Comma-separated email-domain allowlist, e.g. `acme.com, contractors.acme.com`. When set, only accounts whose asserted email is on a listed domain may sign in (others bounce with `domain_not_allowed`). Empty allows any domain the IdP asserts. |
+| `OIDC_AUTO_PROVISION` | `true` | Create a user automatically on first successful OIDC sign-in (display name from the `name` claim). Set `false` to allow only pre-existing (invited/registered) users — unknown emails bounce with `not_invited`. |
 | `ENV_FILE_PATH` | `$DATA_ROOT/.env` | Path to an optional `.env` file the server reads at boot (in addition to `$cwd/.env`). **No longer used for persistence** — the License Setup Page and Settings page now write to the database, not this file (see [Runtime settings persistence](#runtime-settings-persistence)). Kept for operators who bootstrap config from a mounted `.env`. |
 | `TELEMETRY_ENABLED` | `"true"` (set to `"false"` to disable) | Batched, anonymized usage events sent to PromptOwl. Off disables the loop entirely. |
 | `TELEMETRY_INTERVAL_MS` | `3600000` (1 hour) | How often buffered telemetry is flushed to PromptOwl. |
@@ -78,6 +84,92 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `NOTIFY_EMAIL_FROM` | _(unset)_ | From address for notification emails. |
 | `NOTIFY_EMAIL_TO` | _(unset)_ | Comma-separated recipients for notification emails. |
 | `NOTIFY_DEBOUNCE_MS` | `15000` | Per-nest buffer window before notifications flush; bursts collapse into one digest message. |
+
+---
+
+## Single sign-on (OIDC)
+
+Generic OpenID Connect sign-in against any spec-compliant identity provider —
+Microsoft Entra ID and Google are the first-class presets in **Settings →
+Single sign-on**. The server runs a standard authorization-code flow with PKCE:
+`GET /auth/oidc/login` redirects to your IdP, `GET /auth/oidc/callback` verifies
+the returned ID token (issuer, audience, nonce, signature against the issuer's
+JWKS) and starts a normal browser session. Users are looked up by email;
+unknown emails are created automatically when `OIDC_AUTO_PROVISION` is on.
+
+All six `OIDC_*` values are also editable at runtime from **Settings → Single
+sign-on** (superadmin only) — no restart needed. The Settings page shows the
+exact **redirect URI** to register with your IdP:
+
+```
+<PUBLIC_BASE_URL or server origin>/auth/oidc/callback
+```
+
+Set `PUBLIC_BASE_URL` when the server sits behind a reverse proxy so the
+redirect URI is derived from the canonical address rather than the incoming
+Host header.
+
+### Connect Microsoft Entra ID
+
+1. **Register an app.** Entra admin center → *Identity → Applications → App
+   registrations → New registration*. Name it (e.g. "ContextNest"), leave the
+   account type at *Accounts in this organizational directory only*.
+2. **Add the redirect URI.** In the registration: *Authentication → Add a
+   platform → Web*, and paste the redirect URI shown on the ContextNest
+   Settings page (`https://<your-server>/auth/oidc/callback`).
+3. **Create a client secret.** *Certificates & secrets → New client secret*.
+   Copy the secret **value** (not the ID) immediately — it's shown once.
+4. **Collect the IDs.** On the app's *Overview* page copy the **Application
+   (client) ID** and the **Directory (tenant) ID**.
+5. **Fill in ContextNest.** Settings → Single sign-on: click **Microsoft Entra
+   ID**, paste the tenant ID when prompted (issuer becomes
+   `https://login.microsoftonline.com/<tenant>/v2.0`), then paste the client
+   ID and the secret value. Optionally restrict **Allowed email domains** to
+   your org's domain. Save, then flip the toggle **On** and save again (or in
+   the same save).
+6. **Test.** Open the login page in a private window — a **Sign in with
+   Microsoft** button appears and round-trips through Entra. Entra accounts
+   without an `email` claim fall back to `preferred_username` (the UPN).
+
+For **Google**: create an OAuth client ID (type *Web application*) in the
+Google Cloud console, add the same redirect URI under *Authorized redirect
+URIs*, and use the **Google** preset (issuer `https://accounts.google.com`)
+with that client ID/secret.
+
+### Revoking access (offboarding)
+
+Disabling a user **at the IdP** only blocks *new* sign-ins — an existing
+ContextNest session stays valid until it expires (30 days). To cut access
+immediately, **remove the user in ContextNest** (Settings → users): that wipes
+all of their active sessions at once. Real offboarding is therefore two steps —
+disable at the IdP *and* remove in ContextNest — with the ContextNest step being
+the one that ends live sessions.
+
+When a user signs themselves out, ContextNest performs an **RP-initiated
+logout**: if the IdP advertises an `end_session_endpoint` (Entra, Okta,
+Keycloak do; Google does not), the browser is bounced through it so the IdP
+session ends too and the next "Sign in with SSO" click doesn't silently
+re-authenticate. Where the IdP has no logout endpoint, the local session is
+cleared and the user lands back on the login page (the IdP session persists —
+that's the IdP's own timeout to manage).
+
+### Email-verification trust assumption
+
+An ID token whose `email_verified` claim is **explicitly `false`** is refused
+(`?sso_error=email_not_verified`). When the claim is **absent**, the server
+trusts the email claim — Microsoft Entra ID v2 tokens frequently omit it, and
+both Entra and Google guarantee address ownership, so refusing on absence
+would break the primary providers. This is a deliberate trust assumption:
+**when your IdP allows unverified self-registered emails (e.g. an open
+Keycloak realm), configure `oidc_allowed_domains` and disable self-registration
+at the IdP** — otherwise anyone able to assert an arbitrary email at your IdP
+could sign in as the matching local account.
+
+Sign-in failures bounce back to the app as `/?sso_error=<code>` and surface as
+a toast; codes: `disabled`, `not_configured`, `discovery_failed`,
+`provider_error`, `state_mismatch`, `exchange_failed`, `invalid_token`,
+`email_not_verified`, `domain_not_allowed`, `not_invited`, `rate_limited`,
+`service_error`.
 
 ---
 
@@ -108,7 +200,7 @@ Postgres backend starts empty.
 ### Runtime settings persistence
 
 Settings you change at runtime — everything on the **Settings page** (`/admin/settings`:
-sign-in gate, logo, base URL, upload limit, feature flags, Slack/SMTP connectors)
+sign-in gate, logo, base URL, upload limit, feature flags, OIDC SSO, Slack/SMTP connectors)
 plus the **installed license key** — are stored in the database (`server_settings`
 table), **not** in a `.env` file. This is deliberate: on Cloud Run the container
 filesystem is ephemeral, so a file-based value was wiped by every rebuild, and each
