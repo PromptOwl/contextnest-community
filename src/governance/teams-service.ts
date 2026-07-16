@@ -395,11 +395,14 @@ export async function listNestTeams(nestId: string): Promise<SharedTeamRef[]> {
  * Share a team onto a nest — append a {teamId, teamName} ref.
  *
  * Two authorization checks apply, and both matter: the route gates `admin` on
- * the NEST, and this gates the caller's relationship to the TEAM. Without the
- * latter, anyone who learned a team's id could attach it to a nest they
- * administer — pulling in that team's members without their owner's say, and
- * reading the full roster back out of GET /nests/:id/teams, which the ACL on
- * GET /teams/:teamId otherwise denies to non-members.
+ * the NEST, and this gates the caller's relationship to the TEAM — editor+ on
+ * the team (see below). Without the team-side gate, anyone who learned a team's
+ * id could attach it to a nest they administer — pulling in that team's members
+ * without their owner's say, and reading the full roster back out of
+ * GET /nests/:id/teams, which the ACL on GET /teams/:teamId otherwise denies to
+ * non-members. A view-only bar there is not enough: a viewer who owns a nest
+ * clears the nest-side `admin` gate on their own nest, so the team gate is the
+ * only thing standing between "view-only member" and "projected the whole team."
  *
  * The whole thing runs in one transaction: shared_teams is a single JSON cell
  * per nest (so a concurrent share/unshare would otherwise lose a write), and
@@ -420,11 +423,19 @@ export async function shareTeamWithNest(params: {
       [params.teamId],
     )) as TeamRow | undefined;
     if (!team) throw new NotFoundError("Team not found");
-    // Any relationship to the team (owner or member of any role) is enough to
-    // share it; the nest-side 'admin' gate is what limits who can grant access.
-    if (managementRank(team, params.callerUserId, !!params.allowAdmin) < 1) {
+    // Sharing a team projects EVERY member onto the nest at their team role, so
+    // it takes real authority over the team: editor+ (editor, admin, or the
+    // owner / server admin). A view-only member must not be able to pull the
+    // whole roster — including its admins — onto a nest they happen to own, make
+    // it look like an official internal share, and leave the team owner unable
+    // to reverse it. This mirrors the escalation cap on addMember (you can't
+    // project a reach you don't yourself hold on the team).
+    if (
+      managementRank(team, params.callerUserId, !!params.allowAdmin) <
+      ROLE_RANK.editor
+    ) {
       throw new ForbiddenError(
-        "You can only share a team you own or belong to.",
+        "You need to be an editor, admin, or owner of a team to share it. View-only members can't.",
       );
     }
     const nest = (await tx.get("SELECT shared_teams FROM nests WHERE id = ?", [
