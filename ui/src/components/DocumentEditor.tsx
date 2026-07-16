@@ -1626,7 +1626,6 @@ export function DocumentEditor({
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
               {author && (
                 <span className="inline-flex items-center gap-1.5">
-                  <AuthorshipChips author={author} size="md" />
                   Created by <span className="font-medium text-foreground/80">{author}</span>
                 </span>
               )}
