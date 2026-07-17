@@ -147,6 +147,10 @@ export async function getHealth() {
     /** Present when oidc_enabled — lets the login page label the button by IdP. */
     oidc_issuer?: string;
     workflow_plane_enabled?: boolean;
+    /** Content-type toggles — default ON server-side; the editor's type
+     *  picker hides a disabled type exactly when create would refuse it. */
+    type_artifact_enabled?: boolean;
+    type_table_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
     subagent_max_children?: number;
@@ -167,6 +171,10 @@ export interface AdminSettings {
   public_base_url: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
+  /** Content-type toggles (default ON). Disabling refuses new creations of
+   *  the type only — existing nodes still read/render/version. */
+  type_artifact_enabled: boolean;
+  type_table_enabled: boolean;
   subagent_runs_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
