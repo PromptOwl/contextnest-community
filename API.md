@@ -1132,6 +1132,34 @@ Surfaced in the UI from the nest view's overflow menu → **Activity trace** (ow
 
 ---
 
+## GitHub markdown sync (server admin)
+
+Scheduled pull of markdown files from GitHub repos into nests — configured via `/admin/settings` (`github_sync_token` write-only, `github_sync_interval_ms`, `github_sync_sources`) and documented in `CONFIGURATION.md` → *GitHub markdown sync*. Both endpoints use the same guard as `GET /admin/trace` (license admin or `access.yaml` `super_admin`; open mode always allowed).
+
+### POST `/admin/github-sync/run`
+Runs one sync sweep now (same code path as the interval timer; concurrent calls join the in-flight sweep). Returns per-source results:
+```json
+{
+  "results": [
+    { "repo": "acme/docs", "nestId": "nest_abc", "status": "synced", "detail": "2 synced, 5 unchanged" }
+  ]
+}
+```
+- `status` — `synced` (at least one file written), `unchanged` (upstream unmoved — conditional-request 304 or head-sha match), `local-edits` (one or more files skipped because their node's latest version author isn't `system:github-sync` — local content is never overwritten), or `error`.
+- `detail` — human summary (counts, upstream deletions kept locally, truncation, HTTP errors).
+
+### GET `/admin/github-sync/run`
+Last-run status per configured source (drives the Settings → GitHub sync status lines):
+```json
+{
+  "sources": [
+    { "repo": "acme/docs", "branch": "", "mode": "all-markdown", "path": "", "nestId": "nest_abc", "folder": "", "lastStatus": "local-edits", "lastDetail": "1 local edit kept", "lastRunAt": "2026-07-17T09:00:00.000Z" }
+  ]
+}
+```
+
+---
+
 ## Permission middleware quick-ref
 
 For any `/nests/:nestId/...` request, the middleware computes:

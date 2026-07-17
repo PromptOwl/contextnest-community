@@ -8,7 +8,15 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
-import { listNests, listSharedNests } from "./nests/service.js";
+import { listNests, listSharedNests, getNest } from "./nests/service.js";
+import {
+  normalizeGithubSyncSource,
+  getGithubSyncSources,
+  getGithubSyncStatus,
+  runGithubSync,
+  restartGithubSyncScanner,
+  type GithubSyncSource,
+} from "./sync/github-sync.js";
 import { getReviewQueue } from "./governance/review-service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
@@ -395,6 +403,11 @@ export function createApp(): Hono<AuthEnv> {
     smtp_url: config.SMTP_URL ?? "",
     notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
     notify_email_to: config.NOTIFY_EMAIL_TO ?? "",
+    // GitHub markdown sync. The token is WRITE-ONLY (same discipline as the
+    // OIDC client secret above): only its presence is ever reported.
+    github_sync_token_set: !!config.GITHUB_SYNC_TOKEN,
+    github_sync_interval_ms: config.GITHUB_SYNC_INTERVAL_MS,
+    github_sync_sources: getGithubSyncSources(),
   });
 
   app.get("/admin/settings", async (c) => {
@@ -646,6 +659,61 @@ export function createApp(): Hono<AuthEnv> {
         addError("notify_email_to", "Recipients must be valid emails, comma-separated (e.g. team@company.com, ops@company.com).");
       else pending.push({ name: "NOTIFY_EMAIL_TO", value: v || null });
     }
+    // ── GitHub markdown sync ──
+    // Token is write-only (mirrors oidc_client_secret): non-empty string
+    // overwrites, null/"" clears, GET only reports github_sync_token_set.
+    if ("github_sync_token" in body) {
+      const v = body.github_sync_token;
+      if (v === null || v === "") {
+        pending.push({ name: "GITHUB_SYNC_TOKEN", value: null });
+      } else if (typeof v !== "string") {
+        addError("github_sync_token", "GitHub token must be a string (or empty to clear it).");
+      } else {
+        pending.push({ name: "GITHUB_SYNC_TOKEN", value: v.trim() });
+      }
+    }
+    if ("github_sync_interval_ms" in body) {
+      const v = body.github_sync_interval_ms;
+      if (v === null || v === "") {
+        pending.push({ name: "GITHUB_SYNC_INTERVAL_MS", value: null });
+      } else {
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0 || (n > 0 && n < 60_000))
+          addError("github_sync_interval_ms", "GitHub sync interval must be 0 (off) or at least 60000 ms (1 minute).");
+        else pending.push({ name: "GITHUB_SYNC_INTERVAL_MS", value: n === 0 ? null : String(n) });
+      }
+    }
+    // Sources: validated per-entry (repo shape, mode, nest existence) and
+    // stored normalized, so the sweep never has to guess at defaults.
+    if ("github_sync_sources" in body) {
+      const v = body.github_sync_sources;
+      if (v === null || (Array.isArray(v) && v.length === 0)) {
+        pending.push({ name: "GITHUB_SYNC_SOURCES", value: null });
+      } else if (!Array.isArray(v)) {
+        addError("github_sync_sources", "GitHub sync sources must be a list of {repo, nestId, …} entries.");
+      } else {
+        let sourcesError: string | null = null;
+        const normalized: GithubSyncSource[] = [];
+        for (let i = 0; i < v.length; i++) {
+          const r = normalizeGithubSyncSource(v[i], i);
+          if ("error" in r) {
+            sourcesError = r.error;
+            break;
+          }
+          if (!(await getNest(r.source.nestId))) {
+            sourcesError = `source ${i + 1}: nest "${r.source.nestId}" does not exist`;
+            break;
+          }
+          normalized.push(r.source);
+        }
+        if (sourcesError) addError("github_sync_sources", sourcesError);
+        else
+          pending.push({
+            name: "GITHUB_SYNC_SOURCES",
+            value: JSON.stringify(normalized),
+          });
+      }
+    }
     if ("max_body_bytes" in body) {
       const n = Number(body.max_body_bytes);
       if (!Number.isFinite(n) || n < 1024 * 1024 || n > 500 * 1024 * 1024)
@@ -738,6 +806,12 @@ export function createApp(): Hono<AuthEnv> {
       else process.env[name] = value;
     }
 
+    // Interval changes take effect live: rebuild the timer from the getter
+    // (which floors nonzero values at 60s and treats 0/unset as off).
+    if (pending.some((p) => p.name === "GITHUB_SYNC_INTERVAL_MS")) {
+      restartGithubSyncScanner(config.GITHUB_SYNC_INTERVAL_MS);
+    }
+
     return c.json({ settings: currentServerSettings() });
   });
 
@@ -768,6 +842,23 @@ export function createApp(): Hono<AuthEnv> {
     // `count` = rows on this page (back-compat); `total` = full filtered count
     // for the pager. limit/offset echo the applied window.
     return c.json({ count: events.length, total, limit, offset, events });
+  });
+
+  // GitHub markdown sync (CU-wdqcpzwf2w) — same superadmin guard as
+  // /admin/trace (license admin OR access.yaml super_admin; open mode = the
+  // anonymous admin). POST runs one sweep NOW and returns per-source results;
+  // GET exposes each configured source's last-run status + timestamp.
+  app.use("/admin/github-sync/*", flexAuthMiddleware);
+  app.post("/admin/github-sync/run", async (c) => {
+    if (!(await traceAllowed(c)))
+      return c.json({ error: "Only the server admin can do this." }, 403);
+    const results = await runGithubSync();
+    return c.json({ results });
+  });
+  app.get("/admin/github-sync/run", async (c) => {
+    if (!(await traceAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    return c.json({ sources: await getGithubSyncStatus() });
   });
 
   // GET /stats — dashboard summary counts: nests visible to caller,

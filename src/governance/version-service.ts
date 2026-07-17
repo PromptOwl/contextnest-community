@@ -110,6 +110,32 @@ export async function getCurrentVersion(
   return row?.v || 0;
 }
 
+/**
+ * Latest human-visible version row (excludes engine auto-publish bump rows,
+ * same filter as getCurrentVersion/checkConflict). Used by the GitHub sync
+ * connector for its conflict rule (last author decides overwrite vs
+ * local-edits) and its identical-content short-circuit.
+ */
+export async function getLatestVersionMeta(
+  nestId: string,
+  nodeId: string,
+): Promise<{ version: number; author: string; contentHash: string } | null> {
+  const db = getDb();
+  const row = (await db.get(
+    `SELECT version, author, content_hash FROM node_versions
+        WHERE nest_id = ? AND node_id = ?
+          AND author NOT LIKE ?
+        ORDER BY version DESC
+        LIMIT 1`,
+    [nestId, nodeId, `${SYSTEM_AUTHOR_PREFIX}%`],
+  )) as
+    | { version: number; author: string; content_hash: string }
+    | undefined;
+  return row
+    ? { version: row.version, author: row.author, contentHash: row.content_hash }
+    : null;
+}
+
 // ─── Approved Version ───────────────────────────────────────────────────
 
 export async function getApprovedVersion(

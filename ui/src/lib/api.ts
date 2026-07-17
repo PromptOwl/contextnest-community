@@ -188,6 +188,50 @@ export interface AdminSettings {
   notify_email_from: string;
   notify_email_to: string;
   anthropic_api_key?: string | null
+  /** GitHub markdown sync. The token is write-only — only presence returns. */
+  github_sync_token_set?: boolean;
+  github_sync_interval_ms: number;
+  github_sync_sources: GithubSyncSource[];
+  /** Write-only: string sets/replaces, null clears; never returned. */
+  github_sync_token?: string | null;
+}
+
+// ─── GitHub sync ────────────────────────────────────────────────────────
+
+export interface GithubSyncSource {
+  repo: string;
+  branch?: string;
+  mode?: "all-markdown" | "single-file";
+  path?: string;
+  nestId: string;
+  folder?: string;
+}
+
+export interface GithubSyncSourceStatus extends GithubSyncSource {
+  lastStatus: "synced" | "unchanged" | "local-edits" | "error" | null;
+  lastDetail: string | null;
+  lastRunAt: string | null;
+}
+
+export interface GithubSyncRunResult {
+  repo: string;
+  nestId: string;
+  status: "synced" | "unchanged" | "local-edits" | "error";
+  detail: string;
+}
+
+/** Admin: run one GitHub sync sweep now. */
+export async function runGithubSyncNow() {
+  return request<{ results: GithubSyncRunResult[] }>("/admin/github-sync/run", {
+    method: "POST",
+  });
+}
+
+/** Admin: last-run status per configured GitHub sync source. */
+export async function getGithubSyncStatus() {
+  return request<{ sources: GithubSyncSourceStatus[] }>(
+    "/admin/github-sync/run",
+  );
 }
 
 export async function getAdminSettings() {

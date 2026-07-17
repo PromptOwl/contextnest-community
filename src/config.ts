@@ -375,6 +375,40 @@ export const config = {
     return raw;
   },
 
+  /**
+   * GitHub markdown sync (CU-wdqcpzwf2w). Token for the GitHub API — a
+   * fine-grained PAT with contents:read is enough. Empty = unauthenticated
+   * requests (public repos only, low rate limit). WRITE-ONLY in the admin
+   * settings API: GET only reports `github_sync_token_set`, never the value.
+   */
+  get GITHUB_SYNC_TOKEN(): string {
+    return (process.env.GITHUB_SYNC_TOKEN || "").trim();
+  },
+  /**
+   * GitHub sync sweep interval in ms. 0 (the default) disables the scheduled
+   * sweep entirely — same explicit-parse discipline as DRIFT_SCAN_INTERVAL_MS
+   * in index.ts, so an explicit 0 actually disables. Nonzero values are
+   * floored at 60s so a typo can't hammer the GitHub API.
+   */
+  get GITHUB_SYNC_INTERVAL_MS(): number {
+    const raw = process.env.GITHUB_SYNC_INTERVAL_MS;
+    const n =
+      raw != null && raw !== "" && Number.isFinite(Number(raw))
+        ? Number(raw)
+        : 0;
+    if (n <= 0) return 0;
+    return Math.max(60_000, Math.floor(n));
+  },
+  /**
+   * Per-source file cap for all-markdown GitHub sync — keeps a monorepo from
+   * flooding a nest. Env-only escape hatch (not an admin setting); clamped
+   * to [1, 2000], default 500.
+   */
+  get GITHUB_SYNC_MAX_FILES(): number {
+    const n = parseInt(process.env.GITHUB_SYNC_MAX_FILES || "500", 10);
+    return Number.isFinite(n) ? Math.min(2000, Math.max(1, n)) : 500;
+  },
+
   get FEATURE_WORKFLOW_PLANE(): boolean {
     return process.env.FEATURE_WORKFLOW_PLANE === "true";
   },

@@ -412,6 +412,9 @@ export interface CreateNodeInput {
    *  storage and read/update/delete already handle nested ids, only creation
    *  was flat. Ignored when an explicit id is given. */
   folder?: string;
+  /** Optional note recorded on the initial version (e.g. the GitHub sync
+   *  connector's "Synced from github.com/{repo}@{sha}"). */
+  changeNote?: string;
 }
 
 export interface UpdateNodePatch {
@@ -500,7 +503,9 @@ export async function createNode(
   let savedVersion = 1;
   if (hasStewards) {
     try {
-      await versionManager.createVersion(node, userEmail);
+      await versionManager.createVersion(node, userEmail, {
+        note: input.changeNote,
+      });
     } catch (err) {
       console.error("VersionManager.createVersion failed (node create)", err);
     }
@@ -511,13 +516,14 @@ export async function createNode(
       content: input.content,
       author: userEmail,
       status: "draft",
+      changeNote: input.changeNote,
       tags,
     });
   } else {
     try {
       const result = await safePublishDocument(storage, id, {
         editedBy: userEmail,
-        note: "Auto-published on create (no stewards configured)",
+        note: input.changeNote || "Auto-published on create (no stewards configured)",
       });
       savedVersion = result.node.frontmatter.version || 1;
       await versions.createVersion({
@@ -527,6 +533,7 @@ export async function createNode(
         content: result.node.body || "",
         author: userEmail,
         status: "published",
+        changeNote: input.changeNote,
         tags,
       });
       await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
@@ -540,6 +547,7 @@ export async function createNode(
         content: input.content,
         author: userEmail,
         status: "draft",
+        changeNote: input.changeNote,
         tags,
       });
     }

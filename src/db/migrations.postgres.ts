@@ -62,6 +62,7 @@ const HISTORICAL_MIGRATIONS = [
   "020_server_settings",
   "026_api_events_nest_index",
   "027_teams",
+  "028_github_sync_state",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -535,6 +536,21 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       key TEXT PRIMARY KEY,
       value TEXT,
       env_at_write TEXT,
+      updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+
+    -- github_sync_state (migration 028): per-source GitHub markdown sync
+    -- bookkeeping — ETag + head tree sha for change detection, file→blob-sha
+    -- map so only changed blobs are refetched, and the last-run status the
+    -- Settings UI shows per source. See src/sync/github-sync.ts.
+    CREATE TABLE IF NOT EXISTS github_sync_state (
+      source_key TEXT PRIMARY KEY,
+      etag TEXT,
+      head_sha TEXT,
+      files_json TEXT,
+      last_status TEXT,
+      last_detail TEXT,
+      last_run_at TEXT,
       updated_at TEXT NOT NULL DEFAULT ${NOW}
     );
 

@@ -12,6 +12,7 @@ import {
 import { startTelemetryLoop, trackEvent } from "./telemetry/tracker.js";
 import { loadAccessConfig } from "./governance/access-service.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
+import { startGithubSyncScanner } from "./sync/github-sync.js";
 import { startScheduler } from "./workflow/scheduler.js";
 import { sweepStale } from "./shared/rate-limit.js";
 
@@ -98,6 +99,21 @@ async function main() {
       : 30_000;
   if (driftScanIntervalMs > 0) {
     startDriftScanner(driftScanIntervalMs);
+  }
+
+  // Scheduled GitHub markdown sync (CU-wdqcpzwf2w). Same explicit-disable
+  // discipline as the drift scanner above, but the parse lives in the config
+  // getter (GITHUB_SYNC_INTERVAL_MS: 0/unset = off, nonzero floored at 60s)
+  // because the admin Settings page also edits it at runtime — the settings
+  // PATCH restarts the scanner via restartGithubSyncScanner, so both the env
+  // and the UI path go through the same getter. Runs AFTER loadServerSettings
+  // so a persisted interval survives a rebuild.
+  const githubSyncIntervalMs = config.GITHUB_SYNC_INTERVAL_MS;
+  if (githubSyncIntervalMs > 0) {
+    startGithubSyncScanner(githubSyncIntervalMs);
+    console.log(
+      `  GitHub sync: every ${Math.round(githubSyncIntervalMs / 1000)}s`,
+    );
   }
 
   // Start telemetry

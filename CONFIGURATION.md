@@ -84,6 +84,10 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `NOTIFY_EMAIL_FROM` | _(unset)_ | From address for notification emails. |
 | `NOTIFY_EMAIL_TO` | _(unset)_ | Comma-separated recipients for notification emails. |
 | `NOTIFY_DEBOUNCE_MS` | `15000` | Per-nest buffer window before notifications flush; bursts collapse into one digest message. |
+| `GITHUB_SYNC_TOKEN` | _(unset)_ | GitHub access token for the scheduled markdown sync (see [GitHub markdown sync](#github-markdown-sync)). Write-only on the Settings API — `GET /admin/settings` reports only `github_sync_token_set`. Unset works for public repos, at GitHub's low anonymous rate limit. |
+| `GITHUB_SYNC_INTERVAL_MS` | `0` (off) | How often the GitHub sync sweep runs. `0`/unset disables scheduled sync entirely (manual "Sync now" still works). Nonzero values are floored at `60000` (1 minute) so a typo can't hammer the GitHub API. Also editable from Settings → GitHub sync; a UI change takes effect live, no restart. |
+| `GITHUB_SYNC_SOURCES` | _(unset)_ | JSON array of sync sources, e.g. `[{"repo":"acme/docs","nestId":"<nest id>","folder":"imported"}]`. Per entry: `repo` (`owner/name`, required), `nestId` (required, must exist), `branch` (default: the repo's default branch), `mode` (`all-markdown` default, or `single-file`), `path` (all-markdown: subfolder filter; single-file: the file, default `README.md`), `folder` (target folder in the nest, default root). Normally edited from Settings → GitHub sync rather than by hand. |
+| `GITHUB_SYNC_MAX_FILES` | `500` | Per-source file cap for `all-markdown` sync (clamped 1..2000) — keeps a monorepo from flooding a nest. Env-only escape hatch. |
 
 ---
 
@@ -170,6 +174,42 @@ a toast; codes: `disabled`, `not_configured`, `discovery_failed`,
 `provider_error`, `state_mismatch`, `exchange_failed`, `invalid_token`,
 `email_not_verified`, `domain_not_allowed`, `not_invited`, `rate_limited`,
 `service_error`.
+
+---
+
+## GitHub markdown sync
+
+Mirror markdown files from GitHub repositories into nests on a schedule —
+Settings → **GitHub sync** (superadmin), or the `GITHUB_SYNC_*` env vars above.
+Each configured source maps a repo (all `.md` files recursively, or one file in
+`single-file` mode) into a target nest/folder, preserving the repo's directory
+structure (`docs/setup.md` → `<folder>/docs/setup`). Synced documents go through
+the normal node lifecycle, so they get real version history and diffs; every
+sync-authored version carries the author `system:github-sync` and a change note
+`Synced from github.com/<repo>@<sha>`.
+
+Sweeps are cheap: the repo tree is fetched with a conditional request (stored
+`ETag` / head sha — unchanged repos cost one `304`), and only files whose blob
+actually changed are downloaded. **Local edits always win**: if a synced
+document's latest version was written by anyone other than the sync connector,
+that file is never overwritten — the source reports `local-edits` in Settings
+and keeps reporting it each sweep until you either restore the doc to sync
+ownership (delete it, or revert your edit) or remove the source. Files deleted
+upstream are reported but never deleted locally.
+
+Run a sweep on demand with **Sync now** in Settings, or
+`POST /admin/github-sync/run` (superadmin — same guard as `/admin/trace`);
+`GET /admin/github-sync/run` returns each source's last-run status + timestamp.
+
+### Minting a token
+
+For private repos (or to avoid the anonymous rate limit), create a
+**fine-grained personal access token**: GitHub → Settings → Developer settings →
+Personal access tokens → Fine-grained tokens → Generate new token. Scope it to
+just the repositories you sync, and under *Repository permissions* grant only
+**Contents: Read-only** (metadata is included automatically). Paste it into
+Settings → GitHub sync. The token is stored server-side and never returned by
+the API.
 
 ---
 

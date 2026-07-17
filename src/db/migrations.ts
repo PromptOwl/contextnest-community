@@ -1146,6 +1146,30 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("027_teams");
   }
+
+  // 028: GitHub sync state (CU-wdqcpzwf2w). One row per configured sync
+  //   source (repo/branch/path → nest/folder mapping). Persists the HTTP
+  //   ETag + branch head sha so a sweep can 304 / short-circuit when
+  //   upstream hasn't moved, plus a JSON map of file path → blob sha so an
+  //   all-markdown sweep only refetches blobs that actually changed, and
+  //   the last-run status/detail the Settings UI surfaces per source.
+  if (!hasMigration("028_github_sync_state")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS github_sync_state (
+          source_key TEXT PRIMARY KEY,   -- repo|branch|mode|path|nestId|folder
+          etag TEXT,                     -- If-None-Match value for the next poll
+          head_sha TEXT,                 -- root tree sha at last full sync
+          files_json TEXT,               -- JSON { "<repo path>": "<blob sha>" }
+          last_status TEXT,              -- synced | unchanged | local-edits | error
+          last_detail TEXT,
+          last_run_at TEXT,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+    })();
+    recordMigration("028_github_sync_state");
+  }
 }
 
 /**

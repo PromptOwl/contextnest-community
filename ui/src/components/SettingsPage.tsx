@@ -7,7 +7,18 @@
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2 } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  Copy,
+  Github,
+  KeyRound,
+  Plus,
+  RefreshCw,
+  Shield,
+  Loader2,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,7 +31,16 @@ import {
   CardContent,
 } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import type { AdminSettings, SignInGate, ManualSignIn } from "../lib/api";
+import {
+  listNests,
+  getGithubSyncStatus,
+  runGithubSyncNow,
+  type AdminSettings,
+  type SignInGate,
+  type ManualSignIn,
+  type GithubSyncSource,
+  type GithubSyncSourceStatus,
+} from "../lib/api";
 
 interface SettingsPageProps {
   onBack: () => void;
@@ -74,6 +94,15 @@ const TABS: {
       "oidc_client_secret",
       "oidc_allowed_domains",
       "oidc_auto_provision",
+    ],
+  },
+  {
+    id: "github",
+    label: "GitHub sync",
+    keys: [
+      "github_sync_token",
+      "github_sync_interval_ms",
+      "github_sync_sources",
     ],
   },
   {
@@ -220,9 +249,46 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
   // they've navigated away from.
   const [activeTab, setActiveTab] = useState<string>("general");
   const [copiedRedirect, setCopiedRedirect] = useState(false);
+  // GitHub sync tab: nests for the target picker, per-source last-run
+  // status, and the "Sync now" in-flight flag.
+  const [nests, setNests] = useState<Array<{ id: string; name: string }>>([]);
+  const [syncStatus, setSyncStatus] = useState<GithubSyncSourceStatus[]>([]);
+  const [syncing, setSyncing] = useState(false);
   useEffect(() => {
     if (settings) setDraft(settings);
   }, [settings]);
+  useEffect(() => {
+    if (!settings) return;
+    listNests()
+      .then((r) => setNests(r.nests.map((n) => ({ id: n.id, name: n.name }))))
+      .catch(() => {});
+    getGithubSyncStatus()
+      .then((r) => setSyncStatus(r.sources))
+      .catch(() => {});
+  }, [settings]);
+
+  const syncNow = async () => {
+    setSyncing(true);
+    try {
+      const { results } = await runGithubSyncNow();
+      if (results.length === 0) {
+        toast.info("No GitHub sources configured — add one below and save first.");
+      } else {
+        const bad = results.filter((r) => r.status === "error");
+        const conflicts = results.filter((r) => r.status === "local-edits");
+        if (bad.length) toast.error(`Sync finished with errors: ${bad.map((r) => r.repo).join(", ")}`);
+        else if (conflicts.length)
+          toast.warning(`Sync finished — local edits kept on: ${conflicts.map((r) => r.repo).join(", ")}`);
+        else toast.success("GitHub sync complete");
+      }
+      const status = await getGithubSyncStatus();
+      setSyncStatus(status.sources);
+    } catch (e: any) {
+      toast.error(e?.message || "Sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const set = (patch: Partial<AdminSettings>) => {
     setDraft((d) => (d ? { ...d, ...patch } : d));
@@ -239,9 +305,20 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
       // Write-only keys: the server hands back only a mask/presence flag, so
       // there's no value to diff against — "staged" means a non-empty string
       // (set) or null (clear). Everything else diffs by value like normal.
-      if (k === "anthropic_api_key" || k === "oidc_client_secret") {
+      if (
+        k === "anthropic_api_key" ||
+        k === "oidc_client_secret" ||
+        k === "github_sync_token"
+      ) {
         const v = draft[k];
         return (typeof v === "string" && v.trim() !== "") || v === null;
+      }
+      // The sources list is an array — diff by value, not reference, so a
+      // hand-reverted edit doesn't leave a phantom dirty state.
+      if (k === "github_sync_sources") {
+        return (
+          JSON.stringify(draft[k] ?? []) !== JSON.stringify(base[k] ?? [])
+        );
       }
       return (
         ((draft as unknown as Record<string, unknown>)[k] ?? "") !==
@@ -848,6 +925,260 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                       allowed email domains above, or turn auto-provision off.
                     </div>
                   )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* GitHub sync */}
+          <TabsContent value="github" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Github className="h-4 w-4 text-muted-foreground" />
+                  GitHub markdown sync
+                </CardTitle>
+                <CardDescription>
+                  Mirror markdown files from GitHub repositories into nests on
+                  a schedule. Synced documents get normal version history;
+                  documents someone edits locally are never overwritten — they
+                  show up below as “local edits”.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div>
+                  <div className="text-sm font-medium mb-1">Sync interval</div>
+                  <div className="flex items-center gap-2">
+                    <NumField
+                      value={Math.round(
+                        (draft.github_sync_interval_ms ?? 0) / 60_000,
+                      )}
+                      min={0}
+                      onChange={(n) =>
+                        set({
+                          github_sync_interval_ms: Math.max(0, n) * 60_000,
+                        })
+                      }
+                    />
+                    <span className="text-sm text-muted-foreground shrink-0">
+                      minutes — 0 turns scheduled sync off
+                    </span>
+                  </div>
+                </div>
+
+                {/* Access token — write-only, same affordance as the OIDC
+                    client secret: the server only reports presence. */}
+                <div>
+                  <div className="text-sm font-medium mb-1">
+                    GitHub access token
+                  </div>
+                  <div className="text-xs text-muted-foreground mb-2">
+                    {draft.github_sync_token === null
+                      ? "Will be cleared when you save."
+                      : settings?.github_sync_token_set
+                        ? "A token is set. Paste a new one to replace it."
+                        : "Not set — only public repositories will sync, at GitHub's low anonymous rate limit."}
+                  </div>
+                  <TextField
+                    type="password"
+                    value={
+                      typeof draft.github_sync_token === "string"
+                        ? draft.github_sync_token
+                        : ""
+                    }
+                    placeholder="github_pat_… (fine-grained, Contents: read-only)"
+                    onChange={(v) => set({ github_sync_token: v })}
+                  />
+                  {settings?.github_sync_token_set &&
+                    draft.github_sync_token !== null && (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs text-destructive hover:underline"
+                        onClick={() => set({ github_sync_token: null })}
+                      >
+                        Clear token
+                      </button>
+                    )}
+                  {draft.github_sync_token === null && (
+                    <button
+                      type="button"
+                      className="mt-2 text-xs text-muted-foreground hover:underline"
+                      onClick={() => set({ github_sync_token: undefined })}
+                    >
+                      Keep current token
+                    </button>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Sources</CardTitle>
+                <CardDescription>
+                  Each source maps a repository (all markdown files, or one
+                  file) into a nest. Directory structure is preserved under the
+                  target folder. Save your changes before running a sync.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {(draft.github_sync_sources ?? []).map((src, i) => {
+                  const update = (patch: Partial<GithubSyncSource>) => {
+                    const next = [...(draft.github_sync_sources ?? [])];
+                    next[i] = { ...next[i], ...patch };
+                    set({ github_sync_sources: next });
+                  };
+                  const selectCls =
+                    "h-9 w-full rounded-md border border-input bg-background px-2 text-sm";
+                  return (
+                    <div
+                      key={i}
+                      className="rounded-lg border p-3 space-y-2"
+                    >
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <TextField
+                          value={src.repo}
+                          placeholder="owner/repo"
+                          onChange={(v) => update({ repo: v })}
+                        />
+                        <TextField
+                          value={src.branch ?? ""}
+                          placeholder="branch (empty = default branch)"
+                          onChange={(v) => update({ branch: v })}
+                        />
+                        <select
+                          className={selectCls}
+                          value={src.mode ?? "all-markdown"}
+                          onChange={(e) =>
+                            update({
+                              mode: e.target.value as GithubSyncSource["mode"],
+                            })
+                          }
+                        >
+                          <option value="all-markdown">
+                            All markdown files
+                          </option>
+                          <option value="single-file">Single file</option>
+                        </select>
+                        <TextField
+                          value={src.path ?? ""}
+                          placeholder={
+                            (src.mode ?? "all-markdown") === "single-file"
+                              ? "file path (default README.md)"
+                              : "subfolder filter (empty = whole repo)"
+                          }
+                          onChange={(v) => update({ path: v })}
+                        />
+                        <select
+                          className={selectCls}
+                          value={src.nestId}
+                          onChange={(e) => update({ nestId: e.target.value })}
+                        >
+                          <option value="">Pick a nest…</option>
+                          {nests.map((n) => (
+                            <option key={n.id} value={n.id}>
+                              {n.name}
+                            </option>
+                          ))}
+                        </select>
+                        <TextField
+                          value={src.folder ?? ""}
+                          placeholder="target folder in nest (empty = root)"
+                          onChange={(v) => update({ folder: v })}
+                        />
+                      </div>
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-1 text-xs text-destructive hover:underline"
+                          onClick={() =>
+                            set({
+                              github_sync_sources: (
+                                draft.github_sync_sources ?? []
+                              ).filter((_, j) => j !== i),
+                            })
+                          }
+                        >
+                          <Trash2 className="h-3.5 w-3.5" /> Remove source
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      set({
+                        github_sync_sources: [
+                          ...(draft.github_sync_sources ?? []),
+                          {
+                            repo: "",
+                            mode: "all-markdown",
+                            nestId: nests[0]?.id ?? "",
+                          },
+                        ],
+                      })
+                    }
+                  >
+                    <Plus className="h-3.5 w-3.5 mr-1" /> Add source
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={syncNow}
+                    disabled={syncing || isDirty}
+                    title={
+                      isDirty
+                        ? "Save your changes first — Sync now runs the saved configuration."
+                        : undefined
+                    }
+                  >
+                    {syncing ? (
+                      <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-3.5 w-3.5 mr-1" />
+                    )}
+                    Sync now
+                  </Button>
+                </div>
+
+                {/* Per-source last-run status (saved config, not the draft). */}
+                {syncStatus.length > 0 && (
+                  <div className="pt-2 border-t space-y-1.5">
+                    <div className="text-xs font-medium text-muted-foreground">
+                      Last run
+                    </div>
+                    {syncStatus.map((s, i) => (
+                      <div
+                        key={i}
+                        className="flex flex-wrap items-baseline gap-x-2 text-xs"
+                      >
+                        <span className="font-mono">{s.repo}</span>
+                        <span
+                          className={
+                            s.lastStatus === "error"
+                              ? "text-destructive"
+                              : s.lastStatus === "local-edits"
+                                ? "text-amber-600 dark:text-amber-400"
+                                : "text-muted-foreground"
+                          }
+                        >
+                          {s.lastStatus ?? "never run"}
+                          {s.lastDetail ? ` — ${s.lastDetail}` : ""}
+                        </span>
+                        {s.lastRunAt && (
+                          <span className="text-muted-foreground/70">
+                            {new Date(s.lastRunAt).toLocaleString()}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
