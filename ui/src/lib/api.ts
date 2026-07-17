@@ -274,6 +274,36 @@ export async function inviteTeammate(email: string) {
   });
 }
 
+// ─── Superadmins (server admins) ────────────────────────────────────────
+// Effective superadmin = license owner ∪ access.yaml super_admins ∪ DB
+// grants. Only "granted" rows are revocable from the UI.
+
+export interface SuperAdminRow {
+  email: string;
+  source: "license" | "config" | "granted";
+  granted_by: string | null;
+  granted_at: string | null;
+  self: boolean;
+}
+
+export async function listSuperAdmins() {
+  return request<{ super_admins: SuperAdminRow[] }>("/admin/super-admins");
+}
+
+export async function addSuperAdmin(email: string) {
+  return request<{ email: string; source: "granted"; granted_by: string }>(
+    "/admin/super-admins",
+    { method: "POST", body: JSON.stringify({ email }) },
+  );
+}
+
+export async function removeSuperAdmin(email: string) {
+  return request<{ ok: boolean; email: string }>(
+    `/admin/super-admins/${encodeURIComponent(email)}`,
+    { method: "DELETE" },
+  );
+}
+
 // Logged-in user changes their own password (e.g., after an admin reset
 // handed them a temporary one). Invalidates other sessions server-side.
 export async function changePassword(current: string, next: string) {

@@ -4,7 +4,7 @@
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
 import {
-  ArrowLeft, UserPlus, Shield, Users, Copy, Check,
+  ArrowLeft, UserPlus, Shield, ShieldCheck, Users, Copy, Check,
   AlertCircle, Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -213,6 +213,8 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
         </CardContent>
       </Card>
 
+      <SuperAdminsCard />
+
       {pendingStewards.length > 0 && (
         <Card className="mt-4 border-amber-200 bg-amber-50/40">
           <CardHeader>
@@ -385,6 +387,246 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * Superadmins — server-wide admins, managed from the UI (CU-wdqcpzwf2n).
+ * Sources: "license" (owner of the installed PromptOwl license), "config"
+ * (access.yaml super_admins — revocable only by editing the file), "granted"
+ * (DB rows added here — the only revocable kind).
+ */
+function SuperAdminsCard() {
+  const [rows, setRows] = useState<api.SuperAdminRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [addEmail, setAddEmail] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<api.SuperAdminRow | null>(null);
+  const [revoking, setRevoking] = useState(false);
+
+  const fetchRows = async () => {
+    try {
+      const data = await api.listSuperAdmins();
+      setRows(data.super_admins);
+      setError(null);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { fetchRows(); }, []);
+
+  const sourceBadge = (source: api.SuperAdminRow["source"]) => {
+    switch (source) {
+      case "license":
+        return (
+          <Badge
+            variant="outline"
+            className="border-blue-200 bg-blue-50 text-blue-700"
+            title="Owns the installed PromptOwl license. Always a server admin; can't be revoked here."
+          >
+            License
+          </Badge>
+        );
+      case "config":
+        return (
+          <Badge
+            variant="outline"
+            className="border-slate-300 bg-slate-50 text-slate-700"
+            title="Listed in access.yaml super_admins. Revocable only by editing the file and restarting the server."
+          >
+            access.yaml
+          </Badge>
+        );
+      default:
+        return (
+          <Badge
+            variant="outline"
+            className="border-emerald-200 bg-emerald-50 text-emerald-700"
+            title="Granted from this page. Can be revoked here."
+          >
+            Granted
+          </Badge>
+        );
+    }
+  };
+
+  const handleAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const email = addEmail.trim();
+    if (!email) return;
+    setAdding(true);
+    setAddError(null);
+    try {
+      await api.addSuperAdmin(email);
+      setAddEmail("");
+      await fetchRows();
+    } catch (err: any) {
+      setAddError(err.message);
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  return (
+    <Card className="mt-4">
+      <CardHeader>
+        <CardTitle className="text-lg flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4" />
+          Superadmins
+        </CardTitle>
+        <CardDescription>
+          Server-wide admins: they administer every nest, manage teammates, and
+          see the activity trace. Entries from access.yaml or the license can
+          only be changed at the source.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {error && (
+          <Alert variant="destructive" className="mb-4">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        {loading ? (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {rows.map((r) => (
+              <div
+                key={r.email}
+                className="flex items-center gap-3 p-3 rounded-lg border"
+              >
+                <Avatar className="h-9 w-9">
+                  <AvatarFallback>
+                    {(r.email[0] || "?").toUpperCase()}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium truncate">{r.email}</span>
+                    {r.self && (
+                      <span className="text-xs text-muted-foreground">(you)</span>
+                    )}
+                    {sourceBadge(r.source)}
+                  </div>
+                  {r.source === "granted" && r.granted_by && (
+                    <div className="text-xs text-muted-foreground">
+                      granted by {r.granted_by}
+                      {r.granted_at ? ` · ${new Date(r.granted_at + "Z").toLocaleDateString()}` : ""}
+                    </div>
+                  )}
+                </div>
+                {r.source === "granted" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                    onClick={() => setRevokeTarget(r)}
+                    title="Revoke superadmin"
+                  >
+                    Revoke
+                  </Button>
+                )}
+              </div>
+            ))}
+            {rows.length === 0 && (
+              <div className="text-center py-6 text-sm text-muted-foreground">
+                No superadmins yet. Grant one below, or list them under{" "}
+                <code>super_admins</code> in access.yaml.
+              </div>
+            )}
+          </div>
+        )}
+
+        <form onSubmit={handleAdd} className="mt-4 space-y-2">
+          {addError && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{addError}</AlertDescription>
+            </Alert>
+          )}
+          <div className="flex items-center gap-2">
+            <Input
+              type="email"
+              placeholder="teammate@acme.com"
+              value={addEmail}
+              onChange={(e) => {
+                setAddEmail(e.target.value);
+                setAddError(null);
+              }}
+            />
+            <Button type="submit" disabled={adding || !addEmail.trim()}>
+              {adding ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <>
+                  <ShieldCheck className="h-4 w-4 mr-2" />
+                  Grant superadmin
+                </>
+              )}
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Must be an existing user on this server. They immediately get
+            server-admin access everywhere.
+          </p>
+        </form>
+      </CardContent>
+
+      <Dialog
+        open={!!revokeTarget}
+        onOpenChange={(o) => !o && !revoking && setRevokeTarget(null)}
+      >
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>
+              Revoke superadmin for {revokeTarget?.email}?
+            </DialogTitle>
+            <DialogDescription>
+              {revokeTarget?.self
+                ? "You are revoking your OWN superadmin access. You'll lose server-admin powers immediately."
+                : "They keep their account and any nest-level roles, but lose server-wide admin access immediately."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRevokeTarget(null)}
+              disabled={revoking}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={revoking}
+              onClick={async () => {
+                if (!revokeTarget) return;
+                setRevoking(true);
+                try {
+                  await api.removeSuperAdmin(revokeTarget.email);
+                  setRevokeTarget(null);
+                  await fetchRows();
+                } catch (e: any) {
+                  setError(e.message);
+                  setRevokeTarget(null);
+                } finally {
+                  setRevoking(false);
+                }
+              }}
+            >
+              {revoking ? <Loader2 className="h-4 w-4 animate-spin" /> : "Revoke"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
   );
 }
 

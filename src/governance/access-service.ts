@@ -3,14 +3,41 @@
  *
  * Loaded once on startup from DATA_ROOT/access.yaml.
  * Controls: who can register, group memberships, default permissions, super admins.
+ *
+ * Superadmins resolve from TWO sources (CU-wdqcpzwf2n):
+ *   - access.yaml `super_admins` — the authoritative bootstrap. File entries
+ *     can never be revoked via the API (lockout safety).
+ *   - the `super_admins` DB table — grants made at runtime from the UI/API.
+ *     Mirrored into an in-memory Set so `isSuperAdmin` stays synchronous (it
+ *     has many sync call sites, including the engine AccessAdapter contract).
+ *     The Set is loaded at startup (see index.ts) and refreshed after every
+ *     grant/revoke write, so it's always current on the instance that took
+ *     the write. Horizontally scaled deployments (Postgres) converge on the
+ *     other instances at their next restart — acceptable for an operator
+ *     action this rare; don't build cross-instance invalidation for it.
  */
 
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { config } from "../config.js";
+import { getDb } from "../db/client.js";
 import type { AccessConfig } from "./types.js";
 
 let accessConfig: AccessConfig | null = null;
+
+/** Lowercased emails from the super_admins DB table (runtime grants). */
+let grantedSuperAdmins = new Set<string>();
+
+/**
+ * (Re)load the DB-granted superadmins into the in-memory Set. Called at
+ * startup (after migrations) and after every grant/revoke write.
+ */
+export async function loadGrantedSuperAdmins(): Promise<void> {
+  const rows = (await getDb().all(
+    "SELECT email FROM super_admins",
+  )) as Array<{ email: string }>;
+  grantedSuperAdmins = new Set(rows.map((r) => r.email.toLowerCase()));
+}
 
 /**
  * Load access.yaml from DATA_ROOT. Returns null if not present.
@@ -107,13 +134,30 @@ export function getDefaultPermission(
 }
 
 /**
- * Check if a user is a super admin.
+ * Check if a user is a super admin: access.yaml `super_admins` ∪ the
+ * DB-granted set (both case-insensitive).
  */
 export function isSuperAdmin(email: string): boolean {
+  const lower = email.toLowerCase();
+  if (grantedSuperAdmins.has(lower)) return true;
+  return isConfigSuperAdmin(lower);
+}
+
+/**
+ * True only when the email is listed in access.yaml `super_admins` (the
+ * file-authoritative bootstrap). These entries cannot be revoked via the
+ * API — remove them from the file instead.
+ */
+export function isConfigSuperAdmin(email: string): boolean {
   if (!accessConfig?.super_admins) return false;
   return accessConfig.super_admins
     .map((e) => e.toLowerCase())
     .includes(email.toLowerCase());
+}
+
+/** Lowercased emails granted via the super_admins DB table (cached). */
+export function getGrantedSuperAdmins(): string[] {
+  return [...grantedSuperAdmins];
 }
 
 // ─── Simple YAML parser for access.yaml ─────────────────────────────────

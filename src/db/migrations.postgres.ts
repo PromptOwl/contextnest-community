@@ -62,6 +62,7 @@ const HISTORICAL_MIGRATIONS = [
   "020_server_settings",
   "026_api_events_nest_index",
   "027_teams",
+  "028_super_admins",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -536,6 +537,16 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       value TEXT,
       env_at_write TEXT,
       updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+
+    -- super_admins (migration 028): DB-backed superadmin grants made from the
+    -- UI/API. Effective superadmin = access.yaml super_admins ∪ these rows
+    -- (case-insensitive; emails stored lowercased). File entries can never be
+    -- revoked via the API — lockout safety.
+    CREATE TABLE IF NOT EXISTS super_admins (
+      email TEXT PRIMARY KEY,
+      granted_by TEXT NOT NULL,
+      granted_at TEXT NOT NULL DEFAULT ${NOW}
     );
 
     CREATE TABLE IF NOT EXISTS schema_migrations (

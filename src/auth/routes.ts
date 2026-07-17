@@ -31,11 +31,32 @@ import {
   isLicenseAdminEmail,
   isLicenseAdminUserId,
 } from "./license.js";
+import { isSuperAdmin } from "../governance/access-service.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
 import { verifySsoTicket } from "./sso-token.js";
 import { oidcRoutes } from "./oidc.js";
 import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+
+/**
+ * Server admin = the license admin OR a superadmin (access.yaml `super_admins`
+ * ∪ the DB-granted set — see governance/access-service.ts). Guards the
+ * people-management surfaces below so a granted superadmin gets the same
+ * operator powers as the license owner.
+ */
+async function isServerAdminUserId(userId: string): Promise<boolean> {
+  if (await isLicenseAdminUserId(userId)) return true;
+  const row = (await getDb().get(
+    "SELECT email FROM users WHERE id = ?",
+    [userId],
+  )) as { email?: string } | undefined;
+  return !!row?.email && isSuperAdmin(row.email);
+}
+
+/** is_admin for user-facing payloads: license admin OR superadmin. */
+function isServerAdminEmail(email: string): boolean {
+  return isLicenseAdminEmail(email) || isSuperAdmin(email);
+}
 
 // Auth-endpoint rate limits. Keyed on IP for anonymous attempts + email
 // on login (so brute-forcing one email from a botnet still clamps).
@@ -314,7 +335,7 @@ authRoutes.post("/register", async (c) => {
         id: userId,
         email,
         name: body.name || null,
-        is_admin: isLicenseAdminEmail(email),
+        is_admin: isServerAdminEmail(email),
       },
     },
     201,
@@ -436,7 +457,7 @@ authRoutes.post("/login", async (c) => {
       id: user.id,
       email: user.email,
       name: user.name,
-      is_admin: isLicenseAdminEmail(user.email),
+      is_admin: isServerAdminEmail(user.email),
     },
   });
 });
@@ -811,7 +832,7 @@ authRoutes.get("/admin-status", async (c) => {
       me = {
         email: row.email,
         name: row.name,
-        is_admin: isLicenseAdminEmail(row.email),
+        is_admin: isServerAdminEmail(row.email),
       };
     }
   }
@@ -887,9 +908,9 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   if (!callerId) {
     return c.json({ error: "Authentication required." }, 401);
   }
-  if (!(await isLicenseAdminUserId(callerId))) {
+  if (!(await isServerAdminUserId(callerId))) {
     return c.json(
-      { error: "Only the license-admin user can reset passwords." },
+      { error: "Only a server admin can reset passwords." },
       403,
     );
   }
@@ -950,9 +971,9 @@ authRoutes.delete("/users/:userId", async (c) => {
   if (!callerId) {
     return c.json({ error: "Authentication required." }, 401);
   }
-  if (!(await isLicenseAdminUserId(callerId))) {
+  if (!(await isServerAdminUserId(callerId))) {
     return c.json(
-      { error: "Only the license-admin user can remove users." },
+      { error: "Only a server admin can remove users." },
       403,
     );
   }
@@ -1019,11 +1040,11 @@ authRoutes.post("/invite", async (c) => {
     );
   }
   const db = getDb();
-  if (!(await isLicenseAdminUserId(callerId))) {
+  if (!(await isServerAdminUserId(callerId))) {
     return c.json(
       {
         error:
-          "Only the license-admin user can invite teammates. Contact the admin who installed the PromptOwl license on this server to issue invitations.",
+          "Only a server admin can invite teammates. Contact the admin who installed the PromptOwl license on this server to issue invitations.",
       },
       403,
     );
@@ -1098,11 +1119,11 @@ authRoutes.get("/teammates", async (c) => {
   }
 
   const db = getDb();
-  if (!(await isLicenseAdminUserId(callerId))) {
+  if (!(await isServerAdminUserId(callerId))) {
     return c.json(
       {
         error:
-          "Only the license-admin user can view the teammates list. Contact the admin who installed the PromptOwl license on this server.",
+          "Only a server admin can view the teammates list. Contact the admin who installed the PromptOwl license on this server.",
       },
       403,
     );

@@ -1063,6 +1063,38 @@ Execute (the runner contract — the agent IS the runner):
 
 ## 10. Admin / operator
 
+### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
+Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:
+
+- `license` — the PromptOwl account that owns the installed license. Derived live; never revocable here.
+- `config` — `access.yaml` `super_admins`. The authoritative bootstrap: **never revocable via the API** (lockout safety) — edit the file and restart instead.
+- `granted` — rows in the `super_admins` DB table, managed by these endpoints.
+
+All three routes use the same server-admin guard as `GET /admin/trace` (license admin, or any effective superadmin; open mode: always allowed). Emails are case-insensitive and stored lowercased. A superadmin holds `admin` on every nest, sees `/admin/trace` + `/admin/settings`, and can manage teammates (`/auth/teammates`, invite, reset-password, remove).
+
+**GET `/admin/super-admins`** → `200`:
+```json
+{
+  "super_admins": [
+    { "email": "owner@acme.com", "source": "license", "granted_by": null, "granted_at": null, "self": true },
+    { "email": "ops@acme.com",   "source": "config",  "granted_by": null, "granted_at": null, "self": false },
+    { "email": "jane@acme.com",  "source": "granted", "granted_by": "owner@acme.com", "granted_at": "2026-07-17 14:03:22", "self": false }
+  ]
+}
+```
+An email present in several sources shows its least-revocable origin (`license` > `config` > `granted`). `self` marks the caller's own row.
+
+**POST `/admin/super-admins`** with `{ "email": "jane@acme.com" }` → `201 { email, source: "granted", granted_by }`.
+- `400` — missing/malformed email, or no user account with that email exists on this server (invite them as a teammate first).
+- `409` — already an effective superadmin (any source).
+
+**DELETE `/admin/super-admins/:email`** → `200 { ok: true, email }`. Guards:
+- `400` — target is the license admin, or an `access.yaml` entry (file is authoritative; remove from the file + restart).
+- `400` — **last-admin lockout guard**: you can't revoke *yourself* when you're the last effective superadmin (no license admin, no `access.yaml` entries, no other grants) — grant someone else first.
+- `404` — email has no granted row.
+
+Grants persist in the database and are loaded into the in-memory resolution cache at startup and after every grant/revoke, so they survive restarts. Surfaced in the UI on **Teammates → Superadmins** with per-source badges, add-by-email, and confirm-to-revoke.
+
 ### GET `/admin/trace` (server-admin only)
 Operator activity trail — one newest-first row per API request and per MCP tool call, so the server admin has a single place to audit what every client and agent did. Server-admin only: the license admin, or a `super_admin` in `access.yaml` (open mode: always allowed). Everyone else gets `403`. Cross-tenant data; not scoped to a nest.
 
