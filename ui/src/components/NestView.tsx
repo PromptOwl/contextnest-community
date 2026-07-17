@@ -432,6 +432,8 @@ export function NestView({
       dragExpandTimer.current = null;
     }
   };
+  // Don't let a pending spring-open fire (and set state) after unmount.
+  useEffect(() => cancelDragExpand, []);
   const scheduleDragExpand = (path: string) => {
     cancelDragExpand();
     dragExpandTimer.current = setTimeout(() => {
@@ -3257,7 +3259,11 @@ export function NestView({
             </SelectContent>
           </Select>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setMoveTarget(null)}>
+            <Button
+              variant="ghost"
+              disabled={movingDoc}
+              onClick={() => setMoveTarget(null)}
+            >
               Cancel
             </Button>
             <Button
