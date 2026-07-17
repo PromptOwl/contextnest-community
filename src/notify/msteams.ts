@@ -39,16 +39,38 @@ function slackEmojiToUnicode(s: string): string {
   return s.replace(/:[a-z0-9_+-]+:/g, (m) => EMOJI[m] ?? m);
 }
 
-/** Slack mrkdwn one-liner → Adaptive Card TextBlock markdown. */
+/**
+ * Neutralize the markdown Adaptive Card TextBlocks render before any
+ * user-controlled fragment (review notes, nest names, emails) reaches a
+ * card. The subset includes [label](url) links — without this, a
+ * collaborator's note like "[check this](https://evil.example)" renders as
+ * a live, trusted-looking link in the Teams channel. Backslash first (so a
+ * crafted "\[" can't un-escape our work), then both brackets; that kills
+ * link syntax at the root. This is the Teams sibling of slack.ts's
+ * escapeMrkdwn (also duplicated in dispatch.ts) — same intent, different
+ * metacharacters; consolidating the Slack copies is deliberately out of
+ * scope here.
+ */
+export function escapeAdaptiveText(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+}
+
+/**
+ * Slack mrkdwn one-liner → Adaptive Card TextBlock markdown. Escapes FIRST
+ * (raw input is where injection lives), then translates emoji shortcodes and
+ * *bold* → **bold**. ALL card text — title and message alike — must go
+ * through this; nothing user-controlled may reach a TextBlock raw.
+ */
 export function toAdaptiveText(s: string): string {
   // *bold* → **bold** (don't touch already-doubled asterisks or mid-word *).
-  return slackEmojiToUnicode(s).replace(
+  return slackEmojiToUnicode(escapeAdaptiveText(s)).replace(
     /(^|\s)\*([^*\n]+)\*(?=\s|[.,;:!?)]|$)/g,
     "$1**$2**",
   );
 }
 
-/** Slack mrkdwn one-liner → plain text (for fallbackText). */
+/** Slack mrkdwn one-liner → plain text (for fallbackText). No markdown
+ *  renderer touches fallbackText, so no escaping — just de-mrkdwn it. */
 export function toPlainText(s: string): string {
   return slackEmojiToUnicode(s).replace(
     /(^|\s)\*([^*\n]+)\*(?=\s|[.,;:!?)]|$)/g,
@@ -77,8 +99,10 @@ export function msTeamsPayload(title: string, message: string): unknown {
           fallbackText: `[${title}] ${toPlainText(message)}`,
           body: [
             {
+              // Same pipeline as the message: the nest name is user-
+              // controlled text too and must not carry link syntax.
               type: "TextBlock",
-              text: title,
+              text: toAdaptiveText(title),
               weight: "Bolder",
               size: "Medium",
               wrap: true,

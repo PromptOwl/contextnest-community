@@ -118,8 +118,11 @@ webhooks are now created with the **Workflows** (Power Automate) app:
 4. Paste that URL into **Settings → Notifications → Microsoft Teams
    notifications** (or set `MSTEAMS_WEBHOOK_URL`).
 
-If your tenant still has a legacy Office 365 connector webhook, it accepts the
-same payload envelope and works too — but create new hooks via Workflows.
+If your tenant still has a legacy Office 365 connector webhook, it is expected
+to accept the same payload envelope (legacy connectors documented support for
+Adaptive Card attachments, though we have not verified one end-to-end — the
+card's plain-text `fallbackText` is the safety net) — but create new hooks via
+Workflows.
 
 The URL embeds a secret — anyone holding it can post to the channel, so treat
 it like a password (it is why the setting requires `https://`). The server

@@ -12,6 +12,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+import { msTeamsPayload } from "../src/notify/msteams.js";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -275,14 +276,14 @@ tags:
     expect(text).toContain("**Approve Me (in api)**");
   });
 
-  it("reject posts a card with the document title and the rejection note", async () => {
+  it("reject posts a card and neutralizes markdown-link syntax in the note", async () => {
     const id = await draft("Reject Me");
     await jsonRequest(lapp, "POST", `/nests/${lnestId}/nodes/${id}/submit-review`, {}, dev.apiKey);
     // Drain the submit-review notification before asserting (see approve test).
     await settle();
     lsent.length = 0;
     const res = await jsonRequest(lapp, "POST", `/nests/${lnestId}/nodes/${id}/reject`,
-      { note: "missing section" }, jane.apiKey);
+      { note: "[check this](https://evil.example) missing section" }, jane.apiKey);
     expect(res.status).toBe(200);
     await settle();
     const card = lsent.find((p) => ltext(p).includes("Reject Me"));
@@ -291,6 +292,43 @@ tags:
     expect(text).toContain("❌");
     expect(text).toContain("**Reject Me (in api)**");
     expect(text).toContain("missing section");
+    // The note's [label](url) must NOT survive as live link syntax — the
+    // brackets are escaped, so no trusted-looking link renders in Teams.
+    expect(text).not.toContain("[check this](https://evil.example)");
+    expect(text).toContain("\\[check this\\]");
+  });
+});
+
+// Card-builder unit tests: escaping is the security boundary, so pin it
+// directly on msTeamsPayload — every TextBlock (title AND message) must be
+// link-injection-proof while the mrkdwn translation still applies.
+describe("msTeamsPayload — markdown-link escaping", () => {
+  const body = (p: any) => (p as any).attachments[0].content.body;
+
+  it("a [label](url) in the message does not render as a markdown link", () => {
+    const p: any = msTeamsPayload("Nest", "note: [check this](https://evil.example)");
+    expect(body(p)[1].text).not.toContain("[check this](https://evil.example)");
+    expect(body(p)[1].text).toContain("\\[check this\\](https://evil.example)");
+  });
+
+  it("a crafted backslash cannot un-escape the brackets", () => {
+    const p: any = msTeamsPayload("Nest", "\\[x](https://evil.example)");
+    // Raw \ doubles to \\, then [ becomes \[ — the bracket stays escaped.
+    expect(body(p)[1].text).toContain("\\\\\\[x\\](https://evil.example)");
+  });
+
+  it("the title (nest name) goes through the same escape + translation pipeline", () => {
+    const p: any = msTeamsPayload("[Evil](https://evil.example) :memo: nest", "msg");
+    expect(body(p)[0].text).not.toContain("[Evil](https://evil.example)");
+    expect(body(p)[0].text).toContain("\\[Evil\\]");
+    // Translated, not just escaped: shortcodes become unicode in the title too.
+    expect(body(p)[0].text).toContain("📝");
+    expect(body(p)[0].text).not.toContain(":memo:");
+  });
+
+  it("escaping still lets *bold* and emoji translate in the message", () => {
+    const p: any = msTeamsPayload("Nest", ":x: *Doc Title* rejected");
+    expect(body(p)[1].text).toBe("❌ **Doc Title** rejected");
   });
 });
 
