@@ -301,6 +301,18 @@ export const config = {
     return process.env.OIDC_AUTO_PROVISION !== "false";
   },
   /**
+   * Auto-tag content created by SSO users with their directory department:
+   * when on, node CREATE appends `dept:<slugified-department>` to the new
+   * node's tags (never on update, never retroactively). The department is
+   * captured from the OIDC `department` claim at login (see oidc.ts), so
+   * this is only meaningful alongside an IdP that emits that claim — but
+   * there is no hard dependency on OIDC_ENABLED. Default off; superadmin-
+   * togglable at runtime via /admin/settings.
+   */
+  get OIDC_DEPARTMENT_TAGGING(): boolean {
+    return process.env.OIDC_DEPARTMENT_TAGGING === "true";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path

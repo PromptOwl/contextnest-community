@@ -178,6 +178,8 @@ export interface AdminSettings {
   oidc_client_secret_set?: boolean;
   oidc_allowed_domains: string;
   oidc_auto_provision: boolean;
+  /** Tag new documents with the creator's directory department (dept:<slug>). */
+  oidc_department_tagging: boolean;
   /** Server-computed readiness: enabled AND issuer+client id+secret present. */
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */

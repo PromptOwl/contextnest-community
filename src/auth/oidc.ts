@@ -161,6 +161,23 @@ function pkceChallenge(verifier: string): string {
   return createHash("sha256").update(verifier).digest("base64url");
 }
 
+// Defensive cap on the stored department — it's directory metadata that later
+// becomes a tag slug, so anything longer is junk (or an abusive claim).
+const DEPARTMENT_MAX_LENGTH = 120;
+
+/**
+ * Normalize the optional `department` ID-token claim: string → trimmed, inner
+ * whitespace collapsed, length-capped; anything else (absent, non-string,
+ * whitespace-only) → null. Null is meaningful — the login upsert writes it
+ * through, so a claim the IdP stopped emitting CLEARS users.department.
+ */
+export function normalizeDepartment(claim: unknown): string | null {
+  if (typeof claim !== "string") return null;
+  const collapsed = claim.replace(/\s+/g, " ").trim();
+  if (!collapsed) return null;
+  return collapsed.slice(0, DEPARTMENT_MAX_LENGTH).trim();
+}
+
 function buildFlowCookie(
   name: string,
   value: string,
@@ -404,6 +421,14 @@ oidcRoutes.get("/callback", async (c) => {
       ? claims.name.trim()
       : null;
 
+  // Directory department (optional `department` claim — Entra emits it as an
+  // ID-token optional claim; see CONFIGURATION.md). Upserted on EVERY login:
+  // present → users.department takes the claim's value, absent/non-string →
+  // NULL, so a removed claim clears the stored value and directory moves
+  // propagate on the next sign-in. Whitespace is trimmed + collapsed and the
+  // value is capped defensively — it later becomes a tag slug, never markup.
+  const department = normalizeDepartment(claims.department);
+
   // ── Look up / JIT-provision, then session — like the password path ─────
   try {
     const db = getDb();
@@ -442,6 +467,14 @@ oidcRoutes.get("/callback", async (c) => {
     } else {
       trackEvent("user.login", { userId: user.id, method: "oidc" });
     }
+
+    // Department upsert — every login (existing, JIT, or raced) syncs
+    // users.department to this token's claim. `department` is already null
+    // when the claim is absent, so the write-through both sets and clears.
+    await db.run("UPDATE users SET department = ? WHERE id = ?", [
+      department,
+      user.id,
+    ]);
 
     // Same session mechanics as a successful password login: sessions-table
     // row + httpOnly cookie (Secure on HTTPS), then land on the app. Plus the

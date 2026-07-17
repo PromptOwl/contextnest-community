@@ -30,6 +30,7 @@ const OIDC_ENV = [
   "OIDC_CLIENT_SECRET",
   "OIDC_ALLOWED_DOMAINS",
   "OIDC_AUTO_PROVISION",
+  "OIDC_DEPARTMENT_TAGGING",
   "PUBLIC_BASE_URL",
   // The lockout-guard tests PATCH these; scrub them so a leaked value can't
   // bleed into other cases.
@@ -657,6 +658,243 @@ describe("GET /auth/oidc/callback", () => {
       ["raced@acme.com"],
     )) as unknown[];
     expect(rows.length).toBe(1);
+  });
+});
+
+// ─── Department claim capture (CU-wdqcpzwf2p) ─────────────────────────────
+// The optional string `department` claim is upserted to users.department on
+// EVERY login: value present → stored (trimmed, whitespace collapsed, capped),
+// absent → cleared, so a directory move propagates on the next sign-in.
+
+describe("OIDC callback — department claim", () => {
+  /** Full login round-trip with the given extra ID-token claims. */
+  async function ssoLogin(
+    app: any,
+    issuer: ReturnType<typeof installMockIssuer>,
+    privateKey: CryptoKey,
+    claims: Record<string, unknown>,
+  ) {
+    const flow = await startLogin(app);
+    issuer.tokenBody = {
+      id_token: await signIdToken(privateKey, { nonce: flow.nonce, ...claims }),
+    };
+    const res = await app.request(
+      `/auth/oidc/callback?code=c&state=${flow.state}`,
+      { headers: { Cookie: flow.cookieHeader } },
+    );
+    expect(res.headers.get("Location")).toBe("/");
+    return res;
+  }
+
+  async function storedDepartment(email: string): Promise<string | null> {
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get(
+      "SELECT department FROM users WHERE LOWER(email) = ?",
+      [email],
+    )) as { department: string | null } | undefined;
+    expect(row).toBeTruthy();
+    return row!.department;
+  }
+
+  it("stores the department on login (whitespace trimmed + collapsed), refreshes it on a new value, and clears it when the claim disappears", async () => {
+    const { privateKey, jwks } = await makeKeys();
+    const issuer = installMockIssuer(jwks);
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    configureOidc();
+
+    // First login: JIT-provisioned WITH the department. Messy whitespace must
+    // normalize (trim + inner collapse).
+    await ssoLogin(app, issuer, privateKey, {
+      email: "mover@acme.com",
+      department: "  Customer   Success ",
+    });
+    expect(await storedDepartment("mover@acme.com")).toBe("Customer Success");
+
+    // Second login with a new value: the directory move propagates.
+    await ssoLogin(app, issuer, privateKey, {
+      email: "mover@acme.com",
+      department: "Engineering",
+    });
+    expect(await storedDepartment("mover@acme.com")).toBe("Engineering");
+
+    // Third login WITHOUT the claim: the stored value is cleared, not kept.
+    await ssoLogin(app, issuer, privateKey, { email: "mover@acme.com" });
+    expect(await storedDepartment("mover@acme.com")).toBeNull();
+  });
+
+  it("ignores a non-string department claim and caps an overlong one", async () => {
+    const { privateKey, jwks } = await makeKeys();
+    const issuer = installMockIssuer(jwks);
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    configureOidc();
+
+    // Non-string claim (an IdP emitting an array/object) → treated as absent.
+    await ssoLogin(app, issuer, privateKey, {
+      email: "odd.claims@acme.com",
+      department: ["Engineering", "Platform"],
+    });
+    expect(await storedDepartment("odd.claims@acme.com")).toBeNull();
+
+    // Overlong value → stored capped at 120 chars, never unbounded.
+    await ssoLogin(app, issuer, privateKey, {
+      email: "odd.claims@acme.com",
+      department: "x".repeat(500),
+    });
+    expect(await storedDepartment("odd.claims@acme.com")).toBe("x".repeat(120));
+  });
+
+  it("captures the department for an EXISTING (password-registered) user too", async () => {
+    const { privateKey, jwks } = await makeKeys();
+    const issuer = installMockIssuer(jwks);
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const existing = await registerUser(app, "known@acme.com");
+    configureOidc();
+
+    await ssoLogin(app, issuer, privateKey, {
+      email: existing.email,
+      department: "Legal",
+    });
+    expect(await storedDepartment("known@acme.com")).toBe("Legal");
+  });
+});
+
+// ─── Department auto-tagging on node create (CU-wdqcpzwf2p) ───────────────
+// When the oidc_department_tagging toggle is on and the creating user has a
+// stored department, node CREATE appends `#dept:<slugified-department>` to the
+// node's tags — deduped against user-supplied tags. Toggle off, or no
+// department, → untagged and never an error. The department is written
+// straight to users.department here (the claim-capture path is covered above)
+// so these tests exercise the tagging seam in isolation.
+
+describe("department auto-tagging on node create", () => {
+  async function setDepartment(email: string, department: string | null) {
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run(
+      "UPDATE users SET department = ? WHERE LOWER(email) = ?",
+      [department, email.toLowerCase()],
+    );
+  }
+
+  async function makeNest(app: any, apiKey: string): Promise<string> {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Docs" }, apiKey);
+    expect(nest.status).toBe(201);
+    return nest.data.nest.id as string;
+  }
+
+  it("toggle off → node create is untagged even when the user has a department", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const user = await registerUser(app, "writer@acme.com");
+    await setDepartment(user.email, "Engineering");
+    const nestId = await makeNest(app, user.apiKey);
+
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Plain Doc", content: "# Plain", tags: ["notes"] },
+      user.apiKey,
+    );
+    expect(res.status).toBe(201);
+    expect(res.data.node.tags).toEqual(["#notes"]);
+  });
+
+  it("toggle on + department → dept:<slug> appended alongside user tags, deduped", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const user = await registerUser(app, "writer@acme.com");
+    await setDepartment(user.email, "Customer Success");
+    process.env.OIDC_DEPARTMENT_TAGGING = "true";
+    const nestId = await makeNest(app, user.apiKey);
+
+    // Spaces → dashes, lowercase; user tags kept.
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Tagged Doc", content: "# Tagged", tags: ["notes"] },
+      user.apiKey,
+    );
+    expect(created.status).toBe(201);
+    expect(created.data.node.tags).toEqual(["#notes", "#dept:customer-success"]);
+
+    // Deduped when the user already supplied the same dept tag themselves.
+    const dup = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      {
+        title: "Dup Doc",
+        content: "# Dup",
+        tags: ["dept:customer-success", "notes"],
+      },
+      user.apiKey,
+    );
+    expect(dup.status).toBe(201);
+    expect(dup.data.node.tags).toEqual(["#dept:customer-success", "#notes"]);
+
+    // Create-only: an update never adds the tag to a node created without it.
+    process.env.OIDC_DEPARTMENT_TAGGING = "false";
+    const plain = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Pre Toggle", content: "# Pre" },
+      user.apiKey,
+    );
+    process.env.OIDC_DEPARTMENT_TAGGING = "true";
+    const updated = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/${plain.data.node.id}`,
+      { content: "# Pre (edited)" },
+      user.apiKey,
+    );
+    expect(updated.status).toBe(200);
+    expect(updated.data.node.tags ?? []).toEqual([]);
+  });
+
+  it("toggle on + no department → untagged, no error", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const user = await registerUser(app, "nodept@acme.com");
+    process.env.OIDC_DEPARTMENT_TAGGING = "true";
+    const nestId = await makeNest(app, user.apiKey);
+
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "No Dept", content: "# No dept", tags: ["notes"] },
+      user.apiKey,
+    );
+    expect(res.status).toBe(201);
+    expect(res.data.node.tags).toEqual(["#notes"]);
+  });
+
+  it("round-trips the oidc_department_tagging toggle through /admin/settings", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    const before = await jsonRequest(app, "GET", "/admin/settings", undefined, admin.apiKey);
+    expect(before.data.oidc_department_tagging).toBe(false); // default OFF
+
+    const on = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { oidc_department_tagging: true },
+      admin.apiKey,
+    );
+    expect(on.status).toBe(200);
+    expect(on.data.settings.oidc_department_tagging).toBe(true);
+
+    const off = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { oidc_department_tagging: false },
+      admin.apiKey,
+    );
+    expect(off.status).toBe(200);
+    expect(off.data.settings.oidc_department_tagging).toBe(false);
   });
 });
 

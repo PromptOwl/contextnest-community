@@ -382,6 +382,7 @@ export function createApp(): Hono<AuthEnv> {
     oidc_client_secret_set: !!config.OIDC_CLIENT_SECRET,
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
+    oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
     // Live readiness (enabled AND issuer+id+secret present) — the SAVED state,
     // i.e. whether the login button is currently live. The Settings UI derives
     // its own "enabled but not configured" warning from the unsaved draft
@@ -577,6 +578,16 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "OIDC_AUTO_PROVISION",
         value: body.oidc_auto_provision ? "true" : "false",
+      });
+    }
+    // Department auto-tagging (dept:<slug> on node create). Only meaningful
+    // when an OIDC IdP emits the `department` claim, but deliberately NOT
+    // gated on oidc_enabled — the toggle is inert without a department to
+    // read, never harmful. Default off; null clears back to the default.
+    if ("oidc_department_tagging" in body) {
+      pending.push({
+        name: "OIDC_DEPARTMENT_TAGGING",
+        value: body.oidc_department_tagging ? "true" : null,
       });
     }
     // Effective post-PATCH OIDC state: what this request sets, falling back

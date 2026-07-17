@@ -62,6 +62,7 @@ const HISTORICAL_MIGRATIONS = [
   "020_server_settings",
   "026_api_events_nest_index",
   "027_teams",
+  "028_user_department",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -73,10 +74,14 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       password_hash TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT ${NOW},
       is_admin INTEGER NOT NULL DEFAULT 0,
-      is_invited INTEGER NOT NULL DEFAULT 0
+      is_invited INTEGER NOT NULL DEFAULT 0,
+      department TEXT
     );
     -- Case-insensitive email uniqueness (replaces SQLite COLLATE NOCASE index).
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nocase ON users (lower(email));
+    -- users.department is declared inline above (no-op for databases created
+    -- before it shipped) — migration 028 parity for existing deployments.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS department TEXT;
 
     CREATE TABLE IF NOT EXISTS nests (
       id TEXT PRIMARY KEY,

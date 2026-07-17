@@ -67,6 +67,7 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `OIDC_CLIENT_SECRET` | `""` | Client secret from your IdP app registration. Write-only on the Settings API — `GET /admin/settings` reports only `oidc_client_secret_set: true/false`, never the value. |
 | `OIDC_ALLOWED_DOMAINS` | `""` (any) | Comma-separated email-domain allowlist, e.g. `acme.com, contractors.acme.com`. When set, only accounts whose asserted email is on a listed domain may sign in (others bounce with `domain_not_allowed`). Empty allows any domain the IdP asserts. |
 | `OIDC_AUTO_PROVISION` | `true` | Create a user automatically on first successful OIDC sign-in (display name from the `name` claim). Set `false` to allow only pre-existing (invited/registered) users — unknown emails bounce with `not_invited`. |
+| `OIDC_DEPARTMENT_TAGGING` | `false` | Auto-tag newly **created** documents with the creator's directory department: `dept:<slugified-department>` (lowercase, spaces → dashes, e.g. `dept:customer-success`) is appended to the document's tags, deduped against user-supplied tags. Applies on create only — never on update, never retroactively — and a user without a stored department is a silent no-op. The department is captured from the OIDC `department` ID-token claim on every SSO login (a login without the claim clears it, so directory moves propagate), so this is only meaningful when your IdP emits that claim — see [Department auto-tagging](#department-auto-tagging). Also editable from Settings → Single sign-on. |
 | `ENV_FILE_PATH` | `$DATA_ROOT/.env` | Path to an optional `.env` file the server reads at boot (in addition to `$cwd/.env`). **No longer used for persistence** — the License Setup Page and Settings page now write to the database, not this file (see [Runtime settings persistence](#runtime-settings-persistence)). Kept for operators who bootstrap config from a mounted `.env`. |
 | `TELEMETRY_ENABLED` | `"true"` (set to `"false"` to disable) | Batched, anonymized usage events sent to PromptOwl. Off disables the loop entirely. |
 | `TELEMETRY_INTERVAL_MS` | `3600000` (1 hour) | How often buffered telemetry is flushed to PromptOwl. |
@@ -97,7 +98,7 @@ the returned ID token (issuer, audience, nonce, signature against the issuer's
 JWKS) and starts a normal browser session. Users are looked up by email;
 unknown emails are created automatically when `OIDC_AUTO_PROVISION` is on.
 
-All six `OIDC_*` values are also editable at runtime from **Settings → Single
+All seven `OIDC_*` values are also editable at runtime from **Settings → Single
 sign-on** (superadmin only) — no restart needed. The Settings page shows the
 exact **redirect URI** to register with your IdP:
 
@@ -135,6 +136,27 @@ For **Google**: create an OAuth client ID (type *Web application*) in the
 Google Cloud console, add the same redirect URI under *Authorized redirect
 URIs*, and use the **Google** preset (issuer `https://accounts.google.com`)
 with that client ID/secret.
+
+### Department auto-tagging
+
+With `OIDC_DEPARTMENT_TAGGING` on (Settings → Single sign-on → **Department
+auto-tagging**), every document a user **creates** is tagged
+`dept:<slugified-department>` from their directory department — e.g. a user in
+*Customer Success* creates docs tagged `dept:customer-success`. Create-only:
+edits never add or change the tag, and existing documents are never
+retro-tagged. Users without a department (password accounts, or an IdP that
+doesn't emit the claim) create untagged documents — never an error.
+
+The department is read from the **`department` claim** in the OIDC ID token
+and stored on the user at every SSO login: a new value updates it, an absent
+claim clears it, so directory moves propagate on the user's next sign-in.
+
+Microsoft Entra ID does **not** emit the claim by default — add it to the app
+registration: *Token configuration → Add optional claim → Token type: **ID**
+→ select **department** → Add* (grant the suggested Microsoft Graph
+permission if prompted), and make sure the users' *Department* field is
+populated in Entra. Other IdPs work too as long as they emit a string
+`department` claim in the ID token (e.g. a Keycloak user-attribute mapper).
 
 ### Revoking access (offboarding)
 
