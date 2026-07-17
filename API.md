@@ -330,7 +330,9 @@ their role, so they can open it and act per their role.
   `{ teams: [{ teamId, teamName, members: [{ userId, email, role }] }] }`.
   Write-tier (like the collaborator roster) so a read tier can't enumerate emails.
 - **POST** `(admin)` — `{ "team_id": "..." }` share a team → `201 { teams }`.
-  Already shared → `409`.
+  Already shared → `409`. The caller must also be **editor+ on the team**
+  (editor/admin/owner, or server admin); a view-only member sharing → `403`, so
+  a viewer can't project a whole team onto a nest they own.
 - **DELETE `/nests/:nestId/teams/:teamId`** `(admin)` — unshare → `{ teams }`.
 
 ---

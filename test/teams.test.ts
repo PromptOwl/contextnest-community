@@ -173,6 +173,24 @@ describe("sharing a team onto a nest", () => {
     const res = await jsonRequest(app, "POST", `/nests/${nestId}/teams`, { team_id: teamId }, viewerU.apiKey);
     expect([403, 404]).toContain(res.status);
   });
+
+  it("a view-only team member cannot share the team even onto a nest they own", async () => {
+    // The abuse vector: on their OWN nest the viewer clears the nest-side admin
+    // gate (they're the owner), so the team-side gate is the only defense. A
+    // viewer projecting the whole roster — including its admins — onto a nest
+    // they own would look like an official share the team owner can't reverse.
+    const own = await jsonRequest(app, "POST", "/nests", { name: "Viewer's own" }, viewerU.apiKey);
+    const res = await jsonRequest(app, "POST", `/nests/${own.data.nest.id}/teams`, { team_id: teamId }, viewerU.apiKey);
+    expect(res.status).toBe(403);
+  });
+
+  it("an editor team member can share the team onto a nest they administer", async () => {
+    // editor+ carries real authority over the team, so sharing is allowed.
+    const own = await jsonRequest(app, "POST", "/nests", { name: "Editor's own" }, editorU.apiKey);
+    const res = await jsonRequest(app, "POST", `/nests/${own.data.nest.id}/teams`, { team_id: teamId }, editorU.apiKey);
+    expect(res.status).toBe(201);
+    expect(res.data.teams.map((t: any) => t.teamId)).toContain(teamId);
+  });
 });
 
 describe("access resolution via team membership", () => {
