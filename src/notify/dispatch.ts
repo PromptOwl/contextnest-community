@@ -10,13 +10,14 @@
  *
  * All delivery is fire-and-forget with a short timeout: an outage or a bad
  * URL must never slow down or fail the action that raised the event. The
- * server-wide SLACK_WEBHOOK_URL (super-admin Settings) acts as an implicit
- * slack connector for every nest, so the simple one-channel setup needs no
- * rows at all.
+ * server-wide SLACK_WEBHOOK_URL and MSTEAMS_WEBHOOK_URL (super-admin
+ * Settings) act as implicit slack/teams connectors for every nest, so the
+ * simple one-channel setup needs no rows at all.
  */
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
 import { envValues } from "../workflow/env-routes.js";
+import { msTeamsPayload } from "./msteams.js";
 
 export type ConnectorChannel = "slack" | "teams" | "webhook";
 
@@ -60,9 +61,10 @@ function formatBody(
     return { text: escapeMrkdwn(`${EVENT_EMOJI[ev.kind] ?? ""} *[${nestName}]* ${ev.message}`) };
   }
   if (channel === "teams") {
-    // Teams incoming webhooks accept simple text or MessageCard; text keeps
-    // us schema-proof across the connector migration to Workflows.
-    return { text: line };
+    // Workflows-app incoming webhooks (the only kind Microsoft still issues)
+    // expect the Bot Framework message envelope with an Adaptive Card — plain
+    // {text} was an O365-connector shape and those were retired.
+    return msTeamsPayload(nestName, `${EVENT_EMOJI[ev.kind] ?? ""} ${ev.message}`.trim());
   }
   // Raw webhook: the whole event, machine-readable — the integration brick.
   return {
@@ -173,6 +175,17 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
       config.SLACK_WEBHOOK_URL,
       formatBody("slack", nestName, ev),
       "server-slack",
+    );
+  }
+
+  // Implicit server-wide Microsoft Teams connector (super-admin Settings) —
+  // exact parity with the slack one above. MSTEAMS_*, never "teams": that
+  // name means user groups in this codebase.
+  if (config.MSTEAMS_WEBHOOK_URL) {
+    void post(
+      config.MSTEAMS_WEBHOOK_URL,
+      formatBody("teams", nestName, ev),
+      "server-msteams",
     );
   }
 

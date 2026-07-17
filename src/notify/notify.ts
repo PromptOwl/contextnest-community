@@ -1,6 +1,7 @@
 /**
  * Notification dispatcher — one call site per governance event, fanned out
- * to every configured connector (Slack webhook, SMTP email).
+ * to every configured connector (Slack webhook, Microsoft Teams webhook,
+ * SMTP email).
  *
  * Bursts are debounced per nest so bulk actions don't spam the channel:
  * sharing a nest with a 12-person team or clearing a review queue collapses
@@ -13,6 +14,7 @@
  */
 import { config } from "../config.js";
 import { notifySlackForNest } from "./slack.js";
+import { notifyMsTeamsForNest } from "./msteams.js";
 import { notifyEmailForNest } from "./email.js";
 import type { EmailEventDetails } from "./email-render.js";
 
@@ -54,6 +56,7 @@ async function flush(nestId: string): Promise<void> {
     buf.events.length === 1 ? buf.events[0].details : undefined;
   await Promise.allSettled([
     notifySlackForNest(nestId, text),
+    notifyMsTeamsForNest(nestId, text),
     notifyEmailForNest(nestId, text, details),
   ]);
 }
@@ -70,7 +73,12 @@ export async function notifyNestEvent(
   details?: EmailEventDetails,
 ): Promise<void> {
   // Nothing configured → don't even buffer.
-  if (!config.SLACK_WEBHOOK_URL && !config.SMTP_URL) return;
+  if (
+    !config.SLACK_WEBHOOK_URL &&
+    !config.MSTEAMS_WEBHOOK_URL &&
+    !config.SMTP_URL
+  )
+    return;
 
   const buf = buffers.get(nestId);
   if (buf) {

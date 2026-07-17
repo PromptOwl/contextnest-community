@@ -392,6 +392,7 @@ export function createApp(): Hono<AuthEnv> {
       ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
       : null,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
+    msteams_webhook_url: config.MSTEAMS_WEBHOOK_URL ?? "",
     smtp_url: config.SMTP_URL ?? "",
     notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
     notify_email_to: config.NOTIFY_EMAIL_TO ?? "",
@@ -619,6 +620,15 @@ export function createApp(): Hono<AuthEnv> {
       if (v && !/^https:\/\//i.test(v))
         addError("slack_webhook_url", "Slack webhook must be an https:// URL (or leave it empty to turn Slack notifications off).");
       else pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
+    }
+    if ("msteams_webhook_url" in body) {
+      const v = String(body.msteams_webhook_url ?? "").trim();
+      // Empty clears (connector off). A webhook URL carries an implicit
+      // secret in its path — https only. msteams_*, never teams_*: "teams"
+      // in this codebase means user groups.
+      if (v && !/^https:\/\//i.test(v))
+        addError("msteams_webhook_url", "Microsoft Teams webhook must be an https:// URL (or leave it empty to turn Teams notifications off).");
+      else pending.push({ name: "MSTEAMS_WEBHOOK_URL", value: v || null });
     }
     if ("smtp_url" in body) {
       const v = String(body.smtp_url ?? "").trim();

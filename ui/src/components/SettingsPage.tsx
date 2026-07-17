@@ -79,7 +79,7 @@ const TABS: {
   {
     id: "notifications",
     label: "Notifications",
-    keys: ["slack_webhook_url", "smtp_url", "notify_email_from", "notify_email_to"],
+    keys: ["slack_webhook_url", "msteams_webhook_url", "smtp_url", "notify_email_from", "notify_email_to"],
   },
   {
     id: "advanced",
@@ -870,6 +870,28 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   value={draft.slack_webhook_url ?? ""}
                   placeholder="https://hooks.slack.com/services/…"
                   onChange={(v) => set({ slack_webhook_url: v })}
+                />
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Microsoft Teams notifications</CardTitle>
+                <CardDescription>
+                  Post the same governance events to a Microsoft Teams channel
+                  as Adaptive Cards via an incoming-webhook URL (create one in
+                  Teams with the Workflows app: "Post to a channel when a
+                  webhook request is received"). Leave empty to turn the
+                  connector off. The URL contains a secret — treat it like a
+                  password.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <TextField
+                  type="password"
+                  value={draft.msteams_webhook_url ?? ""}
+                  placeholder="https://….logic.azure.com/workflows/…"
+                  onChange={(v) => set({ msteams_webhook_url: v })}
                 />
               </CardContent>
             </Card>

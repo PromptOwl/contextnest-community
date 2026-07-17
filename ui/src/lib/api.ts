@@ -184,6 +184,7 @@ export interface AdminSettings {
   oidc_client_secret?: string | null;
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
+  msteams_webhook_url: string;
   smtp_url: string;
   notify_email_from: string;
   notify_email_to: string;

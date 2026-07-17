@@ -34,6 +34,7 @@ let canonicalEnvLoaded: string | null = null;
 // env value (set directly, bypassing the /admin/settings validator) would
 // spam the log on every submit/approve/reject/add-collaborator.
 let slackUrlWarned = false;
+let msteamsUrlWarned = false;
 let emailFromWarned = false;
 let emailToWarned = false;
 let oidcIssuerWarned = false;
@@ -368,6 +369,28 @@ export const config = {
         slackUrlWarned = true;
         console.warn(
           "[config] SLACK_WEBHOOK_URL rejected: must be an https:// URL. Slack notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
+  },
+
+  /**
+   * Optional Microsoft Teams incoming-webhook URL (Workflows app) for team
+   * notifications — same events as SLACK_WEBHOOK_URL, posted as Adaptive
+   * Cards. Empty/unset = connector off. https only — a webhook carries an
+   * implicit secret in its path, so it never travels plaintext. Named
+   * MSTEAMS_* deliberately: "teams" in this codebase means user groups.
+   */
+  get MSTEAMS_WEBHOOK_URL(): string | null {
+    const raw = process.env.MSTEAMS_WEBHOOK_URL?.trim();
+    if (!raw) return null;
+    if (!/^https:\/\//i.test(raw)) {
+      if (!msteamsUrlWarned) {
+        msteamsUrlWarned = true;
+        console.warn(
+          "[config] MSTEAMS_WEBHOOK_URL rejected: must be an https:// URL. Microsoft Teams notifications disabled.",
         );
       }
       return null;

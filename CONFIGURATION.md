@@ -80,10 +80,57 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `SUBAGENT_MAX_CHILDREN` | `16` | Max direct children a single run may spawn (clamped 1..128) — bounds the call tree's WIDTH. Together with `SUBAGENT_MAX_DEPTH` this caps total tree size so a runner can't fork-bomb the DB. |
 | `RUN_MAX_STEPS` | `10000` | Max steps a single run may accumulate (clamped 10..100000) — bounds a runaway/hostile runner's step log. |
 | `SLACK_WEBHOOK_URL` | _(unset — connector off)_ | Slack incoming-webhook URL for governance-event notifications (review submitted/approved/rejected, collaborator added). `https://` only — the URL embeds a secret. Also editable from Settings in the UI. |
+| `MSTEAMS_WEBHOOK_URL` | _(unset — connector off)_ | Microsoft Teams incoming-webhook URL for the same governance events, posted as Adaptive Cards. `https://` only — the URL embeds a secret. Also editable from Settings in the UI. See [Microsoft Teams notifications](#microsoft-teams-notifications). |
 | `SMTP_URL` | _(unset — connector off)_ | SMTP connection URL for email notifications (`smtp://` or `smtps://`, credentials inline). Requires `NOTIFY_EMAIL_FROM` and `NOTIFY_EMAIL_TO`. Also editable from Settings. |
 | `NOTIFY_EMAIL_FROM` | _(unset)_ | From address for notification emails. |
 | `NOTIFY_EMAIL_TO` | _(unset)_ | Comma-separated recipients for notification emails. |
 | `NOTIFY_DEBOUNCE_MS` | `15000` | Per-nest buffer window before notifications flush; bursts collapse into one digest message. |
+
+---
+
+## Microsoft Teams notifications
+
+Set `MSTEAMS_WEBHOOK_URL` (or paste the URL into **Settings → Notifications →
+Microsoft Teams notifications**) and the server posts the same governance
+events the Slack connector covers — review requested / approved / rejected,
+collaborator added, plus per-nest burst digests — to one Teams channel as
+[Adaptive Cards](https://adaptivecards.io/). Leave it empty to turn the
+connector off. Delivery is fire-and-forget with a short timeout: a Teams
+outage or a bad URL never slows down or fails the action that triggered the
+message.
+
+> Naming note: the setting is `msteams_webhook_url` / `MSTEAMS_WEBHOOK_URL`
+> because "teams" in this product means user groups (the `/teams` API), not
+> Microsoft Teams.
+
+### Create the incoming webhook in a Teams channel
+
+Microsoft retired the classic Office 365 "Incoming Webhook" connectors;
+webhooks are now created with the **Workflows** (Power Automate) app:
+
+1. In Microsoft Teams, open the channel that should receive notifications,
+   click **⋯ (More options) → Workflows**.
+2. Pick the template **"Post to a channel when a webhook request is
+   received"** (searching for "webhook" finds it), sign in if prompted, and
+   confirm the team + channel.
+3. Create the flow and **copy the HTTP POST URL** it shows (a
+   `https://….logic.azure.com/…` or `https://….powerplatform.com/…` address).
+4. Paste that URL into **Settings → Notifications → Microsoft Teams
+   notifications** (or set `MSTEAMS_WEBHOOK_URL`).
+
+If your tenant still has a legacy Office 365 connector webhook, it accepts the
+same payload envelope and works too — but create new hooks via Workflows.
+
+The URL embeds a secret — anyone holding it can post to the channel, so treat
+it like a password (it is why the setting requires `https://`). The server
+sends the standard envelope Workflows expects:
+`{"type": "message", "attachments": [{"contentType":
+"application/vnd.microsoft.card.adaptive", "content": {…card…}}]}` with a
+plain-text `fallbackText` for clients that cannot render cards.
+
+Per-nest connector rows (`POST /nests/:id/connectors` with `channel: "teams"`)
+post the same Adaptive Card format to a nest-specific webhook, with per-event
+filtering — see `API.md`.
 
 ---
 
@@ -200,7 +247,7 @@ Postgres backend starts empty.
 ### Runtime settings persistence
 
 Settings you change at runtime — everything on the **Settings page** (`/admin/settings`:
-sign-in gate, logo, base URL, upload limit, feature flags, OIDC SSO, Slack/SMTP connectors)
+sign-in gate, logo, base URL, upload limit, feature flags, OIDC SSO, Slack/Teams/SMTP connectors)
 plus the **installed license key** — are stored in the database (`server_settings`
 table), **not** in a `.env` file. This is deliberate: on Cloud Run the container
 filesystem is ephemeral, so a file-based value was wiped by every rebuild, and each
