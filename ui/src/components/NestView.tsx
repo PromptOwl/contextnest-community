@@ -423,25 +423,92 @@ export function NestView({
     });
   };
 
-  const handleDropOnFolder = async (targetFolder: string) => {
-    const nodeId = dragNodeId;
-    setDragNodeId(null);
-    setDropFolder(null);
-    if (!nodeId) return;
-    if (folderOfNode(nodeId) === targetFolder) return; // already there
+  // Dragging over a collapsed folder header for a beat expands it, so a doc
+  // can be dropped into a subfolder without aborting the drag to click.
+  const dragExpandTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelDragExpand = () => {
+    if (dragExpandTimer.current) {
+      clearTimeout(dragExpandTimer.current);
+      dragExpandTimer.current = null;
+    }
+  };
+  const scheduleDragExpand = (path: string) => {
+    cancelDragExpand();
+    dragExpandTimer.current = setTimeout(() => {
+      dragExpandTimer.current = null;
+      setCollapsedFolders((prev) => {
+        if (!prev.has(path)) return prev;
+        const next = new Set(prev);
+        next.delete(path);
+        return next;
+      });
+    }, 600);
+  };
+
+  /**
+   * Move a document to another folder — the ONE mover behind both the
+   * drag-and-drop drop handlers and the "Move to folder" menu dialog. The
+   * server returns the node under its NEW id (moving rewrites the id); we
+   * refetch the list rather than patching state, same as every other
+   * mutation in this view, so the tree, folder groups, and counts all pick
+   * up the new id in one pass. Returns true on success so the dialog knows
+   * to close.
+   */
+  const handleMoveNode = async (nodeId: string, targetFolder: string) => {
+    if (folderOfNode(nodeId) === targetFolder) return true; // already there
     try {
-      await api.moveNode(nestId, nodeId, targetFolder);
+      const { node: moved, previousId } = await api.moveNode(
+        nestId,
+        nodeId,
+        targetFolder,
+      );
+      const previousFolder = folderOfNode(previousId);
       toast.success(
         targetFolder
           ? `Moved to ${prettyFolderPath(targetFolder)}`
           : "Moved to nest root",
+        {
+          // Undo = the same move call, back to where it came from. Must use
+          // the NEW id (moved.node.id) — the old id no longer exists.
+          action: {
+            label: "Undo",
+            onClick: async () => {
+              try {
+                await api.moveNode(nestId, moved.id, previousFolder);
+                toast.success("Move undone");
+                fetchData();
+              } catch (err: any) {
+                console.error("[NestView] undo move failed", nestId, moved.id, err);
+                toast.error(err?.message || "Undo failed");
+              }
+            },
+          },
+          duration: 6000,
+        },
       );
       fetchData();
+      return true;
     } catch (err: any) {
       console.error("[NestView] moveNode failed", nestId, nodeId, targetFolder, err);
       toast.error(err?.message || "Move failed");
+      return false;
     }
   };
+
+  const handleDropOnFolder = async (targetFolder: string) => {
+    const nodeId = dragNodeId;
+    setDragNodeId(null);
+    setDropFolder(null);
+    cancelDragExpand();
+    if (!nodeId) return;
+    await handleMoveNode(nodeId, targetFolder);
+  };
+
+  // "Move to folder" menu dialog — the accessible, keyboard-reachable path
+  // to the same move as drag-and-drop.
+  const [moveTarget, setMoveTarget] = useState<any | null>(null);
+  const [moveDest, setMoveDest] = useState("");
+  const [movingDoc, setMovingDoc] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -675,6 +742,19 @@ export function NestView({
 
   // Orphans + broken [[links]], client-side from the loaded list.
   const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
+
+  // Every folder path in use (all prefixes, so intermediate levels with no
+  // direct docs still appear) — options for the Move-to-folder dialog.
+  const allFolders = useMemo(() => {
+    const set = new Set<string>();
+    for (const n of nodes) {
+      const f = folderOfNode(n.id || "");
+      if (!f) continue;
+      const segs = f.split("/");
+      for (let i = 1; i <= segs.length; i++) set.add(segs.slice(0, i).join("/"));
+    }
+    return [...set].sort(byPathSegments);
+  }, [nodes]);
 
   // Distinct authors for the author filter dropdown.
   const authors = useMemo(() => {
@@ -2210,6 +2290,14 @@ export function NestView({
                     const canEdit =
                       node.status !== "pending_review" && canEditNode(node);
                     const canDelete = canEditNode(node);
+                    // Move (drag OR menu) mirrors the edit gate exactly: same
+                    // stewardship scope, and the server locks moves while a
+                    // review is pending, so don't offer either path then.
+                    const canMove = canEdit;
+                    const openMoveDialog = () => {
+                      setMoveDest(folderOfNode(node.id));
+                      setMoveTarget(node);
+                    };
                     // Cards: collapse every row action into a 3-dot menu kept on
                     // the title line. List keeps inline hover buttons below.
                     const actionMenu = (
@@ -2230,6 +2318,12 @@ export function NestView({
                               <DropdownMenuItem onSelect={() => onOpenDocument(node.id)}>
                                 <Pencil className="h-3.5 w-3.5 mr-2" />
                                 Edit
+                              </DropdownMenuItem>
+                            )}
+                            {canMove && (
+                              <DropdownMenuItem onSelect={openMoveDialog}>
+                                <FolderInput className="h-3.5 w-3.5 mr-2" />
+                                Move to folder
                               </DropdownMenuItem>
                             )}
                             {canSubmit && (
@@ -2275,7 +2369,7 @@ export function NestView({
                             dragNodeId === node.id ? "opacity-40" : ""
                           }`}
                         style={!cards && indent ? { marginLeft: `${indent * 1.25}rem` } : undefined}
-                        draggable={!cards && canEditNode(node)}
+                        draggable={!cards && canMove}
                         onDragStart={(e) => {
                           e.dataTransfer.setData("text/plain", node.id);
                           e.dataTransfer.effectAllowed = "move";
@@ -2284,6 +2378,7 @@ export function NestView({
                         onDragEnd={() => {
                           setDragNodeId(null);
                           setDropFolder(null);
+                          cancelDragExpand();
                         }}
                         data-testid={`document-row-${node.id}`}
                       >
@@ -2384,6 +2479,17 @@ export function NestView({
                                 <Pencil className="h-3.5 w-3.5" />
                               </Button>
                             )}
+                            {canMove && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={openMoveDialog}
+                                title="Move to folder"
+                                data-testid={`move-node-${node.id}`}
+                              >
+                                <FolderInput className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
                             <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
                               <History className="h-3.5 w-3.5" />
                             </Button>
@@ -2447,7 +2553,18 @@ export function NestView({
                         baseFolder={baseFolder}
                         isCollapsed={(p) => collapsedFolders.has(p)}
                         renderFolder={(node, { collapsed }) => {
-                          const isDropTarget = dropFolder === node.path;
+                          // Valid drop = a doc is being dragged and this isn't
+                          // its current folder. Invalid targets get no
+                          // highlight and skip preventDefault, so the browser
+                          // shows the no-drop cursor and the drop is a no-op.
+                          // Folder rows themselves are NOT draggable: the
+                          // server has no folder-move/rename endpoint (the
+                          // move API relocates one document per call), so
+                          // folder-onto-folder would be N non-atomic moves —
+                          // document moves only until that lands server-side.
+                          const validDrop =
+                            !!dragNodeId && folderOfNode(dragNodeId) !== node.path;
+                          const isDropTarget = validDrop && dropFolder === node.path;
                           // Only folders that DIRECTLY hold a document collapse.
                           // A pure container (subfolders only, no node file) has
                           // nothing of its own to hide, so it stays a static row
@@ -2468,17 +2585,24 @@ export function NestView({
                                   : undefined
                               }
                               onDragOver={(e) => {
-                                if (!dragNodeId) return;
+                                if (!validDrop) return;
                                 e.preventDefault();
                                 e.dataTransfer.dropEffect = "move";
                               }}
-                              onDragEnter={() =>
-                                dragNodeId && setDropFolder(node.path)
-                              }
-                              onDragLeave={() =>
-                                setDropFolder((d) => (d === node.path ? null : d))
-                              }
+                              onDragEnter={() => {
+                                if (!validDrop) return;
+                                setDropFolder(node.path);
+                                // Hovering a collapsed folder springs it open
+                                // after a beat so its subfolders become targets.
+                                if (collapsible && collapsed)
+                                  scheduleDragExpand(node.path);
+                              }}
+                              onDragLeave={() => {
+                                setDropFolder((d) => (d === node.path ? null : d));
+                                cancelDragExpand();
+                              }}
                               onDrop={(e) => {
+                                if (!validDrop) return;
                                 e.preventDefault();
                                 handleDropOnFolder(node.path);
                               }}
@@ -3094,6 +3218,69 @@ export function NestView({
                 <FolderPlus className="h-4 w-4 mr-2" />
               )}
               Create folder
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Move to folder — the keyboard-accessible path to the same move the
+          drag-and-drop performs; both funnel through handleMoveNode. */}
+      <Dialog
+        open={!!moveTarget}
+        onOpenChange={(open) => {
+          if (!open) setMoveTarget(null);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Move to folder</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Move <strong>{moveTarget?.title}</strong> to another folder.
+            Version history, review state, and [[wiki links]] follow the
+            document.
+          </p>
+          <Select
+            value={moveDest === "" ? "__root__" : moveDest}
+            onValueChange={(v) => setMoveDest(v === "__root__" ? "" : v)}
+          >
+            <SelectTrigger data-testid="move-folder-select">
+              <SelectValue placeholder="Choose a folder" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__root__">Nest root</SelectItem>
+              {allFolders.map((f) => (
+                <SelectItem key={f} value={f}>
+                  {prettyFolderPath(f)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setMoveTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={
+                movingDoc ||
+                !moveTarget ||
+                folderOfNode(moveTarget.id) === moveDest
+              }
+              onClick={async () => {
+                if (!moveTarget) return;
+                setMovingDoc(true);
+                const ok = await handleMoveNode(moveTarget.id, moveDest);
+                setMovingDoc(false);
+                if (ok) setMoveTarget(null);
+              }}
+              data-testid="move-folder-confirm"
+            >
+              {movingDoc ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <FolderInput className="h-4 w-4 mr-2" />
+              )}
+              Move
             </Button>
           </DialogFooter>
         </DialogContent>
