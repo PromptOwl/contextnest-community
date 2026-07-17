@@ -31,6 +31,7 @@ import { config } from "../config.js";
 import { getDb } from "../db/client.js";
 import { insertOrReplace } from "../db/sql.js";
 import { createNode, updateNode } from "../nodes/service.js";
+import { engineCache } from "../nodes/engine.js";
 import { getNest } from "../nests/service.js";
 import {
   getLatestVersionMeta,
@@ -292,7 +293,22 @@ async function upsertFileNode(
   const nodeId = nodeIdForFile(source.folder, filePath);
   const latest = await getLatestVersionMeta(source.nestId, nodeId);
   if (latest && latest.author !== GITHUB_SYNC_AUTHOR) return "local-edits";
-  if (latest && latest.contentHash === hashContent(content)) return "unchanged";
+  if (latest) {
+    if (latest.contentHash === hashContent(content)) return "unchanged";
+    // The stored hash is of the PUBLISHED body, which the engine may have
+    // whitespace-normalized relative to the raw upstream bytes — so when the
+    // hash misses, compare the live body too (modulo trailing whitespace)
+    // before minting a version. Keeps a lost/pruned blob-sha map (e.g. a
+    // reconfigured source) from churning a no-op version per file.
+    try {
+      const { storage } = await engineCache.get(source.nestId);
+      const current = await storage.readDocument(nodeId);
+      if ((current.body || "").trimEnd() === content.trimEnd())
+        return "unchanged";
+    } catch {
+      // Node row exists but the doc is unreadable — fall through to rewrite.
+    }
+  }
   const changeNote = `Synced from github.com/${source.repo}@${shortSha}`;
   if (latest) {
     await updateNode(
@@ -375,6 +391,26 @@ async function syncAllMarkdown(
   const truncated = !!body.truncated || files.length > cap;
   files = files.slice(0, cap);
 
+  // Slugification is lossy (getting_started.md, getting-started.md and
+  // Setup.MD all map to the same node id), so distinct repo files can
+  // collide on one id. Resolve deterministically: the FIRST path in sorted
+  // order owns the id; later paths are skipped and called out in the detail
+  // line — never clobbered, and never renamed with invented suffixes (which
+  // would churn ids across sweeps).
+  const idOwner = new Map<string, string>(); // node id → owning repo path
+  const collisions: string[] = [];
+  const syncFiles: TreeEntry[] = [];
+  for (const f of files) {
+    const id = nodeIdForFile(source.folder, f.path);
+    const owner = idOwner.get(id);
+    if (owner !== undefined) {
+      collisions.push(`id collision: ${f.path} skipped (conflicts with ${owner})`);
+    } else {
+      idOwner.set(id, f.path);
+      syncFiles.push(f);
+    }
+  }
+
   const oldFiles = parseFiles(state);
   const newFiles: Record<string, string> = {};
   let synced = 0;
@@ -382,7 +418,7 @@ async function syncAllMarkdown(
   let localEdits = 0;
   let failed = 0;
 
-  for (const f of files) {
+  for (const f of syncFiles) {
     try {
       // Blob unchanged since a clean sweep → skip without fetching. (A
       // local edit on an upstream-unchanged file is normal local evolution,
@@ -425,6 +461,12 @@ async function syncAllMarkdown(
   if (removed > 0)
     detail += `; removed upstream (kept here): ${removed} file${removed === 1 ? "" : "s"}`;
   if (truncated) detail += `; truncated to ${cap} files`;
+  if (collisions.length > 0) {
+    const shown = collisions.slice(0, 5);
+    detail += `; ${shown.join("; ")}`;
+    if (collisions.length > shown.length)
+      detail += `; and ${collisions.length - shown.length} more collision(s)`;
+  }
 
   const status: SourceRunResult["status"] =
     failed > 0 && synced === 0
@@ -435,9 +477,11 @@ async function syncAllMarkdown(
           ? "synced"
           : "unchanged";
 
-  // Advance the change detectors only on a CLEAN sweep, so conflicted or
-  // failed files are retried instead of being 304'd away next sweep.
-  const clean = localEdits === 0 && failed === 0;
+  // Advance the change detectors only on a CLEAN sweep, so conflicted /
+  // failed / collided files are retried instead of being 304'd away next
+  // sweep — and so the collision warning keeps re-surfacing in the run
+  // results instead of decaying into "unchanged (304)".
+  const clean = localEdits === 0 && failed === 0 && collisions.length === 0;
   await saveState(key, {
     status,
     detail,
@@ -522,11 +566,32 @@ async function syncSource(
 // in-flight run instead of racing it over the same nodes/state rows.
 let inflight: Promise<SourceRunResult[]> | null = null;
 
+/** Drop state rows whose source_key no longer matches any configured source
+ *  (source removed, or a key field like branch/path/nest edited) — otherwise
+ *  they accumulate forever as invisible orphans. */
+async function pruneOrphanedState(liveKeys: string[]): Promise<void> {
+  const db = getDb();
+  if (liveKeys.length === 0) {
+    await db.run("DELETE FROM github_sync_state", []);
+    return;
+  }
+  const placeholders = liveKeys.map(() => "?").join(", ");
+  await db.run(
+    `DELETE FROM github_sync_state WHERE source_key NOT IN (${placeholders})`,
+    liveKeys,
+  );
+}
+
 /** Run one full sweep over every configured source. */
 export function runGithubSync(): Promise<SourceRunResult[]> {
   if (inflight) return inflight;
   inflight = (async () => {
     const sources = getGithubSyncSources();
+    try {
+      await pruneOrphanedState(sources.map(sourceKey));
+    } catch (err) {
+      console.error("[github-sync] state prune failed:", err);
+    }
     const token = config.GITHUB_SYNC_TOKEN;
     const results: SourceRunResult[] = [];
     for (const source of sources) results.push(await syncSource(source, token));

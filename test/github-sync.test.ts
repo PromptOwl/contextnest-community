@@ -361,3 +361,74 @@ describe("single-file mode", () => {
     );
   });
 });
+
+describe("slug collisions", () => {
+  it("first path (sorted) owns a colliding node id; later paths are skipped, not clobbered", async () => {
+    repos["acme/collide"] = {
+      files: {
+        "guide/getting-started.md": "# First Wins\n\nDash flavor.",
+        "guide/getting_started.md": "# Second Must Not Clobber\n\nUnderscore flavor.",
+      },
+    };
+    const patch = await jsonRequest(app, "PATCH", "/admin/settings", {
+      github_sync_sources: [{ repo: "acme/collide", nestId }],
+    }, admin.apiKey);
+    expect(patch.status).toBe(200);
+
+    const res = await runSync();
+    expect(res.data.results[0].status).toBe("synced");
+    expect(res.data.results[0].detail).toContain(
+      "id collision: guide/getting_started.md skipped (conflicts with guide/getting-started.md)",
+    );
+
+    // Sorted-first file owns the id; the underscore variant never lands.
+    const node = await getNode("nodes/guide/getting-started");
+    expect(node.status).toBe(200);
+    expect(node.data.content).toContain("Dash flavor.");
+    expect(node.data.content).not.toContain("Underscore flavor.");
+    expect((await getVersions("nodes/guide/getting-started")).data.versions).toHaveLength(1);
+
+    // A second sweep doesn't flip-flop the content or mint phantom versions,
+    // and the collision warning keeps re-surfacing instead of decaying to 304.
+    const again = await runSync();
+    expect(again.data.results[0].detail).toContain("id collision");
+    expect((await getNode("nodes/guide/getting-started")).data.content).toContain("Dash flavor.");
+    expect((await getVersions("nodes/guide/getting-started")).data.versions).toHaveLength(1);
+  });
+});
+
+describe("errors and state hygiene", () => {
+  it("a failing source reports error while other sources still sweep", async () => {
+    const patch = await jsonRequest(app, "PATCH", "/admin/settings", {
+      github_sync_sources: [
+        { repo: "acme/ghost", nestId }, // not in the mock → 404
+        { repo: "acme/app", mode: "single-file", nestId, folder: "readmes" },
+      ],
+    }, admin.apiKey);
+    expect(patch.status).toBe(200);
+
+    const res = await runSync();
+    expect(res.data.results).toHaveLength(2);
+    expect(res.data.results[0].status).toBe("error");
+    expect(res.data.results[0].detail).toContain("404");
+    // The healthy source is unaffected by its neighbor's failure.
+    expect(res.data.results[1].status).toBe("unchanged");
+
+    const status = await jsonRequest(app, "GET", "/admin/github-sync/run", undefined, admin.apiKey);
+    expect(status.data.sources[0].lastStatus).toBe("error");
+  });
+
+  it("prunes state rows for sources that are no longer configured", async () => {
+    // Earlier tests configured acme/docs, acme/big and acme/collide; the
+    // sweep above should have pruned their orphaned state rows.
+    const dbClient = await import("../src/db/client.js");
+    const rows = (await dbClient
+      .getDb()
+      .all("SELECT source_key FROM github_sync_state")) as Array<{
+      source_key: string;
+    }>;
+    const keys = rows.map((r) => r.source_key).sort();
+    expect(keys).toHaveLength(2);
+    expect(keys.every((k) => k.startsWith("acme/ghost|") || k.startsWith("acme/app|"))).toBe(true);
+  });
+});
