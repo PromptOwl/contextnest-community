@@ -62,6 +62,7 @@ const HISTORICAL_MIGRATIONS = [
   "020_server_settings",
   "026_api_events_nest_index",
   "027_teams",
+  "028_team_source",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -321,10 +322,23 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       name TEXT NOT NULL,
       owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       members TEXT NOT NULL DEFAULT '[]',
+      source TEXT,
+      external_id TEXT,
       created_at TEXT NOT NULL DEFAULT ${NOW},
       updated_at TEXT NOT NULL DEFAULT ${NOW}
     );
     CREATE INDEX IF NOT EXISTS idx_teams_owner ON teams(owner_id);
+
+    -- teams.source / teams.external_id are declared inline above, which is a
+    -- no-op on any database created before imported teams shipped — hence the
+    -- explicit ALTERs (migration 028 parity). The partial unique index is what
+    -- makes a re-import update its own row rather than duplicate it; NULL
+    -- external_id (every hand-made team) is excluded so those never collide.
+    ALTER TABLE teams ADD COLUMN IF NOT EXISTS source TEXT;
+    ALTER TABLE teams ADD COLUMN IF NOT EXISTS external_id TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_external
+      ON teams(owner_id, source, external_id)
+      WHERE external_id IS NOT NULL;
 
     -- nests.shared_teams is declared inline in the CREATE TABLE above, which is
     -- a no-op on any database created before teams shipped. Every nest

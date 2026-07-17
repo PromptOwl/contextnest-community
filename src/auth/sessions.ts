@@ -145,6 +145,87 @@ export function buildClearSessionCookie(opts: { secure?: boolean } = {}): string
  */
 export const OIDC_SESSION_MARKER_COOKIE = "cnst_sso_session";
 
+/**
+ * The caller's PromptOwl device token, parked in an httpOnly cookie.
+ *
+ * WHY A COOKIE AND NOT THE DATABASE. Team import needs to call PromptOwl as the
+ * user, and PromptOwl hands the token over exactly once (at device approval), so
+ * it has to be kept somewhere. Keeping it server-side would turn our database
+ * into a store of live credentials for someone else's SaaS — one leaked backup
+ * and every PromptOwl account that ever signed in here is exposed. In a cookie
+ * it lives in the user's own browser, dies with the session, and a database dump
+ * contains nothing.
+ *
+ * `Path=/teams` is the other half: the browser then attaches this token ONLY to
+ * the team routes that spend it, not to every request to this server. httpOnly
+ * keeps it away from JS (so an XSS can't read it out), and its lifetime matches
+ * the session cookie's so the two die together.
+ *
+ * The token itself is scoped `user:read` + `teams:read` upstream, so even a
+ * stolen one reads a profile and a team list — it can't act as the user.
+ */
+export const PROMPTOWL_TOKEN_COOKIE = "cnst_po_token";
+export const PROMPTOWL_TOKEN_COOKIE_PATH = "/teams";
+
+export function buildPromptowlTokenCookie(
+  token: string,
+  opts: { secure?: boolean; clear?: boolean } = {},
+): string {
+  const parts = [
+    `${PROMPTOWL_TOKEN_COOKIE}=${opts.clear ? "" : encodeURIComponent(token)}`,
+    "HttpOnly",
+    `Path=${PROMPTOWL_TOKEN_COOKIE_PATH}`,
+    "SameSite=Lax",
+    `Max-Age=${opts.clear ? 0 : SESSION_TTL_SECS}`,
+  ];
+  if (opts.secure) parts.push("Secure");
+  return parts.join("; ");
+}
+
+/**
+ * Non-httpOnly marker saying "this session signed in with PromptOwl". Carries
+ * no secret — just "1" — so the SPA can read it and decide whether to offer the
+ * PromptOwl Teams tab at all. It exists because the token cookie above is
+ * httpOnly AND `Path=/teams`, so the UI can neither read it nor cause it to be
+ * sent anywhere else. Lifetime tracks the session, and it's cleared on logout
+ * with everything else.
+ *
+ * It is a UI hint, nothing more: the server independently requires a real token
+ * cookie on the import routes, so forging this marker gets you a tab that
+ * refuses to do anything.
+ */
+export const PROMPTOWL_MARKER_COOKIE = "cnst_po_session";
+
+export function buildPromptowlMarkerCookie(
+  opts: { secure?: boolean; clear?: boolean } = {},
+): string {
+  const parts = [
+    `${PROMPTOWL_MARKER_COOKIE}=${opts.clear ? "" : "1"}`,
+    "Path=/",
+    "SameSite=Lax",
+    `Max-Age=${opts.clear ? 0 : SESSION_TTL_SECS}`,
+  ];
+  if (opts.secure) parts.push("Secure");
+  return parts.join("; ");
+}
+
+/** Read the PromptOwl token cookie off a request, if present. */
+export function getPromptowlTokenFromRequest(c: Context): string | null {
+  const header = c.req.header("Cookie");
+  if (!header) return null;
+  for (const part of header.split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (k === PROMPTOWL_TOKEN_COOKIE) {
+      const v = decodeURIComponent(rest.join("="));
+      // PromptOwl device tokens are `po_device_<hex>`. Anything else is a
+      // forged or stale cookie — treat it as absent rather than forwarding
+      // junk upstream.
+      return /^po_device_[A-Za-z0-9_-]+$/.test(v) ? v : null;
+    }
+  }
+  return null;
+}
+
 export function buildOidcMarkerCookie(
   opts: { secure?: boolean; clear?: boolean } = {},
 ): string {

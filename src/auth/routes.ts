@@ -14,6 +14,8 @@ import { authMiddleware, type AuthEnv } from "./middleware.js";
 import {
   buildClearSessionCookie,
   buildOidcMarkerCookie,
+  buildPromptowlMarkerCookie,
+  buildPromptowlTokenCookie,
   buildSessionCookie,
   createSession,
   deleteAllSessionsForUser,
@@ -42,6 +44,14 @@ import { ANON_USER_ID } from "../shared/constants.js";
 const LOGIN_LIMIT = { max: 5, windowMs: 15 * 60_000 };       // 5 / 15 min
 const REGISTER_LIMIT = { max: 3, windowMs: 60 * 60_000 };    // 3 / hr
 const DEVICE_LIMIT = { max: 10, windowMs: 15 * 60_000 };     // 10 / 15 min
+
+/**
+ * Scopes this server asks PromptOwl to limit its device tokens to — the least
+ * it can function with: identify the user who signed in, and read the teams
+ * they own so they can be imported. See PROMPTOWL_TOKEN_COOKIE in sessions.ts
+ * for where the resulting token lives and why.
+ */
+const PROMPTOWL_SCOPES = ["user:read", "teams:read"];
 
 // Warn once (not per request) when SSO runs without audience binding.
 let warnedMissingSsoAudience = false;
@@ -122,6 +132,19 @@ function clearSessionCookie(c: any) {
   c.header(
     "Set-Cookie",
     buildClearSessionCookie({ secure: isSecureRequest(c) }),
+  );
+  // Log out means log out of PromptOwl access too. Every logout path funnels
+  // through here, so the token cookie can't outlive the session that set it —
+  // otherwise the next person on a shared browser inherits it.
+  c.header(
+    "Set-Cookie",
+    buildPromptowlTokenCookie("", { secure: isSecureRequest(c), clear: true }),
+    { append: true },
+  );
+  c.header(
+    "Set-Cookie",
+    buildPromptowlMarkerCookie({ secure: isSecureRequest(c), clear: true }),
+    { append: true },
   );
 }
 
@@ -576,10 +599,12 @@ authRoutes.post("/device", async (c) => {
   if (!tryConsume(`device:ip:${clientIp(c)}`, DEVICE_LIMIT)) {
     return c.json({ error: "Too many device auth attempts, try again later" }, 429);
   }
-  const body = await c.req.json<{
-    deviceName?: string;
-    deviceType?: string;
-  }>();
+  // Every field here is optional with a default, so a bodyless POST is a
+  // perfectly good request — but c.req.json() throws on an empty body and the
+  // caller would get "Request body isn't valid JSON" for asking correctly.
+  const body = await c.req
+    .json<{ deviceName?: string; deviceType?: string }>()
+    .catch(() => ({}) as { deviceName?: string; deviceType?: string });
   const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
 
   const res = await fetch(`${promptowlUrl}/api/auth/device`, {
@@ -588,6 +613,13 @@ authRoutes.post("/device", async (c) => {
     body: JSON.stringify({
       deviceName: body.deviceName || "ContextNest Community",
       deviceType: body.deviceType || "webapp",
+      // Ask for the least this server can work with: read the profile (to
+      // identify who signed in) and read teams (to import them). The token we
+      // then hold — and park in the user's cookie — is refused by every other
+      // PromptOwl endpoint, so it can't chat as the user or spend their
+      // credits even if it leaks. An older PromptOwl ignores the field and
+      // returns an unscoped token, which still works.
+      scopes: PROMPTOWL_SCOPES,
     }),
   });
 
@@ -659,6 +691,23 @@ authRoutes.post("/promptowl", async (c) => {
   if (!result.ok) {
     return c.json({ error: result.error, gate: result.gate }, result.status);
   }
+
+  // Keep the token for the life of the session so team import can call
+  // PromptOwl as this user without sending them back through device approval.
+  // PromptOwl hands a token over exactly once, at approval — this is the only
+  // moment it can be captured. It goes in the user's own cookie, not our
+  // database (see PROMPTOWL_TOKEN_COOKIE), and it's scoped to reads upstream.
+  c.header(
+    "Set-Cookie",
+    buildPromptowlTokenCookie(body.token, { secure: isSecureRequest(c) }),
+    { append: true },
+  );
+  // Readable marker so the UI knows to offer the PromptOwl Teams tab.
+  c.header(
+    "Set-Cookie",
+    buildPromptowlMarkerCookie({ secure: isSecureRequest(c) }),
+    { append: true },
+  );
 
   return c.json({
     user: {
