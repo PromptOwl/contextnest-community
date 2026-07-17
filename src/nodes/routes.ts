@@ -19,7 +19,13 @@ import {
 } from "../governance/access-guard.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { isPublicReader } from "../shared/access.js";
-import { nodeToMarkdown, isMarkdownFormat } from "./markdown-export.js";
+import {
+  nodeToMarkdown,
+  isMarkdownFormat,
+  isRawFormat,
+  rawContentType,
+  frontmatterBlockOf,
+} from "./markdown-export.js";
 import {
   scanDocumentForDrift,
   getPendingChange,
@@ -54,6 +60,24 @@ function nodeAsMarkdown(response: any, nodeId: string): string {
     tags: response.tags,
     status: response.status,
     body: response.content,
+  });
+}
+
+// Direct raw fetch (`?format=raw`, or `Accept: text/markdown` with no format
+// param): the node BODY as text — no JSON envelope, no synthesized
+// frontmatter. Content-Type is per node type (see rawContentType). With
+// `?frontmatter=1` the stored YAML frontmatter block is prepended verbatim.
+// Built from the same fully-resolved response object the JSON path returns,
+// AFTER the access guard and the public-reader downgrade, so it can never
+// serve bytes the JSON GET wouldn't — a 403/404 is decided before this runs.
+function rawNodeBody(c: any, response: any, storedRaw: string | undefined) {
+  const body: string = response.content ?? "";
+  const payload =
+    c.req.query("frontmatter") === "1"
+      ? frontmatterBlockOf(storedRaw) + body
+      : body;
+  return c.body(payload, 200, {
+    "Content-Type": rawContentType(response.type),
   });
 }
 
@@ -390,12 +414,15 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   if (publicReader) {
     const approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
+      // Kept for the raw path: frontmatter=1 must serve the APPROVED
+      // snapshot's stored frontmatter, never the live working copy's.
+      let approvedRaw = "";
       try {
-        const raw = await versionManager.reconstructVersion(
+        approvedRaw = await versionManager.reconstructVersion(
           nodeId,
           approved,
         );
-        response.content = bodyOnly(nodeId, raw);
+        response.content = bodyOnly(nodeId, approvedRaw);
       } catch (err) {
         console.error(
           "reconstructVersion failed (public single)",
@@ -407,6 +434,9 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       }
       response.version = approved;
       response.status = "published";
+      if (isRawFormat(c)) {
+        return rawNodeBody(c, response, approvedRaw);
+      }
       if (isMarkdownFormat(c)) {
         return c.body(nodeAsMarkdown(response, nodeId), 200, {
           "Content-Type": "text/markdown; charset=utf-8",
@@ -427,6 +457,12 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   if (response.status === "pending_review") {
     const pending = await reviews.getPendingReview(nestId, nodeId);
     (response as any).pendingReviewBy = pending?.requestedBy ?? null;
+  }
+  if (isRawFormat(c)) {
+    // node.rawContent is the exact stored bytes (readDocument and the
+    // drift-path loadLatestApprovedNode both come through parseDocument),
+    // so frontmatter=1 prepends the block exactly as stored.
+    return rawNodeBody(c, response, node.rawContent);
   }
   if (isMarkdownFormat(c)) {
     return c.body(nodeAsMarkdown(response, nodeId), 200, {

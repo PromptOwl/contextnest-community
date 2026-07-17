@@ -393,6 +393,29 @@ Full node content. 403 if no steward access (when stewardship on).
 Add `?format=markdown` to receive `text/markdown` (frontmatter + body) instead
 of JSON — see [§8 export](#get-nestsnestidexportformatmarkdown--llm-pointed-plain-text-view).
 
+**Direct raw fetch** — `?format=raw` returns the node **body** as plain text
+(no JSON envelope, no synthesized frontmatter):
+
+| Param / header | Effect |
+|---|---|
+| `?format=raw` | Raw node body as text; Content-Type per node type (table below). |
+| `Accept: text/markdown` (header) | Same as `?format=raw` when no `format` param is present. An explicit `format` param always wins (`?format=markdown` keeps the frontmatter+body export; any other `format` value keeps JSON). Exact media-type match only — `text/*` / `*/*` do not trigger it. |
+| `?frontmatter=1` | Only meaningful with raw: prepends the node's YAML frontmatter block exactly as stored, above the body. |
+
+Content-Type by node `type`:
+
+| Node type | Content-Type |
+|---|---|
+| `document`, `agent`, `skill` (and any other/unset type) | `text/markdown; charset=utf-8` |
+| `artifact` | `text/html; charset=utf-8` |
+| `tool`, `table` | `text/plain; charset=utf-8` |
+
+Access is identical to the JSON GET — same middleware, grants, and
+public-reader semantics. Public readers get the **approved snapshot** body
+(and, with `frontmatter=1`, that snapshot's stored frontmatter); callers
+without read access get the same 403/404 JSON error as the JSON GET, never
+body bytes. Without `format`/`Accept` the response is unchanged JSON.
+
 ### POST `/nests/:nestId/nodes/:nodeId/revert`
 Restore an earlier version by writing its content as a **new** version (history is preserved).
 ```json
