@@ -417,6 +417,21 @@ Requires nest write permission.
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
 
+### POST `/nests/:nestId/assets`
+Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
+
+Supported types and per-type size caps:
+
+| Type | Extensions | Max size |
+|------|-----------|----------|
+| Image | `png`, `jpg`/`jpeg`, `gif`, `webp` | 10 MB |
+| Video | `mp4`, `webm` | 100 MB |
+
+SVG is deliberately not accepted (stored-XSS surface). Returns `201` with `{ file, url, markdown }` — `markdown` is a ready-to-paste reference: `![alt](url)` for images, the bare asset URL for video (the read view renders same-origin asset video URLs as a player).
+
+### GET `/nests/:nestId/assets/:file`
+Serves the asset bytes with the correct content-type and immutable caching. Read permission. Only server-minted `<uuid>.<ext>` names are accepted.
+
 ---
 
 ## 5. Stewardship
