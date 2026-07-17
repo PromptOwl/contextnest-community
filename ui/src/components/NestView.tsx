@@ -801,6 +801,18 @@ export function NestView({
       .slice(0, 3);
   }, [nodes]);
 
+  // Genuine, non-capped metric for the Overview stat tile: how many documents
+  // were edited in the last 7 days across the whole nest. The recentlyEdited
+  // strip above is sliced to 3 for display, so its length is not a real count.
+  const recentlyEditedCount = useMemo(() => {
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    return nodes.filter((n) => {
+      if (!n.updated_at) return false;
+      const t = Date.parse(String(n.updated_at));
+      return !Number.isNaN(t) && t >= cutoff;
+    }).length;
+  }, [nodes]);
+
   // myStewards (caller's own scoped rows) comes from GET /nests/:id, so
   // non-admin reviewers/editors keep per-node affordances without reading the
   // admin-only roster.
@@ -1640,10 +1652,10 @@ export function NestView({
                 </div>
                 <div>
                   <div className="text-2xl font-semibold leading-none">
-                    {recentlyEdited.length}
+                    {recentlyEditedCount}
                   </div>
                   <div className="text-xs text-muted-foreground mt-1">
-                    Recently edited
+                    Edited this week
                   </div>
                 </div>
               </CardContent>
