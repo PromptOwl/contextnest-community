@@ -359,6 +359,34 @@ export const MarkdownEditor = forwardRef<
   const onUploadImageRef = useRef(onUploadImage);
   onUploadImageRef.current = onUploadImage;
 
+  // ONE in-flight media upload at a time, shared by the toolbar picker and
+  // drag-drop. State drives the toolbar's disabled UI; the ref is the
+  // source of truth for the static handleDrop closure.
+  const [uploading, setUploading] = useState(false);
+  const uploadingRef = useRef(false);
+  const runMediaUpload = async (
+    ed: Editor,
+    file: File,
+    insertPos?: number,
+  ) => {
+    const upload = onUploadImageRef.current;
+    if (!upload) return;
+    if (uploadingRef.current) {
+      toast.error("An upload is already in progress — try again when it finishes.");
+      return;
+    }
+    uploadingRef.current = true;
+    setUploading(true);
+    try {
+      await uploadAndInsertMedia(ed, file, upload, insertPos);
+    } finally {
+      uploadingRef.current = false;
+      setUploading(false);
+    }
+  };
+  const runMediaUploadRef = useRef(runMediaUpload);
+  runMediaUploadRef.current = runMediaUpload;
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -502,14 +530,20 @@ export const MarkdownEditor = forwardRef<
         const upload = onUploadImageRef.current;
         const files = event.dataTransfer?.files;
         if (!ed || !upload || !files || files.length === 0) return false;
+        // ProseMirror fires custom handleDrop even on a read-only view —
+        // never upload/insert into a locked or preview-mode doc.
+        if (!ed.isEditable) return false;
         const file = files[0];
         if (!MEDIA_FILE_RE.test(file.name)) return false;
         event.preventDefault();
+        if (files.length > 1) {
+          toast("Only the first file was uploaded — drop one file at a time.");
+        }
         const pos = view.posAtCoords({
           left: event.clientX,
           top: event.clientY,
         })?.pos;
-        void uploadAndInsertMedia(ed, file, upload, pos);
+        void runMediaUploadRef.current(ed, file, pos);
         return true;
       },
       handleKeyDown: (_view, event) => {
@@ -1060,7 +1094,12 @@ export const MarkdownEditor = forwardRef<
             editor={editor}
             onLink={setLink}
             onRequestDocLink={onRequestDocLink}
-            onUploadImage={onUploadImage}
+            onMediaFile={
+              onUploadImage
+                ? (file) => void runMediaUpload(editor, file)
+                : undefined
+            }
+            uploading={uploading}
             previewing={previewing}
             onTogglePreview={() => setPreviewing((p) => !p)}
           />
@@ -1709,14 +1748,18 @@ function Toolbar({
   editor,
   onLink,
   onRequestDocLink,
-  onUploadImage,
+  onMediaFile,
+  uploading,
   previewing,
   onTogglePreview,
 }: {
   editor: Editor;
   onLink: () => void;
   onRequestDocLink?: () => void;
-  onUploadImage?: (file: File) => Promise<string>;
+  /** Picked image/video file. Parent owns the shared single-flight
+   *  upload guard (toolbar + drag-drop) and the insert. */
+  onMediaFile?: (file: File) => void;
+  uploading: boolean;
   previewing: boolean;
   onTogglePreview: () => void;
 }) {
@@ -1766,21 +1809,14 @@ function Toolbar({
   };
 
   // Hidden file input driven by the "Image or video" toolbar button.
+  // Upload + insert (and the single-flight guard shared with drag-drop)
+  // live in the parent via onMediaFile.
   const mediaInputRef = useRef<HTMLInputElement>(null);
   const pickMedia = () => mediaInputRef.current?.click();
-  // Disables the Upload trigger while a file is in flight so a second
-  // pick can't interleave with the first insert.
-  const [uploading, setUploading] = useState(false);
-  const onMediaPicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onMediaPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
-    if (!file || !onUploadImage) return;
-    setUploading(true);
-    try {
-      await uploadAndInsertMedia(editor, file, onUploadImage);
-    } finally {
-      setUploading(false);
-    }
+    if (file) onMediaFile?.(file);
   };
   // In preview mode every formatting affordance is irrelevant — collapse
   // the toolbar to just the toggle so the user has one obvious way back
@@ -1926,7 +1962,7 @@ function Toolbar({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
-          {onUploadImage && (
+          {onMediaFile && (
             <DropdownMenuItem onSelect={pickMedia}>
               <ImagePlus className="mr-2 h-4 w-4" />
               Image or video
@@ -1945,7 +1981,7 @@ function Toolbar({
         className="hidden"
         onChange={onCsvPicked}
       />
-      {onUploadImage && (
+      {onMediaFile && (
         <input
           ref={mediaInputRef}
           type="file"

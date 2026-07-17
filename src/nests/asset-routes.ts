@@ -58,6 +58,25 @@ const SAFE_NAME = /^[0-9a-f-]{36}\.(png|jpe?g|gif|webp|mp4|webm)$/;
 // POST /nests/:nestId/assets — multipart upload, field name "file".
 assetRoutes.post("/", async (c) => {
   const nestId = c.req.param("nestId")!;
+  // Pre-parse guard. The media type (image vs video) lives inside the
+  // multipart body — the filename is not knowable from headers — so the
+  // per-type caps CANNOT be applied before parsing. What can be rejected
+  // cheaply here is anything larger than the biggest allowed upload:
+  // mirrors app.ts's route-level Content-Length gate for defense in depth
+  // (and covers a configuration where the global MAX_BODY_BYTES was
+  // raised above the asset ceiling). Bodies without a declared
+  // Content-Length fall through to the post-parse checks below.
+  const lenStr = c.req.header("Content-Length");
+  if (lenStr) {
+    const len = parseInt(lenStr, 10);
+    if (Number.isFinite(len) && len > ASSET_MAX_REQUEST_BYTES) {
+      throw new ValidationError(
+        `upload too large (${(len / (1024 * 1024)).toFixed(1)} MB, ` +
+          `max ${VIDEO_MAX_BYTES / (1024 * 1024)} MB for video, ` +
+          `${IMAGE_MAX_BYTES / (1024 * 1024)} MB for images)`,
+      );
+    }
+  }
   const body = await c.req.parseBody();
   const file = body["file"];
   if (!(file instanceof File)) {
@@ -71,6 +90,9 @@ assetRoutes.post("/", async (c) => {
       `unsupported asset type ".${ext}" — allowed: ${Object.keys(CONTENT_TYPES).join(", ")}`,
     );
   }
+  // Per-type cap on file.size — a File property, so this rejects an
+  // oversized upload BEFORE arrayBuffer() ever materializes a second
+  // copy of the bytes. Order matters: keep this ahead of any read.
   const isVideo = VIDEO_EXTS.has(ext);
   const maxBytes = isVideo ? VIDEO_MAX_BYTES : IMAGE_MAX_BYTES;
   if (file.size > maxBytes) {

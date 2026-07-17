@@ -5,7 +5,7 @@
  * at 100 MB — enforced per type in the POST handler, with the asset route
  * alone exempted from the global MAX_BODY_BYTES Content-Length cap.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -96,16 +96,25 @@ describe("asset upload", () => {
     expect(data.error).toContain("max 100 MB");
   }, 60_000);
 
-  it("image cap is unchanged at 10 MB", async () => {
-    const res = await upload(
-      "huge.png",
-      owner.apiKey,
-      new Uint8Array(10 * 1024 * 1024 + 1),
-    );
-    expect(res.status).toBe(400);
-    const data = await res.json();
-    expect(data.error).toMatch(/image too large/i);
-    expect(data.error).toContain("max 10 MB");
+  it("image cap is unchanged at 10 MB, rejected before the bytes are read", async () => {
+    // The handler must check file.size (a File property) BEFORE calling
+    // arrayBuffer() — an oversized upload is never materialized into a
+    // second buffer. The spy proves the ordering.
+    const spy = vi.spyOn(File.prototype, "arrayBuffer");
+    try {
+      const res = await upload(
+        "huge.png",
+        owner.apiKey,
+        new Uint8Array(10 * 1024 * 1024 + 1),
+      );
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toMatch(/image too large/i);
+      expect(data.error).toContain("max 10 MB");
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   }, 30_000);
 
   it("read-tier callers cannot upload", async () => {
