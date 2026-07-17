@@ -8,7 +8,6 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2 } from "lucide-react";
-import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -21,6 +20,7 @@ import {
 } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import type { AdminSettings, SignInGate, ManualSignIn } from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 
 interface SettingsPageProps {
   onBack: () => void;
@@ -749,30 +749,7 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                           variant="outline"
                           size="sm"
                           onClick={async () => {
-                            // navigator.clipboard throws on insecure contexts
-                            // (plain-HTTP local setups) — fall back to the
-                            // legacy execCommand path, and if that fails too,
-                            // tell the admin to copy by hand.
-                            try {
-                              await navigator.clipboard.writeText(redirectUri);
-                            } catch {
-                              try {
-                                const ta = document.createElement("textarea");
-                                ta.value = redirectUri;
-                                ta.style.position = "fixed";
-                                ta.style.opacity = "0";
-                                document.body.appendChild(ta);
-                                ta.select();
-                                const ok = document.execCommand("copy");
-                                document.body.removeChild(ta);
-                                if (!ok) throw new Error("copy failed");
-                              } catch {
-                                toast.error(
-                                  "Couldn't copy automatically — select the URI text and copy it manually.",
-                                );
-                                return;
-                              }
-                            }
+                            if (!(await copyTextWithToast(redirectUri))) return;
                             setCopiedRedirect(true);
                             setTimeout(() => setCopiedRedirect(false), 1500);
                           }}

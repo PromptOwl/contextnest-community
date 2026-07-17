@@ -74,6 +74,7 @@ import {
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { relatedDocs } from "../lib/related";
+import { copyTextWithToast } from "../lib/clipboard";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
 import { resolveWikiTarget, previewSnippet } from "../lib/wiki-preview";
@@ -260,13 +261,9 @@ export function DocumentEditor({
   const runnablesUrl = `${serverOrigin}/nests/${nestId}/runnables`;
   const [copiedRunnables, setCopiedRunnables] = useState(false);
   const copyRunnablesUrl = async () => {
-    try {
-      await navigator.clipboard.writeText(runnablesUrl);
-      setCopiedRunnables(true);
-      setTimeout(() => setCopiedRunnables(false), 1500);
-    } catch {
-      /* clipboard blocked — no-op */
-    }
+    if (!(await copyTextWithToast(runnablesUrl))) return;
+    setCopiedRunnables(true);
+    setTimeout(() => setCopiedRunnables(false), 1500);
   };
   // Inline anchored comments (annotations) parked beside the doc. commentMode
   // forces the rendered read view + highlight overlay even for editors, so
@@ -1325,8 +1322,10 @@ export function DocumentEditor({
                 testId: "document-editor-copy-link",
                 onSelect: () => {
                   const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
-                  navigator.clipboard.writeText(url);
-                  toast.success("Link copied — recipient needs access to this nest");
+                  void copyTextWithToast(
+                    url,
+                    "Link copied — recipient needs access to this nest",
+                  );
                 },
               });
             if (canShare)
