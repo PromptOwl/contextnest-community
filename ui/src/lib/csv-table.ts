@@ -248,6 +248,43 @@ export function looksLikeDelimitedTable(text: string): DetectedTable | null {
   return null;
 }
 
+/**
+ * Single-ROW variant of the paste detection: is this one line (no newline)
+ * a tab- or semicolon-delimited grid row? Copying a single row from a
+ * spreadsheet yields exactly this (`A\tB\tC`, no trailing newline), which
+ * `looksLikeDelimitedTable` deliberately rejects (it requires ≥2 rows) —
+ * without this check the literal tabs would land inside one comma-cell.
+ *
+ * Tab: ≥2 cells is a strong spreadsheet signal. Semicolon: appears in
+ * prose, so additionally no cell may read as a sentence (same length cap
+ * as the multi-row heuristic). Comma lines are already canonical CSV and
+ * are never matched.
+ */
+export function looksLikeDelimitedRow(text: string): DetectedTable | null {
+  const trimmed = text.replace(/\s+$/, "");
+  if (!trimmed || trimmed.includes("\n") || trimmed.includes("\r")) return null;
+
+  if (trimmed.includes("\t")) {
+    const rows = parseDelimited(trimmed, "\t");
+    if (rows.length === 1 && rows[0].length >= 2) {
+      return { delimiter: "\t", rows };
+    }
+    return null;
+  }
+
+  if (trimmed.includes(";") && !trimmed.includes(",")) {
+    const rows = parseDelimited(trimmed, ";");
+    if (
+      rows.length === 1 &&
+      rows[0].length >= 2 &&
+      rows[0].every((c) => c.length <= MAX_DETECTED_CELL_LENGTH)
+    ) {
+      return { delimiter: ";", rows };
+    }
+  }
+  return null;
+}
+
 export interface ConvertedTable {
   markdown: string;
   /** Rows below the header (what actually renders as table body). */

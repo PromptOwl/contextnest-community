@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   detectDelimiter,
+  looksLikeDelimitedRow,
   looksLikeDelimitedTable,
   parseDelimited,
   rowsToCsv,
@@ -61,6 +62,7 @@ export function TableSourceEditor({
   };
 
   const onFilePicked = async (e: ChangeEvent<HTMLInputElement>) => {
+    if (readOnly) return; // defense independent of the button's disabled
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
     if (!file) return;
@@ -91,24 +93,51 @@ export function TableSourceEditor({
     // Comma files are already the canonical body format — keep them
     // verbatim so quoting, `#` comments, and header directives survive.
     const next = delimiter === "," ? text : rowsToCsv(rows);
+    // Toast counts DATA rows only: skip `#` comment lines (the server's
+    // table parser ignores them) and the header row.
+    const dataRows = Math.max(
+      0,
+      rows.filter((r) => !(r[0] ?? "").trimStart().startsWith("#")).length - 1,
+    );
     replaceWith(
       next,
-      `Table replaced from ${file.name} — ${rows.length.toLocaleString()} rows.`,
+      `Table replaced from ${file.name} — ${dataRows.toLocaleString()} data row${dataRows === 1 ? "" : "s"}.`,
     );
   };
 
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     if (readOnly) return;
     const text = e.clipboardData.getData("text/plain");
+
+    // Multi-row tab/semicolon grid → convert + replace the whole body (a
+    // table node's body is one grid). Comma pastes are already canonical
+    // CSV — default caret paste applies.
     const detected = looksLikeDelimitedTable(text);
-    // Comma pastes are already canonical CSV — default caret paste applies.
-    // Tab/semicolon grids are not valid table-node CSV: convert + replace.
-    if (!detected || detected.delimiter === ",") return;
+    if (detected && detected.delimiter !== ",") {
+      e.preventDefault();
+      replaceWith(
+        rowsToCsv(detected.rows),
+        `Pasted grid converted to CSV — table body replaced (${detected.rows.length.toLocaleString()} rows).`,
+      );
+      return;
+    }
+    if (detected) return;
+
+    // Single spreadsheet ROW (`A\tB\tC`, no newline — looksLikeDelimitedTable
+    // requires ≥2 rows) → convert to one CSV line and INSERT at the caret:
+    // one row is an edit within the grid, not a new grid, and letting the
+    // default paste through would land literal tabs inside one comma-cell.
+    const row = looksLikeDelimitedRow(text);
+    if (!row) return;
     e.preventDefault();
-    replaceWith(
-      rowsToCsv(detected.rows),
-      `Pasted grid converted to CSV — table body replaced (${detected.rows.length.toLocaleString()} rows).`,
-    );
+    const el = e.currentTarget;
+    const start = el.selectionStart ?? value.length;
+    const end = el.selectionEnd ?? start;
+    const inserted = rowsToCsv(row.rows);
+    onChange(value.slice(0, start) + inserted + value.slice(end));
+    // Restore the caret after React re-renders the controlled value.
+    const caret = start + inserted.length;
+    requestAnimationFrame(() => el.setSelectionRange(caret, caret));
   };
 
   return (

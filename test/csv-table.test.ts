@@ -7,6 +7,7 @@ import {
   rowsToMarkdownTable,
   looksLikeDelimitedTable,
   delimitedToMarkdownTable,
+  looksLikeDelimitedRow,
   rowsToCsv,
   LARGE_TABLE_ROW_THRESHOLD,
 } from "../ui/src/lib/csv-table";
@@ -371,5 +372,58 @@ describe("rowsToCsv", () => {
   it("converts a parsed TSV grid to CSV", () => {
     const rows = parseDelimited("sku\tprice\nOWL-1\t149", "\t");
     expect(rowsToCsv(rows)).toBe("sku,price\nOWL-1,149");
+  });
+});
+
+// Single-row spreadsheet paste (CU-wdqcpzwf2j review): one copied Excel row
+// arrives as `A\tB\tC` with no newline, which looksLikeDelimitedTable
+// rejects (needs >=2 rows) — looksLikeDelimitedRow catches it.
+describe("looksLikeDelimitedRow", () => {
+  it("detects a single tab-delimited row without a trailing newline", () => {
+    expect(looksLikeDelimitedRow("OWL-1\t149\tEU")).toEqual({
+      delimiter: "\t",
+      rows: [["OWL-1", "149", "EU"]],
+    });
+  });
+
+  it("tolerates trailing whitespace/newlines from the clipboard", () => {
+    expect(looksLikeDelimitedRow("a\tb\n")).toEqual({
+      delimiter: "\t",
+      rows: [["a", "b"]],
+    });
+  });
+
+  it("detects a single semicolon-delimited row", () => {
+    expect(looksLikeDelimitedRow("OWL-1;149;EU")).toEqual({
+      delimiter: ";",
+      rows: [["OWL-1", "149", "EU"]],
+    });
+  });
+
+  it("rejects multi-line input (multi-row belongs to looksLikeDelimitedTable)", () => {
+    expect(looksLikeDelimitedRow("a\tb\nc\td")).toBeNull();
+  });
+
+  it("rejects a single cell (no delimiter)", () => {
+    expect(looksLikeDelimitedRow("just a plain line")).toBeNull();
+  });
+
+  it("never matches comma lines — already canonical CSV", () => {
+    expect(looksLikeDelimitedRow("a,b,c")).toBeNull();
+  });
+
+  it("rejects semicolon lines that also carry commas (prosey/ambiguous)", () => {
+    expect(looksLikeDelimitedRow("first, second; third, fourth")).toBeNull();
+  });
+
+  it("rejects semicolon lines with sentence-length cells", () => {
+    const long = "x".repeat(250);
+    expect(looksLikeDelimitedRow(`${long};b`)).toBeNull();
+  });
+
+  it("converts to a one-line CSV via rowsToCsv", () => {
+    const row = looksLikeDelimitedRow('a,x\tsay "hi"\tplain');
+    expect(row).not.toBeNull();
+    expect(rowsToCsv(row!.rows)).toBe('"a,x","say ""hi""",plain');
   });
 });
