@@ -4,6 +4,7 @@
  * read (`?format=markdown`) and the nest-level `/export` concatenation so
  * agents get identical output from either endpoint.
  */
+import { parseDocument } from "@promptowl/contextnest-engine";
 
 export interface MarkdownExportFields {
   id: string;
@@ -57,6 +58,11 @@ export function isRawFormat(c: {
   const format = c.req.query("format");
   if (format !== undefined) return format === "raw";
   const accept = c.req.header("Accept") ?? "";
+  // DELIBERATE response-shape change (CU-wdqcpzwf2k): before this feature a
+  // client sending `Accept: text/markdown` still received the JSON envelope;
+  // now that header opts into the raw text body. Any client that needs the
+  // old behavior can pin it with an explicit `format` query param — the
+  // param always wins over the header.
   // Exact media-type match only — `text/*` or `*/*` (browser defaults) must
   // NOT flip the response away from JSON.
   return accept
@@ -81,11 +87,26 @@ export function rawContentType(nodeType: string | undefined): string {
 
 /**
  * Extract the leading YAML frontmatter block from a stored raw document
- * string, delimiters included, for `?format=raw&frontmatter=1`. The YAML
- * lines are returned exactly as stored; "" when the document has none.
+ * string, delimiters included, for `?format=raw&frontmatter=1`. Returned
+ * exactly as stored; "" when the document has none.
+ *
+ * Delimiter parsing is delegated to the engine's `parseDocument` (gray-matter
+ * — the same library `serializeDocument`/`matter.stringify` writes with on
+ * the storage write path), so the split can't disagree with how the engine
+ * itself reads the file: the block is the stored prefix that precedes the
+ * parsed body. That keeps a `---` horizontal rule at the top of the BODY out
+ * of the frontmatter block, and makes block + body reconstruct the stored
+ * bytes exactly.
  */
 export function frontmatterBlockOf(raw: string | undefined | null): string {
-  if (!raw) return "";
+  if (!raw || !raw.startsWith("---")) return "";
+  try {
+    const body = parseDocument("frontmatter-split.md", raw, "frontmatter-split").body ?? "";
+    if (raw.endsWith(body)) return raw.slice(0, raw.length - body.length);
+  } catch {
+    /* unparseable frontmatter — fall through to the conservative regex */
+  }
+  // Fallback for raw strings gray-matter can't parse: first `---` fence pair.
   const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   return m ? `---\n${m[1]}\n---\n\n` : "";
 }

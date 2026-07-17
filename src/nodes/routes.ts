@@ -19,6 +19,7 @@ import {
 } from "../governance/access-guard.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { isPublicReader } from "../shared/access.js";
+import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
 import {
   nodeToMarkdown,
   isMarkdownFormat,
@@ -76,6 +77,17 @@ function rawNodeBody(c: any, response: any, storedRaw: string | undefined) {
     c.req.query("frontmatter") === "1"
       ? frontmatterBlockOf(storedRaw) + body
       : body;
+  // Raw bytes on the app origin — never let the browser sniff them into
+  // something more executable than the declared type.
+  c.header("X-Content-Type-Options", "nosniff");
+  // Artifact bodies are editor-controlled HTML+JS served as text/html here.
+  // Without a sandbox their same-origin scripts would ride the viewer's
+  // session. Apply the SAME strict sandbox the /hosted viewer uses (shared
+  // helper — see src/shared/artifact-sandbox.ts) so the document runs on an
+  // opaque origin with no network reach.
+  if ((response.type || "document") === "artifact") {
+    applyArtifactSandboxHeaders(c);
+  }
   return c.body(payload, 200, {
     "Content-Type": rawContentType(response.type),
   });

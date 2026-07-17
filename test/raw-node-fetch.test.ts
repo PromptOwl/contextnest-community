@@ -18,6 +18,7 @@ import {
   jsonRequest,
   authed,
 } from "./helpers.js";
+import { frontmatterBlockOf } from "../src/nodes/markdown-export.js";
 
 // ─── Suite A: formats, content types, precedence (open mode) ─────────────
 
@@ -158,6 +159,76 @@ describe("?format=raw — body, content types, precedence", () => {
     );
     expect(raw.headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(await raw.text()).toBe(stored.artifact);
+  });
+
+  it("artifact raw is sandboxed with the SAME headers as /hosted", async () => {
+    const raw = await app.request(
+      `/nests/${nestId}/nodes/${ids.artifact}?format=raw`,
+    );
+    const hosted = await app.request(
+      `/nests/${nestId}/nodes/${ids.artifact}/hosted`,
+    );
+    expect(raw.status).toBe(200);
+    expect(hosted.status).toBe(200);
+    // Exact parity with the hosted viewer — the policy must never drift.
+    const csp = raw.headers.get("content-security-policy");
+    expect(csp).toBe(hosted.headers.get("content-security-policy"));
+    expect(csp).toContain("sandbox allow-scripts");
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("connect-src 'none'");
+    expect(raw.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(raw.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+
+  it("every raw response carries nosniff; non-artifacts get no sandbox CSP", async () => {
+    for (const type of Object.keys(expectedContentType)) {
+      const res = await app.request(
+        `/nests/${nestId}/nodes/${ids[type]}?format=raw`,
+      );
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      if (type !== "artifact") {
+        expect(res.headers.get("content-security-policy")).toBeNull();
+      }
+    }
+  });
+
+  it("frontmatterBlockOf stops at the real closing delimiter — a --- hr right after frontmatter stays in the body", () => {
+    // Unit-level: gray-matter (via the engine's parseDocument, the same
+    // library the storage write path serializes with) closes frontmatter at
+    // the FIRST `---` fence, so an hr at byte 0 of the body is not swallowed.
+    const raw = "---\ntitle: X\n---\n---\n\nBody after hr\n";
+    const block = frontmatterBlockOf(raw);
+    expect(block).toBe("---\ntitle: X\n---\n");
+    expect(block + "---\n\nBody after hr\n").toBe(raw); // block+body = stored bytes
+    // No frontmatter at all → empty block, nothing invented.
+    expect(frontmatterBlockOf("just a body\n")).toBe("");
+  });
+
+  it("frontmatter split survives a --- hr line inside the body (endpoint)", async () => {
+    const hrBody = "Intro line\n\n---\n\nAfter the hr";
+    const created = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "HR Doc",
+      content: hrBody,
+    });
+    expect(created.status).toBe(201);
+    const id = created.data.node.id;
+    const json = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${id}`);
+    const jsonContent: string = json.data.node.content;
+    expect(jsonContent).toContain("After the hr");
+
+    const res = await app.request(
+      `/nests/${nestId}/nodes/${id}?format=raw&frontmatter=1`,
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // Body is intact after the block (byte parity with the JSON content)…
+    expect(text.endsWith(jsonContent)).toBe(true);
+    // …and the extracted frontmatter block is ONLY the real frontmatter —
+    // the body's `---` hr was not swallowed into it.
+    const block = text.slice(0, text.length - jsonContent.length);
+    expect(block.startsWith("---\n")).toBe(true);
+    expect(block).toContain("HR Doc");
+    expect(block).not.toContain("Intro line");
   });
 
   it("default JSON path is unchanged (regression)", async () => {
