@@ -865,10 +865,22 @@ export function createApp(): Hono<AuthEnv> {
     }
 
     const grantedBy = (await resolveCallerEmail(c.get("userId"))).toLowerCase();
-    await getDb().run(
-      "INSERT INTO super_admins (email, granted_by) VALUES (?, ?)",
-      [email, grantedBy],
-    );
+    try {
+      await getDb().run(
+        "INSERT INTO super_admins (email, granted_by) VALUES (?, ?)",
+        [email, grantedBy],
+      );
+    } catch (err) {
+      // Concurrent-grant race: the isSuperAdmin pre-check above reads the
+      // in-memory cache, so two simultaneous grants can both pass it. The PK
+      // on email is the real arbiter — map its violation to the intended 409.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/unique|duplicate/i.test(msg)) {
+        await loadGrantedSuperAdmins();
+        return c.json({ error: "This user is already a superadmin." }, 409);
+      }
+      throw err;
+    }
     await loadGrantedSuperAdmins();
 
     return c.json({ email, source: "granted", granted_by: grantedBy }, 201);

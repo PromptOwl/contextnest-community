@@ -99,6 +99,12 @@ describe("POST /admin/super-admins", () => {
   it("a granted superadmin gets the full server-admin surface (teammates, admin-status, granting)", async () => {
     const mates = await jsonRequest(app, "GET", "/auth/teammates", undefined, alice.apiKey);
     expect(mates.status).toBe(200);
+    // The teammates list marks granted superadmins with the Admin badge, so
+    // the UI stops offering Reset password / Remove for them.
+    const aliceRow = mates.data.teammates.find((t: any) => t.email === alice.email);
+    expect(aliceRow.is_admin).toBe(true);
+    const bobRow = mates.data.teammates.find((t: any) => t.email === bob.email);
+    expect(bobRow.is_admin).toBe(false); // not granted yet at this point
 
     const status = await jsonRequest(app, "GET", "/auth/admin-status", undefined, alice.apiKey);
     expect(status.data.me.is_admin).toBe(true);
@@ -125,6 +131,32 @@ describe("POST /admin/super-admins", () => {
   });
 });
 
+describe("superadmin peer protection", () => {
+  // alice and bob are both granted superadmins at this point; root is the
+  // access.yaml admin. No server admin may reset or remove another one.
+  it("a server admin cannot reset another server admin's password", async () => {
+    const res = await jsonRequest(
+      app, "POST", `/auth/admin/reset-password/${alice.userId}`, {}, root.apiKey,
+    );
+    expect(res.status).toBe(403);
+    expect(res.data.error).toMatch(/server admin/i);
+  });
+
+  it("a server admin cannot remove another server admin", async () => {
+    const granted = await jsonRequest(
+      app, "DELETE", `/auth/users/${alice.userId}`, undefined, root.apiKey,
+    );
+    expect(granted.status).toBe(403);
+    expect(granted.data.error).toMatch(/server admin/i);
+
+    // …and a granted superadmin can't take out the config-file admin either.
+    const config = await jsonRequest(
+      app, "DELETE", `/auth/users/${root.userId}`, undefined, alice.apiKey,
+    );
+    expect(config.status).toBe(403);
+  });
+});
+
 describe("DELETE /admin/super-admins/:email", () => {
   it("a non-superadmin cannot revoke", async () => {
     // carol is nobody special; use a plain user token (alice is admin now, use a fresh check via bob-revoked later — here use an unauthenticated request instead)
@@ -148,6 +180,29 @@ describe("DELETE /admin/super-admins/:email", () => {
       app, "DELETE", `/admin/super-admins/${alice.email}`, undefined, root.apiKey,
     );
     expect(res.status).toBe(404);
+  });
+
+  it("maps a concurrent-grant PK violation to 409 (race past the cache pre-check)", async () => {
+    // Simulate the race: a row lands in the DB without the in-memory cache
+    // being refreshed (as if another instance/request just inserted it). The
+    // POST's isSuperAdmin pre-check then passes and the INSERT hits the PK.
+    const dbClient = await import("../src/db/client.js");
+    await dbClient.getDb().run(
+      "INSERT INTO super_admins (email, granted_by) VALUES (?, ?)",
+      [alice.email, "race@acme.com"],
+    );
+
+    const res = await jsonRequest(
+      app, "POST", "/admin/super-admins", { email: alice.email }, root.apiKey,
+    );
+    expect(res.status).toBe(409);
+    expect(res.data.error).toMatch(/already a superadmin/i);
+
+    // Clean up through the API (also re-syncs the cache for the tests below).
+    const del = await jsonRequest(
+      app, "DELETE", `/admin/super-admins/${alice.email}`, undefined, root.apiKey,
+    );
+    expect(del.status).toBe(200);
   });
 
   it("400s revoking an access.yaml admin (file is authoritative — lockout safety)", async () => {

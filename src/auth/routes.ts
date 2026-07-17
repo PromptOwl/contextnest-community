@@ -923,6 +923,16 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   ) as { id: string; email: string } | undefined;
   if (!target) return c.json({ error: "User not found" }, 404);
 
+  // Peer protection: one server admin must not be able to password-hijack
+  // another (license/config/granted alike). Own password goes through
+  // /auth/password; other admins are off-limits outright.
+  if (target.id !== callerId && isServerAdminEmail(target.email)) {
+    return c.json(
+      { error: "This user is a server admin — admins can't reset each other's passwords. They can change their own via their account." },
+      403,
+    );
+  }
+
   let supplied: string | undefined;
   try {
     supplied = (await c.req.json<{ password?: string }>()).password;
@@ -988,6 +998,16 @@ authRoutes.delete("/users/:userId", async (c) => {
     [targetId],
   ) as { id: string; email: string } | undefined;
   if (!target) return c.json({ error: "User not found" }, 404);
+
+  // Peer protection: a server admin can't delete another server admin
+  // (license/config/granted alike). Revoke their superadmin grant first
+  // (config/license admins can only be demoted at the source).
+  if (isServerAdminEmail(target.email)) {
+    return c.json(
+      { error: "This user is a server admin — admins can't remove each other. Revoke their superadmin access first." },
+      403,
+    );
+  }
 
   const ownedNests = (
     await db.get(
@@ -1169,9 +1189,12 @@ authRoutes.get("/teammates", async (c) => {
   ) as Array<{ email: string }>;
 
   // Sort admins first; underlying SQL is_admin column is unreliable
-  // (license-derived), so resolve in JS after the map.
+  // (license-derived), so resolve in JS after the map. Server-admin =
+  // license admin OR superadmin, so granted/config superadmins carry the
+  // Admin badge and the UI stops offering Reset password / Remove for them
+  // (the backend rejects those anyway — see the target guards below).
   const enriched = teammates
-    .map((t) => ({ ...t, is_admin: isLicenseAdminEmail(t.email) }))
+    .map((t) => ({ ...t, is_admin: isServerAdminEmail(t.email) }))
     .sort((a, b) => Number(b.is_admin) - Number(a.is_admin));
 
   return c.json({
