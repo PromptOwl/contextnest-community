@@ -7,6 +7,7 @@ import {
   rowsToMarkdownTable,
   type Delimiter,
 } from "@/lib/csv-table";
+import { copyText } from "@/lib/clipboard";
 
 const lowlight = createLowlight(common);
 
@@ -131,11 +132,15 @@ export const CodeBlock = CodeBlockLowlight.extend({
       copy.textContent = "Copy";
       copy.addEventListener("click", () => {
         const text = code.textContent ?? "";
-        void navigator.clipboard?.writeText(text);
-        copy.textContent = "Copied";
-        window.setTimeout(() => {
-          copy.textContent = "Copy";
-        }, 1200);
+        // Outside React/toast land — swap the button label only when the
+        // copy actually succeeded (insecure contexts can fail).
+        void copyText(text).then((ok) => {
+          if (!ok) return;
+          copy.textContent = "Copied";
+          window.setTimeout(() => {
+            copy.textContent = "Copy";
+          }, 1200);
+        });
       });
 
       // Reveal "Convert to table" only for delimited-data blocks.

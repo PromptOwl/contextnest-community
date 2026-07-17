@@ -320,7 +320,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => copyTextWithToast(resetPw.password!)}
+                    onClick={() => void copyTextWithToast(resetPw.password!)}
                   >
                     Copy
                   </Button>

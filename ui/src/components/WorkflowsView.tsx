@@ -59,6 +59,7 @@ import {
   type RunStep,
   type Schedule,
 } from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
@@ -1447,7 +1448,8 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   }, [nestId, selNode]);
 
   const copy = (key: string, text: string) => {
-    void navigator.clipboard?.writeText(text).then(() => {
+    void copyTextWithToast(text).then((ok) => {
+      if (!ok) return;
       setCopied(key);
       setTimeout(() => setCopied(""), 1500);
     });
