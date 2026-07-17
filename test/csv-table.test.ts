@@ -7,6 +7,7 @@ import {
   rowsToMarkdownTable,
   looksLikeDelimitedTable,
   delimitedToMarkdownTable,
+  rowsToCsv,
   LARGE_TABLE_ROW_THRESHOLD,
 } from "../ui/src/lib/csv-table";
 
@@ -338,5 +339,37 @@ describe("delimitedToMarkdownTable (end-to-end)", () => {
     expect(out!.hasHeader).toBe(true);
     expect(out!.dataRows).toBe(LARGE_TABLE_ROW_THRESHOLD + 1);
     expect(out!.dataRows > LARGE_TABLE_ROW_THRESHOLD).toBe(true);
+  });
+});
+
+// Table-node source editor: TSV/semicolon grids normalize to the canonical
+// comma-CSV body a table node stores (CU-wdqcpzwf2j).
+describe("rowsToCsv", () => {
+  it("serializes plain rows", () => {
+    expect(
+      rowsToCsv([
+        ["sku", "price"],
+        ["OWL-1", "149"],
+      ]),
+    ).toBe("sku,price\nOWL-1,149");
+  });
+
+  it("quotes cells containing commas, quotes, or newlines", () => {
+    expect(rowsToCsv([["a,x", 'say "hi"', "line1\nline2", "plain"]])).toBe(
+      '"a,x","say ""hi""","line1\nline2",plain',
+    );
+  });
+
+  it("round-trips through parseDelimited", () => {
+    const rows = [
+      ["name", "note"],
+      ["Ada", 'likes "commas", a lot'],
+    ];
+    expect(parseDelimited(rowsToCsv(rows), ",")).toEqual(rows);
+  });
+
+  it("converts a parsed TSV grid to CSV", () => {
+    const rows = parseDelimited("sku\tprice\nOWL-1\t149", "\t");
+    expect(rowsToCsv(rows)).toBe("sku,price\nOWL-1,149");
   });
 });

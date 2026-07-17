@@ -185,6 +185,21 @@ export function rowsToMarkdownTable(
   return [line(header), separator, ...body.map(line)].join("\n");
 }
 
+/** RFC-4180 cell quoting: wrap when the cell carries a comma, quote, or newline. */
+function csvEscapeCell(cell: string): string {
+  return /[",\n\r]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell;
+}
+
+/**
+ * Rows → canonical comma-CSV (no trailing newline). Used by the table-node
+ * source editor to normalize TSV/semicolon grids (spreadsheet clipboards,
+ * European exports) into the body format the server's table parser and
+ * /table-query read.
+ */
+export function rowsToCsv(rows: string[][]): string {
+  return rows.map((r) => r.map(csvEscapeCell).join(",")).join("\n");
+}
+
 export interface DetectedTable {
   delimiter: Delimiter;
   rows: string[][];
