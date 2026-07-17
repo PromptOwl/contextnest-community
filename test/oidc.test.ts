@@ -743,6 +743,46 @@ describe("OIDC callback — department claim", () => {
     expect(await storedDepartment("odd.claims@acme.com")).toBe("x".repeat(120));
   });
 
+  // The upsert is best-effort: it sits in its own try/catch, so a transient
+  // DB failure on this ancillary write degrades to "department not captured
+  // this login" instead of bouncing a fully valid sign-in to service_error.
+  it("still signs the user in when the department write fails", async () => {
+    const { privateKey, jwks } = await makeKeys();
+    const issuer = installMockIssuer(jwks);
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    configureOidc();
+
+    const { getDb } = await import("../src/db/client.js");
+    const db = getDb();
+    const realRun = db.run.bind(db);
+    const spy = vi
+      .spyOn(db, "run")
+      .mockImplementation(async (sql: string, params?: unknown[]) => {
+        if (sql.includes("SET department")) {
+          throw new Error("disk I/O error (simulated)");
+        }
+        return realRun(sql, params as any[]);
+      });
+
+    try {
+      const res = await ssoLogin(app, issuer, privateKey, {
+        email: "resilient@acme.com",
+        department: "Engineering",
+      });
+      // Login succeeded exactly like normal: redirect home + session cookie.
+      expect(cookiesOf(res)["cnst_session"]).toMatch(/^[0-9a-f]{64}$/);
+      // The write really was attempted and really did throw.
+      expect(
+        spy.mock.calls.some(([sql]) => String(sql).includes("SET department")),
+      ).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The failed write left no department behind — captured on a later login.
+    expect(await storedDepartment("resilient@acme.com")).toBeNull();
+  });
+
   it("captures the department for an EXISTING (password-registered) user too", async () => {
     const { privateKey, jwks } = await makeKeys();
     const issuer = installMockIssuer(jwks);
@@ -867,6 +907,45 @@ describe("department auto-tagging on node create", () => {
     );
     expect(res.status).toBe(201);
     expect(res.data.node.tags).toEqual(["#notes"]);
+  });
+
+  // The tagging lives in createNode, which both REST and MCP call — smoke the
+  // MCP surface too so the "covers REST + MCP creates" claim stays tested.
+  it("tags a document created via the MCP context_create tool", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const user = await registerUser(app, "writer@acme.com");
+    await setDepartment(user.email, "Engineering");
+    process.env.OIDC_DEPARTMENT_TAGGING = "true";
+    const nestId = await makeNest(app, user.apiKey);
+
+    const rpc = await app.request(`/nests/${nestId}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        Authorization: `Bearer ${user.apiKey}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "context_create",
+          arguments: { title: "MCP Doc", content: "# Via MCP", tags: ["notes"] },
+        },
+      }),
+    });
+    expect(rpc.status).toBe(200);
+
+    const node = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/mcp-doc`,
+      undefined,
+      user.apiKey,
+    );
+    expect(node.status).toBe(200);
+    expect(node.data.node.tags).toEqual(["#notes", "#dept:engineering"]);
   });
 
   it("round-trips the oidc_department_tagging toggle through /admin/settings", async () => {

@@ -471,10 +471,19 @@ oidcRoutes.get("/callback", async (c) => {
     // Department upsert — every login (existing, JIT, or raced) syncs
     // users.department to this token's claim. `department` is already null
     // when the claim is absent, so the write-through both sets and clears.
-    await db.run("UPDATE users SET department = ? WHERE id = ?", [
-      department,
-      user.id,
-    ]);
+    // Best-effort by design (own try/catch, NOT the enclosing one): this is
+    // ancillary directory metadata, and a transient failure here must degrade
+    // to "department not captured this login" — never bounce a valid sign-in
+    // to service_error. Same never-block philosophy as departmentTagFor in
+    // src/nodes/service.ts, which already treats a missing value as a no-op.
+    try {
+      await db.run("UPDATE users SET department = ? WHERE id = ?", [
+        department,
+        user.id,
+      ]);
+    } catch (err) {
+      console.error("[oidc] department upsert failed (login continues):", err);
+    }
 
     // Same session mechanics as a successful password login: sessions-table
     // row + httpOnly cookie (Secure on HTTPS), then land on the app. Plus the

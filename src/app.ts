@@ -583,7 +583,9 @@ export function createApp(): Hono<AuthEnv> {
     // Department auto-tagging (dept:<slug> on node create). Only meaningful
     // when an OIDC IdP emits the `department` claim, but deliberately NOT
     // gated on oidc_enabled — the toggle is inert without a department to
-    // read, never harmful. Default off; null clears back to the default.
+    // read, never harmful. Default off; false persists as null (unset) rather
+    // than "false" because unset already means off — unlike oidc_auto_provision
+    // above, whose default is ON and so needs an explicit "false" to disable.
     if ("oidc_department_tagging" in body) {
       pending.push({
         name: "OIDC_DEPARTMENT_TAGGING",
