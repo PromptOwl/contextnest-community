@@ -8,7 +8,10 @@ import {
   looksLikeDelimitedTable,
   delimitedToMarkdownTable,
   looksLikeDelimitedRow,
+  readUploadedTable,
   rowsToCsv,
+  uploadedTableErrorMessage,
+  MAX_CSV_FILE_BYTES,
   LARGE_TABLE_ROW_THRESHOLD,
 } from "../ui/src/lib/csv-table";
 
@@ -425,5 +428,83 @@ describe("looksLikeDelimitedRow", () => {
     const row = looksLikeDelimitedRow('a,x\tsay "hi"\tplain');
     expect(row).not.toBeNull();
     expect(rowsToCsv(row!.rows)).toBe('"a,x","say ""hi""",plain');
+  });
+});
+
+// Shared upload pipeline for both "table from CSV/TSV file" buttons.
+// The file param is structural (name/size/text), so tests need no DOM File.
+describe("readUploadedTable", () => {
+  const asFile = (name: string, text: string, size = text.length) => ({
+    name,
+    size,
+    text: () => Promise.resolve(text),
+  });
+
+  it("parses a comma CSV file", async () => {
+    const res = await readUploadedTable(asFile("prices.csv", "sku,price\nOWL-1,149"));
+    expect(res).toEqual({
+      ok: true,
+      text: "sku,price\nOWL-1,149",
+      delimiter: ",",
+      rows: [
+        ["sku", "price"],
+        ["OWL-1", "149"],
+      ],
+    });
+  });
+
+  it("pins tab for a .tsv extension regardless of content", async () => {
+    const res = await readUploadedTable(asFile("grid.TSV", "a\tb\nc\td"));
+    expect(res.ok && res.delimiter).toBe("\t");
+  });
+
+  it("auto-detects tab without the extension hint", async () => {
+    const res = await readUploadedTable(asFile("grid.txt", "a\tb\nc\td"));
+    expect(res.ok && res.delimiter).toBe("\t");
+  });
+
+  it("rejects files over the size cap without reading them", async () => {
+    let read = false;
+    const res = await readUploadedTable({
+      name: "huge.csv",
+      size: MAX_CSV_FILE_BYTES + 1,
+      text: () => {
+        read = true;
+        return Promise.resolve("a,b");
+      },
+    });
+    expect(res).toEqual({ ok: false, error: "too-large" });
+    expect(read).toBe(false);
+  });
+
+  it("maps a read failure to 'unreadable'", async () => {
+    const res = await readUploadedTable({
+      name: "gone.csv",
+      size: 10,
+      text: () => Promise.reject(new Error("boom")),
+    });
+    expect(res).toEqual({ ok: false, error: "unreadable" });
+  });
+
+  it("maps blank content to 'empty'", async () => {
+    const res = await readUploadedTable(asFile("blank.csv", "\n\n"));
+    expect(res).toEqual({ ok: false, error: "empty" });
+  });
+});
+
+describe("uploadedTableErrorMessage", () => {
+  it("names the size in MB for too-large", () => {
+    expect(uploadedTableErrorMessage("too-large", { size: 11 * 1024 * 1024 })).toBe(
+      "That file is 11.0 MB — the limit for table import is 10 MB.",
+    );
+  });
+
+  it("has copy for the other errors", () => {
+    expect(uploadedTableErrorMessage("unreadable", { size: 0 })).toBe(
+      "Couldn't read that file.",
+    );
+    expect(uploadedTableErrorMessage("empty", { size: 0 })).toBe(
+      "No table rows found in that file.",
+    );
   });
 });

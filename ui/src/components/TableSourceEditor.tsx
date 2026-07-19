@@ -4,11 +4,11 @@ import { Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
-  detectDelimiter,
   looksLikeDelimitedRow,
   looksLikeDelimitedTable,
-  parseDelimited,
+  readUploadedTable,
   rowsToCsv,
+  uploadedTableErrorMessage,
 } from "../lib/csv-table";
 
 /**
@@ -30,10 +30,6 @@ import {
  * markdown round-trip: the string in this textarea is byte-for-byte what
  * the server's table parser and /table-query will read.
  */
-
-// Refuse to read absurdly large files into memory (same cap as the
-// markdown editor's table import).
-const MAX_CSV_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 export interface TableSourceEditorProps {
   value: string;
@@ -66,39 +62,32 @@ export function TableSourceEditor({
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
     if (!file) return;
-    if (file.size > MAX_CSV_FILE_BYTES) {
-      toast.error(
-        `That file is ${(file.size / (1024 * 1024)).toFixed(1)} MB — ` +
-          `the limit for table import is 10 MB.`,
-      );
-      return;
-    }
-    let text: string;
-    try {
-      text = await file.text();
-    } catch {
-      toast.error("Couldn't read that file.");
-      return;
-    }
-    // .tsv extension pins the delimiter; otherwise auto-detect
-    // (tab → comma → semicolon). Comma is a harmless single-column fallback.
-    const delimiter = /\.tsv$/i.test(file.name)
-      ? "\t"
-      : (detectDelimiter(text) ?? ",");
-    const rows = parseDelimited(text, delimiter);
-    if (rows.length === 0) {
-      toast.error("No table rows found in that file.");
+    const toastId = toast.loading("Processing file…");
+    // Let the loader actually paint before the (synchronous, possibly heavy)
+    // read + parse blocks the main thread — two frames clears the commit+paint.
+    // Table CSVs are plausibly the largest uploads in the app.
+    await new Promise((r) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => r(null))),
+    );
+    // Size cap, read, delimiter resolution, parse — shared with the
+    // markdown editor's table import (csv-table.readUploadedTable).
+    const res = await readUploadedTable(file);
+    if (!res.ok) {
+      toast.error(uploadedTableErrorMessage(res.error, file), { id: toastId });
       return;
     }
     // Comma files are already the canonical body format — keep them
     // verbatim so quoting, `#` comments, and header directives survive.
-    const next = delimiter === "," ? text : rowsToCsv(rows);
+    const next = res.delimiter === "," ? res.text : rowsToCsv(res.rows);
     // Toast counts DATA rows only: skip `#` comment lines (the server's
     // table parser ignores them) and the header row.
     const dataRows = Math.max(
       0,
-      rows.filter((r) => !(r[0] ?? "").trimStart().startsWith("#")).length - 1,
+      res.rows.filter((r) => !(r[0] ?? "").trimStart().startsWith("#")).length -
+        1,
     );
+    // replaceWith pops its own result toast; drop the loader first.
+    toast.dismiss(toastId);
     replaceWith(
       next,
       `Table replaced from ${file.name} — ${dataRows.toLocaleString()} data row${dataRows === 1 ? "" : "s"}.`,

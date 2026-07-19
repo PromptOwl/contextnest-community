@@ -285,6 +285,66 @@ export function looksLikeDelimitedRow(text: string): DetectedTable | null {
   return null;
 }
 
+/** Refuse to read absurdly large files into memory — a table this size
+ *  would be unusable in the editor anyway. Shared by every "table from
+ *  CSV/TSV file" upload button. */
+export const MAX_CSV_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+export type UploadedTableError = "too-large" | "unreadable" | "empty";
+
+export type UploadedTableResult =
+  | { ok: true; text: string; delimiter: Delimiter; rows: string[][] }
+  | { ok: false; error: UploadedTableError };
+
+/**
+ * Shared upload pipeline for the CSV/TSV file buttons (markdown editor's
+ * "Table from CSV / TSV" insert + the table-node source editor's replace):
+ * size cap → read → delimiter resolution (a `.tsv` extension pins tab;
+ * otherwise auto-detect, with comma as the harmless single-column
+ * fallback) → parse → empty check. Callers map the error codes to toasts
+ * via uploadedTableErrorMessage so the guard copy stays in one place.
+ *
+ * The `file` parameter is structural (name/size/text) rather than the DOM
+ * `File` type, keeping this module DOM-free and the pipeline testable.
+ */
+export async function readUploadedTable(file: {
+  name: string;
+  size: number;
+  text: () => Promise<string>;
+}): Promise<UploadedTableResult> {
+  if (file.size > MAX_CSV_FILE_BYTES) return { ok: false, error: "too-large" };
+  let text: string;
+  try {
+    text = await file.text();
+  } catch {
+    return { ok: false, error: "unreadable" };
+  }
+  const delimiter = /\.tsv$/i.test(file.name)
+    ? "\t"
+    : (detectDelimiter(text) ?? ",");
+  const rows = parseDelimited(text, delimiter);
+  if (rows.length === 0) return { ok: false, error: "empty" };
+  return { ok: true, text, delimiter, rows };
+}
+
+/** One toast string per UploadedTableError, shared by both upload buttons. */
+export function uploadedTableErrorMessage(
+  error: UploadedTableError,
+  file: { size: number },
+): string {
+  switch (error) {
+    case "too-large":
+      return (
+        `That file is ${(file.size / (1024 * 1024)).toFixed(1)} MB — ` +
+        `the limit for table import is 10 MB.`
+      );
+    case "unreadable":
+      return "Couldn't read that file.";
+    case "empty":
+      return "No table rows found in that file.";
+  }
+}
+
 export interface ConvertedTable {
   markdown: string;
   /** Rows below the header (what actually renders as table body). */
