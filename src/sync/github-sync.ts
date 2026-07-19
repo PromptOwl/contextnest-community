@@ -132,6 +132,19 @@ export function getGithubSyncSources(): GithubSyncSource[] {
   return out;
 }
 
+/**
+ * Where a source lands: nestId + slugified target folder. Two sources with
+ * the same target key would sync into the same node-id namespace and could
+ * silently rewrite each other's nodes every sweep (both authors are
+ * system:github-sync, so the local-edits rule never trips between them) —
+ * the settings PATCH rejects that outright. Nested-folder overlaps that
+ * this key can't see are caught at runtime by the sweep's ClaimMap.
+ */
+export function folderTargetKey(s: GithubSyncSource): string {
+  const segs = (s.folder || "").split("/").map(slugify).filter(Boolean).join("/");
+  return `${s.nestId}|${segs}`;
+}
+
 /** Stable identity for a source's state row. */
 export function sourceKey(s: GithubSyncSource): string {
   return [
@@ -303,6 +316,8 @@ async function upsertFileNode(
     try {
       const { storage } = await engineCache.get(source.nestId);
       const current = await storage.readDocument(nodeId);
+      // trimEnd only — interior CRLF/LF differences still count as a change
+      // (accepted: line-ending churn is rare and a re-sync is harmless).
       if ((current.body || "").trimEnd() === content.trimEnd())
         return "unchanged";
     } catch {
@@ -335,6 +350,57 @@ interface TreeEntry {
   sha: string;
 }
 
+/** Sweep-wide node ownership: `${nestId}::${nodeId}` → who claimed it.
+ *  Prevents two SOURCES from silently ping-ponging the same node every
+ *  sweep (both authors are system:github-sync, so the local-edits conflict
+ *  rule can never trip between them). */
+type ClaimMap = Map<string, { repo: string; path: string }>;
+
+const claimKey = (nestId: string, nodeId: string) => `${nestId}::${nodeId}`;
+
+/** Claim every node a short-circuited (304 / head-sha / error) source
+ *  already tracks, so a later source in the same sweep can't steal its ids. */
+function claimTracked(
+  source: GithubSyncSource,
+  tracked: Record<string, string>,
+  claimed: ClaimMap,
+): void {
+  for (const path of Object.keys(tracked)) {
+    const gk = claimKey(source.nestId, nodeIdForFile(source.folder, path));
+    if (!claimed.has(gk)) claimed.set(gk, { repo: source.repo, path });
+  }
+}
+
+/**
+ * Tracked repo paths whose target node no longer exists (deleted via the
+ * API — DELETE purges the node_versions rows). One IN query per source.
+ * These files must bypass the tree-level 304/head-sha short-circuits AND
+ * the per-file blob-sha shortcut, otherwise a deleted node would stay gone
+ * forever while the source reports "unchanged" — deleting a synced doc is
+ * the documented way to hand it back to sync after a local edit.
+ */
+async function missingTrackedPaths(
+  source: GithubSyncSource,
+  tracked: Record<string, string>,
+): Promise<Set<string>> {
+  const paths = Object.keys(tracked);
+  if (paths.length === 0) return new Set();
+  const idToPath = new Map<string, string>();
+  for (const p of paths) idToPath.set(nodeIdForFile(source.folder, p), p);
+  const ids = [...idToPath.keys()];
+  const db = getDb();
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = (await db.all(
+    `SELECT DISTINCT node_id FROM node_versions
+        WHERE nest_id = ? AND node_id IN (${placeholders})`,
+    [source.nestId, ...ids],
+  )) as Array<{ node_id: string }>;
+  const existing = new Set(rows.map((r) => r.node_id));
+  const missing = new Set<string>();
+  for (const [id, p] of idToPath) if (!existing.has(id)) missing.add(p);
+  return missing;
+}
+
 function summarize(parts: Array<[number, string]>): string {
   const bits = parts.filter(([n]) => n > 0).map(([n, label]) => `${n} ${label}`);
   return bits.length ? bits.join(", ") : "no markdown files matched";
@@ -345,24 +411,38 @@ async function syncAllMarkdown(
   token: string,
   key: string,
   state: SyncState | null,
+  claimed: ClaimMap,
 ): Promise<SourceRunResult> {
   const base = { repo: source.repo, nestId: source.nestId };
+  const oldFiles = parseFiles(state);
+  // Tracked nodes deleted via the API must be recreated even when upstream
+  // hasn't moved — so a sweep with missing nodes skips the conditional
+  // request and the head-sha short-circuit entirely.
+  const missing = await missingTrackedPaths(source, oldFiles);
   const ref = encodeURIComponent(source.branch || "HEAD");
   const url = `https://api.github.com/repos/${source.repo}/git/trees/${ref}?recursive=1`;
   const res = await fetch(url, {
-    headers: ghHeaders(token, state?.etag, "application/vnd.github+json"),
+    headers: ghHeaders(
+      token,
+      missing.size === 0 ? state?.etag : undefined,
+      "application/vnd.github+json",
+    ),
   });
   if (res.status === 304) {
+    claimTracked(source, oldFiles, claimed);
     const detail = "upstream unchanged (304)";
     await saveState(key, { status: "unchanged", detail });
     return { ...base, status: "unchanged", detail };
   }
   if (!res.ok) {
+    claimTracked(source, oldFiles, claimed);
     const detail = `GitHub returned HTTP ${res.status} listing the ${source.branch || "default"} branch tree`;
     await saveState(key, { status: "error", detail });
     return { ...base, status: "error", detail };
   }
   const etag = res.headers.get("etag");
+  // The recursive tree is held in memory whole — bounded by GitHub's own
+  // response limits plus our file cap, so this is fine in practice.
   const body = (await res.json()) as {
     sha?: string;
     truncated?: boolean;
@@ -371,8 +451,10 @@ async function syncAllMarkdown(
   const headSha = String(body.sha || "");
   // Head-sha short-circuit — covers proxies that strip ETags. Only valid
   // when the sha was stored by a CLEAN sweep (local-edits/error sweeps
-  // deliberately don't advance it, so conflicts keep re-surfacing).
-  if (headSha && state?.head_sha === headSha) {
+  // deliberately don't advance it, so conflicts keep re-surfacing) AND no
+  // tracked node has been deleted since (recreation must proceed).
+  if (headSha && state?.head_sha === headSha && missing.size === 0) {
+    claimTracked(source, oldFiles, claimed);
     const detail = "upstream unchanged (head sha match)";
     await saveState(key, { status: "unchanged", detail });
     return { ...base, status: "unchanged", detail };
@@ -403,27 +485,38 @@ async function syncAllMarkdown(
   for (const f of files) {
     const id = nodeIdForFile(source.folder, f.path);
     const owner = idOwner.get(id);
+    const gk = claimKey(source.nestId, id);
+    const cross = claimed.get(gk);
     if (owner !== undefined) {
       collisions.push(`id collision: ${f.path} skipped (conflicts with ${owner})`);
+    } else if (cross) {
+      // Another SOURCE already owns this node in this sweep (e.g. nested
+      // target folders) — same first-wins rule, across sources.
+      collisions.push(
+        `id collision: ${f.path} skipped (conflicts with ${cross.repo}:${cross.path})`,
+      );
     } else {
       idOwner.set(id, f.path);
+      claimed.set(gk, { repo: source.repo, path: f.path });
       syncFiles.push(f);
     }
   }
 
-  const oldFiles = parseFiles(state);
   const newFiles: Record<string, string> = {};
   let synced = 0;
   let unchanged = 0;
   let localEdits = 0;
   let failed = 0;
 
+  // Sequential on purpose — keeps GitHub rate-limit pressure and node-write
+  // contention low; the blob-sha map means steady-state sweeps fetch little.
   for (const f of syncFiles) {
     try {
-      // Blob unchanged since a clean sweep → skip without fetching. (A
-      // local edit on an upstream-unchanged file is normal local evolution,
-      // not a conflict — there's nothing new to overwrite it with.)
-      if (oldFiles[f.path] === f.sha) {
+      // Blob unchanged since a clean sweep → skip without fetching — unless
+      // the node was deleted locally, which must recreate it. (A local edit
+      // on an upstream-unchanged file is normal local evolution, not a
+      // conflict — there's nothing new to overwrite it with.)
+      if (oldFiles[f.path] === f.sha && !missing.has(f.path)) {
         unchanged++;
         newFiles[f.path] = f.sha;
         continue;
@@ -496,12 +589,30 @@ async function syncSingleFile(
   token: string,
   key: string,
   state: SyncState | null,
+  claimed: ClaimMap,
 ): Promise<SourceRunResult> {
   const base = { repo: source.repo, nestId: source.nestId };
   const filePath = source.path || "README.md";
+  const nodeId = nodeIdForFile(source.folder, filePath);
+  // Cross-source ownership: if another source already claimed this node in
+  // this sweep, skip — two sources silently rewriting one node every sweep
+  // is a misconfiguration the admin needs to see, hence status "error".
+  const gk = claimKey(source.nestId, nodeId);
+  const cross = claimed.get(gk);
+  if (cross) {
+    const detail = `id collision: ${filePath} skipped (conflicts with ${cross.repo}:${cross.path})`;
+    await saveState(key, { status: "error", detail });
+    return { ...base, status: "error", detail };
+  }
+  claimed.set(gk, { repo: source.repo, path: filePath });
+  // A deleted node must be recreated even when upstream hasn't moved, so
+  // only send the conditional-request ETag while the node still exists.
+  const nodeExists = !!(await getLatestVersionMeta(source.nestId, nodeId));
   const ref = source.branch ? `?ref=${encodeURIComponent(source.branch)}` : "";
   const url = `https://api.github.com/repos/${source.repo}/contents/${encodePath(filePath)}${ref}`;
-  const res = await fetch(url, { headers: ghHeaders(token, state?.etag) });
+  const res = await fetch(url, {
+    headers: ghHeaders(token, nodeExists ? state?.etag : undefined),
+  });
   if (res.status === 304) {
     const detail = "upstream unchanged (304)";
     await saveState(key, { status: "unchanged", detail });
@@ -539,6 +650,7 @@ async function syncSingleFile(
 async function syncSource(
   source: GithubSyncSource,
   token: string,
+  claimed: ClaimMap,
 ): Promise<SourceRunResult> {
   const key = sourceKey(source);
   try {
@@ -550,8 +662,8 @@ async function syncSource(
     }
     const state = await loadState(key);
     return source.mode === "single-file"
-      ? await syncSingleFile(source, token, key, state)
-      : await syncAllMarkdown(source, token, key, state);
+      ? await syncSingleFile(source, token, key, state, claimed)
+      : await syncAllMarkdown(source, token, key, state, claimed);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     console.error(`[github-sync] sweep failed for ${source.repo}:`, err);
@@ -593,8 +705,12 @@ export function runGithubSync(): Promise<SourceRunResult[]> {
       console.error("[github-sync] state prune failed:", err);
     }
     const token = config.GITHUB_SYNC_TOKEN;
+    // Node ownership spans the whole sweep so two sources can never rewrite
+    // the same node (see ClaimMap).
+    const claimed: ClaimMap = new Map();
     const results: SourceRunResult[] = [];
-    for (const source of sources) results.push(await syncSource(source, token));
+    for (const source of sources)
+      results.push(await syncSource(source, token, claimed));
     return results;
   })().finally(() => {
     inflight = null;

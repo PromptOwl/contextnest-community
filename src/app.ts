@@ -15,6 +15,7 @@ import {
   getGithubSyncStatus,
   runGithubSync,
   restartGithubSyncScanner,
+  folderTargetKey,
   type GithubSyncSource,
 } from "./sync/github-sync.js";
 import { getReviewQueue } from "./governance/review-service.js";
@@ -694,6 +695,11 @@ export function createApp(): Hono<AuthEnv> {
       } else {
         let sourcesError: string | null = null;
         const normalized: GithubSyncSource[] = [];
+        // Two sources targeting the same nest+folder would share a node-id
+        // namespace and silently rewrite each other's nodes every sweep
+        // (both write as system:github-sync, so the local-edits conflict
+        // rule never trips between them) — reject the overlap at save time.
+        const seenTargets = new Map<string, number>();
         for (let i = 0; i < v.length; i++) {
           const r = normalizeGithubSyncSource(v[i], i);
           if ("error" in r) {
@@ -704,6 +710,13 @@ export function createApp(): Hono<AuthEnv> {
             sourcesError = `source ${i + 1}: nest "${r.source.nestId}" does not exist`;
             break;
           }
+          const target = folderTargetKey(r.source);
+          const dup = seenTargets.get(target);
+          if (dup !== undefined) {
+            sourcesError = `sources ${dup + 1} and ${i + 1} target the same nest and folder — give each source its own folder`;
+            break;
+          }
+          seenTargets.set(target, i);
           normalized.push(r.source);
         }
         if (sourcesError) addError("github_sync_sources", sourcesError);

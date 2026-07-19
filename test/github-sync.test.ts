@@ -432,3 +432,85 @@ describe("errors and state hygiene", () => {
     expect(keys.every((k) => k.startsWith("acme/ghost|") || k.startsWith("acme/app|"))).toBe(true);
   });
 });
+
+describe("deleted nodes recreate on sweep", () => {
+  it("a node deleted via the API is recreated even when upstream is unchanged", async () => {
+    repos["acme/phoenix"] = { files: { "phoenix.md": "# Phoenix\n\nRises." } };
+    const patch = await jsonRequest(app, "PATCH", "/admin/settings", {
+      github_sync_sources: [{ repo: "acme/phoenix", nestId, folder: "ph" }],
+    }, admin.apiKey);
+    expect(patch.status).toBe(200);
+
+    const first = await runSync();
+    expect(first.data.results[0].status).toBe("synced");
+    expect((await getNode("nodes/ph/phoenix")).status).toBe(200);
+
+    // Delete the synced node through the API (the documented way to hand a
+    // doc back to sync after local edits).
+    const del = await jsonRequest(
+      app,
+      "DELETE",
+      `/nests/${nestId}/nodes/nodes/ph/phoenix`,
+      undefined,
+      admin.apiKey,
+    );
+    expect(del.status).toBe(200);
+    expect((await getNode("nodes/ph/phoenix")).status).toBe(404);
+
+    // Upstream unchanged — without the missing-node bypass this sweep would
+    // 304 into "unchanged" and the node would stay gone forever.
+    const second = await runSync();
+    expect(second.data.results[0].status).toBe("synced");
+    const node = await getNode("nodes/ph/phoenix");
+    expect(node.status).toBe(200);
+    expect(node.data.content).toContain("Rises.");
+
+    // With the node back, the conditional-request short-circuit resumes.
+    const third = await runSync();
+    expect(third.data.results[0].status).toBe("unchanged");
+  });
+});
+
+describe("cross-source collisions", () => {
+  it("rejects two sources targeting the same nest and folder at save time", async () => {
+    const res = await jsonRequest(app, "PATCH", "/admin/settings", {
+      github_sync_sources: [
+        { repo: "acme/docs", nestId, folder: "shared" },
+        { repo: "acme/app", nestId, folder: "Shared" }, // same after slugify
+      ],
+    }, admin.apiKey);
+    expect(res.status).toBe(400);
+    expect(res.data.fieldErrors.github_sync_sources).toMatch(/same nest and folder/);
+  });
+
+  it("runtime guard: a nested-folder overlap skips the second claimant instead of clobbering", async () => {
+    repos["acme/one"] = { files: { "b/c.md": "# From One" } };
+    repos["acme/two"] = { files: { "c.md": "# From Two" } };
+    // Different folder targets ("x" vs "x/b") pass save-time validation but
+    // both map c.md to nodes/x/b/c — the sweep-wide claim map must catch it.
+    const patch = await jsonRequest(app, "PATCH", "/admin/settings", {
+      github_sync_sources: [
+        { repo: "acme/one", nestId, folder: "x" },
+        { repo: "acme/two", nestId, folder: "x/b" },
+      ],
+    }, admin.apiKey);
+    expect(patch.status).toBe(200);
+
+    const res = await runSync();
+    expect(res.data.results[0].status).toBe("synced");
+    expect(res.data.results[1].detail).toContain(
+      "id collision: c.md skipped (conflicts with acme/one:b/c.md)",
+    );
+    const node = await getNode("nodes/x/b/c");
+    expect(node.status).toBe(200);
+    expect(node.data.content).toContain("From One");
+    expect(node.data.content).not.toContain("From Two");
+
+    // Next sweep: the first source 304-skips but still claims its nodes, so
+    // the overlap keeps getting skipped + reported — never a ping-pong.
+    const again = await runSync();
+    expect(again.data.results[1].detail).toContain("id collision");
+    expect((await getNode("nodes/x/b/c")).data.content).toContain("From One");
+    expect((await getVersions("nodes/x/b/c")).data.versions).toHaveLength(1);
+  });
+});
