@@ -13,6 +13,7 @@ import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
 import { msTeamsPayload } from "../src/notify/msteams.js";
+import { dispatchEvent } from "../src/notify/dispatch.js";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -20,7 +21,10 @@ let alice: { apiKey: string; userId: string; email: string };
 let nestId: string;
 
 const WEBHOOK = "https://prod-01.westus.logic.azure.com/workflows/abc/triggers/manual/paths/invoke";
+// A per-nest connector row's target (dispatch-only path) — captured separately.
+const ROW_URL = "https://teams-hook.example.com/hook";
 const sent: Array<{ url: string; payload: any }> = [];
+const rowSent: any[] = [];
 const realFetch = globalThis.fetch;
 
 /** Every TextBlock of the (single) Adaptive Card, joined — the card's text. */
@@ -49,6 +53,10 @@ beforeAll(async () => {
       const u = String(url);
       if (u === WEBHOOK) {
         sent.push({ url: u, payload: JSON.parse(init.body) });
+        return new Response("ok", { status: 200 });
+      }
+      if (u === ROW_URL) {
+        rowSent.push(JSON.parse(init.body));
         return new Response("ok", { status: 200 });
       }
       // Any other webhook URL simulates an outage; nothing in this suite may
@@ -93,10 +101,47 @@ describe("Microsoft Teams connector", () => {
     expect(body[0].text).toBe("Notify Nest");
     expect(body[0].weight).toBe("Bolder");
     expect(cardText(msg!.payload)).toContain("write");
+    // The :key: shortcode sharing-service uses is translated for Teams.
+    expect(cardText(msg!.payload)).toContain("🔑");
+    expect(cardText(msg!.payload)).not.toContain(":key:");
     // Plain-text fallback for clients that can't render the card.
     expect(msg!.payload.attachments[0].content.fallbackText).toContain(
       "bob@acme.com",
     );
+  });
+
+  it("a per-nest channel:'teams' connector row receives an Adaptive Card; the implicit global connector stays silent for review events", async () => {
+    const create = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/connectors`,
+      { channel: "teams", url: ROW_URL, events: ["review_requested"] },
+      alice.apiKey,
+    );
+    expect(create.status).toBe(201);
+
+    const globalBefore = sent.length;
+    rowSent.length = 0;
+    await dispatchEvent({
+      kind: "review_requested",
+      nestId,
+      message: "Review requested on *Doc* by alice@acme.com",
+    });
+    await settle();
+
+    // The row got the same Adaptive Card wire format as the global connector.
+    expect(rowSent).toHaveLength(1);
+    expectAdaptiveCardEnvelope(rowSent[0]);
+    const body = rowSent[0].attachments[0].content.body;
+    expect(body[0].text).toBe("Notify Nest");
+    expect(cardText(rowSent[0])).toContain("📝");
+    expect(cardText(rowSent[0])).toContain("**Doc**");
+    // Review events reach the global MSTEAMS_WEBHOOK_URL via the debounced
+    // digest path (notifyNestEvent), so dispatchEvent's implicit connector
+    // must NOT also post them — that would be the double-delivery the digest
+    // suppression exists to prevent. Connector rows are dispatch-only, so
+    // the row above still fires.
+    expect(sent.length).toBe(globalBefore);
   });
 
   it("does not post (and does not fail) when the webhook is unset", async () => {
@@ -241,6 +286,13 @@ tags:
     expect(res.status).toBe(201);
     await settle();
 
+    // Exactly ONE post for one review_requested. review-service fires the
+    // event down two paths — dispatchEvent (immediate) and notifyNestEvent
+    // (debounced digest) — and both target the same global webhook, so
+    // without dispatch.ts's DIGEST_DELIVERED_KINDS suppression this would be
+    // 2. (Slack has that double-post today, pre-existing — tracked
+    // separately; this pins Teams to single delivery via the digest path.)
+    expect(lsent).toHaveLength(1);
     const card = lsent.find((p) => ltext(p).includes("Rate Limits"));
     expect(card).toBeTruthy();
     expect(card.type).toBe("message");
@@ -269,6 +321,7 @@ tags:
       { note: "lgtm" }, jane.apiKey);
     expect(res.status).toBe(200);
     await settle();
+    expect(lsent).toHaveLength(1); // single delivery — digest path only
     const card = lsent.find((p) => ltext(p).includes("Approve Me"));
     expect(card).toBeTruthy();
     const text = ltext(card);
@@ -286,6 +339,7 @@ tags:
       { note: "[check this](https://evil.example) missing section" }, jane.apiKey);
     expect(res.status).toBe(200);
     await settle();
+    expect(lsent).toHaveLength(1); // single delivery — digest path only
     const card = lsent.find((p) => ltext(p).includes("Reject Me"));
     expect(card).toBeTruthy();
     const text = ltext(card);

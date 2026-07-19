@@ -131,9 +131,12 @@ sends the standard envelope Workflows expects:
 "application/vnd.microsoft.card.adaptive", "content": {…card…}}]}` with a
 plain-text `fallbackText` for clients that cannot render cards.
 
-Per-nest connector rows (`POST /nests/:id/connectors` with `channel: "teams"`)
-post the same Adaptive Card format to a nest-specific webhook, with per-event
-filtering — see `API.md`.
+Per-nest connector rows post the same Adaptive Card format to a nest-specific
+webhook, with per-event filtering: `POST /nests/:id/connectors` with a JSON
+body like `{"channel": "teams", "url": "https://…", "events":
+["review_requested", "review_rejected"]}` (`events` may also be `["*"]`; the
+`url` may be an `env:KEY` reference into the nest's env store). Manage rows
+with `GET`/`PATCH`/`DELETE` on the same path.
 
 ---
 

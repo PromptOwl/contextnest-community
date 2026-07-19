@@ -50,6 +50,15 @@ const EVENT_EMOJI: Record<string, string> = {
   run_failed: ":rotating_light:",
 };
 
+/** Event kinds review-service ALSO sends through notify.ts's debounced
+ *  digest (notifyNestEvent) — i.e. the kinds a server-wide webhook already
+ *  receives via that path. See the server-msteams block in dispatchEvent. */
+const DIGEST_DELIVERED_KINDS = new Set([
+  "review_requested",
+  "review_approved",
+  "review_rejected",
+]);
+
 /** Channel presets: same event, three wire formats. */
 function formatBody(
   channel: ConnectorChannel,
@@ -179,9 +188,20 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
   }
 
   // Implicit server-wide Microsoft Teams connector (super-admin Settings) —
-  // exact parity with the slack one above. MSTEAMS_*, never "teams": that
-  // name means user groups in this codebase.
-  if (config.MSTEAMS_WEBHOOK_URL) {
+  // parity with the slack one above. MSTEAMS_*, never "teams": that name
+  // means user groups in this codebase.
+  //
+  // Review events are SKIPPED here because review-service fires each of them
+  // down BOTH paths — dispatchEvent (this file, immediate) AND notifyNestEvent
+  // (notify.ts, debounced digest) — and both would land on the same
+  // MSTEAMS_WEBHOOK_URL, posting every review event twice. The digest path
+  // wins for those kinds (it collapses bursts into one message); this implicit
+  // connector delivers only the kinds the digest path never sees (run_failed).
+  // NOTE: the implicit server-slack connector above has this exact double-post
+  // today (dispatchEvent + notifySlackForNest both hit SLACK_WEBHOOK_URL) —
+  // pre-existing behavior, left unchanged in this PR; ticket separately.
+  // Per-nest connector rows below are unaffected: they are dispatch-only.
+  if (config.MSTEAMS_WEBHOOK_URL && !DIGEST_DELIVERED_KINDS.has(ev.kind)) {
     void post(
       config.MSTEAMS_WEBHOOK_URL,
       formatBody("teams", nestName, ev),

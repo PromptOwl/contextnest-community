@@ -33,7 +33,14 @@ const EMOJI: Record<string, string> = {
   ":white_check_mark:": "✅",
   ":x:": "❌",
   ":rotating_light:": "🚨",
+  ":key:": "🔑", // collaborator added (sharing-service)
 };
+
+/** Slack *bold* span: whole word(s) between single asterisks, delimited by
+ *  start/whitespace on the left and whitespace/punctuation/end on the right.
+ *  One definition shared by the Adaptive (→ **bold**) and plain (→ strip)
+ *  renderings so the two can never drift apart. */
+const BOLD_SPAN = /(^|\s)\*([^*\n]+)\*(?=\s|[.,;:!?)]|$)/g;
 
 function slackEmojiToUnicode(s: string): string {
   return s.replace(/:[a-z0-9_+-]+:/g, (m) => EMOJI[m] ?? m);
@@ -63,19 +70,13 @@ export function escapeAdaptiveText(s: string): string {
  */
 export function toAdaptiveText(s: string): string {
   // *bold* → **bold** (don't touch already-doubled asterisks or mid-word *).
-  return slackEmojiToUnicode(escapeAdaptiveText(s)).replace(
-    /(^|\s)\*([^*\n]+)\*(?=\s|[.,;:!?)]|$)/g,
-    "$1**$2**",
-  );
+  return slackEmojiToUnicode(escapeAdaptiveText(s)).replace(BOLD_SPAN, "$1**$2**");
 }
 
 /** Slack mrkdwn one-liner → plain text (for fallbackText). No markdown
  *  renderer touches fallbackText, so no escaping — just de-mrkdwn it. */
 export function toPlainText(s: string): string {
-  return slackEmojiToUnicode(s).replace(
-    /(^|\s)\*([^*\n]+)\*(?=\s|[.,;:!?)]|$)/g,
-    "$1$2",
-  );
+  return slackEmojiToUnicode(s).replace(BOLD_SPAN, "$1$2");
 }
 
 /**
