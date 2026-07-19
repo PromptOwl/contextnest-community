@@ -95,8 +95,10 @@ export function rawContentType(nodeType: string | undefined): string {
  * the storage write path), so the split can't disagree with how the engine
  * itself reads the file: the block is the stored prefix that precedes the
  * parsed body. That keeps a `---` horizontal rule at the top of the BODY out
- * of the frontmatter block, and makes block + body reconstruct the stored
- * bytes exactly.
+ * of the frontmatter block and — on this engine-parse path — makes
+ * block + body reconstruct the stored bytes exactly. The regex fallback
+ * below (unparseable frontmatter only) normalizes trailing whitespace to a
+ * single blank line and carries no exact-reconstruction guarantee.
  */
 export function frontmatterBlockOf(raw: string | undefined | null): string {
   if (!raw || !raw.startsWith("---")) return "";

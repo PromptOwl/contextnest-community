@@ -110,6 +110,23 @@ describe("?format=raw — body, content types, precedence", () => {
     expect(text.split("\n---\n").length).toBe(2);
   });
 
+  it("?frontmatter=1 works for a non-document type (artifact) and keeps its headers", async () => {
+    const res = await app.request(
+      `/nests/${nestId}/nodes/${ids.artifact}?format=raw&frontmatter=1`,
+    );
+    expect(res.status).toBe(200);
+    // Content-Type stays per-type, and the sandbox applies on this path too.
+    expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(res.headers.get("content-security-policy")).toContain(
+      "sandbox allow-scripts",
+    );
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    const text = await res.text();
+    expect(text.startsWith("---\n")).toBe(true);
+    expect(text).toContain("type: artifact");
+    expect(text.endsWith(stored.artifact)).toBe(true);
+  });
+
   it("Accept: text/markdown triggers raw when no format param is present", async () => {
     const res = await app.request(`/nests/${nestId}/nodes/${ids.document}`, {
       headers: { Accept: "text/markdown" },
