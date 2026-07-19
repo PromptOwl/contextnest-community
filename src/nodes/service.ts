@@ -487,10 +487,6 @@ export async function createNode(
   }
   const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
-  // Optional dept:<slug> auto-tag — deduped against the user-supplied tags
-  // (both sides normalized to the #-prefixed form above).
-  const deptTag = await departmentTagFor(userEmail);
-  if (deptTag && !tags.includes(deptTag)) tags.push(deptTag);
 
   if (input.schedule !== undefined && !isRunnableType(input.type)) {
     throw new ValidationError(
@@ -498,6 +494,15 @@ export async function createNode(
         ", "
       )})`
     );
+  }
+
+  // Optional dept:<slug> auto-tag — after the validations above so a request
+  // that fails them never pays the DB lookup. Deduped case-insensitively
+  // against the user-supplied tags (normalizeTag keeps the user's casing, so
+  // "#Dept:Engineering" must still match the all-lowercase auto tag).
+  const deptTag = await departmentTagFor(userEmail);
+  if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
+    tags.push(deptTag);
   }
 
   const hasStewards = await isStewardshipEnabled(nestId);

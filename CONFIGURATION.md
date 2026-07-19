@@ -158,6 +158,12 @@ permission if prompted), and make sure the users' *Department* field is
 populated in Entra. Other IdPs work too as long as they emit a string
 `department` claim in the ID token (e.g. a Keycloak user-attribute mapper).
 
+> **Privacy note:** the `dept:<slug>` tag becomes part of the document's
+> visible metadata — anyone who can read the document (collaborators, shared
+> nests, public nests) can see the creator's directory department. That's
+> PII-adjacent organizational data; consider this before enabling on servers
+> where documents are shared beyond the creator's own team or made public.
+
 ### Revoking access (offboarding)
 
 Disabling a user **at the IdP** only blocks *new* sign-ins — an existing
