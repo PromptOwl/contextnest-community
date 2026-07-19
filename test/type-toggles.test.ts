@@ -200,6 +200,81 @@ describe("content-type toggles — create enforcement", () => {
   });
 });
 
+describe("content-type toggles — bulk publish enforcement", () => {
+  it("POST /publish rejects the whole batch when it contains a disabled type, before any write", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+    const nestId = await makeNest(app, admin.apiKey);
+
+    process.env.TYPE_ARTIFACT_ENABLED = "false";
+
+    // Batch mixes a fine document with a disabled artifact — a policy
+    // violation fails the WHOLE batch (nothing written, document included).
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      {
+        documents: [
+          { title: "Fine Doc", content: "# ok" },
+          { title: "Sneaky Deck", content: "<h1>hi</h1>", type: "artifact" },
+        ],
+      },
+      admin.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.error).toMatch(/Artifact nodes are disabled on this server/);
+
+    // Nothing from the batch landed — not even the valid document.
+    const fineDoc = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/fine-doc`,
+      undefined,
+      admin.apiKey,
+    );
+    expect(fineDoc.status).toBe(404);
+    const sneaky = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/sneaky-deck`,
+      undefined,
+      admin.apiKey,
+    );
+    expect(sneaky.status).toBe(404);
+
+    // Same gate for tables.
+    process.env.TYPE_TABLE_ENABLED = "false";
+    const table = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      { documents: [{ title: "Prices", content: "sku,price\nA,1", type: "table" }] },
+      admin.apiKey,
+    );
+    expect(table.status).toBe(400);
+    expect(table.data.error).toMatch(/Table nodes are disabled on this server/);
+
+    // Re-enabled → the same batch publishes.
+    delete process.env.TYPE_ARTIFACT_ENABLED;
+    delete process.env.TYPE_TABLE_ENABLED;
+    const ok = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publish`,
+      {
+        documents: [
+          { title: "Fine Doc", content: "# ok" },
+          { title: "Sneaky Deck", content: "<h1>hi</h1>", type: "artifact" },
+        ],
+      },
+      admin.apiKey,
+    );
+    expect(ok.status).toBe(201);
+    expect(ok.data.published).toBe(2);
+  });
+});
+
 describe("content-type toggles — /admin/settings round-trip", () => {
   it("PATCH disables/enables live and persists (enable clears the row back to the default)", async () => {
     const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });

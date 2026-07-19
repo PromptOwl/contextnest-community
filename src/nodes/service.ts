@@ -493,7 +493,7 @@ export async function createNode(
     filePath: "",
     frontmatter: {
       title: input.title,
-      type: (input.type as any) || "document",
+      type: requestedType as any,
       tags,
       status: (input.status as any) || (initialStatus as any),
       version: initialVersion,

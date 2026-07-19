@@ -698,6 +698,24 @@ queryRoutes.post("/publish", async (c) => {
     throw new ValidationError("documents array or context_md is required");
   }
 
+  // Content-type toggles gate this bulk path too: it writes documents
+  // directly (no createNode), so without this check a disabled artifact/
+  // table type could still be created here. A disabled type is a POLICY
+  // violation, so it fails the WHOLE batch up front — before any write,
+  // context_md included — with the same message the single-create path
+  // uses. (Malformed rows — missing title/content — keep this endpoint's
+  // existing skip-silently semantics below; those are shape problems,
+  // not policy ones.)
+  for (const doc of body.documents || []) {
+    const t = doc.type || "document";
+    if (t === "artifact" && !config.TYPE_ARTIFACT_ENABLED) {
+      throw new ValidationError("Artifact nodes are disabled on this server");
+    }
+    if (t === "table" && !config.TYPE_TABLE_ENABLED) {
+      throw new ValidationError("Table nodes are disabled on this server");
+    }
+  }
+
   const nestId = c.req.param("nestId")!;
   const { storage } = await engineCache.get(nestId);
   const created: string[] = [];
