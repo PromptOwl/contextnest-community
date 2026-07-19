@@ -471,7 +471,7 @@ export function NestView({
           : "Moved to nest root",
         {
           // Undo = the same move call, back to where it came from. Must use
-          // the NEW id (moved.node.id) — the old id no longer exists.
+          // the NEW id (moved.id) — the old id no longer exists.
           action: {
             label: "Undo",
             onClick: async () => {
@@ -3230,7 +3230,9 @@ export function NestView({
       <Dialog
         open={!!moveTarget}
         onOpenChange={(open) => {
-          if (!open) setMoveTarget(null);
+          // No Escape/overlay dismissal mid-request — same gating as the
+          // disabled Cancel button.
+          if (!open && !movingDoc) setMoveTarget(null);
         }}
       >
         <DialogContent className="max-w-md">
