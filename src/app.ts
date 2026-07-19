@@ -56,6 +56,7 @@ import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
   permissionLevel,
+  isServerAdminUserId,
   type NestPermission,
 } from "./shared/access.js";
 import { AppError } from "./shared/errors.js";
@@ -361,12 +362,9 @@ export function createApp(): Hono<AuthEnv> {
 
   // Server-admin guard shared by the /admin/* operator surfaces: open mode,
   // the license admin, or a superadmin (access.yaml ∪ DB grants).
-  const serverAdminAllowed = async (c: any) => {
-    if (config.AUTH_MODE === "open") return true;
-    const userId = c.get("userId");
-    if (await isLicenseAdminUserId(userId)) return true;
-    return isSuperAdmin(await resolveCallerEmail(userId));
-  };
+  const serverAdminAllowed = async (c: any) =>
+    config.AUTH_MODE === "open" ||
+    (await isServerAdminUserId(c.get("userId")));
 
   // /admin/settings — server-wide settings the admin edits from the Settings
   // page. Each setting takes effect live (config getters read process.env) and
@@ -890,7 +888,9 @@ export function createApp(): Hono<AuthEnv> {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can revoke superadmin." }, 403);
 
-    const email = decodeURIComponent(c.req.param("email")).trim().toLowerCase();
+    // Hono already percent-decodes path params — decoding again would throw
+    // a URIError (→ 500) on an email containing a literal '%'.
+    const email = c.req.param("email").trim().toLowerCase();
     const callerEmail = (await resolveCallerEmail(c.get("userId"))).toLowerCase();
 
     const lic = getCurrentLicense();

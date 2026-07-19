@@ -32,26 +32,14 @@ import {
   isLicenseAdminUserId,
 } from "./license.js";
 import { isSuperAdmin } from "../governance/access-service.js";
+// Guards the people-management surfaces below so a granted superadmin gets the
+// same operator powers as the license owner (see shared/access.ts).
+import { isServerAdminUserId } from "../shared/access.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
 import { verifySsoTicket } from "./sso-token.js";
 import { oidcRoutes } from "./oidc.js";
 import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
-
-/**
- * Server admin = the license admin OR a superadmin (access.yaml `super_admins`
- * ∪ the DB-granted set — see governance/access-service.ts). Guards the
- * people-management surfaces below so a granted superadmin gets the same
- * operator powers as the license owner.
- */
-async function isServerAdminUserId(userId: string): Promise<boolean> {
-  if (await isLicenseAdminUserId(userId)) return true;
-  const row = (await getDb().get(
-    "SELECT email FROM users WHERE id = ?",
-    [userId],
-  )) as { email?: string } | undefined;
-  return !!row?.email && isSuperAdmin(row.email);
-}
 
 /** is_admin for user-facing payloads: license admin OR superadmin. */
 function isServerAdminEmail(email: string): boolean {

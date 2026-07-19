@@ -55,6 +55,8 @@ describe("POST /admin/super-admins", () => {
     // …and the target did not become an admin as a side effect.
     const trace = await jsonRequest(app, "GET", "/admin/trace", undefined, bob.apiKey);
     expect(trace.status).toBe(403);
+    const unsynced = await jsonRequest(app, "GET", "/nests/unsynced", undefined, bob.apiKey);
+    expect(unsynced.status).toBe(403);
   });
 
   it("400s an email with no user account", async () => {
@@ -109,6 +111,21 @@ describe("POST /admin/super-admins", () => {
     const status = await jsonRequest(app, "GET", "/auth/admin-status", undefined, alice.apiKey);
     expect(status.data.me.is_admin).toBe(true);
 
+    // Filesystem-scoped admin ops resolve the same way (license ∪ config ∪
+    // granted): REST /nests/unsynced and its MCP mirror.
+    const unsynced = await jsonRequest(app, "GET", "/nests/unsynced", undefined, alice.apiKey);
+    expect(unsynced.status).toBe(200);
+    expect(Array.isArray(unsynced.data.folders)).toBe(true);
+    // Dynamic import so we get the post-resetModules instance the app uses
+    // (its superadmin cache holds alice's grant).
+    const { handleToolCall } = await import("../src/mcp/tools.js");
+    const text = await handleToolCall(
+      "context_unsynced_list",
+      {},
+      { nestId: "unsynced-gate", userId: alice.userId, userEmail: alice.email } as any,
+    );
+    expect(String(text)).not.toMatch(/don't have permission/i);
+
     // Granted admins can grant others.
     const res = await jsonRequest(
       app, "POST", "/admin/super-admins", { email: bob.email }, alice.apiKey,
@@ -158,8 +175,7 @@ describe("superadmin peer protection", () => {
 });
 
 describe("DELETE /admin/super-admins/:email", () => {
-  it("a non-superadmin cannot revoke", async () => {
-    // carol is nobody special; use a plain user token (alice is admin now, use a fresh check via bob-revoked later — here use an unauthenticated request instead)
+  it("an unauthenticated caller cannot revoke", async () => {
     const res = await jsonRequest(app, "DELETE", `/admin/super-admins/${alice.email}`);
     expect([401, 403]).toContain(res.status);
   });
@@ -203,6 +219,19 @@ describe("DELETE /admin/super-admins/:email", () => {
       app, "DELETE", `/admin/super-admins/${alice.email}`, undefined, root.apiKey,
     );
     expect(del.status).toBe(200);
+  });
+
+  it("handles an email containing a literal % without 500ing (single decode)", async () => {
+    // Hono decodes path params once; the old extra decodeURIComponent threw a
+    // URIError on the literal '%' → 500. Now it resolves cleanly to 404.
+    const res = await jsonRequest(
+      app,
+      "DELETE",
+      `/admin/super-admins/${encodeURIComponent("we%rd@acme.com")}`,
+      undefined,
+      root.apiKey,
+    );
+    expect(res.status).toBe(404);
   });
 
   it("400s revoking an access.yaml admin (file is authoritative — lockout safety)", async () => {

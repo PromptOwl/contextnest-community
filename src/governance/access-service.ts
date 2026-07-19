@@ -155,10 +155,6 @@ export function isConfigSuperAdmin(email: string): boolean {
     .includes(email.toLowerCase());
 }
 
-/** Lowercased emails granted via the super_admins DB table (cached). */
-export function getGrantedSuperAdmins(): string[] {
-  return [...grantedSuperAdmins];
-}
 
 // ─── Simple YAML parser for access.yaml ─────────────────────────────────
 
