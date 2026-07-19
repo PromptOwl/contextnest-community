@@ -140,5 +140,8 @@ assetRoutes.get("/:file", async (c) => {
     "Content-Type": CONTENT_TYPES[ext],
     // uuid names never change content — cache hard.
     "Cache-Control": "public, max-age=31536000, immutable",
+    // Never let the browser second-guess the declared type on direct
+    // navigation (same posture as annotation attachments).
+    "X-Content-Type-Options": "nosniff",
   });
 });

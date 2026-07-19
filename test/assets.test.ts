@@ -131,6 +131,7 @@ describe("asset serving", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/png");
     expect(res.headers.get("cache-control")).toContain("immutable");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     const bytes = new Uint8Array(await res.arrayBuffer());
     expect(bytes.length).toBe(PNG_BYTES.length);
   });
@@ -142,6 +143,7 @@ describe("asset serving", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("video/mp4");
     expect(res.headers.get("cache-control")).toContain("immutable");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
   });
 
   it("rejects non-uuid asset names (traversal shape never reaches the fs)", async () => {

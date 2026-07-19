@@ -547,8 +547,9 @@ export async function deleteDefinition(nestId: string, id: string) {
 
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
-// Upload an image into the nest's assets folder. Multipart (not the JSON
-// request() helper) — the browser sets the boundary content-type itself.
+// Upload an image or video into the nest's assets folder. Multipart (not
+// the JSON request() helper) — the browser sets the boundary content-type
+// itself. `markdown` is `![alt](url)` for images, the bare URL for video.
 export async function uploadAsset(nestId: string, file: File) {
   const form = new FormData();
   form.append("file", file);
