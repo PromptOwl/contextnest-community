@@ -20,10 +20,13 @@ export async function copyText(text: string): Promise<boolean> {
     ta.style.position = "fixed";
     ta.style.opacity = "0";
     document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
+    try {
+      ta.select();
+      return document.execCommand("copy");
+    } finally {
+      // execCommand can throw — always remove the hidden textarea.
+      document.body.removeChild(ta);
+    }
   } catch {
     return false;
   }
