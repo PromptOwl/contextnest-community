@@ -1162,6 +1162,25 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("028_user_department");
   }
+
+  // 029: DB-backed superadmins (CU-wdqcpzwf2n). One row = "this email is a
+  //   server admin", granted from the UI/API. The effective superadmin set is
+  //   access.yaml `super_admins` ∪ these rows (case-insensitive; emails are
+  //   stored lowercased). access.yaml stays the authoritative bootstrap:
+  //   file entries can never be revoked via the API (lockout safety) — this
+  //   table only holds the grants made at runtime.
+  if (!hasMigration("029_super_admins")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS super_admins (
+          email TEXT PRIMARY KEY,          -- stored lowercased
+          granted_by TEXT NOT NULL,        -- email of the granting admin
+          granted_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+    })();
+    recordMigration("029_super_admins");
+  }
 }
 
 /**

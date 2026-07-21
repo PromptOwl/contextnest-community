@@ -39,7 +39,12 @@ import {
 import { definitionRoutes } from "./definitions/routes.js";
 import { assetRoutes } from "./nests/asset-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
-import { isSuperAdmin } from "./governance/access-service.js";
+import {
+  isSuperAdmin,
+  isConfigSuperAdmin,
+  getAccessConfig,
+  loadGrantedSuperAdmins,
+} from "./governance/access-service.js";
 import {
   llmsTxtRoutes,
   nestIndexRoutes,
@@ -51,6 +56,7 @@ import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
   permissionLevel,
+  isServerAdminUserId,
   type NestPermission,
 } from "./shared/access.js";
 import { AppError } from "./shared/errors.js";
@@ -359,14 +365,18 @@ export function createApp(): Hono<AuthEnv> {
     }
   });
 
+  // Server-admin guard shared by the /admin/* operator surfaces: open mode,
+  // the license admin, or a superadmin (access.yaml ∪ DB grants).
+  const serverAdminAllowed = async (c: any) =>
+    config.AUTH_MODE === "open" ||
+    (await isServerAdminUserId(c.get("userId")));
+
   // /admin/settings — server-wide settings the admin edits from the Settings
   // page. Each setting takes effect live (config getters read process.env) and
-  // persists to ENV_FILE_PATH so it survives a restart. In open mode the
-  // anonymous admin may edit; in key mode it's the license admin only.
+  // persists durably so it survives a restart. In open mode the anonymous
+  // admin may edit; in key mode it's the server admin (license admin or
+  // superadmin) only.
   app.use("/admin/settings", flexAuthMiddleware);
-  const adminSettingsAllowed = async (c: any) =>
-    config.AUTH_MODE === "open" ||
-    (await isLicenseAdminUserId(c.get("userId")));
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     manual_sign_in: config.MANUAL_SIGN_IN,
@@ -406,13 +416,13 @@ export function createApp(): Hono<AuthEnv> {
   });
 
   app.get("/admin/settings", async (c) => {
-    if (!(await adminSettingsAllowed(c)))
+    if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     return c.json(currentServerSettings());
   });
 
   app.patch("/admin/settings", async (c) => {
-    if (!(await adminSettingsAllowed(c)))
+    if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can change this." }, 403);
     let body: Record<string, unknown>;
     try {
@@ -778,16 +788,10 @@ export function createApp(): Hono<AuthEnv> {
 
   // GET /admin/trace — the operator audit surface: newest-first activity
   // rows (API + MCP), optional kind/nest/user/limit filters. Server admin
-  // only (license admin OR access.yaml super_admin) — cross-tenant data.
+  // only (license admin OR super_admin) — cross-tenant data.
   app.use("/admin/trace", flexAuthMiddleware);
-  const traceAllowed = async (c: any) => {
-    if (config.AUTH_MODE === "open") return true;
-    const userId = c.get("userId");
-    if (await isLicenseAdminUserId(userId)) return true;
-    return isSuperAdmin(await resolveCallerEmail(userId));
-  };
   app.get("/admin/trace", async (c) => {
-    if (!(await traceAllowed(c)))
+    if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     const limitRaw = Number(c.req.query("limit"));
     const offsetRaw = Number(c.req.query("offset"));
@@ -803,6 +807,173 @@ export function createApp(): Hono<AuthEnv> {
     // `count` = rows on this page (back-compat); `total` = full filtered count
     // for the pager. limit/offset echo the applied window.
     return c.json({ count: events.length, total, limit, offset, events });
+  });
+
+  // ─── /admin/super-admins — grant/revoke superadmins from the UI ──────────
+  // (CU-wdqcpzwf2n). The effective superadmin set is the union of three
+  // sources, surfaced per row as `source`:
+  //   "license" — the PromptOwl account that owns the installed license
+  //               (derived live, never stored, never revocable here)
+  //   "config"  — access.yaml `super_admins` (the authoritative bootstrap;
+  //               revocable only by editing the file — lockout safety)
+  //   "granted" — rows in the super_admins DB table (managed by these routes)
+  // All three routes use the same server-admin guard as /admin/trace.
+  app.use("/admin/super-admins", flexAuthMiddleware);
+  app.use("/admin/super-admins/*", flexAuthMiddleware);
+
+  app.get("/admin/super-admins", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const callerEmail = (await resolveCallerEmail(c.get("userId"))).toLowerCase();
+
+    type Row = {
+      email: string;
+      source: "license" | "config" | "granted";
+      granted_by: string | null;
+      granted_at: string | null;
+      self: boolean;
+    };
+    // Precedence license > config > granted: an email present in several
+    // sources shows its least-revocable origin (that's what governs whether
+    // DELETE is allowed).
+    const byEmail = new Map<string, Row>();
+    const add = (row: Row) => {
+      if (!byEmail.has(row.email)) byEmail.set(row.email, row);
+    };
+
+    const lic = getCurrentLicense();
+    if (lic?.valid && lic.ownerEmail) {
+      const email = lic.ownerEmail.toLowerCase();
+      add({ email, source: "license", granted_by: null, granted_at: null, self: email === callerEmail });
+    }
+    for (const raw of getAccessConfig()?.super_admins ?? []) {
+      const email = raw.toLowerCase();
+      add({ email, source: "config", granted_by: null, granted_at: null, self: email === callerEmail });
+    }
+    const granted = (await getDb().all(
+      "SELECT email, granted_by, granted_at FROM super_admins ORDER BY granted_at, email",
+    )) as Array<{ email: string; granted_by: string; granted_at: string }>;
+    for (const g of granted) {
+      const email = g.email.toLowerCase();
+      add({ email, source: "granted", granted_by: g.granted_by, granted_at: g.granted_at, self: email === callerEmail });
+    }
+
+    return c.json({ super_admins: [...byEmail.values()] });
+  });
+
+  app.post("/admin/super-admins", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can grant superadmin." }, 403);
+
+    let body: { email?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const email =
+      typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    if (!email || !isEmailish(email)) {
+      return c.json({ error: "A valid email is required." }, 400);
+    }
+
+    // Must be an existing user on this server — a superadmin grant to a typo
+    // would otherwise sit live and invisible until someone registers it.
+    const user = await getDb().get(
+      "SELECT id FROM users WHERE LOWER(email) = ?",
+      [email],
+    );
+    if (!user) {
+      return c.json(
+        { error: "No user with this email exists on this server. Invite them as a teammate first." },
+        400,
+      );
+    }
+
+    const lic = getCurrentLicense();
+    const isLicenseOwner =
+      !!lic?.valid && lic.ownerEmail?.toLowerCase() === email;
+    if (isLicenseOwner || isSuperAdmin(email)) {
+      return c.json({ error: "This user is already a superadmin." }, 409);
+    }
+
+    const grantedBy = (await resolveCallerEmail(c.get("userId"))).toLowerCase();
+    try {
+      await getDb().run(
+        "INSERT INTO super_admins (email, granted_by) VALUES (?, ?)",
+        [email, grantedBy],
+      );
+    } catch (err) {
+      // Concurrent-grant race: the isSuperAdmin pre-check above reads the
+      // in-memory cache, so two simultaneous grants can both pass it. The PK
+      // on email is the real arbiter — map its violation to the intended 409.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/unique|duplicate/i.test(msg)) {
+        await loadGrantedSuperAdmins();
+        return c.json({ error: "This user is already a superadmin." }, 409);
+      }
+      throw err;
+    }
+    await loadGrantedSuperAdmins();
+
+    return c.json({ email, source: "granted", granted_by: grantedBy }, 201);
+  });
+
+  app.delete("/admin/super-admins/:email", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can revoke superadmin." }, 403);
+
+    // Hono already percent-decodes path params — decoding again would throw
+    // a URIError (→ 500) on an email containing a literal '%'.
+    const email = c.req.param("email").trim().toLowerCase();
+    const callerEmail = (await resolveCallerEmail(c.get("userId"))).toLowerCase();
+
+    const lic = getCurrentLicense();
+    if (lic?.valid && lic.ownerEmail?.toLowerCase() === email) {
+      return c.json(
+        { error: "The license admin can't be revoked — their access comes from owning the installed PromptOwl license." },
+        400,
+      );
+    }
+    // access.yaml entries are the file-authoritative bootstrap. Refusing to
+    // revoke them via the API is the lockout safety: the operator always keeps
+    // a set of admins that no API caller can remove.
+    if (isConfigSuperAdmin(email)) {
+      return c.json(
+        { error: "This superadmin is defined in access.yaml and can't be revoked from here. Remove them from the file and restart the server." },
+        400,
+      );
+    }
+
+    const db = getDb();
+    const row = await db.get(
+      "SELECT email FROM super_admins WHERE LOWER(email) = ?",
+      [email],
+    );
+    if (!row) return c.json({ error: "Not a granted superadmin." }, 404);
+
+    // Lockout guard: you can't revoke yourself if you're the last effective
+    // superadmin left (no license admin, no access.yaml entries, no other
+    // DB grants) — that would leave the server with no admin at all.
+    if (email === callerEmail) {
+      const hasLicenseAdmin = !!lic?.valid && !!lic.ownerEmail;
+      const hasConfigAdmins = (getAccessConfig()?.super_admins?.length ?? 0) > 0;
+      const others = (await db.get(
+        "SELECT COUNT(*) AS c FROM super_admins WHERE LOWER(email) != ?",
+        [email],
+      )) as { c: number };
+      if (!hasLicenseAdmin && !hasConfigAdmins && others.c === 0) {
+        return c.json(
+          { error: "You're the last superadmin on this server — grant someone else superadmin before revoking yourself." },
+          400,
+        );
+      }
+    }
+
+    await db.run("DELETE FROM super_admins WHERE LOWER(email) = ?", [email]);
+    await loadGrantedSuperAdmins();
+
+    return c.json({ ok: true, email });
   });
 
   // GET /stats — dashboard summary counts: nests visible to caller,

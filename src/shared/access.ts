@@ -7,6 +7,21 @@ import { ANON_USER_ID } from "./constants.js";
 
 export type NestPermission = "none" | "read" | "write" | "admin" | "owner";
 
+/**
+ * Canonical server-admin check by user id: the license admin OR a superadmin
+ * (access.yaml `super_admins` ∪ the DB-granted set). Use this for operator
+ * surfaces (teammates, unsynced folders, /admin/*) so every gate resolves
+ * the same way.
+ */
+export async function isServerAdminUserId(userId: string): Promise<boolean> {
+  if (await isLicenseAdminUserId(userId)) return true;
+  const row = (await getDb().get(
+    "SELECT email FROM users WHERE id = ?",
+    [userId],
+  )) as { email?: string } | undefined;
+  return !!row?.email && isSuperAdmin(row.email);
+}
+
 const PERMISSION_LEVELS: Record<NestPermission, number> = {
   none: 0,
   read: 1,
