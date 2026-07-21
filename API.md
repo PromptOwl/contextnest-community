@@ -141,12 +141,12 @@ Starts generic **OIDC single sign-on** (Microsoft Entra ID, Google, or any spec-
 When enabled and fully configured: fetches the issuer's discovery document (cached in-process ~5 min), mints `state` + `nonce` + a PKCE S256 verifier into three short-lived (10 min) httpOnly `SameSite=Lax` cookies scoped to `Path=/auth/oidc`, and `302`s to the IdP's authorization endpoint with `response_type=code&scope=openid email profile`. When disabled/unconfigured → `302` to `/?sso_error=disabled` / `not_configured`. Rate-limited per IP.
 
 ### GET `/auth/oidc/callback`
-The redirect URI (`<base url>/auth/oidc/callback` — register this exact URI at your IdP). Verifies the `state` param against the flow cookie, exchanges the code at the token endpoint (client secret + PKCE verifier), validates the ID token with the issuer's JWKS (signature, `iss`, `aud` = client id, `exp`, and the `nonce` claim against the flow cookie), extracts the email (`email`, falling back to `preferred_username` for Entra; normalized trim+lowercase), and enforces `oidc_allowed_domains`. Existing users are signed in; unknown users are JIT-provisioned when `oidc_auto_provision` is on (name from the `name` claim), else refused. On success → session cookie (identical to a password login) + `302` to `/`. On any failure → `302` to `/?sso_error=<code>`; codes: `disabled`, `not_configured`, `discovery_failed`, `provider_error`, `state_mismatch`, `exchange_failed`, `invalid_token`, `email_not_verified` (ID token carries `email_verified: false` — an absent claim is trusted; see the trust assumption in `CONFIGURATION.md → Single sign-on (OIDC)`), `domain_not_allowed`, `not_invited`, `rate_limited`, `service_error`. Flow cookies are cleared on every outcome. Rate-limited per IP.
+The redirect URI (`<base url>/auth/oidc/callback` — register this exact URI at your IdP). Verifies the `state` param against the flow cookie, exchanges the code at the token endpoint (client secret + PKCE verifier), validates the ID token with the issuer's JWKS (signature, `iss`, `aud` = client id, `exp`, and the `nonce` claim against the flow cookie), extracts the email (`email`, falling back to `preferred_username` for Entra; normalized trim+lowercase), and enforces `oidc_allowed_domains`. Existing users are signed in; unknown users are JIT-provisioned when `oidc_auto_provision` is on (name from the `name` claim), else refused. Every successful login also upserts `users.department` from the optional string `department` claim (trimmed, whitespace collapsed, capped at 120 chars; absent claim clears the stored value) — read by the `oidc_department_tagging` feature (see `CONFIGURATION.md → Department auto-tagging`). On success → session cookie (identical to a password login) + `302` to `/`. On any failure → `302` to `/?sso_error=<code>`; codes: `disabled`, `not_configured`, `discovery_failed`, `provider_error`, `state_mismatch`, `exchange_failed`, `invalid_token`, `email_not_verified` (ID token carries `email_verified: false` — an absent claim is trusted; see the trust assumption in `CONFIGURATION.md → Single sign-on (OIDC)`), `domain_not_allowed`, `not_invited`, `rate_limited`, `service_error`. Flow cookies are cleared on every outcome. Rate-limited per IP.
 
 ### GET `/auth/oidc/logout`
 RP-initiated logout for an SSO session. Deletes the current session server-side and clears the session cookie plus the `cnst_sso_session` marker. If the issuer advertises an `end_session_endpoint` (Entra/Okta/Keycloak; Google does not), `302`s the browser through it with `post_logout_redirect_uri=<base url>/` so the IdP session ends too; otherwise `302`s straight to `/`. Always clears cookies and always lands on `/`, even if discovery is unreachable. The SPA navigates here (instead of `POST /auth/logout`) only when the non-httpOnly `cnst_sso_session` marker cookie — set on OIDC callback success — is present, so password sessions keep the plain logout.
 
-Related `/admin/settings` fields (GET/PATCH, superadmin only): `oidc_enabled`, `oidc_issuer` (https URL), `oidc_client_id`, `oidc_client_secret` (**write-only** — PATCH sets/replaces, `null` clears; GET returns only `oidc_client_secret_set: boolean`), `oidc_allowed_domains` (comma-separated), `oidc_auto_provision`. Enabling is refused unless issuer + client id + secret are all present.
+Related `/admin/settings` fields (GET/PATCH, superadmin only): `oidc_enabled`, `oidc_issuer` (https URL), `oidc_client_id`, `oidc_client_secret` (**write-only** — PATCH sets/replaces, `null` clears; GET returns only `oidc_client_secret_set: boolean`), `oidc_allowed_domains` (comma-separated), `oidc_auto_provision`, `oidc_department_tagging` (append `dept:<slugified-department>` to a new document's tags on create — create-only, no-op for users without a stored department). Enabling is refused unless issuer + client id + secret are all present.
 
 ---
 
@@ -392,6 +392,29 @@ Response (201): `{ "node": { ... }, "stewards": [...] }`.
 Full node content. 403 if no steward access (when stewardship on).
 Add `?format=markdown` to receive `text/markdown` (frontmatter + body) instead
 of JSON — see [§8 export](#get-nestsnestidexportformatmarkdown--llm-pointed-plain-text-view).
+
+**Direct raw fetch** — `?format=raw` returns the node **body** as plain text
+(no JSON envelope, no synthesized frontmatter):
+
+| Param / header | Effect |
+|---|---|
+| `?format=raw` | Raw node body as text; Content-Type per node type (table below). |
+| `Accept: text/markdown` (header) | Same as `?format=raw` when no `format` param is present. An explicit `format` param always wins (`?format=markdown` keeps the frontmatter+body export; any other `format` value keeps JSON). Exact media-type match only — `text/*` / `*/*` do not trigger it. Matching is presence-based and deliberately ignores q-values: `text/markdown;q=0.1` still triggers raw. |
+| `?frontmatter=1` | Only meaningful with raw: prepends the node's YAML frontmatter block exactly as stored, above the body. |
+
+Content-Type by node `type`:
+
+| Node type | Content-Type |
+|---|---|
+| `document`, `agent`, `skill` (and any other/unset type) | `text/markdown; charset=utf-8` |
+| `artifact` | `text/html; charset=utf-8` |
+| `tool`, `table` | `text/plain; charset=utf-8` |
+
+Access is identical to the JSON GET — same middleware, grants, and
+public-reader semantics. Public readers get the **approved snapshot** body
+(and, with `frontmatter=1`, that snapshot's stored frontmatter); callers
+without read access get the same 403/404 JSON error as the JSON GET, never
+body bytes. Without `format`/`Accept` the response is unchanged JSON.
 
 ### POST `/nests/:nestId/nodes/:nodeId/revert`
 Restore an earlier version by writing its content as a **new** version (history is preserved).

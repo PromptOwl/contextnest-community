@@ -1147,13 +1147,29 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("027_teams");
   }
 
-  // 028: DB-backed superadmins (CU-wdqcpzwf2n). One row = "this email is a
+  // 028: directory department on users (CU-wdqcpzwf2p). Captured from the
+  //   OIDC `department` claim on every SSO login — upserted to the claim's
+  //   value, cleared (NULL) when the claim is absent, so directory moves
+  //   propagate on the next sign-in. Read by the optional dept:<slug>
+  //   auto-tag on node create (OIDC_DEPARTMENT_TAGGING). Nullable: password
+  //   users and IdPs that don't emit the claim simply never set it.
+  if (!hasMigration("028_user_department")) {
+    db.transaction(() => {
+      const userColsNow = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
+      if (!userColsNow.includes("department")) {
+        db.exec("ALTER TABLE users ADD COLUMN department TEXT");
+      }
+    })();
+    recordMigration("028_user_department");
+  }
+
+  // 029: DB-backed superadmins (CU-wdqcpzwf2n). One row = "this email is a
   //   server admin", granted from the UI/API. The effective superadmin set is
   //   access.yaml `super_admins` ∪ these rows (case-insensitive; emails are
   //   stored lowercased). access.yaml stays the authoritative bootstrap:
   //   file entries can never be revoked via the API (lockout safety) — this
   //   table only holds the grants made at runtime.
-  if (!hasMigration("028_super_admins")) {
+  if (!hasMigration("029_super_admins")) {
     db.transaction(() => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS super_admins (
@@ -1163,7 +1179,7 @@ export function runMigrations(db: Database.Database): void {
         );
       `);
     })();
-    recordMigration("028_super_admins");
+    recordMigration("029_super_admins");
   }
 }
 

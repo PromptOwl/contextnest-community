@@ -207,7 +207,8 @@ export const TOOL_DEFINITIONS = [
         },
         type: {
           type: "string",
-          description: "Node type (default: document)",
+          description:
+            "Node type (default: document). Note: artifact and table can be disabled server-wide by an admin — creating a disabled type is rejected; existing nodes of that type stay readable.",
         },
         tags: {
           type: "array",

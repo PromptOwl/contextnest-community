@@ -301,6 +301,18 @@ export const config = {
     return process.env.OIDC_AUTO_PROVISION !== "false";
   },
   /**
+   * Auto-tag content created by SSO users with their directory department:
+   * when on, node CREATE appends `dept:<slugified-department>` to the new
+   * node's tags (never on update, never retroactively). The department is
+   * captured from the OIDC `department` claim at login (see oidc.ts), so
+   * this is only meaningful alongside an IdP that emits that claim — but
+   * there is no hard dependency on OIDC_ENABLED. Default off; superadmin-
+   * togglable at runtime via /admin/settings.
+   */
+  get OIDC_DEPARTMENT_TAGGING(): boolean {
+    return process.env.OIDC_DEPARTMENT_TAGGING === "true";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path
@@ -377,6 +389,21 @@ export const config = {
 
   get FEATURE_WORKFLOW_PLANE(): boolean {
     return process.env.FEATURE_WORKFLOW_PLANE === "true";
+  },
+  /**
+   * Content-type toggles — soft-disable a node type server-wide. DEFAULT ON:
+   * missing/unset/anything-but-"false" = enabled, so existing deployments see
+   * zero behavior change. Only CREATION of the type is refused when disabled;
+   * existing nodes of that type still read/render/version (never data loss).
+   * Runnable types (agent/skill/tool) are NOT governed here — they stay gated
+   * by FEATURE_WORKFLOW_PLANE. Superadmin-editable at runtime via
+   * /admin/settings (type_artifact_enabled / type_table_enabled).
+   */
+  get TYPE_ARTIFACT_ENABLED(): boolean {
+    return process.env.TYPE_ARTIFACT_ENABLED !== "false";
+  },
+  get TYPE_TABLE_ENABLED(): boolean {
+    return process.env.TYPE_TABLE_ENABLED !== "false";
   },
   /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling

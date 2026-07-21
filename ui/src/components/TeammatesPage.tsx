@@ -3,6 +3,7 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 import {
   ArrowLeft, UserPlus, Shield, ShieldCheck, Users, Copy, Check,
   AlertCircle, Loader2,
@@ -338,9 +339,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() =>
-                      navigator.clipboard.writeText(resetPw.password!)
-                    }
+                    onClick={() => void copyTextWithToast(resetPw.password!)}
                   >
                     Copy
                   </Button>
@@ -782,7 +781,7 @@ function NewKeyModal({
 }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    await navigator.clipboard.writeText(password);
+    if (!(await copyTextWithToast(password))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };

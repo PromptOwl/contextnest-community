@@ -249,6 +249,11 @@ export function createApp(): Hono<AuthEnv> {
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
       workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+      // Content-type toggles (default ON). The editor's type picker mirrors
+      // these so a disabled type disappears from creation exactly when the
+      // API would refuse it — existing nodes of the type stay readable.
+      type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
+      type_table_enabled: config.TYPE_TABLE_ENABLED,
       // Sub-agent runs gate its own recursion surface separately (env-only,
       // must clear a security review — NOT a UI toggle). Exposed read-only so
       // the Runs page shows the "spawn sub-agent" option only when it's live.
@@ -380,6 +385,8 @@ export function createApp(): Hono<AuthEnv> {
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+    type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
+    type_table_enabled: config.TYPE_TABLE_ENABLED,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
@@ -392,6 +399,7 @@ export function createApp(): Hono<AuthEnv> {
     oidc_client_secret_set: !!config.OIDC_CLIENT_SECRET,
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
+    oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
     // Live readiness (enabled AND issuer+id+secret present) — the SAVED state,
     // i.e. whether the login button is currently live. The Settings UI derives
     // its own "enabled but not configured" warning from the unsaved draft
@@ -462,6 +470,21 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "FEATURE_WORKFLOW_PLANE",
         value: body.workflow_plane_enabled ? "true" : null,
+      });
+    }
+    // Content-type toggles. Default ON — an explicit "false" is the only
+    // disabled state, so enabling clears the row (falls to the default) and
+    // env-set values gate identically to UI-set ones.
+    if ("type_artifact_enabled" in body) {
+      pending.push({
+        name: "TYPE_ARTIFACT_ENABLED",
+        value: body.type_artifact_enabled ? null : "false",
+      });
+    }
+    if ("type_table_enabled" in body) {
+      pending.push({
+        name: "TYPE_TABLE_ENABLED",
+        value: body.type_table_enabled ? null : "false",
       });
     }
     if ("anthropic_api_key" in body) {
@@ -587,6 +610,18 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "OIDC_AUTO_PROVISION",
         value: body.oidc_auto_provision ? "true" : "false",
+      });
+    }
+    // Department auto-tagging (dept:<slug> on node create). Only meaningful
+    // when an OIDC IdP emits the `department` claim, but deliberately NOT
+    // gated on oidc_enabled — the toggle is inert without a department to
+    // read, never harmful. Default off; false persists as null (unset) rather
+    // than "false" because unset already means off — unlike oidc_auto_provision
+    // above, whose default is ON and so needs an explicit "false" to disable.
+    if ("oidc_department_tagging" in body) {
+      pending.push({
+        name: "OIDC_DEPARTMENT_TAGGING",
+        value: body.oidc_department_tagging ? "true" : null,
       });
     }
     // Effective post-PATCH OIDC state: what this request sets, falling back
