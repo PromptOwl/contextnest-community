@@ -1146,6 +1146,22 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("027_teams");
   }
+
+  // 028: directory department on users (CU-wdqcpzwf2p). Captured from the
+  //   OIDC `department` claim on every SSO login — upserted to the claim's
+  //   value, cleared (NULL) when the claim is absent, so directory moves
+  //   propagate on the next sign-in. Read by the optional dept:<slug>
+  //   auto-tag on node create (OIDC_DEPARTMENT_TAGGING). Nullable: password
+  //   users and IdPs that don't emit the claim simply never set it.
+  if (!hasMigration("028_user_department")) {
+    db.transaction(() => {
+      const userColsNow = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
+      if (!userColsNow.includes("department")) {
+        db.exec("ALTER TABLE users ADD COLUMN department TEXT");
+      }
+    })();
+    recordMigration("028_user_department");
+  }
 }
 
 /**

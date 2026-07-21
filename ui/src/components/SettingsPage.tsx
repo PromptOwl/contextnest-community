@@ -75,6 +75,7 @@ const TABS: {
       "oidc_client_secret",
       "oidc_allowed_domains",
       "oidc_auto_provision",
+      "oidc_department_tagging",
     ],
   },
   {
@@ -804,6 +805,22 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   <Switch
                     checked={draft.oidc_auto_provision}
                     onCheckedChange={(v) => set({ oidc_auto_provision: v })}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-medium">
+                      Department auto-tagging
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Tag new documents with the creator's directory department
+                      (requires the department claim from your IdP).
+                    </p>
+                  </div>
+                  <Switch
+                    checked={draft.oidc_department_tagging}
+                    onCheckedChange={(v) => set({ oidc_department_tagging: v })}
                   />
                 </div>
 

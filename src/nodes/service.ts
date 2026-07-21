@@ -78,6 +78,32 @@ function folderToSegments(folder: string): string[] {
 const stripUndefined = <T extends Record<string, any>>(o: T): T =>
   Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 
+/**
+ * Optional `#dept:<slug>` auto-tag (CU-wdqcpzwf2p). When the superadmin
+ * toggle OIDC_DEPARTMENT_TAGGING is on and the creating user has a directory
+ * department (captured from the OIDC `department` claim at login — see
+ * src/auth/oidc.ts), createNode appends `dept:<slugified-department>`
+ * (lowercase, whitespace → dashes) to the new node's tags. CREATE-only by
+ * design: updateNode never adds it and existing nodes are never retro-tagged,
+ * so the tag records where the document was born, not who touched it last.
+ * A missing user row, NULL department, or lookup error is a silent no-op —
+ * department tagging must never fail a create.
+ */
+async function departmentTagFor(userEmail: string): Promise<string | null> {
+  if (!config.OIDC_DEPARTMENT_TAGGING) return null;
+  try {
+    const row = (await getDb().get(
+      "SELECT department FROM users WHERE LOWER(email) = LOWER(?)",
+      [userEmail],
+    )) as { department?: string | null } | undefined;
+    const slug = slugify(String(row?.department ?? ""));
+    return slug ? normalizeTag(`dept:${slug}`) : null;
+  } catch (err) {
+    console.error("[dept-tag] department lookup failed (tag skipped):", err);
+    return null;
+  }
+}
+
 // Serialize writes per node. Without this, concurrent saves (rapid autosave,
 // two tabs, MCP + REST) each read the same base version and append "base+1",
 // producing duplicate/swapped version numbers that break the engine diff
@@ -481,6 +507,15 @@ export async function createNode(
         ", "
       )})`
     );
+  }
+
+  // Optional dept:<slug> auto-tag — after the validations above so a request
+  // that fails them never pays the DB lookup. Deduped case-insensitively
+  // against the user-supplied tags (normalizeTag keeps the user's casing, so
+  // "#Dept:Engineering" must still match the all-lowercase auto tag).
+  const deptTag = await departmentTagFor(userEmail);
+  if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
+    tags.push(deptTag);
   }
 
   const hasStewards = await isStewardshipEnabled(nestId);
