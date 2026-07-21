@@ -37,7 +37,7 @@ import {
   markNotificationsRead,
 } from "./governance/notify-service.js";
 import { definitionRoutes } from "./definitions/routes.js";
-import { assetRoutes } from "./nests/asset-routes.js";
+import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
 import {
   isSuperAdmin,
@@ -182,14 +182,21 @@ export function createApp(): Hono<AuthEnv> {
   // Request body size cap — prevents DoS via giant POST payloads before
   // a handler ever gets to parse JSON. Only applies when Content-Length
   // is declared; streamed bodies fall through (uncommon on this API).
+  // The asset-upload route alone gets a higher ceiling (video uploads,
+  // per-type caps enforced in the handler) — the global cap is untouched.
+  const ASSET_UPLOAD_PATH = /^\/nests\/[^/]+\/assets\/?$/;
   app.use("*", async (c, next) => {
     const lenStr = c.req.header("Content-Length");
     if (lenStr) {
       const len = parseInt(lenStr, 10);
-      if (Number.isFinite(len) && len > config.MAX_BODY_BYTES) {
+      const cap =
+        c.req.method === "POST" && ASSET_UPLOAD_PATH.test(c.req.path)
+          ? Math.max(config.MAX_BODY_BYTES, ASSET_MAX_REQUEST_BYTES)
+          : config.MAX_BODY_BYTES;
+      if (Number.isFinite(len) && len > cap) {
         return c.json(
           {
-            error: `Request body too large (${len} bytes, max ${config.MAX_BODY_BYTES})`,
+            error: `Request body too large (${len} bytes, max ${cap})`,
           },
           413,
         );
