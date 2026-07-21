@@ -902,13 +902,13 @@ export function createApp(): Hono<AuthEnv> {
   // GET exposes each configured source's last-run status + timestamp.
   app.use("/admin/github-sync/*", flexAuthMiddleware);
   app.post("/admin/github-sync/run", async (c) => {
-    if (!(await traceAllowed(c)))
+    if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can do this." }, 403);
     const results = await runGithubSync();
     return c.json({ results });
   });
   app.get("/admin/github-sync/run", async (c) => {
-    if (!(await traceAllowed(c)))
+    if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     return c.json({ sources: await getGithubSyncStatus() });
   });
