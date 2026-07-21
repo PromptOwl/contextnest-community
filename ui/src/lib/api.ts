@@ -147,6 +147,10 @@ export async function getHealth() {
     /** Present when oidc_enabled — lets the login page label the button by IdP. */
     oidc_issuer?: string;
     workflow_plane_enabled?: boolean;
+    /** Content-type toggles — default ON server-side; the editor's type
+     *  picker hides a disabled type exactly when create would refuse it. */
+    type_artifact_enabled?: boolean;
+    type_table_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
     subagent_max_children?: number;
@@ -167,6 +171,10 @@ export interface AdminSettings {
   public_base_url: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
+  /** Content-type toggles (default ON). Disabling refuses new creations of
+   *  the type only — existing nodes still read/render/version. */
+  type_artifact_enabled: boolean;
+  type_table_enabled: boolean;
   subagent_runs_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
@@ -178,6 +186,8 @@ export interface AdminSettings {
   oidc_client_secret_set?: boolean;
   oidc_allowed_domains: string;
   oidc_auto_provision: boolean;
+  /** Tag new documents with the creator's directory department (dept:<slug>). */
+  oidc_department_tagging: boolean;
   /** Server-computed readiness: enabled AND issuer+client id+secret present. */
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */
@@ -316,6 +326,36 @@ export async function inviteTeammate(email: string) {
     method: "POST",
     body: JSON.stringify({ email }),
   });
+}
+
+// ─── Superadmins (server admins) ────────────────────────────────────────
+// Effective superadmin = license owner ∪ access.yaml super_admins ∪ DB
+// grants. Only "granted" rows are revocable from the UI.
+
+export interface SuperAdminRow {
+  email: string;
+  source: "license" | "config" | "granted";
+  granted_by: string | null;
+  granted_at: string | null;
+  self: boolean;
+}
+
+export async function listSuperAdmins() {
+  return request<{ super_admins: SuperAdminRow[] }>("/admin/super-admins");
+}
+
+export async function addSuperAdmin(email: string) {
+  return request<{ email: string; source: "granted"; granted_by: string }>(
+    "/admin/super-admins",
+    { method: "POST", body: JSON.stringify({ email }) },
+  );
+}
+
+export async function removeSuperAdmin(email: string) {
+  return request<{ ok: boolean; email: string }>(
+    `/admin/super-admins/${encodeURIComponent(email)}`,
+    { method: "DELETE" },
+  );
 }
 
 // Logged-in user changes their own password (e.g., after an admin reset

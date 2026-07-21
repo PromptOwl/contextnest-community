@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError } from "../shared/errors.js";
+import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
 import { resolveCallerEmail, canReadNode } from "../governance/access-guard.js";
 import {
   createThread,
@@ -170,28 +171,10 @@ annotationRoutes.get("/:nodeId{.+}/hosted", async (c) => {
   if (type !== null && type !== ARTIFACT_NODE_TYPE) {
     return c.json({ error: "Not a hosted artifact" }, 404);
   }
-  // Strict, self-contained CSP. `sandbox` (no allow-same-origin) forces an
-  // opaque origin so the artifact can't touch host cookies/storage; the
-  // resource directives then cap what its inline scripts may load or reach:
-  // `connect-src 'none'` blocks fetch/XHR/beacon exfiltration, `default-src
-  // 'none'` blocks external loads, and only inline script/style + data/blob
-  // images are permitted (self-contained decks/dashboards need no network).
-  c.header(
-    "Content-Security-Policy",
-    [
-      "sandbox allow-scripts allow-popups allow-modals",
-      "default-src 'none'",
-      "script-src 'unsafe-inline'",
-      "style-src 'unsafe-inline'",
-      "img-src data: blob:",
-      "font-src data:",
-      "connect-src 'none'",
-      "base-uri 'none'",
-      "form-action 'none'",
-    ].join("; "),
-  );
-  c.header("X-Content-Type-Options", "nosniff");
-  c.header("Referrer-Policy", "no-referrer");
+  // Strict, self-contained CSP — shared with the node `?format=raw` artifact
+  // path so the sandbox policy can't drift between the two HTML-serving
+  // surfaces. See src/shared/artifact-sandbox.ts for the full rationale.
+  applyArtifactSandboxHeaders(c);
   if (served != null) c.header("X-Artifact-Snapshot", String(served));
   return c.html(html);
 });

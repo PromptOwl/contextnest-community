@@ -12,6 +12,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { Button } from "./ui/button";
+import { BetaBadge } from "./ui/beta-badge";
 
 interface Props {
   onBack: () => void;
@@ -27,10 +28,13 @@ interface Props {
 function Section({
   title,
   icon: Icon,
+  beta,
   children,
 }: {
   title: string;
   icon?: React.ComponentType<{ className?: string }>;
+  /** Marks a Workflows-facing (workflow plane) section with the Beta chip. */
+  beta?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -42,6 +46,7 @@ function Section({
           </span>
         )}
         <h2 className="text-base font-semibold tracking-tight">{title}</h2>
+        {beta && <BetaBadge />}
       </div>
       {children}
     </section>
@@ -76,7 +81,7 @@ function DefCard({ term, def }: { term: string; def: React.ReactNode }) {
 
 const LEGO: [string, string][] = [
   ["Nest", "A vault of nodes — the unit of sharing, permissions, and governance."],
-  ["Node", "A versioned Markdown document. Types: document, artifact (hosted HTML), table (CSV fact store, deterministically queryable), and with the workflow plane on: agent, skill (runnable) and tool (the body is code an agent can call)."],
+  ["Node", "A versioned Markdown document. Types: document, artifact (hosted HTML), table (CSV fact store, deterministically queryable), and with the workflow plane (Beta) on: agent, skill (runnable) and tool (the body is code an agent can call)."],
   ["Edge", "A typed link. Flow edges (▶) are control: they decide what happens next, gated by conditions (always / if… judged / metric). The LLM never chooses control flow — it only fills content inside a step."],
   ["Run", "The one artifact every way of starting work converges on: a row saying “walk this agent's subgraph”. It is the queue (unclaimed = waiting), the audit log (steps append), and the receipt (closed with a verdict)."],
   ["Trigger", "Anything that writes a run row: the Run button (a person), a schedule (the clock), an inbound hook (the outside world — Slack, CI, anything that can POST)."],
@@ -169,7 +174,7 @@ export function GuidePage({ onBack }: Props) {
           </div>
         </Section>
 
-        <Section title="The governed loop" icon={Repeat}>
+        <Section title="The governed loop" icon={Repeat} beta>
           <Steps
             steps={[
               <>Write an <b>agent</b> node (its body is the instructions) and wire a flow <b>edge</b> to a target document on the <b>Canvas</b>.</>,
@@ -231,7 +236,7 @@ export function GuidePage({ onBack }: Props) {
           </p>
         </Section>
 
-        <Section title="Build one: a scheduled digest agent (5 minutes)" icon={CalendarClock}>
+        <Section title="Build one: a scheduled digest agent (5 minutes)" icon={CalendarClock} beta>
           <Steps
             steps={[
               <>Once per server: <b>Server settings → Anthropic API key</b> (or per nest in Activity → Tool environment).</>,
@@ -244,7 +249,7 @@ export function GuidePage({ onBack }: Props) {
           />
         </Section>
 
-        <Section title="Build one: a tool-using agent" icon={Wrench}>
+        <Section title="Build one: a tool-using agent" icon={Wrench} beta>
           <Steps
             steps={[
               <><b>New Document</b> → type <b>Tool</b> → the body is code (the runner executes it; conventions are yours + the runner's).</>,
@@ -255,7 +260,7 @@ export function GuidePage({ onBack }: Props) {
           />
         </Section>
 
-        <Section title="Build one: chat in, governed out (Slack)" icon={MessageSquare}>
+        <Section title="Build one: chat in, governed out (Slack)" icon={MessageSquare} beta>
           <Steps
             steps={[
               <>Canvas → click the agent → <b>Triggers</b> → add a <b>Slack</b> trigger → copy the secret URL.</>,

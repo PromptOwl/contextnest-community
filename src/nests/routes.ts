@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
-import { resolveNestPermission } from "../shared/access.js";
+import { resolveNestPermission, isServerAdminUserId } from "../shared/access.js";
 import {
   createNest,
   importNest,
@@ -233,8 +233,9 @@ nestRoutes.post("/:nestId", async (c) => {
 
 // GET /nests/unsynced — list folders under DATA_ROOT that are candidates for
 // sync (dropped in by the starter CLI or copied in manually). In key mode only
-// the license-admin sees them; the listing reflects server-side filesystem
-// state, so non-admins shouldn't be probing what's lying around on disk.
+// a server admin (license admin or superadmin — same resolution as /admin/*)
+// sees them; the listing reflects server-side filesystem state, so non-admins
+// shouldn't be probing what's lying around on disk.
 //
 // Served from inside the `/:nestId` param route (literal "unsynced" branch),
 // NOT as a static sibling route: RegExpRouter refuses a static path beside a
@@ -244,7 +245,7 @@ nestRoutes.post("/:nestId", async (c) => {
 // public URLs are unchanged.
 async function handleUnsyncedList(c: any) {
   const userId = c.get("userId");
-  if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
+  if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can list unsynced folders");
   }
   return c.json({ folders: listUnsyncedFolders() });
@@ -261,7 +262,7 @@ nestRoutes.post("/:nestId/sync", async (c) => {
     throw new NotFoundError("Not found");
   }
   const userId = c.get("userId");
-  if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
+  if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can sync folders");
   }
   const body = await c.req.json<{ name?: string }>();

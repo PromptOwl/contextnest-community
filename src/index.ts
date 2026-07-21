@@ -10,7 +10,10 @@ import {
   startLicenseSafetyPoll,
 } from "./auth/license.js";
 import { startTelemetryLoop, trackEvent } from "./telemetry/tracker.js";
-import { loadAccessConfig } from "./governance/access-service.js";
+import {
+  loadAccessConfig,
+  loadGrantedSuperAdmins,
+} from "./governance/access-service.js";
 import { startDriftScanner } from "./governance/external-edit-service.js";
 import { startGithubSyncScanner } from "./sync/github-sync.js";
 import { startScheduler } from "./workflow/scheduler.js";
@@ -48,6 +51,15 @@ async function main() {
   const accessCfg = loadAccessConfig();
   if (accessCfg) {
     console.log(`  Loaded access.yaml (mode: ${accessCfg.mode || "open"})`);
+  }
+
+  // Load DB-granted superadmins into the in-memory cache that keeps
+  // isSuperAdmin() synchronous. Refreshed on every grant/revoke write; a
+  // failure here must not stop the server (access.yaml admins still work).
+  try {
+    await loadGrantedSuperAdmins();
+  } catch (err) {
+    console.error("[access] failed to load DB-granted superadmins:", err);
   }
 
   // Validate PromptOwl license key (non-blocking — server runs either way)

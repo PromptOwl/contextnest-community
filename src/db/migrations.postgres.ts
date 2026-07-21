@@ -62,7 +62,9 @@ const HISTORICAL_MIGRATIONS = [
   "020_server_settings",
   "026_api_events_nest_index",
   "027_teams",
-  "028_github_sync_state",
+  "028_user_department",
+  "029_super_admins",
+  "030_github_sync_state",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -74,10 +76,14 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       password_hash TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT ${NOW},
       is_admin INTEGER NOT NULL DEFAULT 0,
-      is_invited INTEGER NOT NULL DEFAULT 0
+      is_invited INTEGER NOT NULL DEFAULT 0,
+      department TEXT
     );
     -- Case-insensitive email uniqueness (replaces SQLite COLLATE NOCASE index).
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nocase ON users (lower(email));
+    -- users.department is declared inline above (no-op for databases created
+    -- before it shipped) — migration 028 parity for existing deployments.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS department TEXT;
 
     CREATE TABLE IF NOT EXISTS nests (
       id TEXT PRIMARY KEY,
@@ -539,7 +545,17 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       updated_at TEXT NOT NULL DEFAULT ${NOW}
     );
 
-    -- github_sync_state (migration 028): per-source GitHub markdown sync
+    -- super_admins (migration 029): DB-backed superadmin grants made from the
+    -- UI/API. Effective superadmin = access.yaml super_admins ∪ these rows
+    -- (case-insensitive; emails stored lowercased). File entries can never be
+    -- revoked via the API — lockout safety.
+    CREATE TABLE IF NOT EXISTS super_admins (
+      email TEXT PRIMARY KEY,
+      granted_by TEXT NOT NULL,
+      granted_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+
+    -- github_sync_state (migration 030): per-source GitHub markdown sync
     -- bookkeeping — ETag + head tree sha for change detection, file→blob-sha
     -- map so only changed blobs are refetched, and the last-run status the
     -- Settings UI shows per source. See src/sync/github-sync.ts.
