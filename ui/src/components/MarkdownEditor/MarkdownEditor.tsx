@@ -202,6 +202,7 @@ import { toggleExtensions } from "./extensions/Toggle";
 import { columnExtensions } from "./extensions/Columns";
 import { TableControls } from "./TableControls";
 import { TaskCheckbox } from "./extensions/TaskCheckbox";
+import { VideoPreview } from "./extensions/VideoPreview";
 import { Mention } from "./extensions/Mention";
 import {
   SearchReplace,
@@ -468,6 +469,7 @@ export const MarkdownEditor = forwardRef<
           : undefined,
       }),
       TaskCheckbox,
+      VideoPreview,
       Mention.configure({ onMentionClick }),
       SearchReplace,
       // html:true keeps legacy HTML docs loadable; output is markdown.
