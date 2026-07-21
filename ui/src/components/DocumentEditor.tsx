@@ -152,7 +152,7 @@ export function DocumentEditor({
   onJumpBreadcrumb,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
-  const { adminStatus, isAdmin, workflowPlaneEnabled } = useAuth();
+  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
   // you're reading it" instead of bouncing back to the nest. Same dialog
@@ -1728,8 +1728,10 @@ export function DocumentEditor({
               {/* Icon segmented control, not a dropdown: all choices are
                   visible at once and carry the same type color language as
                   the list icons (document slate / artifact amber / agent
-                  violet / skill blue). Runnable types only when the workflow
-                  plane is on. */}
+                  violet / skill blue). Built from the enabled set: document
+                  always on; artifact/table only when their content-type
+                  toggle is on; runnable types only when the workflow plane
+                  is on. */}
               <div
                 className="inline-flex rounded-md border overflow-hidden"
                 role="radiogroup"
@@ -1739,10 +1741,18 @@ export function DocumentEditor({
                   [
                     { value: "document", label: "Document", Icon: FileText,
                       on: "bg-slate-500/15 text-slate-700 dark:text-slate-300" },
-                    { value: "artifact", label: "Artifact", Icon: Code2,
-                      on: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },
-                    { value: "table", label: "Table", Icon: Table2,
-                      on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300" },
+                    ...(typeArtifactEnabled
+                      ? [
+                          { value: "artifact", label: "Artifact", Icon: Code2,
+                            on: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },
+                        ]
+                      : []),
+                    ...(typeTableEnabled
+                      ? [
+                          { value: "table", label: "Table", Icon: Table2,
+                            on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300" },
+                        ]
+                      : []),
                     ...(workflowPlaneEnabled
                       ? [
                           { value: "agent", label: "Agent", Icon: Bot,

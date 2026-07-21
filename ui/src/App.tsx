@@ -21,6 +21,7 @@ import { DefinitionsPage } from "./components/DefinitionsPage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { BetaBadge } from "@/components/ui/beta-badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -178,7 +179,12 @@ export default function App() {
       // Feature flags gate other views (workflow-plane nav, sub-agent picker)
       // off the /health-sourced AuthContext state, not serverSettings. Re-read
       // health so those toggles take effect live, without a page reload.
-      if ("workflow_plane_enabled" in patch || "subagent_runs_enabled" in patch) {
+      if (
+        "workflow_plane_enabled" in patch ||
+        "subagent_runs_enabled" in patch ||
+        "type_artifact_enabled" in patch ||
+        "type_table_enabled" in patch
+      ) {
         await refreshHealth();
       }
       toast.success("Settings saved");
@@ -660,6 +666,7 @@ export default function App() {
               >
                 <Workflow className="h-3.5 w-3.5 mr-1" />
                 Workflows
+                <BetaBadge className="ml-1.5" />
               </Button>
             )}
 

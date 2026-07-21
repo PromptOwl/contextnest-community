@@ -379,6 +379,21 @@ export const config = {
     return process.env.FEATURE_WORKFLOW_PLANE === "true";
   },
   /**
+   * Content-type toggles — soft-disable a node type server-wide. DEFAULT ON:
+   * missing/unset/anything-but-"false" = enabled, so existing deployments see
+   * zero behavior change. Only CREATION of the type is refused when disabled;
+   * existing nodes of that type still read/render/version (never data loss).
+   * Runnable types (agent/skill/tool) are NOT governed here — they stay gated
+   * by FEATURE_WORKFLOW_PLANE. Superadmin-editable at runtime via
+   * /admin/settings (type_artifact_enabled / type_table_enabled).
+   */
+  get TYPE_ARTIFACT_ENABLED(): boolean {
+    return process.env.TYPE_ARTIFACT_ENABLED !== "false";
+  },
+  get TYPE_TABLE_ENABLED(): boolean {
+    return process.env.TYPE_TABLE_ENABLED !== "false";
+  },
+  /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling
    * back into POST /run for a child agent). Gated SEPARATELY from the base
    * plane because recursion is the risky surface — unbounded fan-out,

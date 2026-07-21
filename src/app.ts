@@ -243,6 +243,11 @@ export function createApp(): Hono<AuthEnv> {
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
       workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+      // Content-type toggles (default ON). The editor's type picker mirrors
+      // these so a disabled type disappears from creation exactly when the
+      // API would refuse it — existing nodes of the type stay readable.
+      type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
+      type_table_enabled: config.TYPE_TABLE_ENABLED,
       // Sub-agent runs gate its own recursion surface separately (env-only,
       // must clear a security review — NOT a UI toggle). Exposed read-only so
       // the Runs page shows the "spawn sub-agent" option only when it's live.
@@ -370,6 +375,8 @@ export function createApp(): Hono<AuthEnv> {
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+    type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
+    type_table_enabled: config.TYPE_TABLE_ENABLED,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
@@ -452,6 +459,21 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "FEATURE_WORKFLOW_PLANE",
         value: body.workflow_plane_enabled ? "true" : null,
+      });
+    }
+    // Content-type toggles. Default ON — an explicit "false" is the only
+    // disabled state, so enabling clears the row (falls to the default) and
+    // env-set values gate identically to UI-set ones.
+    if ("type_artifact_enabled" in body) {
+      pending.push({
+        name: "TYPE_ARTIFACT_ENABLED",
+        value: body.type_artifact_enabled ? null : "false",
+      });
+    }
+    if ("type_table_enabled" in body) {
+      pending.push({
+        name: "TYPE_TABLE_ENABLED",
+        value: body.type_table_enabled ? null : "false",
       });
     }
     if ("anthropic_api_key" in body) {

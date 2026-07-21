@@ -36,6 +36,7 @@ import {
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { config } from "../config.js";
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
@@ -461,6 +462,19 @@ export async function createNode(
   const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
 
+  // Content-type toggles: creation of a disabled type is refused here — the
+  // shared choke point for REST + MCP — so every surface gates identically.
+  // Soft-disable only: existing nodes of a disabled type still read/render/
+  // version untouched. Runnable types (agent/skill/tool) are gated by
+  // FEATURE_WORKFLOW_PLANE at the plane routes, not here.
+  const requestedType = input.type || "document";
+  if (requestedType === "artifact" && !config.TYPE_ARTIFACT_ENABLED) {
+    throw new ValidationError("Artifact nodes are disabled on this server");
+  }
+  if (requestedType === "table" && !config.TYPE_TABLE_ENABLED) {
+    throw new ValidationError("Table nodes are disabled on this server");
+  }
+
   if (input.schedule !== undefined && !isRunnableType(input.type)) {
     throw new ValidationError(
       `schedule is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(
@@ -479,7 +493,7 @@ export async function createNode(
     filePath: "",
     frontmatter: {
       title: input.title,
-      type: (input.type as any) || "document",
+      type: requestedType as any,
       tags,
       status: (input.status as any) || (initialStatus as any),
       version: initialVersion,
