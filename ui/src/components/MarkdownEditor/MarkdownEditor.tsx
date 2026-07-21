@@ -176,9 +176,9 @@ import { toast } from "sonner";
 import {
   looksLikeDelimitedTable,
   detectHeaderRow,
-  detectDelimiter,
-  parseDelimited,
   rowsToMarkdownTable,
+  readUploadedTable,
+  uploadedTableErrorMessage,
   LARGE_TABLE_ROW_THRESHOLD,
   type Delimiter,
 } from "@/lib/csv-table";
@@ -1638,46 +1638,29 @@ function Toolbar({
   // Hidden file input driven by the "Insert table from CSV" toolbar button.
   const csvInputRef = useRef<HTMLInputElement>(null);
   const pickCsv = () => csvInputRef.current?.click();
-  // Refuse to read absurdly large files into memory — a table this size
-  // would be unusable in the editor anyway.
-  const MAX_CSV_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
   const onCsvPicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
     if (!file) return;
-    if (file.size > MAX_CSV_FILE_BYTES) {
-      toast.error(
-        `That file is ${(file.size / (1024 * 1024)).toFixed(1)} MB — ` +
-          `the limit for table import is 10 MB.`,
-      );
-      return;
-    }
     const toastId = toast.loading("Processing file…");
     // Let the loader actually paint before the (synchronous, possibly heavy)
     // read + parse blocks the main thread — two frames clears the commit+paint.
     await new Promise((r) =>
       requestAnimationFrame(() => requestAnimationFrame(() => r(null))),
     );
-    let text: string;
-    try {
-      text = await file.text();
-    } catch {
-      toast.error("Couldn't read that file.", { id: toastId });
-      return;
-    }
-    // .tsv extension pins the delimiter; otherwise auto-detect
-    // (tab → comma → semicolon). Comma is a harmless single-column fallback.
-    const delimiter = /\.tsv$/i.test(file.name)
-      ? "\t"
-      : (detectDelimiter(text) ?? ",");
-    const rows = parseDelimited(text, delimiter);
-    if (rows.length === 0) {
-      toast.error("No table rows found in that file.", { id: toastId });
+    // Size cap, read, delimiter resolution, parse — shared with the
+    // table-node source editor (csv-table.readUploadedTable).
+    const res = await readUploadedTable(file);
+    if (!res.ok) {
+      toast.error(uploadedTableErrorMessage(res.error, file), { id: toastId });
       return;
     }
     // insertDelimitedTable pops its own result toast; drop the loader first.
     toast.dismiss(toastId);
-    insertDelimitedTable(editor, rows, { text, delimiter });
+    insertDelimitedTable(editor, res.rows, {
+      text: res.text,
+      delimiter: res.delimiter,
+    });
   };
 
   // Hidden file input driven by the Image toolbar button.
