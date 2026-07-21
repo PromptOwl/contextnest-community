@@ -8,6 +8,7 @@ import {
   FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
+import { copyTextWithToast } from "../lib/clipboard";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -874,7 +875,7 @@ function CopyInline({ value }: { value: string }) {
     <button
       onClick={async (e) => {
         e.stopPropagation();
-        await navigator.clipboard.writeText(value);
+        if (!(await copyTextWithToast(value))) return;
         setCopied(true);
         setTimeout(() => setCopied(false), 1200);
       }}

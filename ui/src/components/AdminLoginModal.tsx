@@ -18,6 +18,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Shield, AlertCircle, Loader2, ExternalLink, Copy, Check, KeyRound, Eye, EyeOff } from "lucide-react";
 import * as api from "../lib/api";
 import type { ClaimBlocked } from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 import { useAuth } from "../auth/AuthContext";
 
 interface AdminLoginModalProps {
@@ -74,7 +75,7 @@ export function AdminLoginModal({
 
   const copyCode = async () => {
     if (!deviceCode) return;
-    await navigator.clipboard.writeText(deviceCode);
+    if (!(await copyTextWithToast(deviceCode))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };

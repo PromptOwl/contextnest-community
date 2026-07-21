@@ -45,6 +45,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import * as api from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 import { useAuth } from "../auth/AuthContext";
 
 interface ConnectModalProps {
@@ -737,11 +738,9 @@ function KeyRevealModal({
 }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(apiKey);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {}
+    if (!(await copyTextWithToast(apiKey))) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   };
   return (
     <Dialog open onOpenChange={onClose}>
@@ -828,11 +827,9 @@ function Snippet({
 function CopyButton({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {}
+    if (!(await copyTextWithToast(value))) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   };
   return (
     <Button variant="ghost" size="sm" className="h-6 px-2" onClick={copy}>
