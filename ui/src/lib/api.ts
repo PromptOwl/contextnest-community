@@ -1260,6 +1260,10 @@ export interface Team {
   /** Owner email for display ("Created by …"), from API. */
   owner_email?: string;
   members: TeamMember[];
+  /** "promptowl" for an imported team; null when created here. */
+  source?: string | null;
+  /** The team's id in `source`'s system; null when created here. */
+  external_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1321,6 +1325,86 @@ export async function updateTeamMemberRole(
 export async function removeTeamMember(teamId: string, userId: string) {
   return request<{ team: Team }>(`/teams/${teamId}/members/${userId}`, {
     method: "DELETE",
+  });
+}
+
+// ─── PromptOwl team import ──────────────────────────────────────────────
+// Only available to users who signed in with PromptOwl: the token lives in an
+// httpOnly cookie set at that sign-in, and the browser attaches it, so these
+// calls carry no token of their own. Anyone else gets `promptowl_connect_
+// required` from the server, and `hasPromptowlSession()` keeps the UI from
+// offering the feature in the first place. Nothing is stored server-side.
+
+/** A team as PromptOwl reports it — not yet imported. */
+export interface PromptowlTeam {
+  id: string;
+  name: string;
+  /** True when you own the team in PromptOwl. */
+  owned: boolean;
+  /** Your role on the team in PromptOwl: Owner | Editor | Viewer | User. */
+  your_role: string;
+  source: string | null;
+  enterprise: { id: string; name: string } | null;
+  updated_at: string | null;
+  members: { email: string; role: string }[];
+}
+
+/**
+ * Whether you may import a team — Owner or Editor in PromptOwl only.
+ * Importing makes you owner of the copy here, which is more reach than a
+ * view-only member holds upstream. Mirrors the server, which enforces it.
+ */
+export function canImportPromptowlTeam(team: PromptowlTeam): boolean {
+  return ["owner", "editor"].includes((team.your_role || "").toLowerCase());
+}
+
+/** What importing one team changed locally. Emails, not user ids. */
+export interface PromptowlSyncResult {
+  team_id: string;
+  external_id: string;
+  name: string;
+  created: boolean;
+  added: string[];
+  updated: string[];
+  removed: string[];
+}
+
+/** Server marker meaning "sign in with PromptOwl to use this". */
+export const PROMPTOWL_CONNECT_REQUIRED = "promptowl_connect_required";
+
+/**
+ * True when this session signed in with PromptOwl — the only sessions that can
+ * import teams. Reads the readable marker cookie the server sets at PromptOwl
+ * sign-in (the token itself is httpOnly and unreadable here, by design).
+ *
+ * A UI hint only: the server independently requires the real token cookie, so
+ * faking this marker just yields a tab whose requests are refused.
+ */
+export function hasPromptowlSession(): boolean {
+  if (typeof document === "undefined") return false;
+  return document.cookie
+    .split(";")
+    .some((c) => c.trim().startsWith("cnst_po_session="));
+}
+
+/**
+ * True when an error from the calls below means the PromptOwl session is gone
+ * (never signed in, or the token was revoked upstream). The server answers 428
+ * (not 401) for this, so it never trips the logged-out handling in `request`.
+ */
+export function isPromptowlConnectRequired(err: any): boolean {
+  return (err as ApiError)?.body?.code === PROMPTOWL_CONNECT_REQUIRED;
+}
+
+/** The caller's PromptOwl teams — not yet imported. */
+export async function listPromptowlTeams() {
+  return request<{ teams: PromptowlTeam[] }>(`/teams/promptowl`);
+}
+
+export async function syncPromptowlTeams(teamIds: string[]) {
+  return request<{ results: PromptowlSyncResult[] }>(`/teams/promptowl/sync`, {
+    method: "POST",
+    body: JSON.stringify({ team_ids: teamIds }),
   });
 }
 

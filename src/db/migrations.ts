@@ -1181,6 +1181,35 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("029_super_admins");
   }
+
+  // 031: provenance for imported teams (CU-wdqcpzwc6b). A team imported from
+  //   PromptOwl records where it came from (`source`) and its id in that system
+  //   (`external_id`), which is what makes a re-import update the same row
+  //   instead of minting a duplicate — name is not a key, since either side can
+  //   rename. Both columns are NULL on every hand-made team, which keeps the
+  //   existing create/manage paths untouched. The unique index is partial so
+  //   those NULL rows don't collide with each other, and is keyed by owner too:
+  //   the same upstream team imported by two different people is two unrelated
+  //   local teams, each owned by its importer.
+  if (!hasMigration("031_team_source")) {
+    db.transaction(() => {
+      const teamCols = (
+        db.prepare("PRAGMA table_info(teams)").all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!teamCols.includes("source")) {
+        db.exec("ALTER TABLE teams ADD COLUMN source TEXT");
+      }
+      if (!teamCols.includes("external_id")) {
+        db.exec("ALTER TABLE teams ADD COLUMN external_id TEXT");
+      }
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_external
+          ON teams(owner_id, source, external_id)
+          WHERE external_id IS NOT NULL;
+      `);
+    })();
+    recordMigration("031_team_source");
+  }
 }
 
 /**

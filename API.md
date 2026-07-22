@@ -324,6 +324,69 @@ same as collaborator/steward invites.
 A team-shared nest also appears on each member's dashboard (`GET /nests`) with
 their role, so they can open it and act per their role.
 
+### PromptOwl team import (`/teams/promptowl/*`)
+
+Copy the teams the caller owns in PromptOwl into this server. Both routes are
+capped at 10 requests per IP per 15 minutes.
+
+**Only a PromptOwl sign-in can import.** Signing in with PromptOwl parks the
+device token in an httpOnly cookie (`cnst_po_token`, `Path=/teams`, lifetime of
+the session), and these routes read it **from there and nowhere else** — a token
+in the request body is ignored, so a user who signed in another way (SSO, OIDC,
+password) cannot import by supplying one. Hiding the UI is the other half of
+this rule, not the enforcement.
+
+The token is **never written to the database**: PromptOwl hands it over exactly
+once, and a self-hosted server holding live credentials for someone else's SaaS
+is a far worse liability than a cookie that dies with the session. `Path=/teams`
+means the browser only attaches it to these routes. It is scoped upstream to
+`user:read` + `teams:read`, so it cannot act as the user in PromptOwl (no agent
+chat, no credit spend) even if it leaks.
+
+Sign-in also sets `cnst_po_session=1` — a readable, secret-free marker so the
+SPA knows whether to offer the PromptOwl Teams tab. Both cookies are cleared on
+logout.
+
+**`428 Precondition Required`** with `{ code: "promptowl_connect_required" }`
+means "no PromptOwl session — sign in with PromptOwl". It is deliberately **not**
+`401`: the caller is authenticated here, and a `401` would read to the SPA as an
+expired session and bounce them to the login screen. The same 428 is returned
+when PromptOwl rejects the token (revoked upstream), and the cookie is cleared
+so a dead token isn't replayed forever.
+
+An imported team carries `source: "promptowl"` and `external_id` (its PromptOwl
+id); a team created here has `null` for both. `(owner_id, source, external_id)`
+is the import key — a re-import updates that same team rather than duplicating
+it, and survives a rename on either side. Two users importing the same PromptOwl
+team each get their own local team.
+
+- **GET `/teams/promptowl`** — `{ teams: [{ id, name, owned, your_role, source,
+  enterprise, updated_at, members: [{ email, role }] }] }`. Read-only. Returns
+  every team the caller owns **or belongs to** in PromptOwl; `your_role` is
+  their role on it there. No PromptOwl session → `428`; unreachable PromptOwl →
+  `400`.
+- **POST `/teams/promptowl/sync`** — `{ "team_ids": [...] }` →
+  `{ results: [{ team_id, external_id, name, created, added, updated, removed }] }`,
+  where `added`/`updated`/`removed` are member emails. A `team_id` the caller has
+  nothing to do with upstream → `400` (unrelated and nonexistent teams are
+  refused identically, so the error can't be used to probe which ids exist).
+
+  **Importing requires `Owner` or `Editor` upstream** → otherwise `403`, and the
+  whole batch is refused before any writes. The local copy is owned by the
+  importer — free rein to rename it, rewrite its roster, and share it onto a
+  nest. A view-only member of the upstream team holds none of that and must not
+  gain it by copying the team here; that's the same escalation
+  `shareTeamWithNest` already refuses. PromptOwl's `Viewer`, its default `User`,
+  and any unrecognized role all count as no authority.
+
+  **PromptOwl wins.** The local roster is reconciled to match: roles are reset
+  and members no longer in the PromptOwl team are **removed**, including ones
+  added here by hand. Roles map `Owner→admin`, `Editor→editor`, `Viewer→viewer`,
+  and `User`→`viewer` (as does any unrecognized role — an unknown role must never
+  widen access). The importer is the local team's owner and is not written into
+  the roster. Unregistered member emails mint placeholders exactly as
+  `POST /teams/:teamId/members` does.
+
 ### Nest team-share (`/nests/:nestId/teams`)
 
 - **GET** `(write+)` — teams shared onto the nest, enriched with members:

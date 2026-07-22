@@ -35,6 +35,8 @@ interface TeamRow {
   name: string;
   owner_id: string;
   members: string;
+  source?: string | null;
+  external_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -55,6 +57,8 @@ function rowToTeam(row: TeamRow): Team {
     name: row.name,
     owner_id: row.owner_id,
     members: parseMembers(row.members),
+    source: row.source ?? null,
+    external_id: row.external_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -133,9 +137,16 @@ function managementRank(
   return m ? ROLE_RANK[m.role] ?? 0 : 0;
 }
 
+/**
+ * Create a team owned by `ownerId`. `source`/`externalId` mark it as imported
+ * from another system and are the key a re-import matches on
+ * (findTeamByExternalId); both stay null for a team created here by hand.
+ */
 export async function createTeam(params: {
   name: string;
   ownerId: string;
+  source?: string;
+  externalId?: string;
 }): Promise<Team> {
   const name = params.name?.trim();
   if (!name) throw new ValidationError("Team name is required");
@@ -143,10 +154,38 @@ export async function createTeam(params: {
   const now = new Date().toISOString();
   const id = uuid();
   await db.run(
-    "INSERT INTO teams (id, name, owner_id, members, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, name, params.ownerId, "[]", now, now],
+    "INSERT INTO teams (id, name, owner_id, members, source, external_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    [
+      id,
+      name,
+      params.ownerId,
+      "[]",
+      params.source ?? null,
+      params.externalId ?? null,
+      now,
+      now,
+    ],
   );
   return enrichTeam(rowToTeam(await loadTeamRow(id)));
+}
+
+/**
+ * The caller's local copy of an upstream team, or null if they've never
+ * imported it. Scoped to the owner: two people importing the same upstream team
+ * each get their own local team, and neither can be steered onto the other's
+ * row.
+ */
+export async function findTeamByExternalId(params: {
+  ownerId: string;
+  source: string;
+  externalId: string;
+}): Promise<Team | null> {
+  const db = getDb();
+  const row = (await db.get(
+    "SELECT * FROM teams WHERE owner_id = ? AND source = ? AND external_id = ?",
+    [params.ownerId, params.source, params.externalId],
+  )) as TeamRow | undefined;
+  return row ? enrichTeam(rowToTeam(row)) : null;
 }
 
 /**
@@ -239,49 +278,8 @@ export async function addMember(params: {
   if (rank < OWNER_RANK && ROLE_RANK[params.role] > rank) {
     throw new ForbiddenError("You can't give a member a higher role than your own.");
   }
-  const db = getDb();
-
-  // Resolve the target user, minting a placeholder for an unregistered email
-  // (claimed by registering the same address — same flow as collaborators).
-  //
-  // The stored email ALWAYS comes from the resolved account, never from the
-  // request: when a user_id is supplied, a caller-provided email is ignored
-  // entirely. Trusting it would let anyone who knows a user's id pin an
-  // arbitrary address onto that membership, which then renders as their
-  // identity across the roster UIs.
-  let userId = params.userId;
-  let email: string | undefined;
-  if (!userId) {
-    const requested = params.email ? normalizeEmail(params.email) : undefined;
-    if (!requested) {
-      throw new ValidationError("user_id or email is required");
-    }
-    const existing = (await db.get(
-      "SELECT id, email FROM users WHERE LOWER(email) = ?",
-      [requested],
-    )) as { id: string; email?: string } | undefined;
-    if (existing) {
-      userId = existing.id;
-      email = normalizeEmail(existing.email ?? requested);
-    } else {
-      const { hashPassword } = await import("../auth/keys.js");
-      userId = uuid();
-      await db.run(
-        "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-        [userId, requested, null, await hashPassword(uuid())],
-      );
-      email = requested;
-    }
-  } else {
-    const u = (await db.get("SELECT email FROM users WHERE id = ?", [
-      userId,
-    ])) as { email?: string } | undefined;
-    if (!u) throw new ValidationError("User not found");
-    email = normalizeEmail(u.email ?? "");
-  }
-
-  const resolvedId = userId;
-  const resolvedEmail = email;
+  const { userId: resolvedId, email: resolvedEmail } =
+    await resolveMemberIdentity(params);
   await mutateMembers(params.teamId, (members) => {
     if (members.some((m) => m.userId === resolvedId)) {
       throw new ConflictError(
@@ -293,6 +291,94 @@ export async function addMember(params: {
       { userId: resolvedId, email: resolvedEmail, role: params.role as TeamMemberRole },
     ];
   });
+  return enrichTeam(rowToTeam(await loadTeamRow(params.teamId)));
+}
+
+/**
+ * Resolve a roster entry to a real account, minting a placeholder for an
+ * unregistered email (claimed by registering the same address — same flow as
+ * collaborators).
+ *
+ * The returned email ALWAYS comes from the resolved account, never from the
+ * request: when a userId is supplied, a caller-provided email is ignored
+ * entirely. Trusting it would let anyone who knows a user's id pin an arbitrary
+ * address onto that membership, which then renders as their identity across the
+ * roster UIs.
+ *
+ * Shared by addMember and the imported-roster path, so an imported member and a
+ * hand-added one are the same kind of user row.
+ */
+export async function resolveMemberIdentity(params: {
+  email?: string;
+  userId?: string;
+}): Promise<{ userId: string; email: string }> {
+  const db = getDb();
+  if (params.userId) {
+    const u = (await db.get("SELECT email FROM users WHERE id = ?", [
+      params.userId,
+    ])) as { email?: string } | undefined;
+    if (!u) throw new ValidationError("User not found");
+    return { userId: params.userId, email: normalizeEmail(u.email ?? "") };
+  }
+
+  const requested = params.email ? normalizeEmail(params.email) : undefined;
+  if (!requested) {
+    throw new ValidationError("user_id or email is required");
+  }
+  const existing = (await db.get(
+    "SELECT id, email FROM users WHERE LOWER(email) = ?",
+    [requested],
+  )) as { id: string; email?: string } | undefined;
+  if (existing) {
+    return {
+      userId: existing.id,
+      email: normalizeEmail(existing.email ?? requested),
+    };
+  }
+  const { hashPassword } = await import("../auth/keys.js");
+  const userId = uuid();
+  await db.run(
+    "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
+    [userId, requested, null, await hashPassword(uuid())],
+  );
+  return { userId, email: requested };
+}
+
+/**
+ * Replace a team's whole roster in one atomic write — used by the import path,
+ * where the upstream system is the source of truth and the local roster must
+ * end up matching it exactly (adds, role changes, and removals together).
+ *
+ * Doing it as one mutateMembers rather than a loop of addMember/removeMember
+ * calls matters: each of those is its own transaction, so a failure partway
+ * through a reconcile would strand the team half-imported. Same admin+ gate as
+ * the piecemeal ops; no escalation cap, because replacing a roster wholesale is
+ * an admin/owner act by definition and there is no "grant above your own rank"
+ * step to guard.
+ */
+export async function replaceTeamRoster(params: {
+  teamId: string;
+  members: TeamMember[];
+  callerUserId: string;
+  allowAdmin?: boolean;
+}): Promise<Team> {
+  for (const m of params.members) assertValidRole(m.role);
+  const row = await loadTeamRow(params.teamId);
+  if (
+    managementRank(row, params.callerUserId, !!params.allowAdmin) <
+    ROLE_RANK.admin
+  ) {
+    throw new ForbiddenError(
+      "Only a team admin or the owner can replace this team's roster.",
+    );
+  }
+  await mutateMembers(params.teamId, () =>
+    params.members.map((m) => ({
+      userId: m.userId,
+      email: m.email,
+      role: m.role,
+    })),
+  );
   return enrichTeam(rowToTeam(await loadTeamRow(params.teamId)));
 }
 
