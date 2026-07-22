@@ -5,7 +5,7 @@ import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
 import {
-  ArrowLeft, UserPlus, Shield, ShieldCheck, Users, Copy, Check,
+  ArrowLeft, UserPlus, Shield, ShieldCheck, ShieldOff, Users, Copy, Check,
   AlertCircle, Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -54,13 +54,28 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
   const [grantTarget, setGrantTarget] = useState<Teammate | null>(null);
   const [granting, setGranting] = useState(false);
   const [grantError, setGrantError] = useState<string | null>(null);
+  // User pending superadmin-revoke confirmation.
+  const [revokeTarget, setRevokeTarget] = useState<Teammate | null>(null);
+  const [revoking, setRevoking] = useState(false);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
+  // email (lowercased) → superadmin source. Only "granted" rows are revocable;
+  // "license"/"config" admins get no revoke button (they're file-authoritative).
+  const [adminSource, setAdminSource] = useState<Record<string, string>>({});
 
   const fetchTeammates = async () => {
     setLoading(true);
     try {
-      const data = await api.listTeammates();
+      const [data, admins] = await Promise.all([
+        api.listTeammates(),
+        api.listSuperAdmins(),
+      ]);
       setTeammates(data.teammates);
       setPendingStewards(data.pending_stewards || []);
+      setAdminSource(
+        Object.fromEntries(
+          admins.super_admins.map((a) => [a.email.toLowerCase(), a.source]),
+        ),
+      );
       setError(null);
     } catch (err: any) {
       setError(err.message);
@@ -176,6 +191,18 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                       )}
                     </div>
                   </div>
+                  {t.is_admin && adminSource[t.email.toLowerCase()] === "granted" && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                      onClick={() => setRevokeTarget(t)}
+                      title="Revoke this user's superadmin access"
+                    >
+                      <ShieldOff className="h-4 w-4 mr-2" />
+                      Revoke superadmin
+                    </Button>
+                  )}
                   {!t.is_admin && (
                     <>
                     {!t.is_invited && (
@@ -444,6 +471,57 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
               }}
             >
               {granting ? <Loader2 className="h-4 w-4 animate-spin" /> : "Grant"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!revokeTarget}
+        onOpenChange={(o) => !o && !revoking && setRevokeTarget(null)}
+      >
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>Revoke superadmin from {revokeTarget?.email}?</DialogTitle>
+            <DialogDescription>
+              They immediately lose server-admin access. They keep their account
+              and any nest/collaborator roles granted separately. You can grant
+              superadmin again later.
+            </DialogDescription>
+          </DialogHeader>
+          {revokeError && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{revokeError}</AlertDescription>
+            </Alert>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRevokeTarget(null)}
+              disabled={revoking}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={revoking}
+              onClick={async () => {
+                if (!revokeTarget) return;
+                setRevoking(true);
+                setRevokeError(null);
+                try {
+                  await api.removeSuperAdmin(revokeTarget.email);
+                  setRevokeTarget(null);
+                  await fetchTeammates();
+                } catch (e: any) {
+                  setRevokeError(e.message);
+                } finally {
+                  setRevoking(false);
+                }
+              }}
+            >
+              {revoking ? <Loader2 className="h-4 w-4 animate-spin" /> : "Revoke"}
             </Button>
           </DialogFooter>
         </DialogContent>
