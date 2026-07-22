@@ -488,12 +488,55 @@ export interface ImportedFile {
 }
 
 /** Import a folder the user picked in their browser. The browser reads the
- *  folder and uploads each file; the server writes them into the workspace. */
-export async function importNest(name: string, files: ImportedFile[]) {
-  return request<{ nest: any; documents: number }>("/nests/import", {
+ *  folder and uploads each file; the server writes them into the workspace.
+ *
+ *  When `onProgress` is supplied we hit the `?stream=1` endpoint, which streams
+ *  NDJSON progress lines so the caller can render a real progress bar; without
+ *  it, the original single JSON response is used. */
+export async function importNest(
+  name: string,
+  files: ImportedFile[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<{ nest: any; documents: number }> {
+  if (!onProgress) {
+    return request<{ nest: any; documents: number }>("/nests/import", {
+      method: "POST",
+      body: JSON.stringify({ name, files }),
+    });
+  }
+
+  const res = await fetch(`${API_BASE}/nests/import?stream=1`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, files }),
+    credentials: "include",
   });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || `Import failed: ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let result: { nest: any; documents: number } | null = null;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      const msg = JSON.parse(line);
+      if (msg.error) throw new Error(msg.error);
+      if (msg.phase === "register") onProgress(msg.done, msg.total);
+      if (msg.complete) result = { nest: msg.nest, documents: msg.documents };
+    }
+  }
+  if (!result) throw new Error("Import failed");
+  return result;
 }
 
 /** A folder under DATA_ROOT that has not been converted to a nest yet. */

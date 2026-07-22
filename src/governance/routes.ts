@@ -468,6 +468,81 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
   );
 });
 
+// External-edit approve/reject MUST be registered before the generic
+// /:nodeId{.+}/approve and /reject review routes below: the greedy `{.+}`
+// nodeId otherwise swallows `.../external-edits/:suggestionId` and matches the
+// review route first (returning "No pending review for this node"). Hono runs
+// the first-registered matching handler, so specific-before-generic wins.
+
+// POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/approve
+governanceNodeRoutes.post(
+  "/:nodeId{.+}/external-edits/:suggestionId/approve",
+  async (c) => {
+    const nestId = c.req.param("nestId")!;
+    const nodeId = c.req.param("nodeId")!;
+    const suggestionId = c.req.param("suggestionId")!;
+    const body = await c.req
+      .json<{ comment?: string }>()
+      .catch(() => ({}) as { comment?: string });
+    const actor = await getUserEmail(c);
+    try {
+      const result = await externalEdits.approveExternalEdit({
+        nestId,
+        documentId: nodeId,
+        suggestionId,
+        actor,
+        comment: body.comment,
+      });
+      return c.json({
+        approved: true,
+        version: result.versionEntry.version,
+        chainEvent: result.chainEvent.event_id,
+      });
+    } catch (err: any) {
+      console.error(
+        `[external-edit-route] approve failed nest=${nestId} node=${nodeId} suggestion=${suggestionId}`,
+        { message: err?.message, name: err?.name, stack: err?.stack },
+      );
+      return c.json(
+        { error: err.message, name: err?.name },
+        400,
+      );
+    }
+  },
+);
+
+// POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/reject
+governanceNodeRoutes.post(
+  "/:nodeId{.+}/external-edits/:suggestionId/reject",
+  async (c) => {
+    const nestId = c.req.param("nestId")!;
+    const nodeId = c.req.param("nodeId")!;
+    const suggestionId = c.req.param("suggestionId")!;
+    const body = await c.req
+      .json<{ reason?: string }>()
+      .catch(() => ({}) as { reason?: string });
+    if (!body.reason) {
+      throw new ValidationError("Rejection reason is required");
+    }
+    const actor = await getUserEmail(c);
+    try {
+      const result = await externalEdits.rejectExternalEdit({
+        nestId,
+        documentId: nodeId,
+        suggestionId,
+        actor,
+        reason: body.reason,
+      });
+      return c.json({
+        rejected: true,
+        chainEvent: result.chainEvent.event_id,
+      });
+    } catch (err: any) {
+      return c.json({ error: err.message }, 400);
+    }
+  },
+);
+
 // POST /nests/:nestId/nodes/:nodeId/approve
 governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
   const nestId = c.req.param("nestId")!;
@@ -568,75 +643,6 @@ governanceNodeRoutes.get(
       return c.json({ error: "Suggestion not found" }, 404);
     }
     return c.json({ entry: detail });
-  },
-);
-
-// POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/approve
-governanceNodeRoutes.post(
-  "/:nodeId{.+}/external-edits/:suggestionId/approve",
-  async (c) => {
-    const nestId = c.req.param("nestId")!;
-    const nodeId = c.req.param("nodeId")!;
-    const suggestionId = c.req.param("suggestionId")!;
-    const body = await c.req
-      .json<{ comment?: string }>()
-      .catch(() => ({}) as { comment?: string });
-    const actor = await getUserEmail(c);
-    try {
-      const result = await externalEdits.approveExternalEdit({
-        nestId,
-        documentId: nodeId,
-        suggestionId,
-        actor,
-        comment: body.comment,
-      });
-      return c.json({
-        approved: true,
-        version: result.versionEntry.version,
-        chainEvent: result.chainEvent.event_id,
-      });
-    } catch (err: any) {
-      console.error(
-        `[external-edit-route] approve failed nest=${nestId} node=${nodeId} suggestion=${suggestionId}`,
-        { message: err?.message, name: err?.name, stack: err?.stack },
-      );
-      return c.json(
-        { error: err.message, name: err?.name },
-        400,
-      );
-    }
-  },
-);
-
-// POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/reject
-governanceNodeRoutes.post(
-  "/:nodeId{.+}/external-edits/:suggestionId/reject",
-  async (c) => {
-    const nestId = c.req.param("nestId")!;
-    const nodeId = c.req.param("nodeId")!;
-    const suggestionId = c.req.param("suggestionId")!;
-    const body = await c.req
-      .json<{ reason?: string }>()
-      .catch(() => ({}) as { reason?: string });
-    if (!body.reason) {
-      throw new ValidationError("Rejection reason is required");
-    }
-    const actor = await getUserEmail(c);
-    try {
-      const result = await externalEdits.rejectExternalEdit({
-        nestId,
-        documentId: nodeId,
-        suggestionId,
-        actor,
-        reason: body.reason,
-      });
-      return c.json({
-        rejected: true,
-        chainEvent: result.chainEvent.event_id,
-      });
-    } catch (err: any) {
-      return c.json({ error: err.message }, 400);
-    }
   },
 );
 
