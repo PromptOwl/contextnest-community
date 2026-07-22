@@ -1,0 +1,36 @@
+/**
+ * Shared hardening headers for serving artifact HTML on the app origin.
+ * Used by BOTH artifact-serving surfaces — the annotations `/hosted` viewer
+ * and the node `?format=raw` direct fetch — so the sandbox policy can never
+ * drift between them.
+ *
+ * Artifact bodies are editor/attacker-controlled HTML+JS. Served same-origin
+ * without a sandbox, their scripts would ride the viewer's session (httpOnly
+ * cookies don't stop same-origin fetch). The strict CSP below prevents that:
+ * `sandbox` WITHOUT `allow-same-origin` forces an opaque origin so the
+ * document can't touch host cookies/storage; the resource directives then cap
+ * what its inline scripts may load or reach — `connect-src 'none'` blocks
+ * fetch/XHR/beacon exfiltration, `default-src 'none'` blocks external loads,
+ * and only inline script/style + data/blob images are permitted
+ * (self-contained decks/dashboards need no network).
+ */
+export const ARTIFACT_SANDBOX_CSP = [
+  "sandbox allow-scripts allow-popups allow-modals",
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "img-src data: blob:",
+  "font-src data:",
+  "connect-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join("; ");
+
+/** Apply the artifact sandbox trio: strict CSP + nosniff + no referrer. */
+export function applyArtifactSandboxHeaders(c: {
+  header: (name: string, value: string) => void;
+}): void {
+  c.header("Content-Security-Policy", ARTIFACT_SANDBOX_CSP);
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("Referrer-Policy", "no-referrer");
+}

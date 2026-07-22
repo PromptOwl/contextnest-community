@@ -465,6 +465,7 @@ Other read endpoints (all under \`${B}/nests/<nest-id>\`):
 - \`GET /search?q=<terms>\` — full-text search
 - \`GET /overview\` — node count, types, tags
 - \`GET /nodes\` — list; \`GET /nodes/<node-id>?format=markdown\` — one document
+- \`GET /nodes/<node-id>?format=raw\` — direct consumption path: the node BODY as plain text (no JSON envelope; add \`&frontmatter=1\` for the stored YAML block)
 - \`GET /export?format=markdown\` — whole nest as one markdown file (optional \`selector\`, \`max_tokens\`)
 - \`GET /graph\` — ontology graph (nodes, links, tags, stewards)
 

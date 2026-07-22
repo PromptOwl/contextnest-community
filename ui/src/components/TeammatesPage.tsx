@@ -3,8 +3,9 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 import {
-  ArrowLeft, UserPlus, Shield, Users, Copy, Check,
+  ArrowLeft, UserPlus, Shield, ShieldCheck, Users, Copy, Check,
   AlertCircle, Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -49,6 +50,10 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
   // User pending removal confirmation.
   const [removeTarget, setRemoveTarget] = useState<Teammate | null>(null);
   const [removing, setRemoving] = useState(false);
+  // User pending superadmin-grant confirmation.
+  const [grantTarget, setGrantTarget] = useState<Teammate | null>(null);
+  const [granting, setGranting] = useState(false);
+  const [grantError, setGrantError] = useState<string | null>(null);
 
   const fetchTeammates = async () => {
     setLoading(true);
@@ -173,6 +178,17 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                   </div>
                   {!t.is_admin && (
                     <>
+                    {!t.is_invited && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setGrantTarget(t)}
+                        title="Grant this user superadmin access"
+                      >
+                        <ShieldCheck className="h-4 w-4 mr-2" />
+                        Grant superadmin
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       size="sm"
@@ -319,9 +335,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() =>
-                      navigator.clipboard.writeText(resetPw.password!)
-                    }
+                    onClick={() => void copyTextWithToast(resetPw.password!)}
                   >
                     Copy
                   </Button>
@@ -380,6 +394,56 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
               }}
             >
               {removing ? <Loader2 className="h-4 w-4 animate-spin" /> : "Remove"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!grantTarget}
+        onOpenChange={(o) => !o && !granting && setGrantTarget(null)}
+      >
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>Grant superadmin to {grantTarget?.email}?</DialogTitle>
+            <DialogDescription>
+              They immediately get server-admin access everywhere: every nest,
+              teammate management, and the activity trace. You can revoke
+              this later from the Superadmins list below.
+            </DialogDescription>
+          </DialogHeader>
+          {grantError && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{grantError}</AlertDescription>
+            </Alert>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setGrantTarget(null)}
+              disabled={granting}
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={granting}
+              onClick={async () => {
+                if (!grantTarget) return;
+                setGranting(true);
+                setGrantError(null);
+                try {
+                  await api.addSuperAdmin(grantTarget.email);
+                  setGrantTarget(null);
+                  await fetchTeammates();
+                } catch (e: any) {
+                  setGrantError(e.message);
+                } finally {
+                  setGranting(false);
+                }
+              }}
+            >
+              {granting ? <Loader2 className="h-4 w-4 animate-spin" /> : "Grant"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -472,7 +536,7 @@ function NewKeyModal({
 }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    await navigator.clipboard.writeText(password);
+    if (!(await copyTextWithToast(password))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };

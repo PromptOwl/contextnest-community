@@ -1147,7 +1147,42 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("027_teams");
   }
 
-  // 028: provenance for imported teams (CU-wdqcpzwc6b). A team imported from
+  // 028: directory department on users (CU-wdqcpzwf2p). Captured from the
+  //   OIDC `department` claim on every SSO login — upserted to the claim's
+  //   value, cleared (NULL) when the claim is absent, so directory moves
+  //   propagate on the next sign-in. Read by the optional dept:<slug>
+  //   auto-tag on node create (OIDC_DEPARTMENT_TAGGING). Nullable: password
+  //   users and IdPs that don't emit the claim simply never set it.
+  if (!hasMigration("028_user_department")) {
+    db.transaction(() => {
+      const userColsNow = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
+      if (!userColsNow.includes("department")) {
+        db.exec("ALTER TABLE users ADD COLUMN department TEXT");
+      }
+    })();
+    recordMigration("028_user_department");
+  }
+
+  // 029: DB-backed superadmins (CU-wdqcpzwf2n). One row = "this email is a
+  //   server admin", granted from the UI/API. The effective superadmin set is
+  //   access.yaml `super_admins` ∪ these rows (case-insensitive; emails are
+  //   stored lowercased). access.yaml stays the authoritative bootstrap:
+  //   file entries can never be revoked via the API (lockout safety) — this
+  //   table only holds the grants made at runtime.
+  if (!hasMigration("029_super_admins")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS super_admins (
+          email TEXT PRIMARY KEY,          -- stored lowercased
+          granted_by TEXT NOT NULL,        -- email of the granting admin
+          granted_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+    })();
+    recordMigration("029_super_admins");
+  }
+
+  // 031: provenance for imported teams (CU-wdqcpzwc6b). A team imported from
   //   PromptOwl records where it came from (`source`) and its id in that system
   //   (`external_id`), which is what makes a re-import update the same row
   //   instead of minting a duplicate — name is not a key, since either side can
@@ -1156,7 +1191,7 @@ export function runMigrations(db: Database.Database): void {
   //   those NULL rows don't collide with each other, and is keyed by owner too:
   //   the same upstream team imported by two different people is two unrelated
   //   local teams, each owned by its importer.
-  if (!hasMigration("028_team_source")) {
+  if (!hasMigration("031_team_source")) {
     db.transaction(() => {
       const teamCols = (
         db.prepare("PRAGMA table_info(teams)").all() as Array<{ name: string }>
@@ -1173,7 +1208,7 @@ export function runMigrations(db: Database.Database): void {
           WHERE external_id IS NOT NULL;
       `);
     })();
-    recordMigration("028_team_source");
+    recordMigration("031_team_source");
   }
 }
 

@@ -20,7 +20,7 @@ import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
 } from "../nests/unsynced-service.js";
-import { isLicenseAdminUserId } from "../auth/license.js";
+import { isServerAdminUserId } from "../shared/access.js";
 import { config } from "../config.js";
 import {
   createNode,
@@ -207,7 +207,8 @@ export const TOOL_DEFINITIONS = [
         },
         type: {
           type: "string",
-          description: "Node type (default: document)",
+          description:
+            "Node type (default: document). Note: artifact and table can be disabled server-wide by an admin — creating a disabled type is rejected; existing nodes of that type stay readable.",
         },
         tags: {
           type: "array",
@@ -1102,7 +1103,7 @@ async function runTool(
     case "context_unsynced_list": {
       // Same admin gate as REST GET /nests/unsynced — listing reflects
       // server-side filesystem state, so non-admins shouldn't probe it.
-      if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
+      if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
         return "You don't have permission to list unsynced folders. Server admin only.";
       }
       const folders = listUnsyncedFolders();
@@ -1118,7 +1119,7 @@ async function runTool(
 
     case "context_sync_folder": {
       // Same admin gate as REST POST /nests/unsynced/sync.
-      if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
+      if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
         return "You don't have permission to sync folders. Server admin only.";
       }
       try {

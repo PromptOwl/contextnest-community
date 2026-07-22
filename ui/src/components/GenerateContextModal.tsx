@@ -13,6 +13,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { copyTextWithToast } from "../lib/clipboard";
 import { Sparkles, Copy, Check, Key } from "lucide-react";
 
 interface Props {
@@ -34,8 +35,8 @@ function CopyBlock({ label, text }: { label: string; text: string }) {
           variant="ghost"
           size="sm"
           className="h-6 px-2 text-xs"
-          onClick={() => {
-            navigator.clipboard.writeText(text);
+          onClick={async () => {
+            if (!(await copyTextWithToast(text))) return;
             setCopied(true);
             setTimeout(() => setCopied(false), 1500);
           }}

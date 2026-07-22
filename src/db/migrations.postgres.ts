@@ -62,7 +62,9 @@ const HISTORICAL_MIGRATIONS = [
   "020_server_settings",
   "026_api_events_nest_index",
   "027_teams",
-  "028_team_source",
+  "028_user_department",
+  "029_super_admins",
+  "031_team_source",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -74,10 +76,14 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       password_hash TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT ${NOW},
       is_admin INTEGER NOT NULL DEFAULT 0,
-      is_invited INTEGER NOT NULL DEFAULT 0
+      is_invited INTEGER NOT NULL DEFAULT 0,
+      department TEXT
     );
     -- Case-insensitive email uniqueness (replaces SQLite COLLATE NOCASE index).
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_nocase ON users (lower(email));
+    -- users.department is declared inline above (no-op for databases created
+    -- before it shipped) — migration 028 parity for existing deployments.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS department TEXT;
 
     CREATE TABLE IF NOT EXISTS nests (
       id TEXT PRIMARY KEY,
@@ -331,7 +337,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
 
     -- teams.source / teams.external_id are declared inline above, which is a
     -- no-op on any database created before imported teams shipped — hence the
-    -- explicit ALTERs (migration 028 parity). The partial unique index is what
+    -- explicit ALTERs (migration 031 parity). The partial unique index is what
     -- makes a re-import update its own row rather than duplicate it; NULL
     -- external_id (every hand-made team) is excluded so those never collide.
     ALTER TABLE teams ADD COLUMN IF NOT EXISTS source TEXT;
@@ -550,6 +556,16 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       value TEXT,
       env_at_write TEXT,
       updated_at TEXT NOT NULL DEFAULT ${NOW}
+    );
+
+    -- super_admins (migration 028): DB-backed superadmin grants made from the
+    -- UI/API. Effective superadmin = access.yaml super_admins ∪ these rows
+    -- (case-insensitive; emails stored lowercased). File entries can never be
+    -- revoked via the API — lockout safety.
+    CREATE TABLE IF NOT EXISTS super_admins (
+      email TEXT PRIMARY KEY,
+      granted_by TEXT NOT NULL,
+      granted_at TEXT NOT NULL DEFAULT ${NOW}
     );
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
