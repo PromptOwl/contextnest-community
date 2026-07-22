@@ -208,9 +208,9 @@ describe("preview", () => {
   });
 
   it("requires authentication", async () => {
-    const res = await jsonRequest(app, "POST", "/teams/promptowl/preview", {
-      token: "po_device_tok",
-    });
+    // No Authorization header and no session — the auth guard must 401 before
+    // the PromptOwl handler ever runs.
+    const res = await app.request("/teams/promptowl", { method: "GET" });
     expect(res.status).toBe(401);
   });
 });
