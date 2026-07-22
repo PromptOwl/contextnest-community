@@ -19,7 +19,14 @@ import {
 } from "../governance/access-guard.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { isPublicReader } from "../shared/access.js";
-import { nodeToMarkdown, isMarkdownFormat } from "./markdown-export.js";
+import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
+import {
+  nodeToMarkdown,
+  isMarkdownFormat,
+  isRawFormat,
+  rawContentType,
+  frontmatterBlockOf,
+} from "./markdown-export.js";
 import {
   scanDocumentForDrift,
   getPendingChange,
@@ -36,6 +43,7 @@ import {
   updateNode,
   moveNode,
   listNodesForCaller,
+  resolveAuthorship,
   toNodeResponse,
   bodyOnly,
 } from "./service.js";
@@ -53,6 +61,35 @@ function nodeAsMarkdown(response: any, nodeId: string): string {
     tags: response.tags,
     status: response.status,
     body: response.content,
+  });
+}
+
+// Direct raw fetch (`?format=raw`, or `Accept: text/markdown` with no format
+// param): the node BODY as text — no JSON envelope, no synthesized
+// frontmatter. Content-Type is per node type (see rawContentType). With
+// `?frontmatter=1` the stored YAML frontmatter block is prepended verbatim.
+// Built from the same fully-resolved response object the JSON path returns,
+// AFTER the access guard and the public-reader downgrade, so it can never
+// serve bytes the JSON GET wouldn't — a 403/404 is decided before this runs.
+function rawNodeBody(c: any, response: any, storedRaw: string | undefined) {
+  const body: string = response.content ?? "";
+  const payload =
+    c.req.query("frontmatter") === "1"
+      ? frontmatterBlockOf(storedRaw) + body
+      : body;
+  // Raw bytes on the app origin — never let the browser sniff them into
+  // something more executable than the declared type.
+  c.header("X-Content-Type-Options", "nosniff");
+  // Artifact bodies are editor-controlled HTML+JS served as text/html here.
+  // Without a sandbox their same-origin scripts would ride the viewer's
+  // session. Apply the SAME strict sandbox the /hosted viewer uses (shared
+  // helper — see src/shared/artifact-sandbox.ts) so the document runs on an
+  // opaque origin with no network reach.
+  if ((response.type || "document") === "artifact") {
+    applyArtifactSandboxHeaders(c);
+  }
+  return c.body(payload, 200, {
+    "Content-Type": rawContentType(response.type),
   });
 }
 
@@ -366,17 +403,38 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     }
   }
   const response = toNodeResponse(node);
+  const publicReader = await isPublicReader(nestId, userId);
+
+  // Author + collaborators (same additive fields as the list response).
+  // Single-node call takes resolveAuthorship's indexed fast path.
+  // Withheld from public readers: the roster is the nest's people, not its
+  // published content, so it stays behind the same gate as the body. They
+  // keep the frontmatter-only `author` toNodeResponse already set.
+  if (!publicReader) {
+    const people = (
+      await resolveAuthorship(nestId, [
+        { id: nodeId, frontmatterAuthor: node.frontmatter?.author ?? null },
+      ])
+    ).get(nodeId);
+    if (people) {
+      response.author = people.author;
+      response.collaborators = people.collaborators;
+    }
+  }
 
   // Public readers see approved version body only.
-  if (await isPublicReader(nestId, userId)) {
+  if (publicReader) {
     const approved = await versions.getApprovedVersion(nestId, nodeId);
     if (approved != null) {
+      // Kept for the raw path: frontmatter=1 must serve the APPROVED
+      // snapshot's stored frontmatter, never the live working copy's.
+      let approvedRaw = "";
       try {
-        const raw = await versionManager.reconstructVersion(
+        approvedRaw = await versionManager.reconstructVersion(
           nodeId,
           approved,
         );
-        response.content = bodyOnly(nodeId, raw);
+        response.content = bodyOnly(nodeId, approvedRaw);
       } catch (err) {
         console.error(
           "reconstructVersion failed (public single)",
@@ -388,6 +446,9 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       }
       response.version = approved;
       response.status = "published";
+      if (isRawFormat(c)) {
+        return rawNodeBody(c, response, approvedRaw);
+      }
       if (isMarkdownFormat(c)) {
         return c.body(nodeAsMarkdown(response, nodeId), 200, {
           "Content-Type": "text/markdown; charset=utf-8",
@@ -408,6 +469,12 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
   if (response.status === "pending_review") {
     const pending = await reviews.getPendingReview(nestId, nodeId);
     (response as any).pendingReviewBy = pending?.requestedBy ?? null;
+  }
+  if (isRawFormat(c)) {
+    // node.rawContent is the exact stored bytes (readDocument and the
+    // drift-path loadLatestApprovedNode both come through parseDocument),
+    // so frontmatter=1 prepends the block exactly as stored.
+    return rawNodeBody(c, response, node.rawContent);
   }
   if (isMarkdownFormat(c)) {
     return c.body(nodeAsMarkdown(response, nodeId), 200, {

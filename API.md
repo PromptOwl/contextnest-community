@@ -135,6 +135,19 @@ Device-flow login. Also gated by `PROMPTOWL_SIGN_IN_GATE`.
 ### GET `/auth/sso`
 One-click SSO auto-login from PromptOwl (**official deployment only**). PromptOwl redirects a signed-in user here with a short-lived, single-use, audience-bound HS256 JWT ticket (`?ticket=...`). The server verifies the signature with `OFFICIAL_COMMUNITY_SSO_SECRET`, checks `aud` against `PUBLIC_BASE_URL`, enforces one-time-use via the ticket's `jti`, then provisions the user and starts a session (same provisioning + `PROMPTOWL_SIGN_IN_GATE` as `/auth/promptowl`). On success → `302` to `/`; on failure → `302` to `/?sso_error=<code>` (the SPA shows a toast). **When `OFFICIAL_COMMUNITY_SSO_SECRET` is unset** (i.e. every self-hosted server) the feature is disabled and the endpoint bounces to `/?sso_error=not_supported`. That is the domain lock: without the shared secret no ticket can be verified, so the feature stays exclusive to the official community regardless of this redirect. Error codes: `not_supported`, `missing_ticket`, `invalid_ticket`, `bad_audience`, `ticket_used`, `rate_limited`, `sign_in_restricted`, `service_error` (DB/internal fault while redeeming the ticket).
 
+### GET `/auth/oidc/login`
+Starts generic **OIDC single sign-on** (Microsoft Entra ID, Google, or any spec-compliant IdP). Superadmin-configurable via `/admin/settings` (`oidc_*` fields) or the `OIDC_*` env vars — see `CONFIGURATION.md → Single sign-on (OIDC)`. Entirely separate from the PromptOwl flows above.
+
+When enabled and fully configured: fetches the issuer's discovery document (cached in-process ~5 min), mints `state` + `nonce` + a PKCE S256 verifier into three short-lived (10 min) httpOnly `SameSite=Lax` cookies scoped to `Path=/auth/oidc`, and `302`s to the IdP's authorization endpoint with `response_type=code&scope=openid email profile`. When disabled/unconfigured → `302` to `/?sso_error=disabled` / `not_configured`. Rate-limited per IP.
+
+### GET `/auth/oidc/callback`
+The redirect URI (`<base url>/auth/oidc/callback` — register this exact URI at your IdP). Verifies the `state` param against the flow cookie, exchanges the code at the token endpoint (client secret + PKCE verifier), validates the ID token with the issuer's JWKS (signature, `iss`, `aud` = client id, `exp`, and the `nonce` claim against the flow cookie), extracts the email (`email`, falling back to `preferred_username` for Entra; normalized trim+lowercase), and enforces `oidc_allowed_domains`. Existing users are signed in; unknown users are JIT-provisioned when `oidc_auto_provision` is on (name from the `name` claim), else refused. Every successful login also upserts `users.department` from the optional string `department` claim (trimmed, whitespace collapsed, capped at 120 chars; absent claim clears the stored value) — read by the `oidc_department_tagging` feature (see `CONFIGURATION.md → Department auto-tagging`). On success → session cookie (identical to a password login) + `302` to `/`. On any failure → `302` to `/?sso_error=<code>`; codes: `disabled`, `not_configured`, `discovery_failed`, `provider_error`, `state_mismatch`, `exchange_failed`, `invalid_token`, `email_not_verified` (ID token carries `email_verified: false` — an absent claim is trusted; see the trust assumption in `CONFIGURATION.md → Single sign-on (OIDC)`), `domain_not_allowed`, `not_invited`, `rate_limited`, `service_error`. Flow cookies are cleared on every outcome. Rate-limited per IP.
+
+### GET `/auth/oidc/logout`
+RP-initiated logout for an SSO session. Deletes the current session server-side and clears the session cookie plus the `cnst_sso_session` marker. If the issuer advertises an `end_session_endpoint` (Entra/Okta/Keycloak; Google does not), `302`s the browser through it with `post_logout_redirect_uri=<base url>/` so the IdP session ends too; otherwise `302`s straight to `/`. Always clears cookies and always lands on `/`, even if discovery is unreachable. The SPA navigates here (instead of `POST /auth/logout`) only when the non-httpOnly `cnst_sso_session` marker cookie — set on OIDC callback success — is present, so password sessions keep the plain logout.
+
+Related `/admin/settings` fields (GET/PATCH, superadmin only): `oidc_enabled`, `oidc_issuer` (https URL), `oidc_client_id`, `oidc_client_secret` (**write-only** — PATCH sets/replaces, `null` clears; GET returns only `oidc_client_secret_set: boolean`), `oidc_allowed_domains` (comma-separated), `oidc_auto_provision`, `oidc_department_tagging` (append `dept:<slugified-department>` to a new document's tags on create — create-only, no-op for users without a stored department). Enabling is refused unless issuer + client id + secret are all present.
+
 ---
 
 ## 2. Nests
@@ -178,7 +191,7 @@ Owner only.
 ```
 
 ### GET `/nests/unsynced` (server-admin only outside open mode)
-Lists folders under `DATA_ROOT` that aren't nests yet — typically dropped in by the starter CLI or copied in manually. Each entry is a sync candidate. Reflects server-side filesystem state, so in non-open mode only the license admin sees it (everyone else gets `403`).
+Lists folders under `DATA_ROOT` that aren't nests yet — typically dropped in by the starter CLI or copied in manually. Each entry is a sync candidate. Reflects server-side filesystem state, so in non-open mode only a server admin — the license admin or any superadmin (`access.yaml` ∪ granted; same resolution as `/admin/*`) — sees it (everyone else gets `403`).
 
 Response (200):
 ```json
@@ -258,6 +271,135 @@ Removing a collaborator stays admin-only.
 
 ---
 
+## 3a. Teams (group sharing)
+
+A **team** is a reusable, owner-managed group of users. Each member carries a
+**role** (`admin` / `editor` / `viewer`) set on the membership and applied
+uniformly on every nest the team is shared to. Sharing a team onto a nest
+records a `{teamId, teamName}` ref on `nests.shared_teams` (no join table);
+every member then resolves to their own role there, combined highest-wins with
+any direct collaborator / steward grant.
+
+Member role → access mapping:
+
+| role | nest permission | governance role |
+|------|-----------------|-----------------|
+| `viewer` | `read` | viewer |
+| `editor` | `write` | editor |
+| `admin` | `admin` | admin |
+
+Sharing a team whose members carry a governance role (`viewer`/`editor`) turns
+`stewardship_enabled` on for the nest (parity with assigning an individual
+steward). An `admin`-only team is collaborator-style and does not.
+
+### Team management (global)
+
+Auth is the shared session/key auth. Management is gated by the caller's role on
+the team (the server/license admin may manage any team): **add people** =
+editor/admin members + owner (escalation-capped — can't grant above your own
+role); **rename / change-role / remove** = admin members + owner; **delete** =
+owner only. Unregistered member emails mint a placeholder user (`is_invited = 1`),
+same as collaborator/steward invites.
+
+- **POST `/teams`** — `{ "name": "Platform" }` → `201 { team }`. Any user may
+  create a team (they become its owner).
+- **GET `/teams`** — teams the caller owns **or is a member of** → `{ teams: [...] }`.
+  Each member is enriched with `registered` (real account vs invited placeholder)
+  and the team with `owner_email`.
+- **GET `/teams/:teamId`** — owner, a member, or the server admin may view →
+  `{ team: { id, name, owner_id, owner_email, members: [{ userId, email, role, registered }], ... } }`.
+- **PATCH `/teams/:teamId`** — `{ "name": "..." }` rename (admin/owner). Also
+  refreshes the cached `teamName` in every nest that shares this team.
+- **DELETE `/teams/:teamId`** — delete (owner/server-admin); strips the team's
+  ref from every nest's `shared_teams`.
+- **POST `/teams/:teamId/members`** — `{ "email"|"user_id", "role" }` add a
+  member (`role` ∈ `admin`/`editor`/`viewer`) → `201 { team }`. Editor/admin
+  members + owner, capped to the caller's own role. Duplicate member → `409`;
+  invalid role → `400`; above your level → `403`.
+- **PATCH `/teams/:teamId/members/:userId`** — `{ "role": "..." }` change role
+  (admin/owner, capped).
+- **DELETE `/teams/:teamId/members/:userId`** — remove a member (admin/owner);
+  their access to every shared nest is revoked immediately (no per-user rows).
+
+A team-shared nest also appears on each member's dashboard (`GET /nests`) with
+their role, so they can open it and act per their role.
+
+### PromptOwl team import (`/teams/promptowl/*`)
+
+Copy the teams the caller owns in PromptOwl into this server. Both routes are
+capped at 10 requests per IP per 15 minutes.
+
+**Only a PromptOwl sign-in can import.** Signing in with PromptOwl parks the
+device token in an httpOnly cookie (`cnst_po_token`, `Path=/teams`, lifetime of
+the session), and these routes read it **from there and nowhere else** — a token
+in the request body is ignored, so a user who signed in another way (SSO, OIDC,
+password) cannot import by supplying one. Hiding the UI is the other half of
+this rule, not the enforcement.
+
+The token is **never written to the database**: PromptOwl hands it over exactly
+once, and a self-hosted server holding live credentials for someone else's SaaS
+is a far worse liability than a cookie that dies with the session. `Path=/teams`
+means the browser only attaches it to these routes. It is scoped upstream to
+`user:read` + `teams:read`, so it cannot act as the user in PromptOwl (no agent
+chat, no credit spend) even if it leaks.
+
+Sign-in also sets `cnst_po_session=1` — a readable, secret-free marker so the
+SPA knows whether to offer the PromptOwl Teams tab. Both cookies are cleared on
+logout.
+
+**`428 Precondition Required`** with `{ code: "promptowl_connect_required" }`
+means "no PromptOwl session — sign in with PromptOwl". It is deliberately **not**
+`401`: the caller is authenticated here, and a `401` would read to the SPA as an
+expired session and bounce them to the login screen. The same 428 is returned
+when PromptOwl rejects the token (revoked upstream), and the cookie is cleared
+so a dead token isn't replayed forever.
+
+An imported team carries `source: "promptowl"` and `external_id` (its PromptOwl
+id); a team created here has `null` for both. `(owner_id, source, external_id)`
+is the import key — a re-import updates that same team rather than duplicating
+it, and survives a rename on either side. Two users importing the same PromptOwl
+team each get their own local team.
+
+- **GET `/teams/promptowl`** — `{ teams: [{ id, name, owned, your_role, source,
+  enterprise, updated_at, members: [{ email, role }] }] }`. Read-only. Returns
+  every team the caller owns **or belongs to** in PromptOwl; `your_role` is
+  their role on it there. No PromptOwl session → `428`; unreachable PromptOwl →
+  `400`.
+- **POST `/teams/promptowl/sync`** — `{ "team_ids": [...] }` →
+  `{ results: [{ team_id, external_id, name, created, added, updated, removed }] }`,
+  where `added`/`updated`/`removed` are member emails. A `team_id` the caller has
+  nothing to do with upstream → `400` (unrelated and nonexistent teams are
+  refused identically, so the error can't be used to probe which ids exist).
+
+  **Importing requires `Owner` or `Editor` upstream** → otherwise `403`, and the
+  whole batch is refused before any writes. The local copy is owned by the
+  importer — free rein to rename it, rewrite its roster, and share it onto a
+  nest. A view-only member of the upstream team holds none of that and must not
+  gain it by copying the team here; that's the same escalation
+  `shareTeamWithNest` already refuses. PromptOwl's `Viewer`, its default `User`,
+  and any unrecognized role all count as no authority.
+
+  **PromptOwl wins.** The local roster is reconciled to match: roles are reset
+  and members no longer in the PromptOwl team are **removed**, including ones
+  added here by hand. Roles map `Owner→admin`, `Editor→editor`, `Viewer→viewer`,
+  and `User`→`viewer` (as does any unrecognized role — an unknown role must never
+  widen access). The importer is the local team's owner and is not written into
+  the roster. Unregistered member emails mint placeholders exactly as
+  `POST /teams/:teamId/members` does.
+
+### Nest team-share (`/nests/:nestId/teams`)
+
+- **GET** `(write+)` — teams shared onto the nest, enriched with members:
+  `{ teams: [{ teamId, teamName, members: [{ userId, email, role }] }] }`.
+  Write-tier (like the collaborator roster) so a read tier can't enumerate emails.
+- **POST** `(admin)` — `{ "team_id": "..." }` share a team → `201 { teams }`.
+  Already shared → `409`. The caller must also be **editor+ on the team**
+  (editor/admin/owner, or server admin); a view-only member sharing → `403`, so
+  a viewer can't project a whole team onto a nest they own.
+- **DELETE `/nests/:nestId/teams/:teamId`** `(admin)` — unshare → `{ teams }`.
+
+---
+
 ## 4. Nodes (documents)
 
 `nodeId` = relative path without `.md`, e.g. `nodes/api-design`.
@@ -275,7 +417,8 @@ Lists all readable docs.
     "tags": ["#api"],
     "status": "draft" | "pending_review" | "approved" | "rejected",
     "version": 1,
-    "author": "...",
+    "author": "creator@x.com",
+    "collaborators": ["editor@x.com", "grantee@x.com"],
     "created_at": "...",
     "updated_at": "...",
     "content": "# md body",
@@ -284,6 +427,8 @@ Lists all readable docs.
 }
 ```
 - `schedule` is present only on runnable nodes (`type` `agent`/`skill`); omitted otherwise.
+- `author` = the doc's creator (frontmatter author, else the first version's author); `null` for old imports with neither. `collaborators` = distinct version authors ∪ document-scope grant holders, minus the author, sorted. Both also appear on the single-node GET below.
+- Public readers (callers who reach a `visibility: public` nest without being its owner or a collaborator) do **not** receive `collaborators` — the field is omitted, and `author` falls back to the frontmatter value only, never to a version author. The roster is treated as private to the nest's members, like draft content.
 
 ### POST `/nests/:nestId/nodes`
 ```json
@@ -311,6 +456,29 @@ Full node content. 403 if no steward access (when stewardship on).
 Add `?format=markdown` to receive `text/markdown` (frontmatter + body) instead
 of JSON — see [§8 export](#get-nestsnestidexportformatmarkdown--llm-pointed-plain-text-view).
 
+**Direct raw fetch** — `?format=raw` returns the node **body** as plain text
+(no JSON envelope, no synthesized frontmatter):
+
+| Param / header | Effect |
+|---|---|
+| `?format=raw` | Raw node body as text; Content-Type per node type (table below). |
+| `Accept: text/markdown` (header) | Same as `?format=raw` when no `format` param is present. An explicit `format` param always wins (`?format=markdown` keeps the frontmatter+body export; any other `format` value keeps JSON). Exact media-type match only — `text/*` / `*/*` do not trigger it. Matching is presence-based and deliberately ignores q-values: `text/markdown;q=0.1` still triggers raw. |
+| `?frontmatter=1` | Only meaningful with raw: prepends the node's YAML frontmatter block exactly as stored, above the body. |
+
+Content-Type by node `type`:
+
+| Node type | Content-Type |
+|---|---|
+| `document`, `agent`, `skill` (and any other/unset type) | `text/markdown; charset=utf-8` |
+| `artifact` | `text/html; charset=utf-8` |
+| `tool`, `table` | `text/plain; charset=utf-8` |
+
+Access is identical to the JSON GET — same middleware, grants, and
+public-reader semantics. Public readers get the **approved snapshot** body
+(and, with `frontmatter=1`, that snapshot's stored frontmatter); callers
+without read access get the same 403/404 JSON error as the JSON GET, never
+body bytes. Without `format`/`Accept` the response is unchanged JSON.
+
 ### POST `/nests/:nestId/nodes/:nodeId/revert`
 Restore an earlier version by writing its content as a **new** version (history is preserved).
 ```json
@@ -334,6 +502,21 @@ Requires nest write permission.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
+
+### POST `/nests/:nestId/assets`
+Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
+
+Supported types and per-type size caps:
+
+| Type | Extensions | Max size |
+|------|-----------|----------|
+| Image | `png`, `jpg`/`jpeg`, `gif`, `webp` | 10 MB |
+| Video | `mp4`, `webm` | 100 MB |
+
+SVG is deliberately not accepted (stored-XSS surface). Returns `201` with `{ file, url, markdown }` — `markdown` is a ready-to-paste reference: `![alt](url)` for images, the bare asset URL for video (the read view renders same-origin asset video URLs as a player).
+
+### GET `/nests/:nestId/assets/:file`
+Serves the asset bytes with the correct content-type and immutable caching. Read permission. Only server-minted `<uuid>.<ext>` names are accepted.
 
 ---
 
@@ -483,6 +666,63 @@ So Postman will see more rows than the UI; that's expected.
 
 ### GET `/nests/:nestId/nodes/:nodeId/reviews`
 Full review history for a node.
+
+### GET `/nests/:nestId/feed`
+Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
+
+Nest **activity feed** — pending change submissions (the exact rows
+`/review-queue` shows, every field intact, plus the caller's `canReview`)
+interleaved with annotation activity (new comment threads AND replies),
+newest first. Additive sibling of `/review-queue`; that endpoint and the MCP
+`context_review_queue` tool are unchanged.
+
+Comment items are access-filtered to documents the caller can read (same
+resolution as node listing: public readers see approved docs only; grants and
+steward scope honored). Change items mirror the queue (not access-filtered).
+
+```json
+{
+  "items": [
+    {
+      "type": "comment",
+      "id": "<commentId>",
+      "threadId": "<threadId>",
+      "nodeId": "nodes/foo",
+      "title": "Foo",
+      "author": "reviewer@x.com",
+      "snippet": "First ~200 chars of the comment…",
+      "createdAt": "2026-07-14 11:00:00",
+      "resolved": false,
+      "isReply": true
+    },
+    {
+      "type": "change",
+      "id": "<reviewRequestId>",
+      "nestId": "...",
+      "nodeId": "nodes/foo",
+      "title": "Foo",
+      "version": 3,
+      "requestedBy": "author@x.com",
+      "requestedAt": "2026-07-14 10:00:00",
+      "requestNote": "...",
+      "status": "pending",
+      "priority": "normal",
+      "canReview": true,
+      "createdAt": "2026-07-14 10:00:00"
+    }
+  ],
+  "total": 2,
+  "counts": { "changes": 1, "comments": 1 },
+  "filter": "all",
+  "limit": 50,
+  "offset": 0
+}
+```
+
+`counts` always carries both per-type totals regardless of `filter`; the UI
+tab badge binds to `counts.changes` (actionable items), not the feed length.
+The UI deep-links a comment item to its document with the thread focused via
+`?nest=<id>&doc=<nodeId>&thread=<threadId>`.
 
 ---
 
@@ -923,6 +1163,38 @@ Execute (the runner contract — the agent IS the runner):
 ---
 
 ## 10. Admin / operator
+
+### Superadmins — GET/POST `/admin/super-admins`, DELETE `/admin/super-admins/:email` (server-admin only)
+Grant and revoke **superadmins** (server-wide admins) from the API/UI instead of only via `access.yaml`. The effective superadmin set is the union of three sources, surfaced per row as `source`:
+
+- `license` — the PromptOwl account that owns the installed license. Derived live; never revocable here.
+- `config` — `access.yaml` `super_admins`. The authoritative bootstrap: **never revocable via the API** (lockout safety) — edit the file and restart instead.
+- `granted` — rows in the `super_admins` DB table, managed by these endpoints.
+
+All three routes use the same server-admin guard as `GET /admin/trace` (license admin, or any effective superadmin; open mode: always allowed). Emails are case-insensitive and stored lowercased. A superadmin holds `admin` on every nest, sees `/admin/trace` + `/admin/settings`, and can manage teammates (`/auth/teammates`, invite, reset-password, remove).
+
+**GET `/admin/super-admins`** → `200`:
+```json
+{
+  "super_admins": [
+    { "email": "owner@acme.com", "source": "license", "granted_by": null, "granted_at": null, "self": true },
+    { "email": "ops@acme.com",   "source": "config",  "granted_by": null, "granted_at": null, "self": false },
+    { "email": "jane@acme.com",  "source": "granted", "granted_by": "owner@acme.com", "granted_at": "2026-07-17 14:03:22", "self": false }
+  ]
+}
+```
+An email present in several sources shows its least-revocable origin (`license` > `config` > `granted`). `self` marks the caller's own row.
+
+**POST `/admin/super-admins`** with `{ "email": "jane@acme.com" }` → `201 { email, source: "granted", granted_by }`.
+- `400` — missing/malformed email, or no user account with that email exists on this server (invite them as a teammate first).
+- `409` — already an effective superadmin (any source).
+
+**DELETE `/admin/super-admins/:email`** → `200 { ok: true, email }`. Guards:
+- `400` — target is the license admin, or an `access.yaml` entry (file is authoritative; remove from the file + restart).
+- `400` — **last-admin lockout guard**: you can't revoke *yourself* when you're the last effective superadmin (no license admin, no `access.yaml` entries, no other grants) — grant someone else first.
+- `404` — email has no granted row.
+
+Grants persist in the database and are loaded into the in-memory resolution cache at startup and after every grant/revoke, so they survive restarts. Surfaced in the UI on **Teammates → Superadmins** with per-source badges, add-by-email, and confirm-to-revoke.
 
 ### GET `/admin/trace` (server-admin only)
 Operator activity trail — one newest-first row per API request and per MCP tool call, so the server admin has a single place to audit what every client and agent did. Server-admin only: the license admin, or a `super_admin` in `access.yaml` (open mode: always allowed). Everyone else gets `403`. Cross-tenant data; not scoped to a nest.

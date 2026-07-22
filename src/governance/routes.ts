@@ -13,6 +13,7 @@ import { requestBaseUrl } from "../shared/base-url.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
 import * as reviews from "./review-service.js";
+import * as feed from "./feed-service.js";
 import * as comments from "./comment-service.js";
 import * as versions from "./version-service.js";
 import * as externalEdits from "./external-edit-service.js";
@@ -192,6 +193,43 @@ governanceRoutes.get("/review-queue", async (c) => {
   }
 
   return c.json({ ...result, requests });
+});
+
+// GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=
+// Activity feed: pending change submissions (the same rows the review queue
+// shows, every field intact) interleaved with annotation activity (new
+// comment threads + replies), newest first. ADDITIVE sibling of
+// /review-queue — that endpoint (and the MCP context_review_queue tool)
+// keep their exact shape. Comment items are access-filtered to documents
+// the caller can read.
+governanceRoutes.get("/feed", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const filterRaw = c.req.query("filter");
+  const filter =
+    filterRaw === "changes" || filterRaw === "comments" ? filterRaw : "all";
+  const limit = parseLimit(c.req.query("limit"), 50, 200);
+  // Cap offset: each source over-fetches offset+limit rows for the merge, so
+  // an unbounded offset would grow that window (and the sort) without bound.
+  const offsetRaw = parseInt(c.req.query("offset") ?? "", 10);
+  const offset =
+    Number.isNaN(offsetRaw) || offsetRaw < 0
+      ? 0
+      : Math.min(offsetRaw, 10_000);
+  const userId = c.get("userId");
+  // Same identity resolution as the review-queue handler above — the feed's
+  // canReview must agree with the queue's for the same caller (the
+  // access-guard resolver falls back to a different anonymous identity).
+  const userEmail = await getUserEmail(c);
+
+  const result = await feed.getNestFeed({
+    nestId,
+    userId,
+    userEmail,
+    filter,
+    limit,
+    offset,
+  });
+  return c.json({ ...result, filter, limit, offset });
 });
 
 // GET /nests/:nestId/external-edits
@@ -430,6 +468,81 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
   );
 });
 
+// External-edit approve/reject MUST be registered before the generic
+// /:nodeId{.+}/approve and /reject review routes below: the greedy `{.+}`
+// nodeId otherwise swallows `.../external-edits/:suggestionId` and matches the
+// review route first (returning "No pending review for this node"). Hono runs
+// the first-registered matching handler, so specific-before-generic wins.
+
+// POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/approve
+governanceNodeRoutes.post(
+  "/:nodeId{.+}/external-edits/:suggestionId/approve",
+  async (c) => {
+    const nestId = c.req.param("nestId")!;
+    const nodeId = c.req.param("nodeId")!;
+    const suggestionId = c.req.param("suggestionId")!;
+    const body = await c.req
+      .json<{ comment?: string }>()
+      .catch(() => ({}) as { comment?: string });
+    const actor = await getUserEmail(c);
+    try {
+      const result = await externalEdits.approveExternalEdit({
+        nestId,
+        documentId: nodeId,
+        suggestionId,
+        actor,
+        comment: body.comment,
+      });
+      return c.json({
+        approved: true,
+        version: result.versionEntry.version,
+        chainEvent: result.chainEvent.event_id,
+      });
+    } catch (err: any) {
+      console.error(
+        `[external-edit-route] approve failed nest=${nestId} node=${nodeId} suggestion=${suggestionId}`,
+        { message: err?.message, name: err?.name, stack: err?.stack },
+      );
+      return c.json(
+        { error: err.message, name: err?.name },
+        400,
+      );
+    }
+  },
+);
+
+// POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/reject
+governanceNodeRoutes.post(
+  "/:nodeId{.+}/external-edits/:suggestionId/reject",
+  async (c) => {
+    const nestId = c.req.param("nestId")!;
+    const nodeId = c.req.param("nodeId")!;
+    const suggestionId = c.req.param("suggestionId")!;
+    const body = await c.req
+      .json<{ reason?: string }>()
+      .catch(() => ({}) as { reason?: string });
+    if (!body.reason) {
+      throw new ValidationError("Rejection reason is required");
+    }
+    const actor = await getUserEmail(c);
+    try {
+      const result = await externalEdits.rejectExternalEdit({
+        nestId,
+        documentId: nodeId,
+        suggestionId,
+        actor,
+        reason: body.reason,
+      });
+      return c.json({
+        rejected: true,
+        chainEvent: result.chainEvent.event_id,
+      });
+    } catch (err: any) {
+      return c.json({ error: err.message }, 400);
+    }
+  },
+);
+
 // POST /nests/:nestId/nodes/:nodeId/approve
 governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
   const nestId = c.req.param("nestId")!;
@@ -530,75 +643,6 @@ governanceNodeRoutes.get(
       return c.json({ error: "Suggestion not found" }, 404);
     }
     return c.json({ entry: detail });
-  },
-);
-
-// POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/approve
-governanceNodeRoutes.post(
-  "/:nodeId{.+}/external-edits/:suggestionId/approve",
-  async (c) => {
-    const nestId = c.req.param("nestId")!;
-    const nodeId = c.req.param("nodeId")!;
-    const suggestionId = c.req.param("suggestionId")!;
-    const body = await c.req
-      .json<{ comment?: string }>()
-      .catch(() => ({}) as { comment?: string });
-    const actor = await getUserEmail(c);
-    try {
-      const result = await externalEdits.approveExternalEdit({
-        nestId,
-        documentId: nodeId,
-        suggestionId,
-        actor,
-        comment: body.comment,
-      });
-      return c.json({
-        approved: true,
-        version: result.versionEntry.version,
-        chainEvent: result.chainEvent.event_id,
-      });
-    } catch (err: any) {
-      console.error(
-        `[external-edit-route] approve failed nest=${nestId} node=${nodeId} suggestion=${suggestionId}`,
-        { message: err?.message, name: err?.name, stack: err?.stack },
-      );
-      return c.json(
-        { error: err.message, name: err?.name },
-        400,
-      );
-    }
-  },
-);
-
-// POST /nests/:nestId/nodes/:nodeId/external-edits/:suggestionId/reject
-governanceNodeRoutes.post(
-  "/:nodeId{.+}/external-edits/:suggestionId/reject",
-  async (c) => {
-    const nestId = c.req.param("nestId")!;
-    const nodeId = c.req.param("nodeId")!;
-    const suggestionId = c.req.param("suggestionId")!;
-    const body = await c.req
-      .json<{ reason?: string }>()
-      .catch(() => ({}) as { reason?: string });
-    if (!body.reason) {
-      throw new ValidationError("Rejection reason is required");
-    }
-    const actor = await getUserEmail(c);
-    try {
-      const result = await externalEdits.rejectExternalEdit({
-        nestId,
-        documentId: nodeId,
-        suggestionId,
-        actor,
-        reason: body.reason,
-      });
-      return c.json({
-        rejected: true,
-        chainEvent: result.chainEvent.event_id,
-      });
-    } catch (err: any) {
-      return c.json({ error: err.message }, 400);
-    }
   },
 );
 

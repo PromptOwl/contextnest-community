@@ -7,6 +7,11 @@ import {
   rowsToMarkdownTable,
   looksLikeDelimitedTable,
   delimitedToMarkdownTable,
+  looksLikeDelimitedRow,
+  readUploadedTable,
+  rowsToCsv,
+  uploadedTableErrorMessage,
+  MAX_CSV_FILE_BYTES,
   LARGE_TABLE_ROW_THRESHOLD,
 } from "../ui/src/lib/csv-table";
 
@@ -338,5 +343,168 @@ describe("delimitedToMarkdownTable (end-to-end)", () => {
     expect(out!.hasHeader).toBe(true);
     expect(out!.dataRows).toBe(LARGE_TABLE_ROW_THRESHOLD + 1);
     expect(out!.dataRows > LARGE_TABLE_ROW_THRESHOLD).toBe(true);
+  });
+});
+
+// Table-node source editor: TSV/semicolon grids normalize to the canonical
+// comma-CSV body a table node stores (CU-wdqcpzwf2j).
+describe("rowsToCsv", () => {
+  it("serializes plain rows", () => {
+    expect(
+      rowsToCsv([
+        ["sku", "price"],
+        ["OWL-1", "149"],
+      ]),
+    ).toBe("sku,price\nOWL-1,149");
+  });
+
+  it("quotes cells containing commas, quotes, or newlines", () => {
+    expect(rowsToCsv([["a,x", 'say "hi"', "line1\nline2", "plain"]])).toBe(
+      '"a,x","say ""hi""","line1\nline2",plain',
+    );
+  });
+
+  it("round-trips through parseDelimited", () => {
+    const rows = [
+      ["name", "note"],
+      ["Ada", 'likes "commas", a lot'],
+    ];
+    expect(parseDelimited(rowsToCsv(rows), ",")).toEqual(rows);
+  });
+
+  it("converts a parsed TSV grid to CSV", () => {
+    const rows = parseDelimited("sku\tprice\nOWL-1\t149", "\t");
+    expect(rowsToCsv(rows)).toBe("sku,price\nOWL-1,149");
+  });
+});
+
+// Single-row spreadsheet paste (CU-wdqcpzwf2j review): one copied Excel row
+// arrives as `A\tB\tC` with no newline, which looksLikeDelimitedTable
+// rejects (needs >=2 rows) — looksLikeDelimitedRow catches it.
+describe("looksLikeDelimitedRow", () => {
+  it("detects a single tab-delimited row without a trailing newline", () => {
+    expect(looksLikeDelimitedRow("OWL-1\t149\tEU")).toEqual({
+      delimiter: "\t",
+      rows: [["OWL-1", "149", "EU"]],
+    });
+  });
+
+  it("tolerates trailing whitespace/newlines from the clipboard", () => {
+    expect(looksLikeDelimitedRow("a\tb\n")).toEqual({
+      delimiter: "\t",
+      rows: [["a", "b"]],
+    });
+  });
+
+  it("detects a single semicolon-delimited row", () => {
+    expect(looksLikeDelimitedRow("OWL-1;149;EU")).toEqual({
+      delimiter: ";",
+      rows: [["OWL-1", "149", "EU"]],
+    });
+  });
+
+  it("rejects multi-line input (multi-row belongs to looksLikeDelimitedTable)", () => {
+    expect(looksLikeDelimitedRow("a\tb\nc\td")).toBeNull();
+  });
+
+  it("rejects a single cell (no delimiter)", () => {
+    expect(looksLikeDelimitedRow("just a plain line")).toBeNull();
+  });
+
+  it("never matches comma lines — already canonical CSV", () => {
+    expect(looksLikeDelimitedRow("a,b,c")).toBeNull();
+  });
+
+  it("rejects semicolon lines that also carry commas (prosey/ambiguous)", () => {
+    expect(looksLikeDelimitedRow("first, second; third, fourth")).toBeNull();
+  });
+
+  it("rejects semicolon lines with sentence-length cells", () => {
+    const long = "x".repeat(250);
+    expect(looksLikeDelimitedRow(`${long};b`)).toBeNull();
+  });
+
+  it("converts to a one-line CSV via rowsToCsv", () => {
+    const row = looksLikeDelimitedRow('a,x\tsay "hi"\tplain');
+    expect(row).not.toBeNull();
+    expect(rowsToCsv(row!.rows)).toBe('"a,x","say ""hi""",plain');
+  });
+});
+
+// Shared upload pipeline for both "table from CSV/TSV file" buttons.
+// The file param is structural (name/size/text), so tests need no DOM File.
+describe("readUploadedTable", () => {
+  const asFile = (name: string, text: string, size = text.length) => ({
+    name,
+    size,
+    text: () => Promise.resolve(text),
+  });
+
+  it("parses a comma CSV file", async () => {
+    const res = await readUploadedTable(asFile("prices.csv", "sku,price\nOWL-1,149"));
+    expect(res).toEqual({
+      ok: true,
+      text: "sku,price\nOWL-1,149",
+      delimiter: ",",
+      rows: [
+        ["sku", "price"],
+        ["OWL-1", "149"],
+      ],
+    });
+  });
+
+  it("pins tab for a .tsv extension regardless of content", async () => {
+    const res = await readUploadedTable(asFile("grid.TSV", "a\tb\nc\td"));
+    expect(res.ok && res.delimiter).toBe("\t");
+  });
+
+  it("auto-detects tab without the extension hint", async () => {
+    const res = await readUploadedTable(asFile("grid.txt", "a\tb\nc\td"));
+    expect(res.ok && res.delimiter).toBe("\t");
+  });
+
+  it("rejects files over the size cap without reading them", async () => {
+    let read = false;
+    const res = await readUploadedTable({
+      name: "huge.csv",
+      size: MAX_CSV_FILE_BYTES + 1,
+      text: () => {
+        read = true;
+        return Promise.resolve("a,b");
+      },
+    });
+    expect(res).toEqual({ ok: false, error: "too-large" });
+    expect(read).toBe(false);
+  });
+
+  it("maps a read failure to 'unreadable'", async () => {
+    const res = await readUploadedTable({
+      name: "gone.csv",
+      size: 10,
+      text: () => Promise.reject(new Error("boom")),
+    });
+    expect(res).toEqual({ ok: false, error: "unreadable" });
+  });
+
+  it("maps blank content to 'empty'", async () => {
+    const res = await readUploadedTable(asFile("blank.csv", "\n\n"));
+    expect(res).toEqual({ ok: false, error: "empty" });
+  });
+});
+
+describe("uploadedTableErrorMessage", () => {
+  it("names the size in MB for too-large", () => {
+    expect(uploadedTableErrorMessage("too-large", { size: 11 * 1024 * 1024 })).toBe(
+      "That file is 11.0 MB — the limit for table import is 10 MB.",
+    );
+  });
+
+  it("has copy for the other errors", () => {
+    expect(uploadedTableErrorMessage("unreadable", { size: 0 })).toBe(
+      "Couldn't read that file.",
+    );
+    expect(uploadedTableErrorMessage("empty", { size: 0 })).toBe(
+      "No table rows found in that file.",
+    );
   });
 });

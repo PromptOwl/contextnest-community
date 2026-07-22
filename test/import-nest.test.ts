@@ -6,6 +6,7 @@ import {
   createTestApp,
   registerUser,
   jsonRequest,
+  authed,
 } from "./helpers.js";
 
 // Import is now an upload: the browser reads the picked folder and POSTs each
@@ -275,5 +276,207 @@ describe("imported vault: discovery + registration", () => {
     expect(byId["a/b/c/deep-notes"]).toBe("deep-notes");
     // Explicit frontmatter title is untouched.
     expect(byId["with-fm"]).toBe("Explicit FM Title");
+  });
+
+  it("keeps explicitly not-approved docs unpublished, publishes the rest", async () => {
+    const files: FileEntry[] = [
+      mdFile("ok.md", "title: Ok\nstatus: published", "publish me"),
+      mdFile("plain.md", "title: Plain", "no status -> publish"),
+      mdFile("wip.md", "title: Wip\nstatus: draft", "keep draft"),
+      mdFile("bad.md", "title: Bad\nstatus: rejected", "keep unpublished"),
+      mdFile("old.md", "title: Old\nstatus: superseded", "keep unpublished"),
+      mdFile("pr.md", "title: PR\nstatus: pending_review", "awaiting review"),
+      mdFile("rev.md", "title: Rev\nstatus: review", "alias of pending_review"),
+    ];
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Governance States", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    // All register (none dropped), even the rejected one that the engine
+    // would refuse to publish.
+    expect(data.documents).toBe(7);
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${data.nest.id}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    const byId = Object.fromEntries(
+      list.data.nodes.map((n: any) => [n.id, n.status]),
+    );
+    expect(byId["ok"]).toBe("published");
+    expect(byId["plain"]).toBe("published"); // status-less still publishes
+    expect(byId["wip"]).toBe("draft");
+    expect(byId["bad"]).toBe("draft"); // rejected -> kept unpublished, not errored
+    expect(byId["old"]).toBe("draft");
+    expect(byId["pr"]).toBe("draft"); // pending_review -> kept unpublished
+    expect(byId["rev"]).toBe("draft"); // 'review' alias normalizes to pending_review
+  });
+
+  it("sets the importer as author, ignoring the vault's own author (no phantom collaborator)", async () => {
+    const files: FileEntry[] = [
+      mdFile("owned.md", "title: Owned\nstatus: published\nauthor: stranger@nowhere.com", "body"),
+    ];
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Ownership", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    const { data: got } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${data.nest.id}/nodes/owned`,
+      undefined,
+      alice.apiKey,
+    );
+    // Author is the importer, not the vault's frontmatter author.
+    expect(got.node.author).toBe("alice@test.com");
+    // No phantom collaborator from the author≠version-author mismatch.
+    expect(got.node.collaborators ?? []).toEqual([]);
+  });
+
+  it("does not import a vault's _suggestions store (no phantom external edits)", async () => {
+    const meta =
+      "suggestion_id: sug-1\n" +
+      "document_id: notes/idea\n" + // old-nest id, would be unresolvable here
+      "source: out-of-band-edit\n" +
+      "detected_at: '2026-01-01T00:00:00.000Z'\n" +
+      "actor: someone@test.com\n" +
+      "target_hash: sha256:" + "a".repeat(64) + "\n" +
+      "proposed_hash: sha256:" + "b".repeat(64) + "\n";
+    const files: FileEntry[] = [
+      mdFile("notes/idea.md", "title: Idea\nstatus: published", "the doc body"),
+      // Engine per-doc suggestion store — must be skipped on import.
+      { path: "notes/_suggestions/idea/sug-1.meta.yaml", content: meta },
+      { path: "notes/_suggestions/idea/sug-1.patch", content: "--- a\n+++ b\n" },
+    ];
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "No Suggestions", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    // Only the doc registered; the two _suggestions files are not documents.
+    expect(data.documents).toBe(1);
+    const nestId = data.nest.id;
+    // The suggestion store was not written to disk.
+    expect(existsSync(join(env.dataDir, "nests", nestId, "notes", "_suggestions"))).toBe(false);
+    // And the External Edits queue is empty — no phantom entries.
+    const ee = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/external-edits`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(ee.data.total).toBe(0);
+  });
+
+  it("routes external-edit approve to its own handler, not the review route", async () => {
+    // Regression: greedy `/:nodeId{.+}/approve` (review) must not swallow
+    // `.../external-edits/:suggestionId/approve`. A bogus suggestion id should
+    // reach the external-edit handler (400), never the review route's
+    // "No pending review for this node" (403).
+    const imp = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Route Guard", files: [mdFile("doc.md", "title: D\nstatus: published", "body")] },
+      alice.apiKey,
+    );
+    const nestId = imp.data.nest.id;
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/doc/external-edits/does-not-exist/approve`,
+      {},
+      alice.apiKey,
+    );
+    expect(res.data.error).not.toBe("No pending review for this node");
+    expect(res.status).toBe(400);
+  });
+
+  it("streams NDJSON progress with ?stream=1", async () => {
+    const files: FileEntry[] = [
+      mdFile("s1.md", "title: S1", "one"),
+      mdFile("s2.md", "title: S2", "two"),
+    ];
+    const res = await app.request("/nests/import?stream=1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(alice.apiKey) },
+      body: JSON.stringify({ name: "Streamed", files }),
+    });
+    expect(res.status).toBe(200);
+    const lines = (await res.text())
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    // Progress lines carry the total, and a final `complete` line carries result.
+    expect(lines.some((m) => m.phase === "register" && m.total === 2)).toBe(true);
+    const done = lines.find((m) => m.complete);
+    expect(done?.documents).toBe(2);
+    expect(done?.nest?.id).toBeTruthy();
+  });
+
+  it("recovers a doc whose imported version chain won't reconstruct", async () => {
+    // A half-migrated vault: frontmatter claims version 3 with a history whose
+    // v2 diff won't apply (context lines absent from the keyframe). As-is
+    // publish throws "Failed to apply diff"; import must reset + republish.
+    const badDiff =
+      "Index: v1\n" +
+      "===================================================================\n" +
+      "--- v1\tv1\n+++ v1\tv2\n@@ -1,1 +1,1 @@\n" +
+      "-a line that is not in the keyframe\n+replacement\n";
+    const h = (c: string) => `sha256:${c.repeat(64)}`; // schema-valid hash shape
+    const history =
+      "keyframe_interval: 10\n" +
+      "versions:\n" +
+      "  - version: 1\n" +
+      "    keyframe: true\n" +
+      "    edited_by: someone@test.com\n" +
+      "    edited_at: '2026-01-01T00:00:00.000Z'\n" +
+      `    content_hash: ${h("a")}\n` +
+      `    chain_hash: ${h("b")}\n` +
+      "  - version: 2\n" +
+      `    diff: ${JSON.stringify(badDiff)}\n` +
+      "    edited_by: someone@test.com\n" +
+      "    edited_at: '2026-01-02T00:00:00.000Z'\n" +
+      `    content_hash: ${h("c")}\n` +
+      `    chain_hash: ${h("d")}\n`;
+    const files: FileEntry[] = [
+      mdFile("broken.md", "title: Broken\nstatus: published\nversion: 3", "current body"),
+      { path: ".versions/broken/v1.md", content: "---\ntitle: Broken\nversion: 1\nstatus: published\n---\noriginal body\n" },
+      { path: ".versions/broken/history.yaml", content: history },
+    ];
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Broken Chain", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.documents).toBe(1);
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${data.nest.id}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    const broken = list.data.nodes.find((n: any) => n.id === "broken");
+    // Reset path published it fresh rather than dropping it as draft.
+    expect(broken.status).toBe("published");
   });
 });

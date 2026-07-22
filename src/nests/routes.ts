@@ -1,6 +1,7 @@
 import { Hono } from "hono";
+import { streamText } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
-import { resolveNestPermission } from "../shared/access.js";
+import { resolveNestPermission, isServerAdminUserId } from "../shared/access.js";
 import {
   createNest,
   importNest,
@@ -30,6 +31,7 @@ import {
   getStewardRolesForUser,
 } from "../governance/stewardship-service.js";
 import { collabPermToRole } from "../governance/roles.js";
+import { resolveTeamRolesForUser } from "../governance/teams-service.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
@@ -104,8 +106,13 @@ nestRoutes.get("/", async (c) => {
         await getCollaboratorRole(n.id, callerEmail),
       );
       const stewardRoles = await getStewardRolesForUser(n.id, callerEmail);
+      // Team membership is a third grant path — include it so a team member's
+      // card shows their real role instead of a blank badge.
+      const teamRoles = await resolveTeamRolesForUser(n.id, userId);
       roles = [
-        ...new Set([grantRole, ...stewardRoles].filter(Boolean) as string[]),
+        ...new Set(
+          [grantRole, ...stewardRoles, ...teamRoles].filter(Boolean) as string[],
+        ),
       ];
     }
     if (!is_owner && n.user_id !== ANON_USER_ID) {
@@ -215,6 +222,36 @@ nestRoutes.post("/:nestId", async (c) => {
   }
   const files = Array.isArray(body.files) ? body.files : [];
   const userId = c.get("userId");
+  console.log(
+    `[import] request: name=${JSON.stringify(body.name)} files=${files.length}`,
+  );
+
+  // `?stream=1` streams NDJSON progress so the UI can render a real progress
+  // bar over a large import (register runs one publish per doc). Every other
+  // caller (tests, CLI) gets the original single JSON response below.
+  if (c.req.query("stream") === "1") {
+    const name = body.name;
+    return streamText(c, async (stream) => {
+      try {
+        await stream.writeln(JSON.stringify({ phase: "write" }));
+        const nest = await importNest(userId, name, files);
+        const email = await resolveCallerEmail(userId);
+        const documents = await registerImportedDocuments(
+          nest.id,
+          email,
+          async (done, total) => {
+            await stream.writeln(JSON.stringify({ phase: "register", done, total }));
+          },
+        );
+        await stream.writeln(JSON.stringify({ complete: true, nest, documents }));
+      } catch (err) {
+        await stream.writeln(
+          JSON.stringify({ error: (err as Error)?.message || "Import failed" }),
+        );
+      }
+    });
+  }
+
   const nest = await importNest(userId, body.name, files);
   // Seed governance rows for the documents already in the folder so they
   // list as published and edit from their real version (not from scratch).
@@ -227,8 +264,9 @@ nestRoutes.post("/:nestId", async (c) => {
 
 // GET /nests/unsynced — list folders under DATA_ROOT that are candidates for
 // sync (dropped in by the starter CLI or copied in manually). In key mode only
-// the license-admin sees them; the listing reflects server-side filesystem
-// state, so non-admins shouldn't be probing what's lying around on disk.
+// a server admin (license admin or superadmin — same resolution as /admin/*)
+// sees them; the listing reflects server-side filesystem state, so non-admins
+// shouldn't be probing what's lying around on disk.
 //
 // Served from inside the `/:nestId` param route (literal "unsynced" branch),
 // NOT as a static sibling route: RegExpRouter refuses a static path beside a
@@ -238,7 +276,7 @@ nestRoutes.post("/:nestId", async (c) => {
 // public URLs are unchanged.
 async function handleUnsyncedList(c: any) {
   const userId = c.get("userId");
-  if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
+  if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can list unsynced folders");
   }
   return c.json({ folders: listUnsyncedFolders() });
@@ -255,7 +293,7 @@ nestRoutes.post("/:nestId/sync", async (c) => {
     throw new NotFoundError("Not found");
   }
   const userId = c.get("userId");
-  if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
+  if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can sync folders");
   }
   const body = await c.req.json<{ name?: string }>();

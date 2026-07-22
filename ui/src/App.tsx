@@ -5,6 +5,7 @@ import { NestView } from "./components/NestView";
 import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
+import { TeamsPage } from "./components/TeamsPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { WorkflowsView } from "./components/WorkflowsView";
 import { GuidePage } from "./components/GuidePage";
@@ -20,6 +21,7 @@ import { DefinitionsPage } from "./components/DefinitionsPage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { BetaBadge } from "@/components/ui/beta-badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -75,8 +77,12 @@ type View =
       initialTitle?: string;
       /** Prior wiki-link hops, oldest first. Back pops the last entry. */
       breadcrumb?: BreadcrumbEntry[];
+      /** Open with this comment thread focused (activity-feed deep link;
+       *  also arrives via the ?thread= URL param). */
+      initialThreadId?: string;
     }
   | { page: "teammates" }
+  | { page: "teams" }
   | { page: "settings" }
   | { page: "guide" }
   | { page: "trace" }
@@ -170,12 +176,12 @@ export default function App() {
     try {
       const res = await updateAdminSettings(patch);
       setServerSettings(res.settings);
-      // Feature flags gate other views (workflow-plane nav, sub-agent picker)
-      // off the /health-sourced AuthContext state, not serverSettings. Re-read
-      // health so those toggles take effect live, without a page reload.
-      if ("workflow_plane_enabled" in patch || "subagent_runs_enabled" in patch) {
-        await refreshHealth();
-      }
+      // Feature flags gate other views (workflow-plane nav, sub-agent picker,
+      // PromptOwl teams …) off the /health-sourced AuthContext state, not
+      // serverSettings. Always re-read health after a save so ANY flag exposed
+      // there takes effect live — no page reload, and no per-key allowlist to
+      // keep in sync as new flags are added.
+      await refreshHealth();
       toast.success("Settings saved");
     } catch (e: any) {
       toast.error(e?.message || "Failed to save settings");
@@ -258,6 +264,8 @@ export default function App() {
             nodeId: docId,
             isOwner: false,
             isAnonOwned: false,
+            // ?thread=<id> → open the doc with that comment thread focused.
+            initialThreadId: params.get("thread") || undefined,
           });
           return;
         }
@@ -310,10 +318,15 @@ export default function App() {
       params.set("nest", view.nestId);
       if (view.nodeId && view.nodeId !== "new") params.set("doc", view.nodeId);
       else params.delete("doc");
+      // Keep the focused-thread deep link shareable; drop it otherwise so a
+      // stale ?thread doesn't leak onto the next document.
+      if (view.initialThreadId) params.set("thread", view.initialThreadId);
+      else params.delete("thread");
       params.delete("view");
     } else if (view.page === "nest") {
       params.set("nest", view.nestId);
       params.delete("doc");
+      params.delete("thread");
       params.delete("view");
     } else if (
       // Nest-scoped sub-pages: keep ?nest and tag the sub-view so the address
@@ -325,6 +338,7 @@ export default function App() {
     ) {
       params.set("nest", view.nestId);
       params.delete("doc");
+      params.delete("thread");
       params.set(
         "view",
         view.page === "ontology-graph"
@@ -338,6 +352,7 @@ export default function App() {
     } else {
       params.delete("nest");
       params.delete("doc");
+      params.delete("thread");
       params.delete("view");
     }
     const qs = params.toString();
@@ -387,8 +402,19 @@ export default function App() {
       rate_limited: "Too many sign-in attempts. Wait a moment and try again.",
       sign_in_restricted: "Sign-in is restricted on this community. Contact an admin.",
       service_error: "Something went wrong signing you in. Please try again.",
+      // OIDC SSO (GET /auth/oidc/*) reuses the same ?sso_error= channel.
+      disabled: "Single sign-on is turned off on this server.",
+      not_configured: "Single sign-on isn't fully configured. Contact your admin.",
+      discovery_failed: "Couldn't reach the identity provider. Try again, or contact your admin.",
+      provider_error: "Your identity provider declined the sign-in. Try again.",
+      state_mismatch: "The sign-in attempt expired or didn't match this browser. Try again.",
+      exchange_failed: "Sign-in couldn't be completed with the identity provider. Try again.",
+      invalid_token: "The identity provider returned an invalid sign-in token. Try again.",
+      domain_not_allowed: "Your email domain isn't allowed on this server. Contact your admin.",
+      email_not_verified: "Your identity provider reports your email address as unverified. Verify it with your provider, then try again.",
+      not_invited: "No account exists for your email on this server. Ask your admin for an invite.",
     };
-    const msg = messages[code] ?? "Sign-in failed. Try again from PromptOwl.";
+    const msg = messages[code] ?? "Sign-in failed. Please try again.";
     setTimeout(() => toast.error(msg), 0);
   }, []);
 
@@ -635,6 +661,7 @@ export default function App() {
               >
                 <Workflow className="h-3.5 w-3.5 mr-1" />
                 Workflows
+                <BetaBadge className="ml-1.5" />
               </Button>
             )}
 
@@ -643,6 +670,7 @@ export default function App() {
                 me={adminStatus.me}
                 isAdmin={isAdmin}
                 onTeammates={() => setView({ page: "teammates" })}
+                onTeams={() => setView({ page: "teams" })}
                 onSettings={() => setView({ page: "settings" })}
                 onGuide={() => setView({ page: "guide" })}
                 onTrace={() => setView({ page: "trace" })}
@@ -724,6 +752,7 @@ export default function App() {
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
                 initialFolder: opts?.folder,
+                initialThreadId: opts?.thread,
               })
             }
             onOpenTrace={() =>
@@ -787,6 +816,7 @@ export default function App() {
               nestName={doc.nestName}
               nodeId={doc.nodeId}
               initialFolder={(doc as any).initialFolder}
+              initialThreadId={doc.initialThreadId}
               isOwner={doc.isOwner}
               breadcrumb={doc.breadcrumb}
               onBack={() => {
@@ -891,6 +921,9 @@ export default function App() {
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}
+        {view.page === "teams" && (
+          <TeamsPage onBack={() => setView({ page: "dashboard" })} />
+        )}
 
         {view.page === "settings" && (
           <SettingsPage
@@ -961,6 +994,7 @@ interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
   onTeammates: () => void;
+  onTeams: () => void;
   onSettings: () => void;
   onGuide: () => void;
   onTrace: () => void;
@@ -972,6 +1006,7 @@ function UserMenu({
   me,
   isAdmin,
   onTeammates,
+  onTeams,
   onSettings,
   onGuide,
   onTrace,
@@ -1040,6 +1075,10 @@ function UserMenu({
           </>
         )}
         <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onTeams} className="cursor-pointer">
+          <Users className="h-3.5 w-3.5 mr-2" />
+          Teams
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={onGuide} className="cursor-pointer">
           <BookOpen className="h-3.5 w-3.5 mr-2" />
           How it works

@@ -3,8 +3,9 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 import {
-  ArrowLeft, UserPlus, Shield, Users, Copy, Check,
+  ArrowLeft, UserPlus, Shield, ShieldCheck, ShieldOff, Users, Copy, Check,
   AlertCircle, Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -49,13 +50,37 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
   // User pending removal confirmation.
   const [removeTarget, setRemoveTarget] = useState<Teammate | null>(null);
   const [removing, setRemoving] = useState(false);
+  // User pending superadmin-grant confirmation.
+  const [grantTarget, setGrantTarget] = useState<Teammate | null>(null);
+  const [granting, setGranting] = useState(false);
+  const [grantError, setGrantError] = useState<string | null>(null);
+  // User pending superadmin-revoke confirmation.
+  const [revokeTarget, setRevokeTarget] = useState<Teammate | null>(null);
+  const [revoking, setRevoking] = useState(false);
+  const [revokeError, setRevokeError] = useState<string | null>(null);
+  // email (lowercased) → { source, self }. Only "granted" non-self rows are
+  // revocable: "license"/"config" admins are file-authoritative, and you can't
+  // revoke your own access (it would 403 the very next fetch and break the page).
+  const [adminSource, setAdminSource] =
+    useState<Record<string, { source: string; self: boolean }>>({});
 
   const fetchTeammates = async () => {
     setLoading(true);
     try {
-      const data = await api.listTeammates();
+      const [data, admins] = await Promise.all([
+        api.listTeammates(),
+        api.listSuperAdmins(),
+      ]);
       setTeammates(data.teammates);
       setPendingStewards(data.pending_stewards || []);
+      setAdminSource(
+        Object.fromEntries(
+          admins.super_admins.map((a) => [
+            a.email.toLowerCase(),
+            { source: a.source, self: a.self },
+          ]),
+        ),
+      );
       setError(null);
     } catch (err: any) {
       setError(err.message);
@@ -171,8 +196,33 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                       )}
                     </div>
                   </div>
+                  {t.is_admin &&
+                    adminSource[t.email.toLowerCase()]?.source === "granted" &&
+                    !adminSource[t.email.toLowerCase()]?.self && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                      onClick={() => setRevokeTarget(t)}
+                      title="Revoke this user's superadmin access"
+                    >
+                      <ShieldOff className="h-4 w-4 mr-2" />
+                      Revoke superadmin
+                    </Button>
+                  )}
                   {!t.is_admin && (
                     <>
+                    {!t.is_invited && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setGrantTarget(t)}
+                        title="Grant this user superadmin access"
+                      >
+                        <ShieldCheck className="h-4 w-4 mr-2" />
+                        Grant superadmin
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       size="sm"
@@ -319,9 +369,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() =>
-                      navigator.clipboard.writeText(resetPw.password!)
-                    }
+                    onClick={() => void copyTextWithToast(resetPw.password!)}
                   >
                     Copy
                   </Button>
@@ -380,6 +428,107 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
               }}
             >
               {removing ? <Loader2 className="h-4 w-4 animate-spin" /> : "Remove"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!grantTarget}
+        onOpenChange={(o) => !o && !granting && setGrantTarget(null)}
+      >
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>Grant superadmin to {grantTarget?.email}?</DialogTitle>
+            <DialogDescription>
+              They immediately get server-admin access everywhere: every nest,
+              teammate management, and the activity trace. You can revoke
+              this later from this list.
+            </DialogDescription>
+          </DialogHeader>
+          {grantError && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{grantError}</AlertDescription>
+            </Alert>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setGrantTarget(null)}
+              disabled={granting}
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={granting}
+              onClick={async () => {
+                if (!grantTarget) return;
+                setGranting(true);
+                setGrantError(null);
+                try {
+                  await api.addSuperAdmin(grantTarget.email);
+                  setGrantTarget(null);
+                  await fetchTeammates();
+                } catch (e: any) {
+                  setGrantError(e.message);
+                } finally {
+                  setGranting(false);
+                }
+              }}
+            >
+              {granting ? <Loader2 className="h-4 w-4 animate-spin" /> : "Grant"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!revokeTarget}
+        onOpenChange={(o) => !o && !revoking && setRevokeTarget(null)}
+      >
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle>Revoke superadmin from {revokeTarget?.email}?</DialogTitle>
+            <DialogDescription>
+              They immediately lose server-admin access. They keep their account
+              and any nest/collaborator roles granted separately. You can grant
+              superadmin again later.
+            </DialogDescription>
+          </DialogHeader>
+          {revokeError && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{revokeError}</AlertDescription>
+            </Alert>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRevokeTarget(null)}
+              disabled={revoking}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={revoking}
+              onClick={async () => {
+                if (!revokeTarget) return;
+                setRevoking(true);
+                setRevokeError(null);
+                try {
+                  await api.removeSuperAdmin(revokeTarget.email);
+                  setRevokeTarget(null);
+                  await fetchTeammates();
+                } catch (e: any) {
+                  setRevokeError(e.message);
+                } finally {
+                  setRevoking(false);
+                }
+              }}
+            >
+              {revoking ? <Loader2 className="h-4 w-4 animate-spin" /> : "Revoke"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -472,7 +621,7 @@ function NewKeyModal({
 }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    await navigator.clipboard.writeText(password);
+    if (!(await copyTextWithToast(password))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };

@@ -60,6 +60,9 @@ interface ArtifactViewerProps {
    * but not free-edit the source — same split DocumentEditor applies.
    */
   reviewerOnly?: boolean;
+  /** Scroll this comment thread into view once threads load (activity-feed /
+   *  ?thread= deep link). */
+  initialThreadId?: string;
   onBack: () => void;
 }
 
@@ -76,6 +79,7 @@ export function ArtifactViewer({
   currentEmail,
   viewOnly = false,
   reviewerOnly = false,
+  initialThreadId,
   onBack,
 }: ArtifactViewerProps) {
   const [mode, setMode] = useState<"preview" | "annotate" | "edit">("preview");
@@ -333,6 +337,23 @@ export function ArtifactViewer({
   useEffect(() => {
     loadThreads();
   }, [loadThreads]);
+
+  // Feed deep-link: once threads load and the target exists, scroll its card
+  // into view in the rail. Consumed once — later reloads (replies, resolves)
+  // must not re-yank the scroll position.
+  const initialThreadConsumedRef = useRef(false);
+  useEffect(() => {
+    if (!initialThreadId || initialThreadConsumedRef.current || loadingThreads) {
+      return;
+    }
+    if (!threads.some((t) => t.id === initialThreadId)) return;
+    initialThreadConsumedRef.current = true;
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`annotation-thread-${initialThreadId}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, [threads, loadingThreads, initialThreadId]);
 
   // Lazily fetch + extract the artifact text the first time the user enters
   // Annotate mode (also feeds the snapshot badge if the prop was unknown).
@@ -877,6 +898,7 @@ function ThreadCard({
   const resolved = thread.status === "resolved";
   return (
     <div
+      id={`annotation-thread-${thread.id}`}
       className={`rounded-lg border p-2.5 text-sm ${
         resolved ? "bg-muted/40 opacity-80" : "bg-background"
       }`}

@@ -36,6 +36,7 @@ let canonicalEnvLoaded: string | null = null;
 let slackUrlWarned = false;
 let emailFromWarned = false;
 let emailToWarned = false;
+let oidcIssuerWarned = false;
 
 /**
  * Email shape gate for the notification envelope: local@domain.tld, no
@@ -155,6 +156,16 @@ export const config = {
   get PROMPTOWL_KEY() {
     return process.env.PROMPTOWL_KEY || "";
   },
+  /**
+   * Whether importing/syncing teams FROM PromptOwl is offered. Default OFF
+   * (only an explicit "true" enables) — an operator opts the PO-team surface
+   * in from Settings or env. When off, the /teams/promptowl routes 404 and the
+   * UI hides the panel. Independent of PROMPTOWL_SIGN_IN_GATE: a user may sign
+   * in with PromptOwl yet not be allowed to pull their PO teams in.
+   */
+  get PROMPTOWL_TEAMS_ENABLED(): boolean {
+    return process.env.PROMPTOWL_TEAMS_ENABLED === "true";
+  },
   /** Vercel automation-bypass secret for PO calls; unset = no bypass. */
   get PROMPTOWL_BYPASS_SECRET(): string {
     return process.env.PROMPTOWL_BYPASS_SECRET || "";
@@ -235,6 +246,83 @@ export const config = {
       : "open";
   },
   /**
+   * Generic OIDC single sign-on (Microsoft Entra ID, Google, any spec-
+   * compliant IdP). Off by default; superadmin-configurable at runtime via
+   * /admin/settings. When enabled AND fully configured (issuer + client id +
+   * client secret), GET /auth/oidc/login starts an authorization-code + PKCE
+   * flow and GET /auth/oidc/callback finishes it with a normal browser
+   * session — exactly like a password login.
+   */
+  get OIDC_ENABLED(): boolean {
+    return process.env.OIDC_ENABLED === "true";
+  },
+  /**
+   * OIDC issuer URL, e.g. "https://login.microsoftonline.com/<tenant>/v2.0"
+   * or "https://accounts.google.com". https only — tokens and the client
+   * secret ride this trust root, so a plaintext issuer is refused (warn once,
+   * treated as unset). Trailing slash stripped so discovery-doc comparison is
+   * canonical.
+   */
+  get OIDC_ISSUER(): string {
+    const raw = (process.env.OIDC_ISSUER || "").trim().replace(/\/$/, "");
+    if (!raw) return "";
+    let ok = false;
+    try {
+      ok = new URL(raw).protocol === "https:";
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      if (!oidcIssuerWarned) {
+        oidcIssuerWarned = true;
+        console.warn(
+          "[config] OIDC_ISSUER rejected: must be a valid https:// URL. OIDC sign-in disabled.",
+        );
+      }
+      return "";
+    }
+    return raw;
+  },
+  get OIDC_CLIENT_ID(): string {
+    return (process.env.OIDC_CLIENT_ID || "").trim();
+  },
+  get OIDC_CLIENT_SECRET(): string {
+    return (process.env.OIDC_CLIENT_SECRET || "").trim();
+  },
+  /**
+   * Comma-separated email-domain allowlist for OIDC sign-in (e.g.
+   * "acme.com, contractors.acme.com"). Empty = any domain the IdP asserts.
+   * Entries are normalized to lowercase; matching is on the part after the
+   * final "@" of the asserted email.
+   */
+  get OIDC_ALLOWED_DOMAINS(): string[] {
+    return (process.env.OIDC_ALLOWED_DOMAINS || "")
+      .split(",")
+      .map((d) => d.trim().toLowerCase())
+      .filter(Boolean);
+  },
+  /**
+   * Auto-provision (JIT-create) an unknown user on first successful OIDC
+   * sign-in. Default true. When false, only emails that already have a user
+   * row (invited / registered) may sign in via OIDC — everyone else bounces
+   * with ?sso_error=not_invited.
+   */
+  get OIDC_AUTO_PROVISION(): boolean {
+    return process.env.OIDC_AUTO_PROVISION !== "false";
+  },
+  /**
+   * Auto-tag content created by SSO users with their directory department:
+   * when on, node CREATE appends `dept:<slugified-department>` to the new
+   * node's tags (never on update, never retroactively). The department is
+   * captured from the OIDC `department` claim at login (see oidc.ts), so
+   * this is only meaningful alongside an IdP that emits that claim — but
+   * there is no hard dependency on OIDC_ENABLED. Default off; superadmin-
+   * togglable at runtime via /admin/settings.
+   */
+  get OIDC_DEPARTMENT_TAGGING(): boolean {
+    return process.env.OIDC_DEPARTMENT_TAGGING === "true";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path
@@ -311,6 +399,21 @@ export const config = {
 
   get FEATURE_WORKFLOW_PLANE(): boolean {
     return process.env.FEATURE_WORKFLOW_PLANE === "true";
+  },
+  /**
+   * Content-type toggles — soft-disable a node type server-wide. DEFAULT ON:
+   * missing/unset/anything-but-"false" = enabled, so existing deployments see
+   * zero behavior change. Only CREATION of the type is refused when disabled;
+   * existing nodes of that type still read/render/version (never data loss).
+   * Runnable types (agent/skill/tool) are NOT governed here — they stay gated
+   * by FEATURE_WORKFLOW_PLANE. Superadmin-editable at runtime via
+   * /admin/settings (type_artifact_enabled / type_table_enabled).
+   */
+  get TYPE_ARTIFACT_ENABLED(): boolean {
+    return process.env.TYPE_ARTIFACT_ENABLED !== "false";
+  },
+  get TYPE_TABLE_ENABLED(): boolean {
+    return process.env.TYPE_TABLE_ENABLED !== "false";
   },
   /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling

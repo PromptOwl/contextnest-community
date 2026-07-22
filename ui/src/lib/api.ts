@@ -142,7 +142,17 @@ export async function getHealth() {
     logo_url?: string | null;
     promptowl_sign_in_gate?: "open" | "admin-only" | "disabled";
     manual_sign_in?: "open" | "invite-only" | "disabled";
+    /** True only when OIDC SSO is enabled AND fully configured server-side. */
+    oidc_enabled?: boolean;
+    /** Present when oidc_enabled — lets the login page label the button by IdP. */
+    oidc_issuer?: string;
     workflow_plane_enabled?: boolean;
+    /** Import teams from PromptOwl (default OFF). Off → the panel is hidden. */
+    promptowl_teams_enabled?: boolean;
+    /** Content-type toggles — default ON server-side; the editor's type
+     *  picker hides a disabled type exactly when create would refuse it. */
+    type_artifact_enabled?: boolean;
+    type_table_enabled?: boolean;
     subagent_runs_enabled?: boolean;
     subagent_max_depth?: number;
     subagent_max_children?: number;
@@ -163,10 +173,30 @@ export interface AdminSettings {
   public_base_url: string;
   max_body_bytes: number;
   workflow_plane_enabled: boolean;
+  /** Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
+   *  and the PromptOwl Teams panel is hidden. */
+  promptowl_teams_enabled: boolean;
+  /** Content-type toggles (default ON). Disabling refuses new creations of
+   *  the type only — existing nodes still read/render/version. */
+  type_artifact_enabled: boolean;
+  type_table_enabled: boolean;
   subagent_runs_enabled: boolean;
   subagent_max_depth: number;
   subagent_max_children: number;
   trace_retention_days: number;
+  /** OIDC SSO. The client secret is write-only — only its presence comes back. */
+  oidc_enabled: boolean;
+  oidc_issuer: string;
+  oidc_client_id: string;
+  oidc_client_secret_set?: boolean;
+  oidc_allowed_domains: string;
+  oidc_auto_provision: boolean;
+  /** Tag new documents with the creator's directory department (dept:<slug>). */
+  oidc_department_tagging: boolean;
+  /** Server-computed readiness: enabled AND issuer+client id+secret present. */
+  oidc_ready?: boolean;
+  /** Write-only: string sets/replaces, null clears; never returned. */
+  oidc_client_secret?: string | null;
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   smtp_url: string;
@@ -257,6 +287,36 @@ export async function inviteTeammate(email: string) {
     method: "POST",
     body: JSON.stringify({ email }),
   });
+}
+
+// ─── Superadmins (server admins) ────────────────────────────────────────
+// Effective superadmin = license owner ∪ access.yaml super_admins ∪ DB
+// grants. Only "granted" rows are revocable from the UI.
+
+export interface SuperAdminRow {
+  email: string;
+  source: "license" | "config" | "granted";
+  granted_by: string | null;
+  granted_at: string | null;
+  self: boolean;
+}
+
+export async function listSuperAdmins() {
+  return request<{ super_admins: SuperAdminRow[] }>("/admin/super-admins");
+}
+
+export async function addSuperAdmin(email: string) {
+  return request<{ email: string; source: "granted"; granted_by: string }>(
+    "/admin/super-admins",
+    { method: "POST", body: JSON.stringify({ email }) },
+  );
+}
+
+export async function removeSuperAdmin(email: string) {
+  return request<{ ok: boolean; email: string }>(
+    `/admin/super-admins/${encodeURIComponent(email)}`,
+    { method: "DELETE" },
+  );
 }
 
 // Logged-in user changes their own password (e.g., after an admin reset
@@ -433,12 +493,55 @@ export interface ImportedFile {
 }
 
 /** Import a folder the user picked in their browser. The browser reads the
- *  folder and uploads each file; the server writes them into the workspace. */
-export async function importNest(name: string, files: ImportedFile[]) {
-  return request<{ nest: any; documents: number }>("/nests/import", {
+ *  folder and uploads each file; the server writes them into the workspace.
+ *
+ *  When `onProgress` is supplied we hit the `?stream=1` endpoint, which streams
+ *  NDJSON progress lines so the caller can render a real progress bar; without
+ *  it, the original single JSON response is used. */
+export async function importNest(
+  name: string,
+  files: ImportedFile[],
+  onProgress?: (done: number, total: number) => void,
+): Promise<{ nest: any; documents: number }> {
+  if (!onProgress) {
+    return request<{ nest: any; documents: number }>("/nests/import", {
+      method: "POST",
+      body: JSON.stringify({ name, files }),
+    });
+  }
+
+  const res = await fetch(`${API_BASE}/nests/import?stream=1`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, files }),
+    credentials: "include",
   });
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || `Import failed: ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let result: { nest: any; documents: number } | null = null;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      const msg = JSON.parse(line);
+      if (msg.error) throw new Error(msg.error);
+      if (msg.phase === "register") onProgress(msg.done, msg.total);
+      if (msg.complete) result = { nest: msg.nest, documents: msg.documents };
+    }
+  }
+  if (!result) throw new Error("Import failed");
+  return result;
 }
 
 /** A folder under DATA_ROOT that has not been converted to a nest yet. */
@@ -532,8 +635,9 @@ export async function deleteDefinition(nestId: string, id: string) {
 
 // ─── Nodes ──────────────────────────────────────────────────────────────
 
-// Upload an image into the nest's assets folder. Multipart (not the JSON
-// request() helper) — the browser sets the boundary content-type itself.
+// Upload an image or video into the nest's assets folder. Multipart (not
+// the JSON request() helper) — the browser sets the boundary content-type
+// itself. `markdown` is `![alt](url)` for images, the bare URL for video.
 export async function uploadAsset(nestId: string, file: File) {
   const form = new FormData();
   form.append("file", file);
@@ -719,6 +823,65 @@ export async function getReviewQueue(nestId: string, status = "pending") {
   return request<{ requests: any[]; total: number }>(
     `/nests/${nestId}/review-queue?status=${encodeURIComponent(status)}`,
   );
+}
+
+// ── Nest activity feed (changes + comments) ───────────────────────────────
+
+export type FeedFilter = "all" | "changes" | "comments";
+
+/** A pending change submission — same fields the review queue returns. */
+export interface FeedChangeItem {
+  type: "change";
+  id: string;
+  nestId: string;
+  nodeId: string;
+  title?: string;
+  version: number;
+  requestedBy: string;
+  requestedAt: string;
+  requestNote?: string;
+  status: string;
+  priority: string;
+  canReview: boolean;
+  createdAt: string;
+}
+
+/** One comment event — a new annotation thread, or a reply on one. */
+export interface FeedCommentItem {
+  type: "comment";
+  id: string;
+  threadId: string;
+  nodeId: string;
+  title?: string;
+  author: string;
+  snippet: string;
+  createdAt: string;
+  resolved: boolean;
+  isReply: boolean;
+}
+
+export type FeedItem = FeedChangeItem | FeedCommentItem;
+
+/** Activity feed: pending changes + annotation activity, newest first. */
+export async function getNestFeed(
+  nestId: string,
+  filter: FeedFilter = "all",
+  limit = 50,
+  offset = 0,
+) {
+  const params = new URLSearchParams({
+    filter,
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return request<{
+    items: FeedItem[];
+    total: number;
+    counts: { changes: number; comments: number };
+    filter: FeedFilter;
+    limit: number;
+    offset: number;
+  }>(`/nests/${nestId}/feed?${params.toString()}`);
 }
 
 export async function submitForReview(
@@ -1121,6 +1284,194 @@ export async function removeCollaborator(nestId: string, collabId: string) {
     `/nests/${nestId}/collaborators/${collabId}`,
     { method: "DELETE" },
   );
+}
+
+// ─── Teams ──────────────────────────────────────────────────────────────
+// A team is a reusable, owner-managed group. Each member carries a role
+// (mirrors the server enum in src/shared/types.ts) applied on every nest the
+// team is shared to.
+
+export type TeamRole = "admin" | "editor" | "viewer";
+
+export interface TeamMember {
+  userId: string;
+  email: string;
+  role: TeamRole;
+  /** True = real registered account; false = invited placeholder (from API). */
+  registered?: boolean;
+}
+
+export interface Team {
+  id: string;
+  name: string;
+  owner_id: string;
+  /** Owner email for display ("Created by …"), from API. */
+  owner_email?: string;
+  members: TeamMember[];
+  /** "promptowl" for an imported team; null when created here. */
+  source?: string | null;
+  /** The team's id in `source`'s system; null when created here. */
+  external_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Picker options for a team member's role. Mirrors TeamMemberRole server-side. */
+export const TEAM_ROLES: { value: TeamRole; label: string; hint: string }[] = [
+  { value: "viewer", label: "Viewer", hint: "Read only" },
+  { value: "editor", label: "Editor", hint: "Read and edit documents" },
+  { value: "admin", label: "Admin", hint: "Full access except deleting the nest" },
+];
+
+export async function listTeams() {
+  return request<{ teams: Team[] }>(`/teams`);
+}
+
+export async function getTeam(teamId: string) {
+  return request<{ team: Team }>(`/teams/${teamId}`);
+}
+
+export async function createTeam(name: string) {
+  return request<{ team: Team }>(`/teams`, {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function renameTeam(teamId: string, name: string) {
+  return request<{ team: Team }>(`/teams/${teamId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteTeam(teamId: string) {
+  return request<{ removed: boolean }>(`/teams/${teamId}`, { method: "DELETE" });
+}
+
+export async function addTeamMember(
+  teamId: string,
+  data: { email?: string; user_id?: string; role: TeamRole },
+) {
+  return request<{ team: Team }>(`/teams/${teamId}/members`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateTeamMemberRole(
+  teamId: string,
+  userId: string,
+  role: TeamRole,
+) {
+  return request<{ team: Team }>(`/teams/${teamId}/members/${userId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  });
+}
+
+export async function removeTeamMember(teamId: string, userId: string) {
+  return request<{ team: Team }>(`/teams/${teamId}/members/${userId}`, {
+    method: "DELETE",
+  });
+}
+
+// ─── PromptOwl team import ──────────────────────────────────────────────
+// Only available to users who signed in with PromptOwl: the token lives in an
+// httpOnly cookie set at that sign-in, and the browser attaches it, so these
+// calls carry no token of their own. Anyone else gets `promptowl_connect_
+// required` from the server, and `hasPromptowlSession()` keeps the UI from
+// offering the feature in the first place. Nothing is stored server-side.
+
+/** A team as PromptOwl reports it — not yet imported. */
+export interface PromptowlTeam {
+  id: string;
+  name: string;
+  /** True when you own the team in PromptOwl. */
+  owned: boolean;
+  /** Your role on the team in PromptOwl: Owner | Editor | Viewer | User. */
+  your_role: string;
+  source: string | null;
+  enterprise: { id: string; name: string } | null;
+  updated_at: string | null;
+  members: { email: string; role: string }[];
+}
+
+/**
+ * Whether you may import a team — Owner or Editor in PromptOwl only.
+ * Importing makes you owner of the copy here, which is more reach than a
+ * view-only member holds upstream. Mirrors the server, which enforces it.
+ */
+export function canImportPromptowlTeam(team: PromptowlTeam): boolean {
+  return ["owner", "editor"].includes((team.your_role || "").toLowerCase());
+}
+
+/** What importing one team changed locally. Emails, not user ids. */
+export interface PromptowlSyncResult {
+  team_id: string;
+  external_id: string;
+  name: string;
+  created: boolean;
+  added: string[];
+  updated: string[];
+  removed: string[];
+}
+
+/** Server marker meaning "sign in with PromptOwl to use this". */
+export const PROMPTOWL_CONNECT_REQUIRED = "promptowl_connect_required";
+
+/**
+ * True when this session signed in with PromptOwl — the only sessions that can
+ * import teams. Reads the readable marker cookie the server sets at PromptOwl
+ * sign-in (the token itself is httpOnly and unreadable here, by design).
+ *
+ * A UI hint only: the server independently requires the real token cookie, so
+ * faking this marker just yields a tab whose requests are refused.
+ */
+export function hasPromptowlSession(): boolean {
+  if (typeof document === "undefined") return false;
+  return document.cookie
+    .split(";")
+    .some((c) => c.trim().startsWith("cnst_po_session="));
+}
+
+/**
+ * True when an error from the calls below means the PromptOwl session is gone
+ * (never signed in, or the token was revoked upstream). The server answers 428
+ * (not 401) for this, so it never trips the logged-out handling in `request`.
+ */
+export function isPromptowlConnectRequired(err: any): boolean {
+  return (err as ApiError)?.body?.code === PROMPTOWL_CONNECT_REQUIRED;
+}
+
+/** The caller's PromptOwl teams — not yet imported. */
+export async function listPromptowlTeams() {
+  return request<{ teams: PromptowlTeam[] }>(`/teams/promptowl`);
+}
+
+export async function syncPromptowlTeams(teamIds: string[]) {
+  return request<{ results: PromptowlSyncResult[] }>(`/teams/promptowl/sync`, {
+    method: "POST",
+    body: JSON.stringify({ team_ids: teamIds }),
+  });
+}
+
+/** Teams shared onto a nest, each enriched with its member roster. */
+export async function listNestTeams(nestId: string) {
+  return request<{
+    teams: { teamId: string; teamName: string; members: TeamMember[] }[];
+  }>(`/nests/${nestId}/teams`);
+}
+
+export async function shareNestWithTeam(nestId: string, teamId: string) {
+  return request(`/nests/${nestId}/teams`, {
+    method: "POST",
+    body: JSON.stringify({ team_id: teamId }),
+  });
+}
+
+export async function unshareNestTeam(nestId: string, teamId: string) {
+  return request(`/nests/${nestId}/teams/${teamId}`, { method: "DELETE" });
 }
 
 // ─── Ontology graph ───────────────────────────────────────────────────────

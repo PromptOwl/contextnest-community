@@ -13,6 +13,9 @@ import {
 import { authMiddleware, type AuthEnv } from "./middleware.js";
 import {
   buildClearSessionCookie,
+  buildOidcMarkerCookie,
+  buildPromptowlMarkerCookie,
+  buildPromptowlTokenCookie,
   buildSessionCookie,
   createSession,
   deleteAllSessionsForUser,
@@ -30,16 +33,34 @@ import {
   isLicenseAdminEmail,
   isLicenseAdminUserId,
 } from "./license.js";
+import { isSuperAdmin } from "../governance/access-service.js";
+// Guards the people-management surfaces below so a granted superadmin gets the
+// same operator powers as the license owner (see shared/access.ts).
+import { isServerAdminUserId } from "../shared/access.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
 import { verifySsoTicket } from "./sso-token.js";
-import { getConnInfo } from "@hono/node-server/conninfo";
+import { oidcRoutes } from "./oidc.js";
+import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+
+/** is_admin for user-facing payloads: license admin OR superadmin. */
+function isServerAdminEmail(email: string): boolean {
+  return isLicenseAdminEmail(email) || isSuperAdmin(email);
+}
 
 // Auth-endpoint rate limits. Keyed on IP for anonymous attempts + email
 // on login (so brute-forcing one email from a botnet still clamps).
 const LOGIN_LIMIT = { max: 5, windowMs: 15 * 60_000 };       // 5 / 15 min
 const REGISTER_LIMIT = { max: 3, windowMs: 60 * 60_000 };    // 3 / hr
 const DEVICE_LIMIT = { max: 10, windowMs: 15 * 60_000 };     // 10 / 15 min
+
+/**
+ * Scopes this server asks PromptOwl to limit its device tokens to — the least
+ * it can function with: identify the user who signed in, and read the teams
+ * they own so they can be imported. See PROMPTOWL_TOKEN_COOKIE in sessions.ts
+ * for where the resulting token lives and why.
+ */
+const PROMPTOWL_SCOPES = ["user:read", "teams:read"];
 
 // Warn once (not per request) when SSO runs without audience binding.
 let warnedMissingSsoAudience = false;
@@ -60,23 +81,9 @@ function assertValidPassword(password: string, label = "password"): void {
   }
 }
 
-function clientIp(c: any): string {
-  // Respect reverse-proxy headers; fall back to the raw socket address if
-  // none. Intentionally trusts the first forwarded IP — deploy behind a
-  // proxy you control.
-  const xff = c.req.header("x-forwarded-for");
-  if (xff) return xff.split(",")[0].trim();
-  const realIp = c.req.header("x-real-ip");
-  if (realIp) return realIp.trim();
-  // No proxy (e.g. running locally) — read the TCP peer address directly.
-  try {
-    const addr = getConnInfo(c).remote.address;
-    if (addr) return addr;
-  } catch {
-    // Runtime without conninfo support — fall through to "unknown".
-  }
-  return "unknown";
-}
+// clientIp lives in ../shared/request-ip.ts (proxy headers → TCP peer →
+// "unknown") — shared with the OIDC endpoints so every auth entry point
+// keys its rate limits identically.
 
 /**
  * Resolve the caller's userId from either an httpOnly session cookie
@@ -134,6 +141,19 @@ function clearSessionCookie(c: any) {
   c.header(
     "Set-Cookie",
     buildClearSessionCookie({ secure: isSecureRequest(c) }),
+  );
+  // Log out means log out of PromptOwl access too. Every logout path funnels
+  // through here, so the token cookie can't outlive the session that set it —
+  // otherwise the next person on a shared browser inherits it.
+  c.header(
+    "Set-Cookie",
+    buildPromptowlTokenCookie("", { secure: isSecureRequest(c), clear: true }),
+    { append: true },
+  );
+  c.header(
+    "Set-Cookie",
+    buildPromptowlMarkerCookie({ secure: isSecureRequest(c), clear: true }),
+    { append: true },
   );
 }
 
@@ -241,6 +261,11 @@ async function provisionPromptowlUser(
 
 export const authRoutes = new Hono<AuthEnv>();
 
+// Generic OIDC SSO (Microsoft Entra ID / Google / any spec-compliant IdP) —
+// GET /auth/oidc/login + GET /auth/oidc/callback. Separate from the PromptOwl
+// ticket flow at GET /auth/sso below. See src/auth/oidc.ts.
+authRoutes.route("/oidc", oidcRoutes);
+
 // POST /auth/register
 //
 // SELF sign-up only — creates a brand-new account. It deliberately does NOT set
@@ -321,7 +346,7 @@ authRoutes.post("/register", async (c) => {
         id: userId,
         email,
         name: body.name || null,
-        is_admin: isLicenseAdminEmail(email),
+        is_admin: isServerAdminEmail(email),
       },
     },
     201,
@@ -443,7 +468,7 @@ authRoutes.post("/login", async (c) => {
       id: user.id,
       email: user.email,
       name: user.name,
-      is_admin: isLicenseAdminEmail(user.email),
+      is_admin: isServerAdminEmail(user.email),
     },
   });
 });
@@ -453,6 +478,14 @@ authRoutes.post("/logout", async (c) => {
   const sessionId = getSessionIdFromRequest(c);
   if (sessionId) await deleteSession(sessionId);
   clearSessionCookie(c);
+  // Also clear the OIDC SSO marker so it can't linger past a local logout.
+  // (SSO sessions normally sign out via GET /auth/oidc/logout, which does
+  // the IdP round-trip; this is the fallback path.)
+  c.header(
+    "Set-Cookie",
+    buildOidcMarkerCookie({ secure: isSecureRequest(c), clear: true }),
+    { append: true },
+  );
   return c.json({ ok: true });
 });
 
@@ -575,10 +608,12 @@ authRoutes.post("/device", async (c) => {
   if (!tryConsume(`device:ip:${clientIp(c)}`, DEVICE_LIMIT)) {
     return c.json({ error: "Too many device auth attempts, try again later" }, 429);
   }
-  const body = await c.req.json<{
-    deviceName?: string;
-    deviceType?: string;
-  }>();
+  // Every field here is optional with a default, so a bodyless POST is a
+  // perfectly good request — but c.req.json() throws on an empty body and the
+  // caller would get "Request body isn't valid JSON" for asking correctly.
+  const body = await c.req
+    .json<{ deviceName?: string; deviceType?: string }>()
+    .catch(() => ({}) as { deviceName?: string; deviceType?: string });
   const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
 
   const res = await fetch(`${promptowlUrl}/api/auth/device`, {
@@ -587,6 +622,13 @@ authRoutes.post("/device", async (c) => {
     body: JSON.stringify({
       deviceName: body.deviceName || "ContextNest Community",
       deviceType: body.deviceType || "webapp",
+      // Ask for the least this server can work with: read the profile (to
+      // identify who signed in) and read teams (to import them). The token we
+      // then hold — and park in the user's cookie — is refused by every other
+      // PromptOwl endpoint, so it can't chat as the user or spend their
+      // credits even if it leaks. An older PromptOwl ignores the field and
+      // returns an unscoped token, which still works.
+      scopes: PROMPTOWL_SCOPES,
     }),
   });
 
@@ -658,6 +700,23 @@ authRoutes.post("/promptowl", async (c) => {
   if (!result.ok) {
     return c.json({ error: result.error, gate: result.gate }, result.status);
   }
+
+  // Keep the token for the life of the session so team import can call
+  // PromptOwl as this user without sending them back through device approval.
+  // PromptOwl hands a token over exactly once, at approval — this is the only
+  // moment it can be captured. It goes in the user's own cookie, not our
+  // database (see PROMPTOWL_TOKEN_COOKIE), and it's scoped to reads upstream.
+  c.header(
+    "Set-Cookie",
+    buildPromptowlTokenCookie(body.token, { secure: isSecureRequest(c) }),
+    { append: true },
+  );
+  // Readable marker so the UI knows to offer the PromptOwl Teams tab.
+  c.header(
+    "Set-Cookie",
+    buildPromptowlMarkerCookie({ secure: isSecureRequest(c) }),
+    { append: true },
+  );
 
   return c.json({
     user: {
@@ -810,7 +869,7 @@ authRoutes.get("/admin-status", async (c) => {
       me = {
         email: row.email,
         name: row.name,
-        is_admin: isLicenseAdminEmail(row.email),
+        is_admin: isServerAdminEmail(row.email),
       };
     }
   }
@@ -886,9 +945,9 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
   if (!callerId) {
     return c.json({ error: "Authentication required." }, 401);
   }
-  if (!(await isLicenseAdminUserId(callerId))) {
+  if (!(await isServerAdminUserId(callerId))) {
     return c.json(
-      { error: "Only the license-admin user can reset passwords." },
+      { error: "Only a server admin can reset passwords." },
       403,
     );
   }
@@ -900,6 +959,16 @@ authRoutes.post("/admin/reset-password/:userId", async (c) => {
     [targetId],
   ) as { id: string; email: string } | undefined;
   if (!target) return c.json({ error: "User not found" }, 404);
+
+  // Peer protection: one server admin must not be able to password-hijack
+  // another (license/config/granted alike). Own password goes through
+  // /auth/password; other admins are off-limits outright.
+  if (target.id !== callerId && isServerAdminEmail(target.email)) {
+    return c.json(
+      { error: "This user is a server admin — admins can't reset each other's passwords. They can change their own via their account." },
+      403,
+    );
+  }
 
   let supplied: string | undefined;
   try {
@@ -949,9 +1018,9 @@ authRoutes.delete("/users/:userId", async (c) => {
   if (!callerId) {
     return c.json({ error: "Authentication required." }, 401);
   }
-  if (!(await isLicenseAdminUserId(callerId))) {
+  if (!(await isServerAdminUserId(callerId))) {
     return c.json(
-      { error: "Only the license-admin user can remove users." },
+      { error: "Only a server admin can remove users." },
       403,
     );
   }
@@ -966,6 +1035,16 @@ authRoutes.delete("/users/:userId", async (c) => {
     [targetId],
   ) as { id: string; email: string } | undefined;
   if (!target) return c.json({ error: "User not found" }, 404);
+
+  // Peer protection: a server admin can't delete another server admin
+  // (license/config/granted alike). Revoke their superadmin grant first
+  // (config/license admins can only be demoted at the source).
+  if (isServerAdminEmail(target.email)) {
+    return c.json(
+      { error: "This user is a server admin — admins can't remove each other. Revoke their superadmin access first." },
+      403,
+    );
+  }
 
   const ownedNests = (
     await db.get(
@@ -1018,11 +1097,11 @@ authRoutes.post("/invite", async (c) => {
     );
   }
   const db = getDb();
-  if (!(await isLicenseAdminUserId(callerId))) {
+  if (!(await isServerAdminUserId(callerId))) {
     return c.json(
       {
         error:
-          "Only the license-admin user can invite teammates. Contact the admin who installed the PromptOwl license on this server to issue invitations.",
+          "Only a server admin can invite teammates. Contact the admin who installed the PromptOwl license on this server to issue invitations.",
       },
       403,
     );
@@ -1097,11 +1176,11 @@ authRoutes.get("/teammates", async (c) => {
   }
 
   const db = getDb();
-  if (!(await isLicenseAdminUserId(callerId))) {
+  if (!(await isServerAdminUserId(callerId))) {
     return c.json(
       {
         error:
-          "Only the license-admin user can view the teammates list. Contact the admin who installed the PromptOwl license on this server.",
+          "Only a server admin can view the teammates list. Contact the admin who installed the PromptOwl license on this server.",
       },
       403,
     );
@@ -1147,9 +1226,12 @@ authRoutes.get("/teammates", async (c) => {
   ) as Array<{ email: string }>;
 
   // Sort admins first; underlying SQL is_admin column is unreliable
-  // (license-derived), so resolve in JS after the map.
+  // (license-derived), so resolve in JS after the map. Server-admin =
+  // license admin OR superadmin, so granted/config superadmins carry the
+  // Admin badge and the UI stops offering Reset password / Remove for them
+  // (the backend rejects those anyway — see the target guards below).
   const enriched = teammates
-    .map((t) => ({ ...t, is_admin: isLicenseAdminEmail(t.email) }))
+    .map((t) => ({ ...t, is_admin: isServerAdminEmail(t.email) }))
     .sort((a, b) => Number(b.is_admin) - Number(a.is_admin));
 
   return c.json({

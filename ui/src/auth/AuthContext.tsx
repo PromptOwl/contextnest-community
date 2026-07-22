@@ -51,6 +51,14 @@ export interface AuthContextValue {
   /** Public feature flag from /health — the server's route gate, so the UI
    *  hides the workflow plane exactly when the API would 404 it. */
   workflowPlaneEnabled: boolean;
+  /** Public feature flag from /health — import teams from PromptOwl (default
+   *  OFF). Off → /teams/promptowl 404s, so the UI hides the panel to match. */
+  promptowlTeamsEnabled: boolean;
+  /** Content-type toggles from /health (default ON). The editor's type picker
+   *  hides a disabled type exactly when the API would refuse creating it;
+   *  existing nodes of the type stay readable. */
+  typeArtifactEnabled: boolean;
+  typeTableEnabled: boolean;
   /** Public feature flag from /health — sub-agent (nested) runs. Gated
    *  separately from the plane; when off the UI hides the "spawn sub-agent"
    *  option exactly when the API would reject a parent_run_id (400). */
@@ -78,6 +86,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [workflowPlaneEnabled, setWorkflowPlaneEnabled] = useState(false);
+  const [promptowlTeamsEnabled, setPromptowlTeamsEnabled] = useState(false);
+  // Content types default ON (mirrors config.ts — only an explicit "false"
+  // disables), so the picker doesn't flicker types away while /health loads.
+  const [typeArtifactEnabled, setTypeArtifactEnabled] = useState(true);
+  const [typeTableEnabled, setTypeTableEnabled] = useState(true);
   const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
   // Defaults mirror config.ts; overwritten by /health so operator overrides
   // flow through to the picker.
@@ -106,6 +119,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
       const h = await api.getHealth();
       setLogoUrl(h.logo_url ?? null);
       setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+      setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
+      setTypeArtifactEnabled(h.type_artifact_enabled !== false);
+      setTypeTableEnabled(h.type_table_enabled !== false);
       setSubagentRunsEnabled(!!h.subagent_runs_enabled);
       if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
       if (typeof h.subagent_max_children === "number") setSubagentMaxChildren(h.subagent_max_children);
@@ -143,6 +159,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setLogoUrl(h.logo_url ?? null);
         setServerVersion(h.version ?? null);
         setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+        setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
+        setTypeArtifactEnabled(h.type_artifact_enabled !== false);
+        setTypeTableEnabled(h.type_table_enabled !== false);
         setSubagentRunsEnabled(!!h.subagent_runs_enabled);
         if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
         if (typeof h.subagent_max_children === "number") setSubagentMaxChildren(h.subagent_max_children);
@@ -260,6 +279,19 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const logout = useCallback(async () => {
     ++seqRef.current;
+    // If this session was started via OIDC SSO, the server set a readable
+    // marker cookie. Route logout through GET /auth/oidc/logout so the IdP
+    // session ends too (RP-initiated logout) — otherwise the next "Sign in
+    // with SSO" click silently re-authenticates. That endpoint tears the
+    // local session down server-side and redirects back to "/", so we hand
+    // the whole tab over to it rather than calling api.logout().
+    const ssoSession = document.cookie
+      .split(";")
+      .some((c) => c.trim().startsWith("cnst_sso_session="));
+    if (ssoSession) {
+      window.location.assign("/auth/oidc/logout");
+      return;
+    }
     try {
       await api.logout();
     } catch {
@@ -283,6 +315,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
         authenticated,
         isAdmin,
         workflowPlaneEnabled,
+        promptowlTeamsEnabled,
+        typeArtifactEnabled,
+        typeTableEnabled,
         subagentRunsEnabled,
         subagentMaxDepth,
         subagentMaxChildren,

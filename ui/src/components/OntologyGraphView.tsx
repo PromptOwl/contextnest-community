@@ -16,6 +16,7 @@ import {
 } from "d3-force";
 import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, FolderTree } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 import { Button } from "./ui/button";
 
 interface Props {
@@ -758,13 +759,9 @@ function NodeDetail({
 function QuerySnippet({ label, value }: { label: string; value: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard unavailable (http, permissions) — nothing to do */
-    }
+    if (!(await copyTextWithToast(value))) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   };
   return (
     <div className="min-w-0">

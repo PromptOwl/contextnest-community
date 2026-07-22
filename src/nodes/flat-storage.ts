@@ -49,9 +49,7 @@ export class FlatNestStorage extends NestStorage {
       const dir = (e as any).parentPath ?? (e as any).path ?? root;
       const rel = relative(root, join(dir, e.name)).split(sep).join("/");
       // Skip anything inside a hidden dir or node_modules.
-      if (rel.split("/").some(isSkippedSegment)) {
-        continue;
-      }
+      if (rel.split("/").some(isSkippedSegment)) continue;
       ids.push(rel.replace(/\.md$/, ""));
     }
 
