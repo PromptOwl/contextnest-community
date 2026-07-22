@@ -59,6 +59,7 @@ import {
   type RunStep,
   type Schedule,
 } from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
@@ -1396,6 +1397,20 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   // Full trigger URLs are revealed exactly once, at creation (API-key
   // semantics) — cache them for this session so copy keeps working.
   const [revealedHookUrls, setRevealedHookUrls] = useState<Record<string, string>>({});
+  // Actual visible width of the scroll viewport, measured — the shelf reflows
+  // to this so cards never clip under the config panel at the default view.
+  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+  const [canvasW, setCanvasW] = useState(0);
+  useEffect(() => {
+    if (!scrollEl) return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      if (w) setCanvasW(w);
+    });
+    ro.observe(scrollEl);
+    setCanvasW(scrollEl.clientWidth);
+    return () => ro.disconnect();
+  }, [scrollEl]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1433,7 +1448,8 @@ function CanvasPanel({ nestId }: { nestId: string }) {
   }, [nestId, selNode]);
 
   const copy = (key: string, text: string) => {
-    void navigator.clipboard?.writeText(text).then(() => {
+    void copyTextWithToast(text).then((ok) => {
+      if (!ok) return;
       setCopied(key);
       setTimeout(() => setCopied(""), 1500);
     });
@@ -1486,7 +1502,9 @@ function CanvasPanel({ nestId }: { nestId: string }) {
       });
     }
   }
-  const flowWidth = Math.max(920, PAD_X * 2 + (Math.max(0, ...[...placed.values()].map((p) => p.x)) + CARD_W + 60));
+  // Intrinsic width the flow graph itself needs (no fixed floor); the shelf
+  // reflows on top of this and the SVG grows to whichever is wider.
+  const flowGraphWidth = PAD_X * 2 + (Math.max(0, ...[...placed.values()].map((p) => p.x)) + CARD_W + 60);
   const flowHeight = Math.max(300, PAD_Y + (Math.max(-PAD_Y + 40, ...[...placed.values()].map((p) => p.y)) + CARD_H + 40));
 
   // Shelf: every doc NOT yet wired into any edge, laid out as a grid below a
@@ -1506,7 +1524,11 @@ function CanvasPanel({ nestId }: { nestId: string }) {
       return rank(a) - rank(b) || labelOf(a).localeCompare(labelOf(b));
     });
   const shelfTop = flowHeight + 46;
-  const perRow = Math.max(2, Math.floor((flowWidth - PAD_X * 2) / (CARD_W + 46)));
+  // Reflow to the measured viewport width, not a fixed assumed one — so the
+  // rightmost cards don't clip under the config panel. Only exceed the
+  // viewport when the flow graph genuinely needs it (scroll then is intended).
+  const layoutWidth = Math.max(flowGraphWidth, canvasW > 0 ? Math.floor(canvasW) : 920);
+  const perRow = Math.max(1, Math.floor((layoutWidth - PAD_X * 2) / (CARD_W + 46)));
   shelfIds.forEach((id, i) => {
     placed.set(id, {
       id,
@@ -1514,7 +1536,7 @@ function CanvasPanel({ nestId }: { nestId: string }) {
       y: shelfTop + Math.floor(i / perRow) * (CARD_H + 28),
     });
   });
-  const width = flowWidth;
+  const width = layoutWidth;
   const height = shelfIds.length
     ? shelfTop + Math.ceil(shelfIds.length / perRow) * (CARD_H + 28) + 30
     : flowHeight + 20;
@@ -1650,7 +1672,7 @@ function CanvasPanel({ nestId }: { nestId: string }) {
             and it appears here, ready to wire up.
           </div>
         ) : (
-          <div className="overflow-auto">
+          <div className="overflow-auto" ref={setScrollEl}>
             <svg
               width={width}
               height={height}

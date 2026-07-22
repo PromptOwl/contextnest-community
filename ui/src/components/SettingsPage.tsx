@@ -7,7 +7,7 @@
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Shield, Loader2 } from "lucide-react";
+import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -19,7 +19,9 @@ import {
   CardContent,
 } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { BetaBadge } from "@/components/ui/beta-badge";
 import type { AdminSettings, SignInGate, ManualSignIn } from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 
 interface SettingsPageProps {
   onBack: () => void;
@@ -64,6 +66,19 @@ const TABS: {
     ],
   },
   {
+    id: "sso",
+    label: "Single sign-on",
+    keys: [
+      "oidc_enabled",
+      "oidc_issuer",
+      "oidc_client_id",
+      "oidc_client_secret",
+      "oidc_allowed_domains",
+      "oidc_auto_provision",
+      "oidc_department_tagging",
+    ],
+  },
+  {
     id: "notifications",
     label: "Notifications",
     keys: ["slack_webhook_url", "smtp_url", "notify_email_from", "notify_email_to"],
@@ -75,13 +90,39 @@ const TABS: {
       "telemetry_enabled",
       "max_body_bytes",
       "trace_retention_days",
+      "type_artifact_enabled",
+      "type_table_enabled",
       "workflow_plane_enabled",
+      "promptowl_teams_enabled",
       "subagent_runs_enabled",
       "subagent_max_depth",
       "subagent_max_children",
     ],
   },
 ];
+
+/**
+ * Attributes that keep credential managers out of the settings fields.
+ *
+ * Nothing on this page is the admin's OWN credential — they're server-side
+ * secrets (OIDC client secret, Anthropic key, SMTP URL). Left alone, Chrome
+ * and the password-manager extensions read a `type="password"` box as a login
+ * form and stuff the admin's saved password into it, which then SAVES as the
+ * server's config on the next PATCH. Silent, and confusing to unpick.
+ *
+ * Three different opt-outs because they honour different things:
+ *   - autoComplete="new-password" — the only value Chrome/Safari respect on a
+ *     password input; plain "off" is ignored there by design.
+ *   - data-1p-ignore / data-lpignore — 1Password and LastPass ignore the
+ *     autocomplete attribute entirely and need their own vendor opt-out.
+ */
+const noAutofill = (type: string) =>
+  ({
+    autoComplete: type === "password" ? "new-password" : "off",
+    "data-1p-ignore": true,
+    "data-lpignore": "true",
+    "data-form-type": "other",
+  }) as const;
 
 /** Controlled text input bound straight to the draft (no per-field Save). */
 function TextField({
@@ -102,6 +143,7 @@ function TextField({
       placeholder={placeholder}
       onChange={(e) => onChange(e.target.value)}
       className="flex-1"
+      {...noAutofill(type)}
     />
   );
 }
@@ -127,6 +169,7 @@ function MbField({
           if (Number.isFinite(n) && n > 0)
             onChange(Math.floor(n * 1024 * 1024));
         }}
+        {...noAutofill("number")}
       />
       <span className="text-sm text-muted-foreground shrink-0">MB</span>
     </div>
@@ -160,6 +203,7 @@ function NumField({
         const n = Number(e.target.value);
         if (Number.isInteger(n)) onChange(n);
       }}
+      {...noAutofill("number")}
     />
   );
 }
@@ -180,6 +224,7 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
   // rejected field — otherwise the error banner points at fields on a tab
   // they've navigated away from.
   const [activeTab, setActiveTab] = useState<string>("general");
+  const [copiedRedirect, setCopiedRedirect] = useState(false);
   useEffect(() => {
     if (settings) setDraft(settings);
   }, [settings]);
@@ -196,11 +241,11 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
     if (!draft || !settings) return [] as (keyof AdminSettings)[];
     const base = settings as unknown as Record<string, unknown>;
     return (Object.keys(draft) as (keyof AdminSettings)[]).filter((k) => {
-      // Write-only key: the server hands back only a mask, so there's no value
-      // to diff against — "staged" means a non-empty string (set) or null
-      // (clear). Everything else diffs by value like normal.
-      if (k === "anthropic_api_key") {
-        const v = draft.anthropic_api_key;
+      // Write-only keys: the server hands back only a mask/presence flag, so
+      // there's no value to diff against — "staged" means a non-empty string
+      // (set) or null (clear). Everything else diffs by value like normal.
+      if (k === "anthropic_api_key" || k === "oidc_client_secret") {
+        const v = draft[k];
         return (typeof v === "string" && v.trim() !== "") || v === null;
       }
       return (
@@ -502,6 +547,309 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
             </Card>
           </TabsContent>
 
+          {/* Single sign-on (OIDC) */}
+          <TabsContent value="sso" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <KeyRound className="h-4 w-4 text-muted-foreground" />
+                  Single sign-on (OIDC)
+                </CardTitle>
+                <CardDescription>
+                  Let teammates sign in with your identity provider — Microsoft
+                  Entra ID, Google, or any OpenID Connect issuer. Fill in the
+                  issuer and app credentials below, then turn it on.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.oidc_enabled ? "On" : "Off"}
+                    {!draft.oidc_enabled &&
+                      !(draft.oidc_issuer && draft.oidc_client_id) && (
+                        <span className="text-muted-foreground">
+                          {" "}
+                          · configure the issuer and app credentials first
+                        </span>
+                      )}
+                  </span>
+                  <Switch
+                    checked={draft.oidc_enabled}
+                    onCheckedChange={(v) => set({ oidc_enabled: v })}
+                  />
+                </div>
+
+                {/* "On with a dead flow" is legal server state (e.g. the
+                    secret was cleared while enabled stayed true) — the login
+                    button simply hides. Make that legible instead of silent.
+                    Mirrors the server's readiness rule (isOidcReady) against
+                    the DRAFT rather than reading the saved `oidc_ready`, so it
+                    warns live while the admin is staging the change. */}
+                {(() => {
+                  const secretPresent =
+                    draft.oidc_client_secret === null
+                      ? false
+                      : typeof draft.oidc_client_secret === "string" &&
+                          draft.oidc_client_secret.trim() !== ""
+                        ? true
+                        : !!settings?.oidc_client_secret_set;
+                  const ready =
+                    draft.oidc_enabled &&
+                    !!draft.oidc_issuer?.trim() &&
+                    !!draft.oidc_client_id?.trim() &&
+                    secretPresent;
+                  if (!draft.oidc_enabled || ready) return null;
+                  return (
+                    <div
+                      role="alert"
+                      className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+                    >
+                      Enabled but not configured — the SSO sign-in button stays
+                      hidden until the issuer, client ID, and client secret are
+                      all set.
+                    </div>
+                  );
+                })()}
+
+                {/* Presets — prefill the issuer for the two common IdPs, and
+                    reflect which one the current issuer matches so the buttons
+                    read as a selector rather than two identical actions. The
+                    match is derived from draft.oidc_issuer, so it also lights
+                    up when the issuer was typed/pasted by hand or loaded from
+                    the server. Anything else (a custom IdP, or blank) leaves
+                    both unselected. */}
+                {(() => {
+                  const issuer = draft.oidc_issuer?.trim() ?? "";
+                  const preset: "entra" | "google" | null =
+                    /^https:\/\/login\.microsoftonline\.com\/[^/]+\/v2\.0$/.test(
+                      issuer,
+                    )
+                      ? "entra"
+                      : issuer === "https://accounts.google.com"
+                        ? "google"
+                        : null;
+                  return (
+                    <div>
+                      <div className="text-sm font-medium mb-1">Issuer URL</div>
+                      <div
+                        className="flex gap-2 mb-2"
+                        role="group"
+                        aria-label="Identity provider preset"
+                      >
+                        <Button
+                          type="button"
+                          variant={preset === "entra" ? "default" : "outline"}
+                          size="sm"
+                          aria-pressed={preset === "entra"}
+                          onClick={() => {
+                            const tenant = window.prompt(
+                              "Microsoft Entra tenant ID (Directory ID) — find it on your app registration's Overview page:",
+                            );
+                            if (tenant && tenant.trim())
+                              set({
+                                oidc_issuer: `https://login.microsoftonline.com/${tenant.trim()}/v2.0`,
+                              });
+                          }}
+                        >
+                          Microsoft Entra ID
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={preset === "google" ? "default" : "outline"}
+                          size="sm"
+                          aria-pressed={preset === "google"}
+                          onClick={() =>
+                            set({ oidc_issuer: "https://accounts.google.com" })
+                          }
+                        >
+                          Google
+                        </Button>
+                        {preset === null && issuer !== "" && (
+                          <span className="self-center text-xs text-muted-foreground">
+                            Custom issuer
+                          </span>
+                        )}
+                      </div>
+                      <TextField
+                        value={draft.oidc_issuer ?? ""}
+                        placeholder="https://login.microsoftonline.com/{tenant}/v2.0"
+                        onChange={(v) => set({ oidc_issuer: v })}
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        https:// only. Must serve
+                        /.well-known/openid-configuration.
+                      </p>
+                    </div>
+                  );
+                })()}
+
+                <div>
+                  <div className="text-sm font-medium mb-1">Client ID</div>
+                  <TextField
+                    value={draft.oidc_client_id ?? ""}
+                    placeholder="Application (client) ID from your IdP app registration"
+                    onChange={(v) => set({ oidc_client_id: v })}
+                  />
+                </div>
+
+                {/* Client secret — write-only, same pattern as the Anthropic
+                    key: the server only reports presence, never the value. */}
+                <div>
+                  <div className="text-sm font-medium mb-1">Client secret</div>
+                  <div className="text-xs text-muted-foreground mb-2">
+                    {draft.oidc_client_secret === null
+                      ? "Will be cleared when you save."
+                      : settings?.oidc_client_secret_set
+                        ? "A client secret is set. Paste a new one to replace it."
+                        : "Not set."}
+                  </div>
+                  <TextField
+                    type="password"
+                    value={
+                      typeof draft.oidc_client_secret === "string"
+                        ? draft.oidc_client_secret
+                        : ""
+                    }
+                    placeholder="Paste to set or replace"
+                    onChange={(v) => set({ oidc_client_secret: v })}
+                  />
+                  {settings?.oidc_client_secret_set &&
+                    draft.oidc_client_secret !== null && (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs text-destructive hover:underline"
+                        onClick={() => set({ oidc_client_secret: null })}
+                      >
+                        Clear secret
+                      </button>
+                    )}
+                  {draft.oidc_client_secret === null && (
+                    <button
+                      type="button"
+                      className="mt-2 text-xs text-muted-foreground hover:underline"
+                      onClick={() => set({ oidc_client_secret: undefined })}
+                    >
+                      Keep current secret
+                    </button>
+                  )}
+                </div>
+
+                {/* Redirect URI — read-only; the admin pastes this into the
+                    IdP's app registration. Derived from the public base URL
+                    when set, else this browser's origin. */}
+                <div>
+                  <div className="text-sm font-medium mb-1">Redirect URI</div>
+                  {(() => {
+                    const base = (
+                      draft.public_base_url || window.location.origin
+                    ).replace(/\/$/, "");
+                    const redirectUri = `${base}/auth/oidc/callback`;
+                    return (
+                      <div className="flex items-center gap-2">
+                        <code className="flex-1 bg-muted/40 border rounded px-2 py-1.5 text-xs font-mono break-all">
+                          {redirectUri}
+                        </code>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={async () => {
+                            if (!(await copyTextWithToast(redirectUri))) return;
+                            setCopiedRedirect(true);
+                            setTimeout(() => setCopiedRedirect(false), 1500);
+                          }}
+                        >
+                          {copiedRedirect ? (
+                            <Check className="h-3.5 w-3.5" />
+                          ) : (
+                            <Copy className="h-3.5 w-3.5" />
+                          )}
+                          <span className="ml-1.5">
+                            {copiedRedirect ? "Copied" : "Copy"}
+                          </span>
+                        </Button>
+                      </div>
+                    );
+                  })()}
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Register this exact URI in your IdP's app registration
+                    (Entra: Authentication → Web redirect URIs; Google:
+                    Authorized redirect URIs).
+                  </p>
+                </div>
+
+                <div>
+                  <div className="text-sm font-medium mb-1">
+                    Allowed email domains
+                  </div>
+                  <TextField
+                    value={draft.oidc_allowed_domains ?? ""}
+                    placeholder="acme.com, contractors.acme.com — empty allows any"
+                    onChange={(v) => set({ oidc_allowed_domains: v })}
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Only accounts whose email domain is listed may sign in.
+                    Leave empty to allow any domain your IdP asserts.
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-medium">
+                      Auto-provision new users
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Create an account on first SSO sign-in. Turn off to allow
+                      only users you've already invited.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={draft.oidc_auto_provision}
+                    onCheckedChange={(v) => set({ oidc_auto_provision: v })}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-medium">
+                      Department auto-tagging
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Tag new documents with the creator's directory department
+                      (requires the department claim from your IdP).
+                    </p>
+                  </div>
+                  <Switch
+                    checked={draft.oidc_department_tagging}
+                    onCheckedChange={(v) => set({ oidc_department_tagging: v })}
+                  />
+                </div>
+
+                {/* Auto-provision + no allowlist = anyone the issuer will
+                    authenticate gets an account. Harmless on a single-tenant
+                    Entra directory (the issuer IS the allowlist), wide open on
+                    a multi-tenant or consumer issuer like Google. The two
+                    settings are individually reasonable, so warn on the
+                    combination — an admin reading either field alone won't see
+                    it, and it silently overrides an invite-only server. */}
+                {draft.oidc_enabled &&
+                  draft.oidc_auto_provision &&
+                  !draft.oidc_allowed_domains?.trim() && (
+                    <div
+                      role="alert"
+                      className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+                    >
+                      Anyone your issuer can authenticate will get an account on
+                      first sign-in — with a consumer or multi-tenant issuer
+                      (e.g. Google), that's any account on the internet, and it
+                      applies even when manual sign-in is invite-only. Set
+                      allowed email domains above, or turn auto-provision off.
+                    </div>
+                  )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
           {/* Notifications */}
           <TabsContent value="notifications" className="space-y-4">
             <Card>
@@ -624,10 +972,50 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
               </CardContent>
             </Card>
 
+            {/* Content types — per-type creation toggles (default on).
+                Soft-disable: turning one off refuses NEW nodes of the type;
+                existing nodes still read/render/version. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Content types</CardTitle>
+                <CardDescription>
+                  Which node types can be created on this server. Turning one
+                  off hides it from the editor and refuses new creations —
+                  existing nodes of that type stay readable and versioned.
+                  Runnable types (agent, skill, tool) are governed by the
+                  workflow plane below.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    Artifacts (hosted HTML) —{" "}
+                    {draft.type_artifact_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.type_artifact_enabled}
+                    onCheckedChange={(v) => set({ type_artifact_enabled: v })}
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    Tables (CSV fact stores) —{" "}
+                    {draft.type_table_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.type_table_enabled}
+                    onCheckedChange={(v) => set({ type_table_enabled: v })}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
             {/* Workflow plane ("turing" track) */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Workflow plane</CardTitle>
+                <CardTitle className="text-base">
+                  Workflow plane <BetaBadge className="ml-1 align-middle" />
+                </CardTitle>
                 <CardDescription>
                   Typed edges, an edge-type registry, and governed runs — the
                   automation layer. Optional; off by default. Turning it on adds
@@ -651,6 +1039,32 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                         ...(v ? {} : { subagent_runs_enabled: false }),
                       })
                     }
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Import teams from PromptOwl */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Import teams from PromptOwl
+                </CardTitle>
+                <CardDescription>
+                  Lets users who signed in with PromptOwl pull their PromptOwl
+                  teams in as local teams. Off by default. When off, the
+                  PromptOwl Teams panel is hidden and the import API is
+                  unavailable.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.promptowl_teams_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.promptowl_teams_enabled}
+                    onCheckedChange={(v) => set({ promptowl_teams_enabled: v })}
                   />
                 </div>
               </CardContent>

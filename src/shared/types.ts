@@ -40,3 +40,54 @@ export interface NestCollaborator {
   granted_by: string;
   granted_at: string;
 }
+
+/**
+ * A team member's role. Same vocabulary as EffectiveRole minus 'owner'
+ * (a team has an owner_id, not an owner member). Set per-member and applied
+ * uniformly on every nest the team is shared to.
+ */
+export type TeamMemberRole = "admin" | "editor" | "viewer";
+
+export interface TeamMember {
+  userId: string;
+  email: string;
+  role: TeamMemberRole;
+  /**
+   * True when the member has a real registered account; false when they are an
+   * invited placeholder (is_invited = 1) who hasn't claimed the email yet.
+   * Populated on read (enrichment), absent in the stored JSON.
+   */
+  registered?: boolean;
+}
+
+/** A team — a reusable, owner-managed group with an inline member roster. */
+export interface Team {
+  id: string;
+  name: string;
+  owner_id: string;
+  /** Owner's email, resolved on read for display ("Created by …"). */
+  owner_email?: string;
+  members: TeamMember[];
+  /**
+   * Where the team came from — 'promptowl' for an imported team, null for one
+   * created here. Drives the "imported" badge and the re-sync affordance.
+   */
+  source?: string | null;
+  /**
+   * The team's id in `source`'s system. Together with owner_id + source this is
+   * the import key: it's what makes a re-import update this row rather than
+   * create a second copy, and it survives a rename on either side.
+   */
+  external_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Entry in `nests.shared_teams` — a team shared onto a nest. `teamId` is
+ * canonical; `teamName` is a cached display label refreshed on team rename.
+ */
+export interface SharedTeamRef {
+  teamId: string;
+  teamName: string;
+}

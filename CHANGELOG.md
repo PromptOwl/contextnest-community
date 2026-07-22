@@ -1,5 +1,11 @@
 # @promptowl/contextnest-community
 
+## Unreleased
+
+### Minor Changes
+
+- **Video assets + editor media upload** (`src/nests/asset-routes.ts`, `ui/src/components/MarkdownEditor/MarkdownEditor.tsx`, `ui/src/components/DocumentViewer.tsx`) — nest assets now accept mp4/webm video alongside images, with per-type size caps (images 10 MB, video 100 MB) enforced without raising the global request cap. The editor's Upload menu becomes "Image or video" (with drag-drop onto the editor), and both the editor itself (including its preview toggle) and the read view render same-origin asset video URLs as an inline player; external URLs stay plain links. Asset serving sends `X-Content-Type-Options: nosniff`.
+
 ## 1.10.0
 
 ### Minor Changes

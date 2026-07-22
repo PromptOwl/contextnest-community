@@ -8,13 +8,16 @@ import {
   FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
+import { copyTextWithToast } from "../lib/clipboard";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { DeleteNestDialog } from "./DeleteNestDialog";
+import { RenameNestDialog } from "./RenameNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
 
 function relTime(iso: string): string {
@@ -68,6 +71,9 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   // the confirmation copy without prop-drilling through a separate child.
   const [deleteTarget, setDeleteTarget] = useState<
     { id: string; name: string; isImported: boolean } | null
+  >(null);
+  const [renameTarget, setRenameTarget] = useState<
+    { id: string; name: string; description: string | null } | null
   >(null);
 
   const serverUrl =
@@ -398,10 +404,11 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
               </div>
               <div className="space-y-1">
                 <Label>Description (optional)</Label>
-                <Input
+                <Textarea
                   placeholder="Shared docs for the engineering team"
                   value={newDesc}
                   onChange={(e) => setNewDesc(e.target.value)}
+                  rows={3}
                 />
               </div>
               <div className="flex gap-2">
@@ -522,6 +529,19 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
               const canDelete =
                 isOwner ||
                 (isAnonymous && authMode !== "open" && isAdmin);
+              // Mirror server rename rule (PATCH /nests/:nestId — owner or
+              // nest-admin), plus the same admin-caretaker carve-out for the
+              // anon commons in key mode. Gate on the caller's RAW grant
+              // (`roles`) rather than `permission`, which folds license
+              // admins to "admin" on every nest — the UI deliberately hides
+              // admin affordances on other users' nests (same philosophy as
+              // NestView). Anon nests already resolve license admins to
+              // is_owner=true server-side; the authMode term is the
+              // client-side fallback matching canDelete above.
+              const canRename =
+                isOwner ||
+                (Array.isArray(nest.roles) && nest.roles.includes("admin")) ||
+                (isAnonymous && authMode !== "open" && isAdmin);
               // Card role badge — derive from merged effective roles
               // (collaborator + steward), not just the collaborator permission.
               // A steward editor/reviewer resolves to permission='read'
@@ -593,27 +613,49 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                       : "border-border"
                   }`}
                 >
-                  {/* Delete — gated to match server rules (owner, or admin
-                      caretaker on the ungoverned commons in key mode).
-                      Keeps the affordance off cards the user can't act on
-                      so shared/reviewer/viewer nests don't show a teasing
-                      Trash icon. */}
-                  {canDelete && (
-                    <button
-                      type="button"
-                      aria-label={`Delete nest ${nest.name}`}
-                      title="Delete nest"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        requestDelete(nest.id, nest.name, !!nest.is_imported);
-                      }}
-                      className="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                  {/* Card actions — each gated to match server rules so
+                      shared/reviewer/viewer nests don't show teasing icons.
+                      Rename: owner or nest-admin (PATCH /nests/:nestId).
+                      Delete: owner, or admin caretaker on the ungoverned
+                      commons in key mode. */}
+                  {(canRename || canDelete) && (
+                    <div className="absolute top-2 right-2 flex items-center gap-0.5">
+                      {canRename && (
+                        <button
+                          type="button"
+                          aria-label={`Rename nest ${nest.name}`}
+                          title="Rename nest"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRenameTarget({
+                              id: nest.id,
+                              name: nest.name,
+                              description: nest.description ?? null,
+                            });
+                          }}
+                          className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      {canDelete && (
+                        <button
+                          type="button"
+                          aria-label={`Delete nest ${nest.name}`}
+                          title="Delete nest"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            requestDelete(nest.id, nest.name, !!nest.is_imported);
+                          }}
+                          className="p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
                   )}
 
-                  <div className="flex items-start gap-3 pr-7">
+                  <div className="flex items-start gap-3 pr-12">
                     <div
                       className={`p-2 rounded-md ${
                         isAnonymous ? "bg-amber-100" : "bg-primary/10"
@@ -749,6 +791,35 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
         </>
       )}
 
+      {renameTarget && (
+        <RenameNestDialog
+          nestId={renameTarget.id}
+          nestName={renameTarget.name}
+          nestDescription={renameTarget.description}
+          open
+          onOpenChange={(open) => {
+            if (!open) setRenameTarget(null);
+          }}
+          onRenamed={(updated) => {
+            // Update the card in place — no refetch needed; nothing else on
+            // the dashboard derives from the name/slug.
+            setNests((prev) =>
+              prev.map((n) =>
+                n.id === updated.id
+                  ? {
+                      ...n,
+                      name: updated.name,
+                      slug: updated.slug,
+                      description: updated.description,
+                    }
+                  : n,
+              ),
+            );
+            setRenameTarget(null);
+          }}
+        />
+      )}
+
       {deleteTarget && (
         <DeleteNestDialog
           nestId={deleteTarget.id}
@@ -804,7 +875,7 @@ function CopyInline({ value }: { value: string }) {
     <button
       onClick={async (e) => {
         e.stopPropagation();
-        await navigator.clipboard.writeText(value);
+        if (!(await copyTextWithToast(value))) return;
         setCopied(true);
         setTimeout(() => setCopied(false), 1200);
       }}

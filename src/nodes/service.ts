@@ -6,10 +6,11 @@
 import {
   serializeDocument,
   parseDocument,
+  normalizeStatus,
 } from "@promptowl/contextnest-engine";
-import type { ContextNode } from "@promptowl/contextnest-engine";
-import { rename, mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
+import { rename, mkdir, rm } from "node:fs/promises";
+import { dirname, join, basename } from "node:path";
 import { safePublishDocument } from "../governance/safe-publish.js";
 import { engineCache } from "./engine.js";
 import {
@@ -36,6 +37,7 @@ import {
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { config } from "../config.js";
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
 async function userIdFromEmail(email: string): Promise<string> {
@@ -76,6 +78,32 @@ function folderToSegments(folder: string): string[] {
 
 const stripUndefined = <T extends Record<string, any>>(o: T): T =>
   Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
+
+/**
+ * Optional `#dept:<slug>` auto-tag (CU-wdqcpzwf2p). When the superadmin
+ * toggle OIDC_DEPARTMENT_TAGGING is on and the creating user has a directory
+ * department (captured from the OIDC `department` claim at login — see
+ * src/auth/oidc.ts), createNode appends `dept:<slugified-department>`
+ * (lowercase, whitespace → dashes) to the new node's tags. CREATE-only by
+ * design: updateNode never adds it and existing nodes are never retro-tagged,
+ * so the tag records where the document was born, not who touched it last.
+ * A missing user row, NULL department, or lookup error is a silent no-op —
+ * department tagging must never fail a create.
+ */
+async function departmentTagFor(userEmail: string): Promise<string | null> {
+  if (!config.OIDC_DEPARTMENT_TAGGING) return null;
+  try {
+    const row = (await getDb().get(
+      "SELECT department FROM users WHERE LOWER(email) = LOWER(?)",
+      [userEmail],
+    )) as { department?: string | null } | undefined;
+    const slug = slugify(String(row?.department ?? ""));
+    return slug ? normalizeTag(`dept:${slug}`) : null;
+  } catch (err) {
+    console.error("[dept-tag] department lookup failed (tag skipped):", err);
+    return null;
+  }
+}
 
 // Serialize writes per node. Without this, concurrent saves (rapid autosave,
 // two tabs, MCP + REST) each read the same base version and append "base+1",
@@ -124,7 +152,12 @@ export interface NodeResponse {
   tags: string[];
   status: string;
   version: number;
-  author?: string;
+  /** Creator email — frontmatter author when present, else the author of the
+   *  node's first version. Null for old imported docs with neither. */
+  author?: string | null;
+  /** Everyone else with a hand in the doc: distinct node_versions authors
+   *  UNION document-scope grant holders, minus the author, sorted. */
+  collaborators?: string[];
   description?: string;
   created_at?: string;
   updated_at?: string;
@@ -170,6 +203,92 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
         ? String((fm.metadata as any).schedule)
         : undefined,
   };
+}
+
+export interface NodeAuthorship {
+  author: string | null;
+  collaborators: string[];
+}
+
+/**
+ * Batch author + collaborator resolution for a set of nodes.
+ *
+ * Author = the node's frontmatter author (passed in by the caller) or, when
+ * frontmatter lacks it (imports, older docs), the author of the node's first
+ * version. Collaborators = distinct node_versions authors UNION document-scope
+ * grant holders, MINUS the author, sorted.
+ *
+ * Exactly two queries regardless of node count (no per-node N+1): one grouped
+ * pass over node_versions — per (node, author) the earliest version that
+ * author touched, so the overall-earliest author doubles as the creator
+ * fallback — and one pass over document grants joined to users for emails.
+ * Both are plain GROUP BY / JOIN SQL, portable across SQLite and Postgres.
+ * `system:*` version authors (auto-publish bumps, drift scans) mirror
+ * machine activity, not a person — they're excluded.
+ */
+export async function resolveAuthorship(
+  nestId: string,
+  nodes: Array<{ id: string; frontmatterAuthor?: string | null }>,
+): Promise<Map<string, NodeAuthorship>> {
+  const result = new Map<string, NodeAuthorship>();
+  if (nodes.length === 0) return result;
+  const db = getDb();
+
+  // Single-node fast path (the detail endpoint) narrows both scans by id;
+  // the list path scans the nest once, grouped.
+  const single = nodes.length === 1 ? nodes[0].id : null;
+  const versionRows = (await db.all(
+    `SELECT node_id, author, MIN(version) AS first_version
+       FROM node_versions
+      WHERE nest_id = ?${single ? " AND node_id = ?" : ""}
+        AND author IS NOT NULL AND author NOT LIKE 'system:%'
+      GROUP BY node_id, author`,
+    single ? [nestId, single] : [nestId],
+  )) as Array<{ node_id: string; author: string; first_version: number }>;
+  const grantRows = (await db.all(
+    `SELECT g.target AS node_id, u.email AS email
+       FROM grants g
+       JOIN users u ON u.id = g.user_id
+      WHERE g.nest_id = ? AND g.target_type = 'document'${single ? " AND g.target = ?" : ""}`,
+    single ? [nestId, single] : [nestId],
+  )) as Array<{ node_id: string; email: string }>;
+
+  const editorsByNode = new Map<string, Array<{ author: string; first: number }>>();
+  for (const r of versionRows) {
+    let list = editorsByNode.get(r.node_id);
+    if (!list) editorsByNode.set(r.node_id, (list = []));
+    list.push({ author: r.author, first: Number(r.first_version) });
+  }
+  const granteesByNode = new Map<string, string[]>();
+  for (const g of grantRows) {
+    let list = granteesByNode.get(g.node_id);
+    if (!list) granteesByNode.set(g.node_id, (list = []));
+    list.push(g.email);
+  }
+
+  for (const n of nodes) {
+    const editors = editorsByNode.get(n.id) ?? [];
+    const firstAuthor = editors.length
+      ? editors.reduce((a, b) => (b.first < a.first ? b : a)).author
+      : null;
+    const author = n.frontmatterAuthor || firstAuthor;
+    const authorKey = author ? author.toLowerCase() : null;
+    // Distinct (case-insensitive), author excluded, sorted.
+    const seen = new Set<string>();
+    const collaborators: string[] = [];
+    for (const email of [
+      ...editors.map((e) => e.author),
+      ...(granteesByNode.get(n.id) ?? []),
+    ]) {
+      const key = email.toLowerCase();
+      if (key === authorKey || seen.has(key)) continue;
+      seen.add(key);
+      collaborators.push(email);
+    }
+    collaborators.sort((a, b) => a.localeCompare(b));
+    result.set(n.id, { author: author ?? null, collaborators });
+  }
+  return result;
 }
 
 export interface ListNodesFilters {
@@ -227,9 +346,29 @@ export async function listNodesForCaller(
   }
   const publicReader = await isPublicReader(nestId, userId);
 
+  // Author + collaborators for exactly the post-filter set — two batched
+  // queries for the whole list (see resolveAuthorship), never per-node.
+  // Withheld from public readers: the roster is the nest's people, not its
+  // published content, so it stays behind the same gate as the body. They
+  // keep the frontmatter-only `author` toNodeResponse already set.
+  const authorship = publicReader
+    ? null
+    : await resolveAuthorship(
+        nestId,
+        accessible.map((d) => ({
+          id: d.id,
+          frontmatterAuthor: d.frontmatter.author ?? null,
+        })),
+      );
+
   const enriched = await Promise.all(
     accessible.map(async (doc) => {
       const r = toNodeResponse(doc);
+      const people = authorship?.get(doc.id);
+      if (people) {
+        r.author = people.author;
+        r.collaborators = people.collaborators;
+      }
 
       if (publicReader) {
         const approved = await versions.getApprovedVersion(nestId, doc.id);
@@ -350,12 +489,34 @@ export async function createNode(
   const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
 
+  // Content-type toggles: creation of a disabled type is refused here — the
+  // shared choke point for REST + MCP — so every surface gates identically.
+  // Soft-disable only: existing nodes of a disabled type still read/render/
+  // version untouched. Runnable types (agent/skill/tool) are gated by
+  // FEATURE_WORKFLOW_PLANE at the plane routes, not here.
+  const requestedType = input.type || "document";
+  if (requestedType === "artifact" && !config.TYPE_ARTIFACT_ENABLED) {
+    throw new ValidationError("Artifact nodes are disabled on this server");
+  }
+  if (requestedType === "table" && !config.TYPE_TABLE_ENABLED) {
+    throw new ValidationError("Table nodes are disabled on this server");
+  }
+
   if (input.schedule !== undefined && !isRunnableType(input.type)) {
     throw new ValidationError(
       `schedule is only valid for runnable node types (${RUNNABLE_NODE_TYPES.join(
         ", "
       )})`
     );
+  }
+
+  // Optional dept:<slug> auto-tag — after the validations above so a request
+  // that fails them never pays the DB lookup. Deduped case-insensitively
+  // against the user-supplied tags (normalizeTag keeps the user's casing, so
+  // "#Dept:Engineering" must still match the all-lowercase auto tag).
+  const deptTag = await departmentTagFor(userEmail);
+  if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
+    tags.push(deptTag);
   }
 
   const hasStewards = await isStewardshipEnabled(nestId);
@@ -368,7 +529,7 @@ export async function createNode(
     filePath: "",
     frontmatter: {
       title: input.title,
-      type: (input.type as any) || "document",
+      type: requestedType as any,
       tags,
       status: (input.status as any) || (initialStatus as any),
       version: initialVersion,
@@ -439,6 +600,63 @@ export async function createNode(
 }
 
 /**
+ * The EXPLICIT lifecycle status the source author gave a doc, canonicalized via
+ * the engine's `normalizeStatus`, or null if the frontmatter carried no
+ * `status:` at all.
+ *
+ * The engine's parser defaults a missing status to "draft", so
+ * `node.frontmatter.status` can't tell an explicit draft from a status-less
+ * Obsidian file — we scan the raw source instead. Normalizing means aliases
+ * (`review`, `submitted`, `in_review`, …) collapse to their canonical status
+ * (e.g. `pending_review`), so an import can't smuggle a not-yet-approved doc
+ * past the keep-unpublished gate by spelling its status differently.
+ */
+function explicitFrontmatterStatus(raw: string): string | null {
+  const fm = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return null;
+  const m = fm[1].match(/^status:[ \t]*["']?([A-Za-z_-]+)["']?[ \t]*$/m);
+  return m ? normalizeStatus(m[1]) : null;
+}
+
+/**
+ * Reset a single imported doc to a clean, publishable base.
+ *
+ * An imported folder can be a previously-exported (or half-migrated)
+ * ContextNest vault carrying an engine version chain — a keyframe plus diffs
+ * under `<dir>/.versions/<name>/` — that no longer reconstructs (e.g. the diff
+ * for an intermediate version won't apply). Publishing then throws
+ * "Failed to apply diff for version N". This drops the stale per-doc history
+ * and strips the frontmatter `version`/`checksum` so the next publish starts a
+ * fresh v1 keyframe. Only called on docs whose as-is publish already failed,
+ * so valid chains are left untouched (preserve-when-valid).
+ *
+ * NOTE: reaching into the engine's `.versions/` layout is engine-internal
+ * territory (see CLAUDE.md Engine Logic Boundary). It lives here as a stopgap;
+ * the durable fix is an engine-side `resetVersionChain()` API to consume,
+ * bundled with the pending `deferCheckpoint` upstream work.
+ */
+async function resetImportedDocForPublish(
+  storage: NestStorage,
+  nestId: string,
+  nodeId: string
+): Promise<void> {
+  // Engine history layout: `<root>/<docDir>/.versions/<docName>/`.
+  const versionsDir = join(
+    resolveNestPath(nestId),
+    dirname(nodeId),
+    ".versions",
+    basename(nodeId)
+  );
+  await rm(versionsDir, { recursive: true, force: true });
+
+  const node = await storage.readDocument(nodeId);
+  const fm = { ...node.frontmatter };
+  delete (fm as Record<string, unknown>).version;
+  delete (fm as Record<string, unknown>).checksum;
+  await storage.writeDocument(nodeId, serializeDocument({ ...node, frontmatter: fm }));
+}
+
+/**
  * Register the documents already present in an imported folder.
  *
  * On import the nest row exists but the governance DB is empty, so the
@@ -446,23 +664,28 @@ export async function createNode(
  * them the docs still list (discovery is disk-based) but show as "draft"
  * and editing wouldn't continue from their real version.
  *
- * This walks the folder's documents once and, for each, runs the engine's
- * publish (safePublishDocument) so the doc gains a published checksum + a
- * version-chain keyframe and context.yaml is regenerated — exactly the
- * no-stewards auto-publish path createNode uses. That is what makes an
- * imported doc usable by AI: GraphQueryEngine/Resolver only return
+ * This walks the folder's documents once. Docs the source marked not-yet-
+ * approved (draft/rejected/superseded) are registered in a draft state and NOT
+ * force-published — they become AI-visible only after review in the new nest
+ * (and the engine hard-refuses to publish a rejected doc anyway). Every other
+ * doc is run through the engine's publish (safePublishDocument) so it gains a
+ * published checksum + a version-chain keyframe and context.yaml is regenerated
+ * — exactly the no-stewards auto-publish path createNode uses. That is what
+ * makes an imported doc usable by AI: GraphQueryEngine/Resolver only return
  * *published* documents, and public/shared readers reconstruct the approved
- * body from the keyframe. Any .versions history copied on import is preserved;
- * publish appends to the chain. Each doc is then seeded with a
- * published+approved governance row at its published version, plus its tag
- * index. Idempotent: docs that already carry a version row are skipped, so
- * re-running is safe.
+ * body from the keyframe. A valid .versions chain copied on import is preserved
+ * (publish appends to it); an inconsistent chain that won't reconstruct is
+ * reset to a fresh v1 and retried once, so a broken chain never drops the doc.
+ * Each published doc is then seeded with a published+approved governance row at
+ * its published version, plus its tag index. Idempotent: docs that already
+ * carry a version row are skipped, so re-running is safe.
  *
  * Returns the number of documents newly registered.
  */
 export async function registerImportedDocuments(
   nestId: string,
-  userEmail: string
+  userEmail: string,
+  onProgress?: (done: number, total: number) => void | Promise<void>
 ): Promise<number> {
   const { storage } = await engineCache.get(nestId);
   let docs: ContextNode[];
@@ -473,22 +696,37 @@ export async function registerImportedDocuments(
     return 0;
   }
 
+  const startedAt = Date.now();
+  console.log(`[import] register: discovered=${docs.length} nest=${nestId}`);
+  await onProgress?.(0, docs.length);
   let registered = 0;
+  let alreadyTracked = 0;
+  let publishFailed = 0;
+  let publishRecovered = 0;
+  let keptUnpublished = 0;
+  let processed = 0;
   for (let doc of docs) {
     const nodeId = doc.id;
-    if ((await versions.getCurrentVersion(nestId, nodeId)) > 0) continue; // already tracked
+    await onProgress?.(++processed, docs.length);
+    if ((await versions.getCurrentVersion(nestId, nodeId)) > 0) {
+      alreadyTracked++;
+      continue; // already tracked
+    }
 
-    // Imported markdown often ships without a frontmatter `title:`, which
-    // would list the doc as untitled. Fall back to the filename (leaf of the
-    // node id) and persist it to disk BEFORE publish so the title sticks.
-    if (!doc.frontmatter?.title) {
-      const title = nodeId.split("/").pop() || nodeId;
-      doc = { ...doc, frontmatter: { ...doc.frontmatter, title } };
-      try {
-        await storage.writeDocument(nodeId, serializeDocument(doc));
-      } catch (err) {
-        console.error("import: failed to persist filename title", nodeId, err);
-      }
+    // Normalize ownership + title on import, persisted BEFORE publish so both
+    // stick on disk:
+    //  - Author/owner is ALWAYS the importer. The vault's own `author:` names
+    //    someone who isn't a user on this instance (e.g. stacey@…) — showing
+    //    them as creator is wrong, and because the doc's version author is the
+    //    importer, an author≠importer mismatch also fabricates a phantom
+    //    "1 collaborator". Overwriting author fixes both.
+    //  - A title-less doc falls back to its filename (leaf of the node id).
+    const title = doc.frontmatter?.title ?? (nodeId.split("/").pop() || nodeId);
+    doc = { ...doc, frontmatter: { ...doc.frontmatter, title, author: userEmail } };
+    try {
+      await storage.writeDocument(nodeId, serializeDocument(doc));
+    } catch (err) {
+      console.error("import: failed to persist import metadata", nodeId, err);
     }
 
     const rawTags = Array.isArray(doc.frontmatter?.tags)
@@ -496,12 +734,41 @@ export async function registerImportedDocuments(
       : [];
     const tags = rawTags.map((t) => normalizeTag(String(t)));
 
-    // Publish in the engine so the doc is AI-visible (published status +
-    // checksum + keyframe). Falls back to the on-disk version if publish
-    // fails, so the doc still lists + edits from a sane base.
+    // Only trust an integer > 0 as the incoming version; junk like "3.011"
+    // falls back to 1 (the fresh-publish path replaces it anyway).
     const fmVersion = Number(doc.frontmatter?.version);
-    let version = Number.isFinite(fmVersion) && fmVersion > 0 ? fmVersion : 1;
+    let version = Number.isInteger(fmVersion) && fmVersion > 0 ? fmVersion : 1;
     let content = doc.body || "";
+
+    // Docs the source EXPLICITLY marked not-yet-approved are registered as
+    // draft and NOT force-published — honors the imported governance state
+    // (and the engine refuses to publish a rejected doc regardless). Anything
+    // that isn't published/approved (draft, pending_review, rejected,
+    // superseded, or an unknown status) is kept unpublished; a status-less doc
+    // still takes the publish path below.
+    const status = explicitFrontmatterStatus(doc.rawContent);
+    if (status && status !== "published" && status !== "approved") {
+      await versions.createVersion({
+        nestId,
+        nodeId,
+        version,
+        content,
+        author: userEmail,
+        status: "draft",
+        changeNote: "Imported from existing folder (kept unpublished)",
+        tags,
+      });
+      await syncNodeTags(nestId, nodeId, tags);
+      keptUnpublished++;
+      registered++;
+      continue;
+    }
+
+    // Publish in the engine so the doc is AI-visible (published status +
+    // checksum + keyframe). If the imported version chain is inconsistent and
+    // publish throws, reset the doc to a fresh base and retry once; if it
+    // still fails, register as draft rather than fake a published row.
+    let published = false;
     try {
       const result = await safePublishDocument(storage, nodeId, {
         editedBy: userEmail,
@@ -509,12 +776,32 @@ export async function registerImportedDocuments(
       });
       version = result.node.frontmatter.version || version;
       content = result.node.body || content;
+      published = true;
     } catch (err) {
-      console.error(
-        "safePublishDocument failed (import register)",
-        nodeId,
-        err
+      // Expected for docs carrying an inconsistent imported chain — the reset
+      // below recovers them. Log a quiet one-liner, not the full stack, so a
+      // handled failure doesn't read as a broken import.
+      console.warn(
+        `[import] publish retry needed for ${nodeId}: ${(err as Error)?.message ?? err}`,
       );
+      try {
+        await resetImportedDocForPublish(storage, nestId, nodeId);
+        const result = await safePublishDocument(storage, nodeId, {
+          editedBy: userEmail,
+          note: "Imported from existing folder (reset chain)",
+        });
+        version = result.node.frontmatter.version || 1;
+        content = result.node.body || content;
+        published = true;
+        publishRecovered++;
+      } catch (err2) {
+        publishFailed++;
+        console.error(
+          "reset+republish failed (import register)",
+          nodeId,
+          err2
+        );
+      }
     }
 
     await versions.createVersion({
@@ -523,15 +810,20 @@ export async function registerImportedDocuments(
       version,
       content,
       author: userEmail,
-      status: "published",
+      status: published ? "published" : "draft",
       changeNote: "Imported from existing folder",
       tags,
     });
-    await versions.setApprovedVersion(nestId, nodeId, version, userEmail);
+    if (published) {
+      await versions.setApprovedVersion(nestId, nodeId, version, userEmail);
+    }
     await syncNodeTags(nestId, nodeId, tags);
     registered++;
   }
 
+  console.log(
+    `[import] register done: registered=${registered} alreadyTracked=${alreadyTracked} keptUnpublished=${keptUnpublished} publishRecovered=${publishRecovered} publishFailed=${publishFailed} tookMs=${Date.now() - startedAt}`,
+  );
   await trackEvent("nest.import.documents", { nestId, registered });
   return registered;
 }

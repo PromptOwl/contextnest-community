@@ -6,6 +6,8 @@ import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
+import { nestTeamRoutes } from "./nests/nest-team-routes.js";
+import { teamRoutes } from "./governance/team-routes.js";
 import { listNests, listSharedNests } from "./nests/service.js";
 import { getReviewQueue } from "./governance/review-service.js";
 import { engineCache } from "./nodes/engine.js";
@@ -35,9 +37,14 @@ import {
   markNotificationsRead,
 } from "./governance/notify-service.js";
 import { definitionRoutes } from "./definitions/routes.js";
-import { assetRoutes } from "./nests/asset-routes.js";
+import { assetRoutes, ASSET_MAX_REQUEST_BYTES } from "./nests/asset-routes.js";
 import { logTraceEvent, listTraceEvents } from "./telemetry/trace-log.js";
-import { isSuperAdmin } from "./governance/access-service.js";
+import {
+  isSuperAdmin,
+  isConfigSuperAdmin,
+  getAccessConfig,
+  loadGrantedSuperAdmins,
+} from "./governance/access-service.js";
 import {
   llmsTxtRoutes,
   nestIndexRoutes,
@@ -49,6 +56,7 @@ import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
   permissionLevel,
+  isServerAdminUserId,
   type NestPermission,
 } from "./shared/access.js";
 import { AppError } from "./shared/errors.js";
@@ -64,6 +72,7 @@ import {
   isLicenseAdminUserId,
 } from "./auth/license.js";
 import { persistSetting } from "./db/settings.js";
+import { isOidcReady } from "./auth/oidc.js";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
@@ -173,14 +182,21 @@ export function createApp(): Hono<AuthEnv> {
   // Request body size cap — prevents DoS via giant POST payloads before
   // a handler ever gets to parse JSON. Only applies when Content-Length
   // is declared; streamed bodies fall through (uncommon on this API).
+  // The asset-upload route alone gets a higher ceiling (video uploads,
+  // per-type caps enforced in the handler) — the global cap is untouched.
+  const ASSET_UPLOAD_PATH = /^\/nests\/[^/]+\/assets\/?$/;
   app.use("*", async (c, next) => {
     const lenStr = c.req.header("Content-Length");
     if (lenStr) {
       const len = parseInt(lenStr, 10);
-      if (Number.isFinite(len) && len > config.MAX_BODY_BYTES) {
+      const cap =
+        c.req.method === "POST" && ASSET_UPLOAD_PATH.test(c.req.path)
+          ? Math.max(config.MAX_BODY_BYTES, ASSET_MAX_REQUEST_BYTES)
+          : config.MAX_BODY_BYTES;
+      if (Number.isFinite(len) && len > cap) {
         return c.json(
           {
-            error: `Request body too large (${len} bytes, max ${config.MAX_BODY_BYTES})`,
+            error: `Request body too large (${len} bytes, max ${cap})`,
           },
           413,
         );
@@ -214,8 +230,9 @@ export function createApp(): Hono<AuthEnv> {
   });
 
   // Health check (public)
-  app.get("/health", (c) =>
-    c.json({
+  app.get("/health", (c) => {
+    const oidcReady = isOidcReady();
+    return c.json({
       status: isSuspended() ? "suspended" : "ok",
       service: "contextnest-community",
       version: SERVICE_VERSION,
@@ -229,10 +246,24 @@ export function createApp(): Hono<AuthEnv> {
       // The login page reads this to show/hide the credential form, and to
       // switch the Register link to an "activate invite" affordance.
       manual_sign_in: config.MANUAL_SIGN_IN,
+      // OIDC SSO — true only when enabled AND fully configured, so the login
+      // page never shows a button that would bounce with an error. The issuer
+      // is exposed (when live) so the client can label the button by IdP
+      // (login.microsoftonline.com → Microsoft, accounts.google.com → Google).
+      oidc_enabled: oidcReady,
+      ...(oidcReady && { oidc_issuer: config.OIDC_ISSUER }),
       // Public feature flags the SPA needs before auth to decide what to
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
       workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+      // Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
+      // and the UI hides the PromptOwl Teams panel.
+      promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
+      // Content-type toggles (default ON). The editor's type picker mirrors
+      // these so a disabled type disappears from creation exactly when the
+      // API would refuse it — existing nodes of the type stay readable.
+      type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
+      type_table_enabled: config.TYPE_TABLE_ENABLED,
       // Sub-agent runs gate its own recursion surface separately (env-only,
       // must clear a security review — NOT a UI toggle). Exposed read-only so
       // the Runs page shows the "spawn sub-agent" option only when it's live.
@@ -244,8 +275,8 @@ export function createApp(): Hono<AuthEnv> {
       subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
       subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
       ...(isSuspended() && { suspended_reason: getSuspensionReason() }),
-    }),
-  );
+    });
+  });
 
   // Admin-features gate: teammate management and governance routes are
   // blocked until a valid license is installed. Login/register/device/
@@ -344,14 +375,18 @@ export function createApp(): Hono<AuthEnv> {
     }
   });
 
+  // Server-admin guard shared by the /admin/* operator surfaces: open mode,
+  // the license admin, or a superadmin (access.yaml ∪ DB grants).
+  const serverAdminAllowed = async (c: any) =>
+    config.AUTH_MODE === "open" ||
+    (await isServerAdminUserId(c.get("userId")));
+
   // /admin/settings — server-wide settings the admin edits from the Settings
   // page. Each setting takes effect live (config getters read process.env) and
-  // persists to ENV_FILE_PATH so it survives a restart. In open mode the
-  // anonymous admin may edit; in key mode it's the license admin only.
+  // persists durably so it survives a restart. In open mode the anonymous
+  // admin may edit; in key mode it's the server admin (license admin or
+  // superadmin) only.
   app.use("/admin/settings", flexAuthMiddleware);
-  const adminSettingsAllowed = async (c: any) =>
-    config.AUTH_MODE === "open" ||
-    (await isLicenseAdminUserId(c.get("userId")));
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     manual_sign_in: config.MANUAL_SIGN_IN,
@@ -360,10 +395,27 @@ export function createApp(): Hono<AuthEnv> {
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+    promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
+    type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
+    type_table_enabled: config.TYPE_TABLE_ENABLED,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
     subagent_max_depth: config.SUBAGENT_MAX_DEPTH,
     subagent_max_children: config.SUBAGENT_MAX_CHILDREN,
     trace_retention_days: config.TRACE_RETENTION_DAYS,
+    // OIDC SSO. The client secret is WRITE-ONLY: only its presence is
+    // reported, never the value (same discipline as the Anthropic key below).
+    oidc_enabled: config.OIDC_ENABLED,
+    oidc_issuer: config.OIDC_ISSUER,
+    oidc_client_id: config.OIDC_CLIENT_ID,
+    oidc_client_secret_set: !!config.OIDC_CLIENT_SECRET,
+    oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
+    oidc_auto_provision: config.OIDC_AUTO_PROVISION,
+    oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    // Live readiness (enabled AND issuer+id+secret present) — the SAVED state,
+    // i.e. whether the login button is currently live. The Settings UI derives
+    // its own "enabled but not configured" warning from the unsaved draft
+    // instead, so this is for API consumers (and tests) rather than that badge.
+    oidc_ready: isOidcReady(),
     // Server-wide runner default. NEVER the value — masked tail only.
     anthropic_api_key_masked: process.env.ANTHROPIC_API_KEY
       ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
@@ -375,13 +427,13 @@ export function createApp(): Hono<AuthEnv> {
   });
 
   app.get("/admin/settings", async (c) => {
-    if (!(await adminSettingsAllowed(c)))
+    if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     return c.json(currentServerSettings());
   });
 
   app.patch("/admin/settings", async (c) => {
-    if (!(await adminSettingsAllowed(c)))
+    if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can change this." }, 403);
     let body: Record<string, unknown>;
     try {
@@ -429,6 +481,29 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "FEATURE_WORKFLOW_PLANE",
         value: body.workflow_plane_enabled ? "true" : null,
+      });
+    }
+    // Import teams from PromptOwl. Default OFF — enabling writes "true",
+    // disabling clears the row (falls back to the default).
+    if ("promptowl_teams_enabled" in body) {
+      pending.push({
+        name: "PROMPTOWL_TEAMS_ENABLED",
+        value: body.promptowl_teams_enabled ? "true" : null,
+      });
+    }
+    // Content-type toggles. Default ON — an explicit "false" is the only
+    // disabled state, so enabling clears the row (falls to the default) and
+    // env-set values gate identically to UI-set ones.
+    if ("type_artifact_enabled" in body) {
+      pending.push({
+        name: "TYPE_ARTIFACT_ENABLED",
+        value: body.type_artifact_enabled ? null : "false",
+      });
+    }
+    if ("type_table_enabled" in body) {
+      pending.push({
+        name: "TYPE_TABLE_ENABLED",
+        value: body.type_table_enabled ? null : "false",
       });
     }
     if ("anthropic_api_key" in body) {
@@ -501,6 +576,106 @@ export function createApp(): Hono<AuthEnv> {
         else pending.push({ name: "TRACE_RETENTION_DAYS", value: String(n) });
       }
     }
+    // ── OIDC SSO ──
+    // The client secret is write-only: a non-empty string overwrites, null or
+    // "" clears, and GET only ever reports `oidc_client_secret_set`. Issuer
+    // must be a https URL (the trust root of the whole flow). Enabling
+    // requires the effective post-PATCH config to be complete, so the toggle
+    // can never be left on with a login button that just bounces errors.
+    if ("oidc_issuer" in body) {
+      const v = String(body.oidc_issuer ?? "").trim().replace(/\/$/, "");
+      let ok = false;
+      try {
+        ok = !v || new URL(v).protocol === "https:";
+      } catch {
+        ok = false;
+      }
+      if (!ok)
+        addError("oidc_issuer", "OIDC issuer must be a valid https:// URL (e.g. https://accounts.google.com), or empty to clear it.");
+      else pending.push({ name: "OIDC_ISSUER", value: v || null });
+    }
+    if ("oidc_client_id" in body) {
+      const v = String(body.oidc_client_id ?? "").trim();
+      pending.push({ name: "OIDC_CLIENT_ID", value: v || null });
+    }
+    if ("oidc_client_secret" in body) {
+      const v = body.oidc_client_secret;
+      if (v === null || v === "") {
+        pending.push({ name: "OIDC_CLIENT_SECRET", value: null });
+      } else if (typeof v !== "string") {
+        addError("oidc_client_secret", "OIDC client secret must be a string (or empty to clear it).");
+      } else {
+        pending.push({ name: "OIDC_CLIENT_SECRET", value: v.trim() });
+      }
+    }
+    if ("oidc_allowed_domains" in body) {
+      const raw = String(body.oidc_allowed_domains ?? "").trim();
+      const entries = raw
+        .split(",")
+        .map((d) => d.trim().toLowerCase())
+        .filter(Boolean);
+      // Bare hostnames only — an entry with "@", a scheme, a slash, or no dot
+      // is a typo'd email/URL, not a domain, and would silently never match.
+      const bad = entries.find((d) => !/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(d));
+      if (bad !== undefined)
+        addError("oidc_allowed_domains", `"${bad}" is not a valid domain — use bare domains, comma-separated (e.g. acme.com, contractors.acme.com), or leave empty to allow any.`);
+      else
+        pending.push({
+          name: "OIDC_ALLOWED_DOMAINS",
+          value: entries.length ? entries.join(",") : null,
+        });
+    }
+    if ("oidc_auto_provision" in body) {
+      pending.push({
+        name: "OIDC_AUTO_PROVISION",
+        value: body.oidc_auto_provision ? "true" : "false",
+      });
+    }
+    // Department auto-tagging (dept:<slug> on node create). Only meaningful
+    // when an OIDC IdP emits the `department` claim, but deliberately NOT
+    // gated on oidc_enabled — the toggle is inert without a department to
+    // read, never harmful. Default off; false persists as null (unset) rather
+    // than "false" because unset already means off — unlike oidc_auto_provision
+    // above, whose default is ON and so needs an explicit "false" to disable.
+    if ("oidc_department_tagging" in body) {
+      pending.push({
+        name: "OIDC_DEPARTMENT_TAGGING",
+        value: body.oidc_department_tagging ? "true" : null,
+      });
+    }
+    // Effective post-PATCH OIDC state: what this request sets, falling back
+    // to current config for fields it doesn't touch. Shared by the enable
+    // guard here AND the total-lockout guard below (SSO-only servers are a
+    // supported configuration, so the lockout check must see OIDC too).
+    const effOidcIssuer =
+      "oidc_issuer" in body
+        ? String(body.oidc_issuer ?? "").trim()
+        : config.OIDC_ISSUER;
+    const effOidcClientId =
+      "oidc_client_id" in body
+        ? String(body.oidc_client_id ?? "").trim()
+        : config.OIDC_CLIENT_ID;
+    const effOidcSecret =
+      "oidc_client_secret" in body
+        ? String(body.oidc_client_secret ?? "").trim()
+        : config.OIDC_CLIENT_SECRET;
+    const effOidcEnabled =
+      "oidc_enabled" in body ? !!body.oidc_enabled : config.OIDC_ENABLED;
+    const effOidcReady =
+      effOidcEnabled && !!effOidcIssuer && !!effOidcClientId && !!effOidcSecret;
+    if ("oidc_enabled" in body) {
+      if (body.oidc_enabled && !effOidcReady) {
+        addError(
+          "oidc_enabled",
+          "Set the OIDC issuer, client ID, and client secret before turning single sign-on on.",
+        );
+      } else {
+        pending.push({
+          name: "OIDC_ENABLED",
+          value: body.oidc_enabled ? "true" : null,
+        });
+      }
+    }
     if ("slack_webhook_url" in body) {
       const v = String(body.slack_webhook_url ?? "").trim();
       // Empty clears (connector off). A webhook URL carries an implicit
@@ -542,11 +717,13 @@ export function createApp(): Hono<AuthEnv> {
       else pending.push({ name: "MAX_BODY_BYTES", value: String(Math.floor(n)) });
     }
 
-    // Total-lockout guard: manual and PromptOwl sign-in can't BOTH be off, or
-    // no one could ever log in. Evaluate the effective post-PATCH state —
-    // values this request sets, falling back to current config for fields it
-    // doesn't touch — so the combination is checked even when only one of the
-    // two is in the body.
+    // Total-lockout guard: at least ONE sign-in method must survive the
+    // PATCH — manual, PromptOwl, or a ready+enabled OIDC flow. Evaluated on
+    // the effective post-PATCH state (values this request sets, falling back
+    // to current config for untouched fields), so the combination is checked
+    // whichever side of it is in the body. This is symmetric: it blocks
+    // disabling both classic methods without SSO, AND it blocks turning off /
+    // un-configuring OIDC when it's the only remaining way in.
     const effManual =
       "manual_sign_in" in body
         ? String(body.manual_sign_in ?? "").trim().toLowerCase()
@@ -555,12 +732,20 @@ export function createApp(): Hono<AuthEnv> {
       "promptowl_sign_in_gate" in body
         ? String(body.promptowl_sign_in_gate ?? "").trim().toLowerCase()
         : config.PROMPTOWL_SIGN_IN_GATE;
-    if (effManual === "disabled" && effGate === "disabled") {
-      // Cross-field rule — key it to a sign-in field so the client lands on the
-      // General tab where both toggles live.
+    if (effManual === "disabled" && effGate === "disabled" && !effOidcReady) {
+      // Cross-field rule — key it to the field group this request touched so
+      // the client focuses the tab the admin is actually editing: the SSO tab
+      // when the body only changes OIDC fields, else the General tab where
+      // the two classic sign-in toggles live.
+      const touchedOidcOnly =
+        !("manual_sign_in" in body) &&
+        !("promptowl_sign_in_gate" in body) &&
+        ["oidc_enabled", "oidc_issuer", "oidc_client_id", "oidc_client_secret"].some(
+          (k) => k in body,
+        );
       addError(
-        "manual_sign_in",
-        "Cannot disable both manual and PromptOwl sign-in — no one would be able to log in.",
+        touchedOidcOnly ? "oidc_enabled" : "manual_sign_in",
+        "Cannot disable both manual and PromptOwl sign-in unless SSO (OIDC) is enabled and configured — no one would be able to log in.",
       );
     }
 
@@ -622,16 +807,10 @@ export function createApp(): Hono<AuthEnv> {
 
   // GET /admin/trace — the operator audit surface: newest-first activity
   // rows (API + MCP), optional kind/nest/user/limit filters. Server admin
-  // only (license admin OR access.yaml super_admin) — cross-tenant data.
+  // only (license admin OR super_admin) — cross-tenant data.
   app.use("/admin/trace", flexAuthMiddleware);
-  const traceAllowed = async (c: any) => {
-    if (config.AUTH_MODE === "open") return true;
-    const userId = c.get("userId");
-    if (await isLicenseAdminUserId(userId)) return true;
-    return isSuperAdmin(await resolveCallerEmail(userId));
-  };
   app.get("/admin/trace", async (c) => {
-    if (!(await traceAllowed(c)))
+    if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     const limitRaw = Number(c.req.query("limit"));
     const offsetRaw = Number(c.req.query("offset"));
@@ -649,6 +828,173 @@ export function createApp(): Hono<AuthEnv> {
     return c.json({ count: events.length, total, limit, offset, events });
   });
 
+  // ─── /admin/super-admins — grant/revoke superadmins from the UI ──────────
+  // (CU-wdqcpzwf2n). The effective superadmin set is the union of three
+  // sources, surfaced per row as `source`:
+  //   "license" — the PromptOwl account that owns the installed license
+  //               (derived live, never stored, never revocable here)
+  //   "config"  — access.yaml `super_admins` (the authoritative bootstrap;
+  //               revocable only by editing the file — lockout safety)
+  //   "granted" — rows in the super_admins DB table (managed by these routes)
+  // All three routes use the same server-admin guard as /admin/trace.
+  app.use("/admin/super-admins", flexAuthMiddleware);
+  app.use("/admin/super-admins/*", flexAuthMiddleware);
+
+  app.get("/admin/super-admins", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can view this." }, 403);
+    const callerEmail = (await resolveCallerEmail(c.get("userId"))).toLowerCase();
+
+    type Row = {
+      email: string;
+      source: "license" | "config" | "granted";
+      granted_by: string | null;
+      granted_at: string | null;
+      self: boolean;
+    };
+    // Precedence license > config > granted: an email present in several
+    // sources shows its least-revocable origin (that's what governs whether
+    // DELETE is allowed).
+    const byEmail = new Map<string, Row>();
+    const add = (row: Row) => {
+      if (!byEmail.has(row.email)) byEmail.set(row.email, row);
+    };
+
+    const lic = getCurrentLicense();
+    if (lic?.valid && lic.ownerEmail) {
+      const email = lic.ownerEmail.toLowerCase();
+      add({ email, source: "license", granted_by: null, granted_at: null, self: email === callerEmail });
+    }
+    for (const raw of getAccessConfig()?.super_admins ?? []) {
+      const email = raw.toLowerCase();
+      add({ email, source: "config", granted_by: null, granted_at: null, self: email === callerEmail });
+    }
+    const granted = (await getDb().all(
+      "SELECT email, granted_by, granted_at FROM super_admins ORDER BY granted_at, email",
+    )) as Array<{ email: string; granted_by: string; granted_at: string }>;
+    for (const g of granted) {
+      const email = g.email.toLowerCase();
+      add({ email, source: "granted", granted_by: g.granted_by, granted_at: g.granted_at, self: email === callerEmail });
+    }
+
+    return c.json({ super_admins: [...byEmail.values()] });
+  });
+
+  app.post("/admin/super-admins", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can grant superadmin." }, 403);
+
+    let body: { email?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    const email =
+      typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+    if (!email || !isEmailish(email)) {
+      return c.json({ error: "A valid email is required." }, 400);
+    }
+
+    // Must be an existing user on this server — a superadmin grant to a typo
+    // would otherwise sit live and invisible until someone registers it.
+    const user = await getDb().get(
+      "SELECT id FROM users WHERE LOWER(email) = ?",
+      [email],
+    );
+    if (!user) {
+      return c.json(
+        { error: "No user with this email exists on this server. Invite them as a teammate first." },
+        400,
+      );
+    }
+
+    const lic = getCurrentLicense();
+    const isLicenseOwner =
+      !!lic?.valid && lic.ownerEmail?.toLowerCase() === email;
+    if (isLicenseOwner || isSuperAdmin(email)) {
+      return c.json({ error: "This user is already a superadmin." }, 409);
+    }
+
+    const grantedBy = (await resolveCallerEmail(c.get("userId"))).toLowerCase();
+    try {
+      await getDb().run(
+        "INSERT INTO super_admins (email, granted_by) VALUES (?, ?)",
+        [email, grantedBy],
+      );
+    } catch (err) {
+      // Concurrent-grant race: the isSuperAdmin pre-check above reads the
+      // in-memory cache, so two simultaneous grants can both pass it. The PK
+      // on email is the real arbiter — map its violation to the intended 409.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/unique|duplicate/i.test(msg)) {
+        await loadGrantedSuperAdmins();
+        return c.json({ error: "This user is already a superadmin." }, 409);
+      }
+      throw err;
+    }
+    await loadGrantedSuperAdmins();
+
+    return c.json({ email, source: "granted", granted_by: grantedBy }, 201);
+  });
+
+  app.delete("/admin/super-admins/:email", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can revoke superadmin." }, 403);
+
+    // Hono already percent-decodes path params — decoding again would throw
+    // a URIError (→ 500) on an email containing a literal '%'.
+    const email = c.req.param("email").trim().toLowerCase();
+    const callerEmail = (await resolveCallerEmail(c.get("userId"))).toLowerCase();
+
+    const lic = getCurrentLicense();
+    if (lic?.valid && lic.ownerEmail?.toLowerCase() === email) {
+      return c.json(
+        { error: "The license admin can't be revoked — their access comes from owning the installed PromptOwl license." },
+        400,
+      );
+    }
+    // access.yaml entries are the file-authoritative bootstrap. Refusing to
+    // revoke them via the API is the lockout safety: the operator always keeps
+    // a set of admins that no API caller can remove.
+    if (isConfigSuperAdmin(email)) {
+      return c.json(
+        { error: "This superadmin is defined in access.yaml and can't be revoked from here. Remove them from the file and restart the server." },
+        400,
+      );
+    }
+
+    const db = getDb();
+    const row = await db.get(
+      "SELECT email FROM super_admins WHERE LOWER(email) = ?",
+      [email],
+    );
+    if (!row) return c.json({ error: "Not a granted superadmin." }, 404);
+
+    // Lockout guard: you can't revoke yourself if you're the last effective
+    // superadmin left (no license admin, no access.yaml entries, no other
+    // DB grants) — that would leave the server with no admin at all.
+    if (email === callerEmail) {
+      const hasLicenseAdmin = !!lic?.valid && !!lic.ownerEmail;
+      const hasConfigAdmins = (getAccessConfig()?.super_admins?.length ?? 0) > 0;
+      const others = (await db.get(
+        "SELECT COUNT(*) AS c FROM super_admins WHERE LOWER(email) != ?",
+        [email],
+      )) as { c: number };
+      if (!hasLicenseAdmin && !hasConfigAdmins && others.c === 0) {
+        return c.json(
+          { error: "You're the last superadmin on this server — grant someone else superadmin before revoking yourself." },
+          400,
+        );
+      }
+    }
+
+    await db.run("DELETE FROM super_admins WHERE LOWER(email) = ?", [email]);
+    await loadGrantedSuperAdmins();
+
+    return c.json({ ok: true, email });
+  });
+
   // GET /stats — dashboard summary counts: nests visible to caller,
   // documents across those nests, total users on the server. Uses
   // ─── My Work — cross-nest inbox of things that need this person ──────────
@@ -656,6 +1002,12 @@ export function createApp(): Hono<AuthEnv> {
   // you across every nest you can act in. Reuses the governance review queue
   // (an agent's write-back lands here too, once the runner submits governed
   // changes). flexAuth so it works in open mode and with a key.
+  // Teams — global, owner-managed group primitive (not nest-scoped). Auth via
+  // flexAuth; ownership + admin bypass enforced inside the service/handlers.
+  app.use("/teams/*", flexAuthMiddleware);
+  app.use("/teams", flexAuthMiddleware);
+  app.route("/teams", teamRoutes);
+
   app.use("/me/*", flexAuthMiddleware);
   app.get("/me/work", async (c) => {
     const userId = c.get("userId");
@@ -813,6 +1165,13 @@ export function createApp(): Hono<AuthEnv> {
         /\/comments$/.test(path) ||
         /\/comments\/[^/]+\/resolve$/.test(path);
       const isActivityPath = /\/activity$/.test(path);
+      // The activity feed serves the review queue's rows under another URL
+      // (/nests/:id/feed?filter=changes), so it must sit behind the same
+      // license gate as /review-queue. Match the exact nest-scoped route
+      // shape via the already-split path segments — NOT includes("/feed"),
+      // which a node slug like nodes/product-feed would false-positive
+      // (parts = [nestId, "feed"] only for the real feed route).
+      const isFeedPath = parts.length === 2 && parts[1] === "feed";
       const isGovernance =
         path.includes("/stewards") ||
         path.includes("/review-queue") ||
@@ -826,7 +1185,8 @@ export function createApp(): Hono<AuthEnv> {
         path.includes("/can-approve") ||
         path.includes("/can-edit") ||
         isCommentPath ||
-        isActivityPath;
+        isActivityPath ||
+        isFeedPath;
       const needsLicense = c.req.method !== "GET" || isGovernance;
       if (needsLicense) {
         const lic = getCurrentLicense();
@@ -977,6 +1337,11 @@ export function createApp(): Hono<AuthEnv> {
       required = c.req.method === "GET" || c.req.method === "POST"
         ? "write"
         : "admin";
+    } else if (resource === "teams") {
+      // Team shares change who can reach the nest. Listing exposes member
+      // emails (like the collaborator roster) → 'write'; sharing/unsharing a
+      // whole team (which may include admin-role members) → 'admin'.
+      required = c.req.method === "GET" ? "write" : "admin";
     } else if (parts[1] === "hooks") {
       // Hook rows carry trigger capability (the token fires runs, which is
       // a write-tier action) — reading the list must not be a read-tier
@@ -1142,6 +1507,7 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
+  nestsApp.route("/:nestId/teams", nestTeamRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);
   nestsApp.route("/:nestId/run", runTriggerRoutes);

@@ -28,9 +28,13 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  Tabs, TabsContent, TabsList, TabsTrigger,
+} from "@/components/ui/tabs";
 import { Globe, Lock, Users, Loader2, AlertCircle } from "lucide-react";
 import * as api from "../lib/api";
 import { CollaboratorManager } from "./CollaboratorManager";
+import { TeamShareManager } from "./TeamShareManager";
 import { useAuth } from "../auth/AuthContext";
 
 interface ShareNestDialogProps {
@@ -146,13 +150,32 @@ export function ShareNestDialog({
             </div>
           </div>
 
-          {/* Collaborators — shared with the NestView tab. */}
-          <CollaboratorManager
-            nestId={nestId}
-            nestName={nestName}
-            onChanged={onChanged}
-            currentUserEmail={currentEmail}
-          />
+          {/* People and Teams split into tabs so the dialog stays short no
+              matter how many collaborators or teams a nest has. Only the
+              active tab's list renders. */}
+          <Tabs defaultValue="people">
+            <TabsList className="grid grid-cols-2 w-full">
+              <TabsTrigger value="people">People</TabsTrigger>
+              <TabsTrigger value="teams">Teams</TabsTrigger>
+            </TabsList>
+            <TabsContent
+              value="people"
+              className="mt-3 max-h-[52vh] overflow-y-auto pr-1"
+            >
+              <CollaboratorManager
+                nestId={nestId}
+                nestName={nestName}
+                onChanged={onChanged}
+                currentUserEmail={currentEmail}
+              />
+            </TabsContent>
+            <TabsContent
+              value="teams"
+              className="mt-3 max-h-[52vh] overflow-y-auto pr-1"
+            >
+              <TeamShareManager nestId={nestId} onChanged={onChanged} />
+            </TabsContent>
+          </Tabs>
         </div>
 
         <DialogFooter>
