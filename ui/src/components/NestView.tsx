@@ -253,6 +253,10 @@ export function NestView({
   >("all");
   const [editingSteward, setEditingSteward] = useState<Steward | null>(null);
   const [loading, setLoading] = useState(true);
+  // True only until the first successful fetch. Tab CONTENT gates on this, not
+  // `loading`, so a background refetch (fired by the many mutation handlers)
+  // never blanks already-rendered tabs back to a spinner.
+  const [initialLoad, setInitialLoad] = useState(true);
   const [search, setSearch] = useState(initialSearch ?? "");
   // Multi-tag AND filter; toggled by clicking tag chips on list rows.
   const [tagFilters, setTagFilters] = useState<string[]>([]);
@@ -525,6 +529,7 @@ export function NestView({
     setRoles(nestMeta?.roles ?? []);
     setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
     setLoading(false);
+    setInitialLoad(false);
   }, [nestId]);
 
   // Next page of comment activity, appended under the feed. Offset by the
@@ -1609,7 +1614,7 @@ export function NestView({
             rows, and a grouped table-of-contents grid so opening a nest
             presents an index rather than just the flat node list. */}
         <TabsContent value="overview" className="space-y-4">
-          {loading ? (
+          {initialLoad ? (
             <div className="flex items-center justify-center py-16">
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
@@ -2159,7 +2164,7 @@ export function NestView({
                   ))}
                 </div>
               )}
-              {loading ? (
+              {initialLoad ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
@@ -2738,7 +2743,7 @@ export function NestView({
               </div>
             </CardHeader>
             <CardContent>
-              {loading ? (
+              {initialLoad ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>

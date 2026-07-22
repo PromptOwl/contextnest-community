@@ -6,6 +6,7 @@
 import {
   serializeDocument,
   parseDocument,
+  normalizeStatus,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm } from "node:fs/promises";
@@ -599,6 +600,25 @@ export async function createNode(
 }
 
 /**
+ * The EXPLICIT lifecycle status the source author gave a doc, canonicalized via
+ * the engine's `normalizeStatus`, or null if the frontmatter carried no
+ * `status:` at all.
+ *
+ * The engine's parser defaults a missing status to "draft", so
+ * `node.frontmatter.status` can't tell an explicit draft from a status-less
+ * Obsidian file — we scan the raw source instead. Normalizing means aliases
+ * (`review`, `submitted`, `in_review`, …) collapse to their canonical status
+ * (e.g. `pending_review`), so an import can't smuggle a not-yet-approved doc
+ * past the keep-unpublished gate by spelling its status differently.
+ */
+function explicitFrontmatterStatus(raw: string): string | null {
+  const fm = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return null;
+  const m = fm[1].match(/^status:[ \t]*["']?([A-Za-z_-]+)["']?[ \t]*$/m);
+  return m ? normalizeStatus(m[1]) : null;
+}
+
+/**
  * Reset a single imported doc to a clean, publishable base.
  *
  * An imported folder can be a previously-exported (or half-migrated)
@@ -609,21 +629,12 @@ export async function createNode(
  * and strips the frontmatter `version`/`checksum` so the next publish starts a
  * fresh v1 keyframe. Only called on docs whose as-is publish already failed,
  * so valid chains are left untouched (preserve-when-valid).
+ *
+ * NOTE: reaching into the engine's `.versions/` layout is engine-internal
+ * territory (see CLAUDE.md Engine Logic Boundary). It lives here as a stopgap;
+ * the durable fix is an engine-side `resetVersionChain()` API to consume,
+ * bundled with the pending `deferCheckpoint` upstream work.
  */
-/**
- * Read the EXPLICIT `status:` from a doc's original frontmatter, or null if
- * none was written. The engine's parser defaults a missing status to "draft",
- * so `node.frontmatter.status` can't tell an explicit draft from a status-less
- * Obsidian file — we scan the raw source instead, so only docs the author
- * actually marked draft/rejected/superseded are kept unpublished on import.
- */
-function explicitFrontmatterStatus(raw: string): string | null {
-  const fm = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!fm) return null;
-  const m = fm[1].match(/^status:[ \t]*["']?([A-Za-z_-]+)["']?[ \t]*$/m);
-  return m ? m[1].toLowerCase() : null;
-}
-
 async function resetImportedDocForPublish(
   storage: NestStorage,
   nestId: string,
@@ -731,10 +742,12 @@ export async function registerImportedDocuments(
 
     // Docs the source EXPLICITLY marked not-yet-approved are registered as
     // draft and NOT force-published — honors the imported governance state
-    // (and the engine refuses to publish a rejected doc regardless). A
-    // status-less doc still takes the publish path below.
+    // (and the engine refuses to publish a rejected doc regardless). Anything
+    // that isn't published/approved (draft, pending_review, rejected,
+    // superseded, or an unknown status) is kept unpublished; a status-less doc
+    // still takes the publish path below.
     const status = explicitFrontmatterStatus(doc.rawContent);
-    if (status === "draft" || status === "rejected" || status === "superseded") {
+    if (status && status !== "published" && status !== "approved") {
       await versions.createVersion({
         nestId,
         nodeId,

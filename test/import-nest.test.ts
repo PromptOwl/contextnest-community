@@ -285,6 +285,8 @@ describe("imported vault: discovery + registration", () => {
       mdFile("wip.md", "title: Wip\nstatus: draft", "keep draft"),
       mdFile("bad.md", "title: Bad\nstatus: rejected", "keep unpublished"),
       mdFile("old.md", "title: Old\nstatus: superseded", "keep unpublished"),
+      mdFile("pr.md", "title: PR\nstatus: pending_review", "awaiting review"),
+      mdFile("rev.md", "title: Rev\nstatus: review", "alias of pending_review"),
     ];
     const { status, data } = await jsonRequest(
       app,
@@ -294,9 +296,9 @@ describe("imported vault: discovery + registration", () => {
       alice.apiKey,
     );
     expect(status).toBe(201);
-    // All five register (none dropped), even the rejected one that the engine
+    // All register (none dropped), even the rejected one that the engine
     // would refuse to publish.
-    expect(data.documents).toBe(5);
+    expect(data.documents).toBe(7);
     const list = await jsonRequest(
       app,
       "GET",
@@ -312,6 +314,8 @@ describe("imported vault: discovery + registration", () => {
     expect(byId["wip"]).toBe("draft");
     expect(byId["bad"]).toBe("draft"); // rejected -> kept unpublished, not errored
     expect(byId["old"]).toBe("draft");
+    expect(byId["pr"]).toBe("draft"); // pending_review -> kept unpublished
+    expect(byId["rev"]).toBe("draft"); // 'review' alias normalizes to pending_review
   });
 
   it("sets the importer as author, ignoring the vault's own author (no phantom collaborator)", async () => {
