@@ -156,6 +156,16 @@ export const config = {
   get PROMPTOWL_KEY() {
     return process.env.PROMPTOWL_KEY || "";
   },
+  /**
+   * Whether importing/syncing teams FROM PromptOwl is offered. Default OFF
+   * (only an explicit "true" enables) — an operator opts the PO-team surface
+   * in from Settings or env. When off, the /teams/promptowl routes 404 and the
+   * UI hides the panel. Independent of PROMPTOWL_SIGN_IN_GATE: a user may sign
+   * in with PromptOwl yet not be allowed to pull their PO teams in.
+   */
+  get PROMPTOWL_TEAMS_ENABLED(): boolean {
+    return process.env.PROMPTOWL_TEAMS_ENABLED === "true";
+  },
   /** Vercel automation-bypass secret for PO calls; unset = no bypass. */
   get PROMPTOWL_BYPASS_SECRET(): string {
     return process.env.PROMPTOWL_BYPASS_SECRET || "";

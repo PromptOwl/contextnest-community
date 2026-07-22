@@ -60,12 +60,15 @@ interface TeamsPageProps {
 }
 
 export function TeamsPage({ onBack }: TeamsPageProps) {
-  const { adminStatus, isAdmin } = useAuth();
+  const { adminStatus, isAdmin, promptowlTeamsEnabled } = useAuth();
   const myEmail = (adminStatus?.me?.email || "").toLowerCase();
   // Importing needs the PromptOwl token from a PromptOwl sign-in, so the tab is
   // only offered to those sessions. Read once: it can't change without a
   // sign-in, which remounts this anyway. The server enforces the same rule.
-  const [promptowlSession] = useState(() => api.hasPromptowlSession());
+  // Also gated by the PROMPTOWL_TEAMS_ENABLED feature flag: off → /teams/promptowl
+  // 404s, so hide the panel to match.
+  const [hasPromptowlSession] = useState(() => api.hasPromptowlSession());
+  const promptowlSession = promptowlTeamsEnabled && hasPromptowlSession;
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
