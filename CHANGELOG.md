@@ -1,10 +1,45 @@
 # @promptowl/contextnest-community
 
-## Unreleased
+## 1.11.0
 
 ### Minor Changes
 
-- **Video assets + editor media upload** (`src/nests/asset-routes.ts`, `ui/src/components/MarkdownEditor/MarkdownEditor.tsx`, `ui/src/components/DocumentViewer.tsx`) — nest assets now accept mp4/webm video alongside images, with per-type size caps (images 10 MB, video 100 MB) enforced without raising the global request cap. The editor's Upload menu becomes "Image or video" (with drag-drop onto the editor), and both the editor itself (including its preview toggle) and the read view render same-origin asset video URLs as an inline player; external URLs stay plain links. Asset serving sends `X-Content-Type-Options: nosniff`.
+- v1.11.0 — teams as shareable member groups with PromptOwl sync, OIDC SSO, a governance activity feed, superadmin management from the UI, video assets, and type-appropriate editors.
+
+  ### Teams & sharing
+
+  - **Teams — shareable member groups with per-member roles** (`src/governance/teams-service.ts`, `src/governance/team-routes.ts`, `src/nests/nest-team-routes.ts`, `ui/src/components/TeamsPage.tsx`, `ui/src/components/TeamShareManager.tsx`) — teams as first-class member groups, attachable to nests from the share dialog with per-member roles and team-aware access resolution. Management is role-gated, roster writes are atomic against the resolved account email, and sharing a team onto a nest requires editor+ plus a relationship to the team (view-only members can no longer attach a team the owner can't undo).
+  - **PromptOwl team import + one-click sync** (`src/governance/promptowl-teams.ts`, `ui/src/components/PromptowlTeamsPanel.tsx`) — import PromptOwl teams into Community and keep them synced with one click, gated behind a `PROMPTOWL_TEAMS_ENABLED` settings flag with live-refreshing settings.
+
+  ### Authentication
+
+  - **OIDC SSO — Microsoft Entra ID + Google** (`src/auth/oidc.ts`, `ui/src/components/Login.tsx`, `ui/src/components/SettingsPage.tsx`) — superadmin-configurable OIDC sign-in with issuer presets, RP-initiated logout, graceful JIT provisioning, RS256 pinning, an `email_verified` policy, per-endpoint rate limits with fetch timeouts, and an SSO-only sign-in configuration.
+  - **Department auto-tagging** (`src/config.ts`, `src/nodes/service.ts`) — optional department tags sourced from the OIDC department claim, with case-insensitive dedupe; claim capture never fails login.
+
+  ### Governance & admin
+
+  - **Activity feed in the review queue** (`src/governance/feed-service.ts`, `ui/src/components/governance/ReviewQueue.tsx`) — comments join changes in the review queue, with a counts-driven chip, load-more paging, parallel `canReview` resolution, and a feed license gate.
+  - **Superadmin management from the UI** (`src/app.ts`, `ui/src/components/TeammatesPage.tsx`) — DB-backed grant/revoke of superadmins inline on the user card; superadmin peers are protected from reset/remove, grant races return 409, and revoke is hidden on your own row.
+
+  ### Documents & editor
+
+  - **Video assets + editor media upload** (`src/nests/asset-routes.ts`, `ui/src/components/MarkdownEditor/MarkdownEditor.tsx`, `ui/src/components/DocumentViewer.tsx`) — nest assets accept mp4/webm video alongside images with per-type size caps (images 10 MB, video 100 MB) enforced without raising the global request cap; the editor's Upload menu becomes "Image or video" with drag-drop, and both editor and read view render same-origin asset video URLs as an inline player. Asset serving sends `X-Content-Type-Options: nosniff`.
+  - **Type-appropriate editors** (`ui/src/components/TableSourceEditor.tsx`, `ui/src/lib/csv-table.ts`) — source editing for tool and table nodes, with spreadsheet paste, CSV/TSV upload via a shared upload helper, and the editor locked during in-flight uploads.
+  - **Raw node fetch** (`src/nodes/routes.ts`, `src/shared/artifact-sandbox.ts`) — `?format=raw` returns node bodies directly, with artifact responses sandboxed and `nosniff` on every raw path.
+  - **Author + collaborators on documents** (`ui/src/components/AuthorshipChips.tsx`) — author and collaborator chips on document cards and details; the roster is withheld from public readers.
+  - **Nest rename** (`ui/src/components/RenameNestDialog.tsx`) — rename a nest from the dashboard or nest view; the dialog sends only dirty fields and no longer clobbers an in-flight inline rename.
+
+  ### Settings
+
+  - **Per-type content toggles** (`src/config.ts`, `ui/src/components/SettingsPage.tsx`) — enable/disable content types server-wide, enforced on the bulk publish path and noted in the MCP `context_create` description; the workflow plane is labeled Beta (`ui/src/components/ui/beta-badge.tsx`).
+
+  ### Fixes
+
+  - Folder import recovers unpublishable docs, drops stale governance state, and shows progress; recovered docs land as `pending_review` without a refetch flash (`src/fs/vault-import.ts`, `ui/src/components/ImportFolderModal.tsx`).
+  - Shared safe-copy clipboard util with a fallback for insecure contexts, applied everywhere including `CodeBlock` (`ui/src/lib/clipboard.ts`).
+  - Workflow canvas shelf reflows to the visible width instead of clipping right-side cards (`ui/src/components/WorkflowsView.tsx`).
+  - Nest description fields use a textarea and expand for long text; the nest Overview shows the real edited-this-week count; Overview and External Edits tabs show a loader while fetching (`ui/src/components/NestView.tsx`).
+  - Collaborator chips are coloured per person so initials stop colliding; the redundant creator avatar beside the full email is dropped.
 
 ## 1.10.0
 
