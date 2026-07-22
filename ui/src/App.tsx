@@ -176,17 +176,12 @@ export default function App() {
     try {
       const res = await updateAdminSettings(patch);
       setServerSettings(res.settings);
-      // Feature flags gate other views (workflow-plane nav, sub-agent picker)
-      // off the /health-sourced AuthContext state, not serverSettings. Re-read
-      // health so those toggles take effect live, without a page reload.
-      if (
-        "workflow_plane_enabled" in patch ||
-        "subagent_runs_enabled" in patch ||
-        "type_artifact_enabled" in patch ||
-        "type_table_enabled" in patch
-      ) {
-        await refreshHealth();
-      }
+      // Feature flags gate other views (workflow-plane nav, sub-agent picker,
+      // PromptOwl teams …) off the /health-sourced AuthContext state, not
+      // serverSettings. Always re-read health after a save so ANY flag exposed
+      // there takes effect live — no page reload, and no per-key allowlist to
+      // keep in sync as new flags are added.
+      await refreshHealth();
       toast.success("Settings saved");
     } catch (e: any) {
       toast.error(e?.message || "Failed to save settings");

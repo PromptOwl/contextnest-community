@@ -256,6 +256,9 @@ export function createApp(): Hono<AuthEnv> {
       // render. Mirrors the server-side route gate so UI and API agree:
       // flag off → the plane's routes 404 AND its UI stays hidden.
       workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+      // Import teams from PromptOwl (default OFF). Off → /teams/promptowl 404s
+      // and the UI hides the PromptOwl Teams panel.
+      promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
       // Content-type toggles (default ON). The editor's type picker mirrors
       // these so a disabled type disappears from creation exactly when the
       // API would refuse it — existing nodes of the type stay readable.
@@ -392,6 +395,7 @@ export function createApp(): Hono<AuthEnv> {
     public_base_url: config.PUBLIC_BASE_URL,
     max_body_bytes: config.MAX_BODY_BYTES,
     workflow_plane_enabled: config.FEATURE_WORKFLOW_PLANE,
+    promptowl_teams_enabled: config.PROMPTOWL_TEAMS_ENABLED,
     type_artifact_enabled: config.TYPE_ARTIFACT_ENABLED,
     type_table_enabled: config.TYPE_TABLE_ENABLED,
     subagent_runs_enabled: config.FEATURE_SUBAGENT_RUNS,
@@ -477,6 +481,14 @@ export function createApp(): Hono<AuthEnv> {
       pending.push({
         name: "FEATURE_WORKFLOW_PLANE",
         value: body.workflow_plane_enabled ? "true" : null,
+      });
+    }
+    // Import teams from PromptOwl. Default OFF — enabling writes "true",
+    // disabling clears the row (falls back to the default).
+    if ("promptowl_teams_enabled" in body) {
+      pending.push({
+        name: "PROMPTOWL_TEAMS_ENABLED",
+        value: body.promptowl_teams_enabled ? "true" : null,
       });
     }
     // Content-type toggles. Default ON — an explicit "false" is the only

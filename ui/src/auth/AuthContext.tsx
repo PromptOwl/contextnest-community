@@ -51,6 +51,9 @@ export interface AuthContextValue {
   /** Public feature flag from /health — the server's route gate, so the UI
    *  hides the workflow plane exactly when the API would 404 it. */
   workflowPlaneEnabled: boolean;
+  /** Public feature flag from /health — import teams from PromptOwl (default
+   *  OFF). Off → /teams/promptowl 404s, so the UI hides the panel to match. */
+  promptowlTeamsEnabled: boolean;
   /** Content-type toggles from /health (default ON). The editor's type picker
    *  hides a disabled type exactly when the API would refuse creating it;
    *  existing nodes of the type stay readable. */
@@ -83,6 +86,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [workflowPlaneEnabled, setWorkflowPlaneEnabled] = useState(false);
+  const [promptowlTeamsEnabled, setPromptowlTeamsEnabled] = useState(false);
   // Content types default ON (mirrors config.ts — only an explicit "false"
   // disables), so the picker doesn't flicker types away while /health loads.
   const [typeArtifactEnabled, setTypeArtifactEnabled] = useState(true);
@@ -115,6 +119,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       const h = await api.getHealth();
       setLogoUrl(h.logo_url ?? null);
       setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+      setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
       setTypeArtifactEnabled(h.type_artifact_enabled !== false);
       setTypeTableEnabled(h.type_table_enabled !== false);
       setSubagentRunsEnabled(!!h.subagent_runs_enabled);
@@ -154,6 +159,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setLogoUrl(h.logo_url ?? null);
         setServerVersion(h.version ?? null);
         setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+        setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
         setTypeArtifactEnabled(h.type_artifact_enabled !== false);
         setTypeTableEnabled(h.type_table_enabled !== false);
         setSubagentRunsEnabled(!!h.subagent_runs_enabled);
@@ -309,6 +315,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         authenticated,
         isAdmin,
         workflowPlaneEnabled,
+        promptowlTeamsEnabled,
         typeArtifactEnabled,
         typeTableEnabled,
         subagentRunsEnabled,

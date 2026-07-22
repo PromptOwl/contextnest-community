@@ -93,6 +93,7 @@ const TABS: {
       "type_artifact_enabled",
       "type_table_enabled",
       "workflow_plane_enabled",
+      "promptowl_teams_enabled",
       "subagent_runs_enabled",
       "subagent_max_depth",
       "subagent_max_children",
@@ -1038,6 +1039,32 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                         ...(v ? {} : { subagent_runs_enabled: false }),
                       })
                     }
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Import teams from PromptOwl */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Import teams from PromptOwl
+                </CardTitle>
+                <CardDescription>
+                  Lets users who signed in with PromptOwl pull their PromptOwl
+                  teams in as local teams. Off by default. When off, the
+                  PromptOwl Teams panel is hidden and the import API is
+                  unavailable.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.promptowl_teams_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.promptowl_teams_enabled}
+                    onCheckedChange={(v) => set({ promptowl_teams_enabled: v })}
                   />
                 </div>
               </CardContent>

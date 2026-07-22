@@ -16,6 +16,7 @@ import {
 } from "../auth/sessions.js";
 // NOTE: /teams/promptowl must be registered before /teams/:teamId below.
 import { ForbiddenError, UnauthorizedError } from "../shared/errors.js";
+import { config } from "../config.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { clientIp } from "../shared/request-ip.js";
 import {
@@ -78,6 +79,11 @@ async function withPromptowlToken<T>(
   c: Context,
   run: (token: string) => Promise<T>,
 ) {
+  // Feature gate: when PromptOwl team import is disabled, the surface doesn't
+  // exist — 404 so the UI and API agree (the panel is hidden the same way).
+  if (!config.PROMPTOWL_TEAMS_ENABLED) {
+    return c.json({ error: "Not found" }, 404);
+  }
   if (!tryConsume(`po-teams:ip:${clientIp(c)}`, PROMPTOWL_LIMIT)) {
     return c.json({ error: "Too many PromptOwl requests, try again later" }, 429);
   }

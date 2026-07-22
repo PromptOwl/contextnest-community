@@ -47,6 +47,9 @@ const queuePo = (teams: unknown[]) =>
 
 beforeAll(async () => {
   env = setupTestEnv();
+  // The PromptOwl team-import surface is OFF by default; these tests exercise
+  // it, so opt in for the suite.
+  process.env.PROMPTOWL_TEAMS_ENABLED = "true";
   app = await createTestApp("key");
   owner = await registerUser(app, "owner@acme.com", "Owner");
   await resetAuthRateLimit();
@@ -124,6 +127,28 @@ const sync = (teamIds: string[], key = owner.apiKey, cookie?: string | null) =>
 
 const poCookie = (res: Response) =>
   res.headers.getSetCookie().find((c: string) => c.startsWith("cnst_po_token="));
+
+describe("feature flag gate", () => {
+  it("404s the PromptOwl team routes when the feature is off", async () => {
+    process.env.PROMPTOWL_TEAMS_ENABLED = "";
+    try {
+      const get = await rawRequest("/teams/promptowl", {
+        cookie: "cnst_po_token=po_device_cookie",
+      });
+      expect(get.status).toBe(404);
+      const post = await rawRequest("/teams/promptowl/sync", {
+        method: "POST",
+        cookie: "cnst_po_token=po_device_cookie",
+        body: { team_ids: ["po-team-1"] },
+      });
+      expect(post.status).toBe(404);
+      // Gate is upstream of any PromptOwl call.
+      expect(poRequests).toHaveLength(0);
+    } finally {
+      process.env.PROMPTOWL_TEAMS_ENABLED = "true";
+    }
+  });
+});
 
 describe("only a PromptOwl sign-in can import", () => {
   it("uses the token cookie left by PromptOwl sign-in", async () => {

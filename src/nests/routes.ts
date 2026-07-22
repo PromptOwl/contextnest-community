@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { streamText } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
 import { resolveNestPermission, isServerAdminUserId } from "../shared/access.js";
 import {
@@ -221,6 +222,36 @@ nestRoutes.post("/:nestId", async (c) => {
   }
   const files = Array.isArray(body.files) ? body.files : [];
   const userId = c.get("userId");
+  console.log(
+    `[import] request: name=${JSON.stringify(body.name)} files=${files.length}`,
+  );
+
+  // `?stream=1` streams NDJSON progress so the UI can render a real progress
+  // bar over a large import (register runs one publish per doc). Every other
+  // caller (tests, CLI) gets the original single JSON response below.
+  if (c.req.query("stream") === "1") {
+    const name = body.name;
+    return streamText(c, async (stream) => {
+      try {
+        await stream.writeln(JSON.stringify({ phase: "write" }));
+        const nest = await importNest(userId, name, files);
+        const email = await resolveCallerEmail(userId);
+        const documents = await registerImportedDocuments(
+          nest.id,
+          email,
+          async (done, total) => {
+            await stream.writeln(JSON.stringify({ phase: "register", done, total }));
+          },
+        );
+        await stream.writeln(JSON.stringify({ complete: true, nest, documents }));
+      } catch (err) {
+        await stream.writeln(
+          JSON.stringify({ error: (err as Error)?.message || "Import failed" }),
+        );
+      }
+    });
+  }
+
   const nest = await importNest(userId, body.name, files);
   // Seed governance rows for the documents already in the folder so they
   // list as published and edit from their real version (not from scratch).
