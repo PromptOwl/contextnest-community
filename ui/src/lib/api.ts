@@ -68,7 +68,68 @@ async function request<T = any>(
     err.body = data;
     throw err;
   }
+  // A successful mutation under /nests/{id} changes what the cached structural
+  // reads (node list, nest, settings) would return — drop that nest's read
+  // cache so approval/edit state is never served stale. See cachedRead below.
+  const method = (options.method ?? "GET").toUpperCase();
+  if (method !== "GET") {
+    const m = path.match(/^\/nests\/([^/?]+)/);
+    if (m) invalidateNestReads(m[1]);
+    // Creating / deleting / renaming a nest changes the nests list itself.
+    if (path === "/nests" || /^\/nests\/[^/?]+$/.test(path)) {
+      readCache.delete("/nests");
+    }
+  }
   return data as T;
+}
+
+// ─── Client read cache (structural, slow-changing GETs) ──────────────────
+// The node list / nest / settings get re-fetched on every navigation, which
+// makes the app feel like it "reloads forever" on a large nest. Cache just
+// those structural reads in memory with a short TTL + in-flight dedupe, and
+// invalidate a nest's reads on any mutation (handled in request() above).
+// Live document bodies, search, and feeds are intentionally NOT cached — they
+// need freshness.
+const READ_TTL_MS = 30_000;
+type CacheEntry = { data: unknown; ts: number; inflight?: Promise<unknown> };
+const readCache = new Map<string, CacheEntry>();
+
+async function cachedRead<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
+  const hit = readCache.get(key);
+  if (hit?.inflight) return hit.inflight as Promise<T>; // dedupe concurrent calls
+  if (hit && Date.now() - hit.ts < READ_TTL_MS) return hit.data as T; // fresh → instant
+  const inflight = fetcher()
+    .then((data) => {
+      readCache.set(key, { data, ts: Date.now() });
+      return data;
+    })
+    .catch((err) => {
+      // Drop only the in-flight marker; keep any prior good value.
+      const cur = readCache.get(key);
+      if (cur?.inflight) {
+        if (cur.data !== undefined) readCache.set(key, { data: cur.data, ts: cur.ts });
+        else readCache.delete(key);
+      }
+      throw err;
+    });
+  readCache.set(key, { data: hit?.data, ts: hit?.ts ?? 0, inflight });
+  return inflight as Promise<T>;
+}
+
+/** Drop cached structural reads for a nest (or all when no id). Called
+ *  automatically on any successful mutation under /nests/{id} in request();
+ *  exported for manual busts and tests. */
+export function invalidateNestReads(nestId?: string): void {
+  if (!nestId) {
+    readCache.clear();
+    return;
+  }
+  const prefix = `/nests/${nestId}`;
+  for (const k of readCache.keys()) {
+    // Exact key or a sub-path — but not a different nest whose id merely
+    // shares this prefix (nest-1 must not clear nest-12).
+    if (k === prefix || k.startsWith(`${prefix}/`)) readCache.delete(k);
+  }
 }
 
 /** Error thrown by `request` on a non-2xx response, with the parsed body. */
@@ -444,8 +505,10 @@ export async function deleteApiKey(keyId: string) {
 // ─── Nest settings ─────────────────────────────────────────────────────
 
 export async function getNestSettings(nestId: string) {
-  return request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
-    `/nests/${nestId}/settings`,
+  return cachedRead(`/nests/${nestId}/settings`, () =>
+    request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
+      `/nests/${nestId}/settings`,
+    ),
   );
 }
 
@@ -462,7 +525,7 @@ export async function updateNestSettings(
 // ─── Nests ──────────────────────────────────────────────────────────────
 
 export async function listNests() {
-  return request<{ nests: any[] }>("/nests");
+  return cachedRead("/nests", () => request<{ nests: any[] }>("/nests"));
 }
 
 export async function createNest(name: string, description?: string) {
@@ -576,14 +639,16 @@ export async function setNestVisibility(
 }
 
 export async function getNest(nestId: string) {
-  return request<{
-    nest: { id: string; name: string; visibility: "private" | "public" };
-    permission: string;
-    // Caller's merged effective roles (collaborator + steward), nest-wide.
-    roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
-    // Caller's own steward rows (scoped). Full roster is admin-only.
-    myStewards?: any[];
-  }>(`/nests/${nestId}`);
+  return cachedRead(`/nests/${nestId}`, () =>
+    request<{
+      nest: { id: string; name: string; visibility: "private" | "public" };
+      permission: string;
+      // Caller's merged effective roles (collaborator + steward), nest-wide.
+      roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
+      // Caller's own steward rows (scoped). Full roster is admin-only.
+      myStewards?: any[];
+    }>(`/nests/${nestId}`),
+  );
 }
 
 export async function getServerStats() {
@@ -652,7 +717,9 @@ export async function uploadAsset(nestId: string, file: File) {
 }
 
 export async function listNodes(nestId: string) {
-  return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
+  return cachedRead(`/nests/${nestId}/nodes`, () =>
+    request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`),
+  );
 }
 
 /** Per-node comment (annotation thread) counts for sorting the document list. */
