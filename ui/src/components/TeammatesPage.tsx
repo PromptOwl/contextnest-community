@@ -58,9 +58,11 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
   const [revokeTarget, setRevokeTarget] = useState<Teammate | null>(null);
   const [revoking, setRevoking] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
-  // email (lowercased) → superadmin source. Only "granted" rows are revocable;
-  // "license"/"config" admins get no revoke button (they're file-authoritative).
-  const [adminSource, setAdminSource] = useState<Record<string, string>>({});
+  // email (lowercased) → { source, self }. Only "granted" non-self rows are
+  // revocable: "license"/"config" admins are file-authoritative, and you can't
+  // revoke your own access (it would 403 the very next fetch and break the page).
+  const [adminSource, setAdminSource] =
+    useState<Record<string, { source: string; self: boolean }>>({});
 
   const fetchTeammates = async () => {
     setLoading(true);
@@ -73,7 +75,10 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
       setPendingStewards(data.pending_stewards || []);
       setAdminSource(
         Object.fromEntries(
-          admins.super_admins.map((a) => [a.email.toLowerCase(), a.source]),
+          admins.super_admins.map((a) => [
+            a.email.toLowerCase(),
+            { source: a.source, self: a.self },
+          ]),
         ),
       );
       setError(null);
@@ -191,7 +196,9 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                       )}
                     </div>
                   </div>
-                  {t.is_admin && adminSource[t.email.toLowerCase()] === "granted" && (
+                  {t.is_admin &&
+                    adminSource[t.email.toLowerCase()]?.source === "granted" &&
+                    !adminSource[t.email.toLowerCase()]?.self && (
                     <Button
                       variant="outline"
                       size="sm"
@@ -436,7 +443,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
             <DialogDescription>
               They immediately get server-admin access everywhere: every nest,
               teammate management, and the activity trace. You can revoke
-              this later from the Superadmins list below.
+              this later from this list.
             </DialogDescription>
           </DialogHeader>
           {grantError && (
