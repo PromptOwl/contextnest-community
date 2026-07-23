@@ -220,6 +220,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
     const KEY = "cnst_auth_tick";
     const onStorage = (e: StorageEvent) => {
       if (e.key !== KEY) return;
+      // Auth changed in a sibling tab — this tab's read cache may belong to
+      // the previous identity.
+      api.invalidateNestReads();
       void refresh();
     };
     const onVisible = () => {
@@ -250,6 +253,10 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const loginSuccess = useCallback(
     (user?: LoginSuccessUser) => {
       const mySeq = ++seqRef.current;
+      // The read cache may still hold the previous identity's responses
+      // (anonymous view, or another user on a shared machine) — access is
+      // per-user, so never let them cross an auth transition.
+      api.invalidateNestReads();
       if (user) {
         const name = user.name ?? null;
         setAdminStatus((prev) => ({
@@ -298,6 +305,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
       // Even if the server call fails, treat the client as logged out —
       // the cookie may already be invalid and we don't want a stuck UI.
     }
+    // Drop the read cache with the session — cached nest data belongs to the
+    // identity that just signed out.
+    api.invalidateNestReads();
     setAuthenticated(authMode === "open");
     setAdminStatus((prev) => (prev ? { ...prev, me: null } : prev));
     broadcastAuthChange();

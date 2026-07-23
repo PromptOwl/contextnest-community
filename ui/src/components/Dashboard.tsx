@@ -43,12 +43,6 @@ interface DashboardProps {
   onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
 }
 
-interface ServerStats {
-  nests: number;
-  documents: number;
-  users: number;
-}
-
 export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
@@ -62,7 +56,6 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
-  const [stats, setStats] = useState<ServerStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -82,23 +75,22 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
 
   const fetchNests = async () => {
     setLoading(true);
+    // The page loader is gated on the nest list only. The banner stats are
+    // derived from that same response (each nest carries document_count), so
+    // there is no separate /stats round-trip. /unsynced and /me/work are
+    // best-effort extras that stream into their own sections as they land —
+    // /unsynced is admin-gated (403 for non-admins).
+    api
+      .listUnsyncedFolders()
+      .then((d) => setUnsynced(d.folders))
+      .catch(() => setUnsynced([]));
+    api
+      .getMyWork()
+      .then(setWork)
+      .catch(() => setWork({ items: [], waiting: [], notifications: [] }));
     try {
-      // /stats and /unsynced are best-effort. /stats can 503 on license-gated
-      // servers; /unsynced is admin-gated, so non-admin callers get 403. In
-      // both cases the dashboard still renders with the rest of the data.
-      const [nestsData, statsData, unsyncedData, workData] = await Promise.all([
-        api.listNests(),
-        api.getServerStats().catch((e) => {
-          console.error("[Dashboard] getServerStats failed", e);
-          return null;
-        }),
-        api.listUnsyncedFolders().catch(() => ({ folders: [] })),
-        api.getMyWork().catch(() => ({ items: [], waiting: [], notifications: [] })),
-      ]);
+      const nestsData = await api.listNests();
       setNests(nestsData.nests);
-      setStats(statsData);
-      setUnsynced(unsyncedData.folders);
-      setWork(workData);
     } catch (e) {
       console.error("[Dashboard] fetchNests failed", e);
     } finally {
@@ -198,22 +190,14 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
             </div>
             <div className="flex gap-6 text-center">
               <div>
-                <div className="text-2xl font-bold">
-                  {stats?.nests ?? nests.length}
-                </div>
+                <div className="text-2xl font-bold">{nests.length}</div>
                 <div className="text-xs text-muted-foreground">Nests</div>
               </div>
               <div>
                 <div className="text-2xl font-bold">
-                  {stats ? stats.documents : "—"}
+                  {nests.reduce((sum, n) => sum + (n.document_count ?? 0), 0)}
                 </div>
                 <div className="text-xs text-muted-foreground">Documents</div>
-              </div>
-              <div>
-                <div className="text-2xl font-bold">
-                  {stats ? stats.users : "—"}
-                </div>
-                <div className="text-xs text-muted-foreground">Users</div>
               </div>
             </div>
           </div>
