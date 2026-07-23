@@ -964,7 +964,12 @@ export function NestView({
   const stats = {
     total: nodes.length,
     pending: nodes.filter((n) => n.status === "pending_review").length,
-    approved: nodes.filter((n) => n.status === "approved").length,
+    // "published" is the engine's terminal post-approve status (approve writes
+    // 'published'; no-steward creates auto-publish) — both mean AI-visible,
+    // so the AI Ready card counts them together.
+    approved: nodes.filter(
+      (n) => n.status === "approved" || n.status === "published",
+    ).length,
     reviewQueue: reviewQueue.length,
     reviewable: reviewableQueue.length,
   };
