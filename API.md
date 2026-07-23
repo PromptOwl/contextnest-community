@@ -51,16 +51,16 @@ Clears session cookie. 200.
 ### POST `/auth/keys` (auth required)
 Mints an API key for the caller. 409 if one already exists — use rotate.
 ```json
-{ "label": "cli" }
+{ "label": "cli", "nest_id": "optional — scope the key to one nest" }
 ```
 Response (201):
 ```json
 { "api_key": "cnst_...", "id": "uuid", "label": "cli" }
 ```
-**Plaintext shown once.**
+**Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the Connect dialog mints); a nest-scoped key is rejected on other nests' MCP/API paths.
 
 ### POST `/auth/keys/rotate` (auth required)
-Replaces existing key, returns new plaintext.
+Replaces existing key, returns new plaintext. Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label).
 
 ### GET `/auth/keys` (auth required)
 Lists key prefixes (no plaintext).
@@ -1139,6 +1139,10 @@ Publishes the nest (snapshots + index).
 
 ### `/nests/:nestId/mcp/*`
 Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually; LLM clients connect here.
+
+**Transport is read-tier.** MCP Streamable HTTP is always POST (even `initialize` / `tools/list`), so the per-nest gate admits any credential with read access; every mutating tool re-checks its own permission inside the tool handler (create/edit via stewardship, approve/reject via reviewer rights, stewards/sharing/sync via their own admin checks).
+
+**Denials are JSON-RPC.** Gate rejections on the MCP transport path return a JSON-RPC error envelope — `{ "jsonrpc": "2.0", "id": <echoed>, "error": { "code": -32000, "message": "<what failed — actionable reason>" } }` — instead of plain `{error}` JSON, so external clients (PromptOwl, Claude Desktop, Cursor) surface *why* a connection failed: key scoped to a different nest, server suspended, license required, or nest not found / no access.
 
 Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same as their REST counterparts):
 - `context_unsynced_list` — mirrors `GET /nests/unsynced`.

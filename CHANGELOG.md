@@ -1,5 +1,29 @@
 # @promptowl/contextnest-community
 
+## 1.12.0
+
+### Minor Changes
+
+- v1.12.0 — reliable external MCP connections, a tabbed dashboard, and a UI read cache that ends the constant reloading.
+
+  ### MCP & connections
+
+  - **Collaborator MCP connections unblocked** (`src/app.ts`, `src/mcp/tools.ts`, `src/auth/routes.ts`, `ui/src/components/ConnectModal.tsx`) — external clients (PromptOwl, Claude Desktop, Cursor) intermittently showed "no tools found" for users with valid access. The per-nest transport gate now runs at read tier (MCP Streamable HTTP is always POST; mutating tools re-check their own permission inside `runTool`), middleware denials on the MCP path return a proper JSON-RPC error envelope with an actionable reason instead of plain `{error}` JSON, and the Connect dialog mints a user-level key instead of silently nest-scoping the account's single key (rotate accepts `nest_id: null` to clear a stale scope). Backed by a full role-permission matrix suite (`test/mcp-permission-matrix.test.ts`).
+
+  ### Dashboard
+
+  - **Nests and My Work split into tabs** (`ui/src/components/Dashboard.tsx`) — with a large review backlog the stacked My Work list pushed the nest grid below a huge scroll; nests stay the default tab.
+  - **Faster dashboard load** (`ui/src/components/Dashboard.tsx`, `ui/src/lib/api.ts`) — banner counts derive from the nest list's `document_count` instead of the slow `/stats` round-trip, and `/unsynced` + `/me/work` no longer gate the page loader; they stream in as they land.
+  - **AI Ready card no longer shows 0 for live documents** (`ui/src/components/Dashboard.tsx`) — the count now includes `published` alongside `approved`, matching `LifecycleStatusBadge`.
+
+  ### UI read cache
+
+  - **Structural nest reads cached** (`ui/src/lib/api.ts`) — a 30s in-memory cache with in-flight dedupe for the slow-changing GETs (`listNodes`, `listNests`, `getNest`, `getNestSettings`) stops large nests from re-fetching everything on every navigation. True stale-while-revalidate (expired entries paint instantly and revalidate in the background), a generation counter closes the stale-after-edit race, and any successful mutation under `/nests/{id}` — including streaming import and folder sync — busts the affected cache plus the nests list. The cache clears on every auth transition so a user switch is never served the previous identity's data (`ui/src/auth/AuthContext.tsx`). Live document bodies, search, and feeds are intentionally uncached.
+
+  ### Fixes
+
+  - Invited badge cleared on every sign-in flow — PromptOwl device flow, SSO ticket, and OIDC logins left `is_invited=1`, so a stale badge lingered and a later re-invite could clobber an active account; the clear moved into `createSession`, the one point all browser sign-ins route through (`src/auth/sessions.ts`).
+
 ## 1.11.0
 
 ### Minor Changes
