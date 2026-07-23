@@ -87,6 +87,16 @@ describe("nest UI read caching @unit", () => {
     expect(after.nodes).toHaveLength(1);
   });
 
+  it("busts the nests list on a node-level mutation — its rows carry document_count", async () => {
+    fetchSpy = vi.fn(async () => okJson({ nests: [], node: {}, count: 0, nodes: [] }));
+    (globalThis as any).fetch = fetchSpy;
+
+    await api.listNests();
+    await api.createNode("nest-1", { title: "t", content: "c" }); // changes nest-1's document_count
+    await api.listNests();
+    expect(getListCalls(fetchSpy, "/nests")).toHaveLength(2);
+  });
+
   it("refetches the nests list after syncing an unsynced folder", async () => {
     fetchSpy = vi.fn(async () => okJson({ nests: [], nest: {}, documents: 0 }));
     (globalThis as any).fetch = fetchSpy;

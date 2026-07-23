@@ -153,6 +153,10 @@ export function invalidateNestReads(nestId?: string): void {
     // shares this prefix (nest-1 must not clear nest-12).
     if (k === prefix || k.startsWith(`${prefix}/`)) readCache.delete(k);
   }
+  // Node-level mutations change per-nest metadata the list rows carry
+  // (document_count, updated_at) — the Dashboard derives its totals from
+  // them, so the list must not survive any nest-scoped mutation either.
+  readCache.delete("/nests");
 }
 
 /** Drop the cached nests list. Needed by mutations that create a nest but
