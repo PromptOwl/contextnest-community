@@ -692,10 +692,6 @@ export async function getNest(nestId: string) {
   );
 }
 
-export async function getServerStats() {
-  return request<{ nests: number; documents: number; users: number }>("/stats");
-}
-
 // ─── Glossary definitions ──────────────────────────────────────────────
 
 export interface Definition {
