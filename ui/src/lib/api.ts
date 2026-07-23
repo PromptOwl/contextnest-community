@@ -488,8 +488,12 @@ export async function createApiKey(opts?: { label?: string; nest_id?: string }) 
   });
 }
 
-/** Rotate the caller's existing key — atomic DELETE + INSERT. */
-export async function rotateApiKey(opts?: { label?: string; nest_id?: string }) {
+/** Rotate the caller's existing key — atomic DELETE + INSERT.
+ *  nest_id: null explicitly clears a per-nest scope; omitting keeps it. */
+export async function rotateApiKey(opts?: {
+  label?: string;
+  nest_id?: string | null;
+}) {
   return request<{ api_key: string; key_prefix: string }>("/auth/keys/rotate", {
     method: "POST",
     body: JSON.stringify(opts || {}),
