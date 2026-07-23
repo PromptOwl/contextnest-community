@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
@@ -239,6 +240,27 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
         </CardContent>
       </Card>
 
+      {/* Tabbed view: Nests (default) vs My Work. With 200+ work items the
+          stacked layout pushed the nest grid below a huge scroll — tabs keep
+          nests one click away without touching either section's internals. */}
+      <Tabs defaultValue="nests">
+        <TabsList className="h-12 p-1.5">
+          <TabsTrigger value="nests" className="px-6 py-2 text-sm">
+            <Database className="h-4 w-4 mr-1.5" />
+            Nests
+          </TabsTrigger>
+          <TabsTrigger value="work" className="px-6 py-2 text-sm gap-1.5">
+            <Inbox className="h-4 w-4" />
+            My Work
+            {work.items.length > 0 && (
+              <span className="rounded-full bg-primary text-primary-foreground text-xs font-semibold px-1.5 py-0.5">
+                {work.items.length}
+              </span>
+            )}
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="work">
       {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
           row clicks straight to the document (circular nav), approve/reject
           inline. "My Work" = waiting on you; "Waiting on" = you handed off. */}
@@ -367,7 +389,9 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           </div>
         )}
       </div>
+        </TabsContent>
 
+        <TabsContent value="nests" className="space-y-6">
       {/* Nests header */}
       <div className="flex items-center justify-between">
         <div>
@@ -790,6 +814,8 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           </div>
         </>
       )}
+        </TabsContent>
+      </Tabs>
 
       {renameTarget && (
         <RenameNestDialog
