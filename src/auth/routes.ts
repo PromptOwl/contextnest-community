@@ -430,19 +430,8 @@ authRoutes.post("/login", async (c) => {
   if (hasIp) clear(ipKey);
   clear(emailKey);
 
-  // A first successful login is a real "claim" too — an invited teammate has
-  // now accessed the account, so clear is_invited. This clears the "Invited"
-  // badge and makes a later /auth/invite on this email return 409 instead of
-  // silently overwriting a working login (re-invite only refreshes the temp
-  // password of someone who has NOT logged in yet). Use Reset password to
-  // re-issue a credential for an already-active teammate.
-  if (user.is_invited === 1) {
-    try {
-      await db.run("UPDATE users SET is_invited = 0 WHERE id = ?", [user.id]);
-    } catch {
-      // best-effort; never block a valid login on this bookkeeping update
-    }
-  }
+  // NOTE: is_invited is cleared inside createSession (below) — the shared
+  // claim point for every sign-in flow (password, PromptOwl, OIDC).
 
   // Legacy SHA-256 password? Silently upgrade to bcrypt on this successful
   // login so the DB migrates itself over time without forcing a reset.

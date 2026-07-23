@@ -49,6 +49,22 @@ export async function createSession(userId: string, userAgent?: string): Promise
      VALUES (?, ?, ?, ?)`,
     [id, userId, expiryIso(), userAgent || null],
   );
+
+  // Any successful login is a real "claim" — an invited teammate has now
+  // accessed the account, so clear is_invited. Done HERE (the one point every
+  // browser sign-in routes through: password, PromptOwl device flow, PromptOwl
+  // SSO ticket, OIDC) so no flow can leave a stale "Invited" badge, and a
+  // later /auth/invite on this email returns 409 instead of silently
+  // overwriting a working login. Use Reset password to re-issue a credential
+  // for an already-active teammate.
+  try {
+    await db.run("UPDATE users SET is_invited = 0 WHERE id = ? AND is_invited = 1", [
+      userId,
+    ]);
+  } catch {
+    // best-effort; never block a valid login on this bookkeeping update
+  }
+
   return id;
 }
 
