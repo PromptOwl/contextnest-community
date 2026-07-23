@@ -474,6 +474,16 @@ export async function handleToolCall(
   }
 }
 
+/**
+ * SECURITY INVARIANT — new mutating tools MUST self-gate. The /mcp transport
+ * admits READ-tier callers (MCP is always POST, so the route can't
+ * distinguish reads from writes); per-tool permission checks in the cases
+ * below are the ONLY write/governance enforcement. Follow the existing
+ * patterns: canCreateInNest / canUserEdit for content writes, canUserApprove
+ * (inside review-service) for governance, explicit admin checks for
+ * stewards/sharing/sync. A mutating case without its own check ships a
+ * privilege escalation.
+ */
 async function runTool(
   toolName: string,
   args: Record<string, any>,
@@ -739,8 +749,9 @@ async function runTool(
     }
 
     case "context_create": {
-      // Defense-in-depth: the /mcp middleware already requires nest write,
-      // but gate here too so creation stays locked if that ever changes.
+      // PRIMARY write gate: the /mcp middleware admits read-tier callers
+      // (the MCP transport is always POST), so this per-tool check is what
+      // keeps creation locked to write+ collaborators and nest-scope editors.
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
         return "You don't have permission to create documents in this nest.";
       }
