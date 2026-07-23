@@ -532,9 +532,9 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
 // One row per user (DB UNIQUE), so we DELETE + INSERT inside a
 // transaction to preserve that invariant. New plaintext returned once.
 authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
-  const body = await c.req.json<{ label?: string; nest_id?: string }>().catch(
-    () => ({}) as { label?: string; nest_id?: string },
-  );
+  const body = await c.req
+    .json<{ label?: string; nest_id?: string | null }>()
+    .catch(() => ({}) as { label?: string; nest_id?: string | null });
   const db = getDb();
   const userId = c.get("userId");
 
@@ -546,6 +546,13 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
     [userId],
   ) as { label: string | null; nest_id: string | null } | undefined;
 
+  // Scope resolution: field absent → keep the prior scope; explicitly null
+  // (or "") → clear to a user-level key; a nest id → scope to that nest.
+  // The old `body.nest_id ?? prior` collapsed "clear it" into "keep it",
+  // leaving no way to un-scope a key.
+  const nestScope =
+    "nest_id" in body ? body.nest_id || null : prior?.nest_id ?? null;
+
   await db.transaction(async (tx) => {
     await tx.run("DELETE FROM api_keys WHERE user_id = ?", [userId]);
     await tx.run(
@@ -555,7 +562,7 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
         userId,
         hashApiKey(apiKey),
         getKeyPrefix(apiKey),
-        body.nest_id ?? prior?.nest_id ?? null,
+        nestScope,
         body.label ?? prior?.label ?? null,
       ],
     );

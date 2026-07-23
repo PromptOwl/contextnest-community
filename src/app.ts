@@ -1131,20 +1131,48 @@ export function createApp(): Hono<AuthEnv> {
     const userId = c.get("userId");
     const nestScope = c.get("nestScope");
 
+    // MCP transport (POST /nests/:id/mcp): the client speaks JSON-RPC, so a
+    // plain `{error}` JSON body surfaces in the client UI as a generic
+    // "no tools found" / connection failure with no explanation. Wrap gate
+    // denials for this path in a JSON-RPC error envelope (echoing the
+    // request id when parseable) so the client shows WHY the connection
+    // failed — wrong key scope, missing license, no access.
+    const isMcpTransport = parts.length === 2 && parts[1] === "mcp";
+    const deny = async (
+      status: 403 | 404 | 503,
+      error: string,
+      extra?: Record<string, unknown>,
+    ) => {
+      if (!isMcpTransport) return c.json({ error, ...extra }, status);
+      let id: string | number | null = null;
+      try {
+        id = (await c.req.json())?.id ?? null;
+      } catch {
+        /* unparseable body — id stays null */
+      }
+      // Fold the human-facing `reason` into the message — the envelope's
+      // `message` string is all most MCP clients display.
+      const message =
+        typeof extra?.reason === "string" ? `${error} — ${extra.reason}` : error;
+      return c.json(
+        { jsonrpc: "2.0", id, error: { code: -32000, message } },
+        status,
+      );
+    };
+
     if (nestScope && nestScope !== nestId) {
-      return c.json({ error: "API key not authorized for this nest" }, 403);
+      return deny(
+        403,
+        `API key not authorized for this nest — this key is scoped to nest "${nestScope}". Use that nest's MCP URL, or mint a user-level key in the Connect dialog.`,
+      );
     }
 
     // Kill switch: if suspended, block writes but allow reads
     if (isSuspended() && c.req.method !== "GET") {
-      return c.json(
-        {
-          error: "Server suspended by PromptOwl",
-          reason: getSuspensionReason(),
-          contact: "support@promptowl.ai",
-        },
-        503,
-      );
+      return deny(503, "Server suspended by PromptOwl", {
+        reason: getSuspensionReason(),
+        contact: "support@promptowl.ai",
+      });
     }
 
     // License gate: block writes until a valid PromptOwl key is
@@ -1191,15 +1219,11 @@ export function createApp(): Hono<AuthEnv> {
       if (needsLicense) {
         const lic = getCurrentLicense();
         if (!lic?.valid) {
-          return c.json(
-            {
-              error: "License required",
-              reason:
-                "Install a PromptOwl license key via the setup screen or POST /license/install.",
-              setup_url: "/setup",
-            },
-            503,
-          );
+          return deny(503, "License required", {
+            reason:
+              "This server has no valid PromptOwl license installed. Ask the server admin to install one via the setup screen or POST /license/install.",
+            setup_url: "/setup",
+          });
         }
       }
     }
@@ -1227,6 +1251,14 @@ export function createApp(): Hono<AuthEnv> {
     const isReadQuery =
       parts.length === 2 &&
       ["context", "query", "search", "export"].includes(parts[1]);
+
+    // MCP transport is read-tier (isMcpTransport, declared above with the
+    // deny helper): the Streamable HTTP protocol is ALWAYS POST — even
+    // initialize and tools/list — so the generic non-GET 'write' bump below
+    // must skip it or read-only collaborators lose the whole MCP surface.
+    // Every mutating tool re-checks its own permission inside runTool
+    // (create/edit via stewardship, approve/reject via canUserApprove,
+    // stewards/sharing/sync via their own admin checks).
 
     let grantRole: "read" | "write" | null = null;
     let grantNestVisible = false;
@@ -1258,7 +1290,11 @@ export function createApp(): Hono<AuthEnv> {
         grantNestVisible = await hasAnyGrant(nestId, userId);
       }
       if (!grantRole && !grantNestVisible) {
-        return c.json({ error: "Nest not found" }, 404);
+        // Same message for "doesn't exist" and "no access" — existence oracle.
+        return deny(404, "Nest not found", {
+          reason:
+            "The nest id may be wrong, or these credentials have no access to it. Ask the nest owner to share the nest with you, then reconnect.",
+        });
       }
     }
 
@@ -1352,7 +1388,8 @@ export function createApp(): Hono<AuthEnv> {
       !isStewardActionPath &&
       !isCommentAction &&
       !isAnnotationAction &&
-      !isReadQuery
+      !isReadQuery &&
+      !isMcpTransport
     ) {
       required = "write";
     }
@@ -1416,13 +1453,13 @@ export function createApp(): Hono<AuthEnv> {
       !stewardEditorBypass &&
       effectiveLevel < permissionLevel(required)
     ) {
-      return c.json(
+      return deny(
+        403,
+        `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,
         {
-          error: `You don't have access to perform this action on this nest. Required permission: '${required}', your permission: '${permission}'. Ask the nest owner or a server admin to grant you ${required} access.`,
           required_permission: required,
           your_permission: permission,
         },
-        403,
       );
     }
 

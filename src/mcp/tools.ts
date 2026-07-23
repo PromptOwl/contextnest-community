@@ -739,8 +739,9 @@ async function runTool(
     }
 
     case "context_create": {
-      // Defense-in-depth: the /mcp middleware already requires nest write,
-      // but gate here too so creation stays locked if that ever changes.
+      // PRIMARY write gate: the /mcp middleware admits read-tier callers
+      // (the MCP transport is always POST), so this per-tool check is what
+      // keeps creation locked to write+ collaborators and nest-scope editors.
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
         return "You don't have permission to create documents in this nest.";
       }
