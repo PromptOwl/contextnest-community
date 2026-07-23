@@ -474,6 +474,16 @@ export async function handleToolCall(
   }
 }
 
+/**
+ * SECURITY INVARIANT — new mutating tools MUST self-gate. The /mcp transport
+ * admits READ-tier callers (MCP is always POST, so the route can't
+ * distinguish reads from writes); per-tool permission checks in the cases
+ * below are the ONLY write/governance enforcement. Follow the existing
+ * patterns: canCreateInNest / canUserEdit for content writes, canUserApprove
+ * (inside review-service) for governance, explicit admin checks for
+ * stewards/sharing/sync. A mutating case without its own check ships a
+ * privilege escalation.
+ */
 async function runTool(
   toolName: string,
   args: Record<string, any>,

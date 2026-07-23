@@ -1144,6 +1144,11 @@ export function createApp(): Hono<AuthEnv> {
       extra?: Record<string, unknown>,
     ) => {
       if (!isMcpTransport) return c.json({ error, ...extra }, status);
+      // Reading the body here is safe even though the MCP transport also
+      // consumes it downstream: Hono caches the parsed body on the request,
+      // and on this path we return WITHOUT calling next() anyway. If the
+      // body-reading strategy upstream ever changes, id echoing degrades to
+      // null — never a thrown error.
       let id: string | number | null = null;
       try {
         id = (await c.req.json())?.id ?? null;
