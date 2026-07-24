@@ -17,6 +17,14 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
@@ -70,6 +78,10 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   >(null);
   const [renameTarget, setRenameTarget] = useState<
     { id: string; name: string; description: string | null } | null
+  >(null);
+  // Unsynced folder pending discard — drives the confirm dialog.
+  const [discardTarget, setDiscardTarget] = useState<
+    { name: string; label: string } | null
   >(null);
 
   const serverUrl =
@@ -133,6 +145,34 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
       console.error("[Dashboard] syncUnsyncedFolder failed", name, e);
       const msg = e instanceof Error ? e.message : "Failed to sync folder";
       setSyncErrors((s) => ({ ...s, [name]: msg }));
+    } finally {
+      setSyncing((s) => {
+        const next = { ...s };
+        delete next[name];
+        return next;
+      });
+    }
+  };
+
+  // Delete an unsynced folder outright (leftover files the user doesn't want as
+  // a nest). Confirmed via the discard dialog — it removes files from disk and
+  // can't be undone.
+  const handleDiscardUnsynced = async (name: string) => {
+    setSyncing((s) => ({ ...s, [name]: true }));
+    setSyncErrors((s) => {
+      const next = { ...s };
+      delete next[name];
+      return next;
+    });
+    try {
+      await api.deleteUnsyncedFolder(name);
+      setUnsynced((prev) => prev.filter((f) => f.name !== name));
+      setDiscardTarget(null);
+    } catch (e) {
+      console.error("[Dashboard] deleteUnsyncedFolder failed", name, e);
+      const msg = e instanceof Error ? e.message : "Failed to delete folder";
+      setSyncErrors((s) => ({ ...s, [name]: msg }));
+      setDiscardTarget(null);
     } finally {
       setSyncing((s) => {
         const next = { ...s };
@@ -534,24 +574,36 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                           Unsynced
                         </span>
                       </div>
-                      <Button
-                        size="sm"
-                        className="mt-3"
-                        onClick={() => handleSync(folder.name)}
-                        disabled={isSyncing}
-                      >
-                        {isSyncing ? (
-                          <>
-                            <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
-                            Syncing…
-                          </>
-                        ) : (
-                          <>
-                            <FolderSync className="h-3.5 w-3.5 mr-2" />
-                            Sync to Nest
-                          </>
-                        )}
-                      </Button>
+                      <div className="flex items-center gap-2 mt-3">
+                        <Button
+                          size="sm"
+                          onClick={() => handleSync(folder.name)}
+                          disabled={isSyncing}
+                        >
+                          {isSyncing ? (
+                            <>
+                              <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+                              Syncing…
+                            </>
+                          ) : (
+                            <>
+                              <FolderSync className="h-3.5 w-3.5 mr-2" />
+                              Sync to Nest
+                            </>
+                          )}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-muted-foreground hover:text-destructive"
+                          onClick={() => setDiscardTarget({ name: folder.name, label: folder.label })}
+                          disabled={isSyncing}
+                          title="Delete this folder from the server"
+                        >
+                          <Trash2 className="h-3.5 w-3.5 mr-2" />
+                          Delete
+                        </Button>
+                      </div>
                       {errMsg && (
                         <p
                           role="alert"
@@ -896,6 +948,56 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           }}
         />
       )}
+
+      <Dialog
+        open={!!discardTarget}
+        onOpenChange={(open) => {
+          // Don't let a click-away close it mid-delete.
+          if (!open && discardTarget && syncing[discardTarget.name]) return;
+          if (!open) setDiscardTarget(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-700">
+              <Trash2 className="h-4 w-4" />
+              Delete folder
+            </DialogTitle>
+            <DialogDescription>
+              Permanently delete{" "}
+              <strong className="text-foreground">{discardTarget?.label}</strong>{" "}
+              and its files from the server. This can't be undone. The folder
+              won't be synced into a nest.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setDiscardTarget(null)}
+              disabled={!!discardTarget && !!syncing[discardTarget.name]}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => discardTarget && handleDiscardUnsynced(discardTarget.name)}
+              disabled={!!discardTarget && !!syncing[discardTarget.name]}
+            >
+              {discardTarget && syncing[discardTarget.name] ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+                  Deleting…
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-3.5 w-3.5 mr-2" />
+                  Delete folder
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <ImportFolderModal
         isOpen={showImport}

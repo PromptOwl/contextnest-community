@@ -21,6 +21,7 @@ import { registerImportedDocuments } from "../nodes/service.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
+  deleteUnsyncedFolder,
 } from "./unsynced-service.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
@@ -297,6 +298,26 @@ nestRoutes.post("/:nestId/sync", async (c) => {
     await resolveCallerEmail(userId),
   );
   return c.json(result, 201);
+});
+
+// DELETE /nests/unsynced/sync — remove an unsynced folder the user doesn't want
+// (leftover files taking up space, no intention to sync). Same admin-gate as
+// sync (touches server disk). Name travels in the body because leaf paths
+// contain slashes. Registered on the same literal "unsynced" branch.
+nestRoutes.delete("/:nestId/sync", async (c) => {
+  if (c.req.param("nestId") !== "unsynced") {
+    throw new NotFoundError("Not found");
+  }
+  const userId = c.get("userId");
+  if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
+    throw new ForbiddenError("Only the server admin can delete folders");
+  }
+  const body = await c.req.json<{ name?: string }>().catch(() => ({}) as { name?: string });
+  if (!body?.name) {
+    throw new ValidationError("name is required");
+  }
+  deleteUnsyncedFolder(body.name);
+  return c.json({ ok: true });
 });
 
 // GET /nests/:nestId

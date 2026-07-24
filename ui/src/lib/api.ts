@@ -673,6 +673,13 @@ export async function syncUnsyncedFolder(name: string) {
   return out;
 }
 
+export async function deleteUnsyncedFolder(name: string) {
+  return request<{ ok: true }>("/nests/unsynced/sync", {
+    method: "DELETE",
+    body: JSON.stringify({ name }),
+  });
+}
+
 export async function setNestVisibility(
   nestId: string,
   visibility: "private" | "public",
