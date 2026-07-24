@@ -71,6 +71,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const [showImport, setShowImport] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
   // Pending target sits in state so the modal can render the nest name in
   // the confirmation copy without prop-drilling through a separate child.
   const [deleteTarget, setDeleteTarget] = useState<
@@ -222,12 +223,16 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
+    setCreateError(null);
     try {
       await api.createNest(newName, newDesc);
       setNewName(""); setNewDesc(""); setShowCreate(false);
       fetchNests();
     } catch (e) {
       console.error("[Dashboard] createNest failed", e);
+      setCreateError(
+        e instanceof Error ? e.message : "Failed to create nest",
+      );
     }
   };
 
@@ -499,9 +504,16 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                 <Input
                   placeholder="Team Knowledge"
                   value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
+                  onChange={(e) => {
+                    setNewName(e.target.value);
+                    if (createError) setCreateError(null);
+                  }}
+                  aria-invalid={!!createError}
                   autoFocus
                 />
+                {createError && (
+                  <p className="text-xs text-destructive">{createError}</p>
+                )}
               </div>
               <div className="space-y-1">
                 <Label>Description (optional)</Label>
@@ -514,7 +526,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
               </div>
               <div className="flex gap-2">
                 <Button type="submit">Create Nest</Button>
-                <Button type="button" variant="outline" onClick={() => setShowCreate(false)}>
+                <Button type="button" variant="outline" onClick={() => { setShowCreate(false); setCreateError(null); }}>
                   Cancel
                 </Button>
               </div>

@@ -221,8 +221,28 @@ export async function createNest(
   description?: string,
 ): Promise<Nest> {
   const id = uuid();
-  const slug = toSlug(name);
   const db = getDb();
+
+  const trimmed = name.trim();
+  if (!trimmed) throw new ValidationError("Name cannot be empty");
+  const slug = toSlug(trimmed);
+  if (!slug) {
+    throw new ValidationError(
+      "Name must contain at least one alphanumeric character",
+    );
+  }
+  // Surface the duplicate BEFORE the INSERT would trip UNIQUE(user_id, slug) —
+  // the raw constraint error otherwise bubbled up as a generic 500 with no
+  // hint that the name was taken. Mirrors renameNest's conflict guard.
+  const conflict = (await db.get(
+    "SELECT id FROM nests WHERE user_id = ? AND slug = ? LIMIT 1",
+    [userId, slug],
+  )) as { id: string } | undefined;
+  if (conflict) {
+    throw new ValidationError(
+      "You already have a nest with this name. Pick a different one.",
+    );
+  }
 
   // Ungoverned (anon-owned) nests default to public so the shared commons
   // stays visible to everyone in both open and key modes. Admin can flip
@@ -231,13 +251,13 @@ export async function createNest(
 
   await db.run(
     "INSERT INTO nests (id, user_id, name, slug, description, visibility) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, userId, name, slug, description || null, visibility],
+    [id, userId, trimmed, slug, description || null, visibility],
   );
 
   const path = resolveNestPath(id);
   mkdirSync(path, { recursive: true });
   const storage = new NestStorage(path);
-  await storage.init(name);
+  await storage.init(trimmed);
 
   trackEvent("nest.create", { nestId: id, userId });
 
