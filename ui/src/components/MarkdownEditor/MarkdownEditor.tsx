@@ -1693,9 +1693,12 @@ const MEDIA_ACCEPT =
 const MEDIA_FILE_RE = /\.(png|jpe?g|gif|webp|mp4|webm)$/i;
 const VIDEO_FILE_RE = /\.(mp4|webm)$/i;
 // Client-side mirrors of the server's per-type caps — fail fast with a
-// friendly toast instead of shipping 100 MB upstream to be rejected.
+// friendly toast instead of shipping the file upstream to be rejected.
+// Video mirrors the server default (config.VIDEO_MAX_BYTES = 30 MB), kept under
+// Cloud Run's 32 MiB request limit. If a deployment raises VIDEO_MAX_MB, bump
+// this to match so the client doesn't reject an upload the server would accept.
 const IMAGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
-const VIDEO_MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MB
+const VIDEO_MAX_UPLOAD_BYTES = 30 * 1024 * 1024; // 30 MB
 
 /**
  * Upload an image/video via the caller's asset uploader and insert the

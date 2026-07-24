@@ -27,6 +27,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AuthEnv } from "../auth/middleware.js";
 import { resolveNestPath } from "../shared/paths.js";
+import { config } from "../config.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 
 export const assetRoutes = new Hono<AuthEnv>();
@@ -45,7 +46,10 @@ const VIDEO_EXTS = new Set(["mp4", "webm"]);
 
 // Per-type upload caps, enforced on the parsed file in the POST handler.
 export const IMAGE_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
-export const VIDEO_MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+// Video cap is env-configurable (VIDEO_MAX_MB) — default 30 MB, under Cloud
+// Run's 32 MiB request limit so oversized videos fail with our clear message,
+// not a platform 413. See config.VIDEO_MAX_BYTES.
+export const VIDEO_MAX_BYTES = config.VIDEO_MAX_BYTES;
 // Effective Content-Length ceiling for the asset POST route only (largest
 // allowed file + slack for multipart framing). app.ts consults this so the
 // global MAX_BODY_BYTES cap never has to be raised for video uploads.

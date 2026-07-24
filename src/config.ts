@@ -545,4 +545,15 @@ export const config = {
   get MAX_BODY_BYTES() {
     return parseInt(process.env.MAX_BODY_BYTES || String(10 * 1024 * 1024), 10);
   },
+  /**
+   * Max video upload size in bytes. Default 30 MB — kept under Cloud Run's
+   * 32 MiB HTTP/1 request-body limit so a too-big video is rejected cleanly by
+   * our own check (clear message) instead of a bare 413 from the platform.
+   * Raise via VIDEO_MAX_MB only when the deployment can actually accept it
+   * (e.g. not behind Cloud Run, or on HTTP/2 / direct-to-bucket upload).
+   */
+  get VIDEO_MAX_BYTES() {
+    const mb = parseInt(process.env.VIDEO_MAX_MB || "30", 10);
+    return (Number.isFinite(mb) && mb > 0 ? mb : 30) * 1024 * 1024;
+  },
 };
