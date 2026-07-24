@@ -544,6 +544,35 @@ export async function getCollaboratorRole(
 }
 
 /**
+ * The caller's badge roles on a nest: their RAW grants merged across all three
+ * paths — collaborator row, steward assignments, team membership — deduped.
+ *
+ * Unlike resolveUserRoles this does NOT fold in super/owner admin, so a server
+ * admin who is only an editor here shows "editor", not "admin". The three
+ * lookups are independent, so they run in parallel — one round-trip's latency
+ * instead of three. Callers that need the same collab+steward+team merge
+ * (dashboard cards, share lines) should use this rather than re-fetching each.
+ */
+export async function resolveGrantRoles(
+  nestId: string,
+  userEmail: string,
+  userId: string,
+): Promise<string[]> {
+  const [grantRaw, stewardRoles, teamRoles] = await Promise.all([
+    getCollaboratorRole(nestId, userEmail),
+    getStewardRolesForUser(nestId, userEmail),
+    resolveTeamRolesForUser(nestId, userId),
+  ]);
+  return [
+    ...new Set(
+      [collabPermToRole(grantRaw), ...stewardRoles, ...teamRoles].filter(
+        Boolean,
+      ) as string[],
+    ),
+  ];
+}
+
+/**
  * Effective roles for a user on a nest, merged from collaborator access and
  * steward assignments. When `nodeId` is given, steward rows are resolved for
  * that node (document > tag > nest); otherwise every active steward row on

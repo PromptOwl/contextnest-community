@@ -195,7 +195,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
               </div>
               <div>
                 <div className="text-2xl font-bold">
-                  {nests.reduce((sum, n) => sum + (n.document_count ?? 0), 0)}
+                  {nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)}
                 </div>
                 <div className="text-xs text-muted-foreground">Documents</div>
               </div>
