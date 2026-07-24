@@ -52,6 +52,7 @@ import {
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
+import { verifySsoTicket, type SsoTicketClaims } from "./auth/sso-token.js";
 import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
@@ -153,6 +154,62 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 
   return c.json({ error: "Missing or invalid credentials" }, 401);
 });
+
+// PromptOwl native integration — /index and /mcp additionally accept a
+// short-lived HS256 service ticket minted by the official PromptOwl
+// deployment (the same shared OFFICIAL_COMMUNITY_SSO_SECRET the /auth/sso
+// login flow trusts). Distinctions from a login ticket: `scope: "mcp"` is
+// REQUIRED here (a leaked one-time SSO login ticket can't double as a bearer
+// credential) and there's no jti (this ticket can't be redeemed for a login
+// session). The user is resolved by email and must ALREADY exist — native
+// access never auto-provisions; PromptOwl relies on that to only auto-connect
+// users who hold accounts on both sides. Non-JWT bearers (cnst_ keys),
+// cookies, and open mode fall through to flexAuthMiddleware unchanged.
+const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
+  async (c, next) => {
+    const header = c.req.header("Authorization") || "";
+    const token = header.startsWith("Bearer ")
+      ? header.slice("Bearer ".length)
+      : "";
+    const secret = config.OFFICIAL_COMMUNITY_SSO_SECRET;
+    const looksLikeJwt =
+      !!token && !token.startsWith("cnst_") && token.split(".").length === 3;
+    if (!looksLikeJwt || !secret) return flexAuthMiddleware(c, next);
+
+    let claims: SsoTicketClaims;
+    try {
+      claims = verifySsoTicket(token, secret);
+    } catch {
+      return c.json({ error: "Invalid service ticket" }, 401);
+    }
+    if ((claims as { scope?: string }).scope !== "mcp") {
+      return c.json({ error: "Invalid service ticket" }, 401);
+    }
+    // Audience binding — same policy as GET /auth/sso: enforced when
+    // PUBLIC_BASE_URL is set (official deployments), so a ticket minted for
+    // another server can't be replayed against this one.
+    const expectedAud = config.PUBLIC_BASE_URL;
+    if (expectedAud && (claims.aud || "").replace(/\/$/, "") !== expectedAud) {
+      return c.json({ error: "Invalid service ticket" }, 401);
+    }
+
+    const db = getDb();
+    const user = (await db.get(
+      "SELECT id FROM users WHERE LOWER(email) = LOWER(?)",
+      [claims.sub.trim()],
+    )) as { id: string } | undefined;
+    if (!user) {
+      return c.json(
+        { error: "No ContextNest account exists for this PromptOwl user" },
+        404,
+      );
+    }
+
+    c.set("userId", user.id);
+    c.set("nestScope", null);
+    return next();
+  },
+);
 
 export function createApp(): Hono<AuthEnv> {
   // LinearRouter, not the default SmartRouter — parity with upstream
@@ -1119,9 +1176,9 @@ export function createApp(): Hono<AuthEnv> {
   // === Agent entry point: /llms.txt (public manual), /index (person nest
   // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
   app.route("/llms.txt", llmsTxtRoutes);
-  app.use("/index", flexAuthMiddleware);
+  app.use("/index", flexAuthWithPromptowlTicket);
   app.route("/index", nestIndexRoutes);
-  app.use("/mcp", flexAuthMiddleware);
+  app.use("/mcp", flexAuthWithPromptowlTicket);
   app.route("/mcp", serverMcpRoutes);
 
   // === All /nests routes ===
