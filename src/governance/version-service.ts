@@ -68,6 +68,56 @@ export async function createVersion(params: {
   };
 }
 
+/**
+ * Insert a version row, or update it in place if one already exists at
+ * (nest, node, version).
+ *
+ * Needed because publishing a DRAFT through the engine transitions it to
+ * published WITHOUT bumping the version number (draft N → published N). The
+ * governance row that import (or a prior save) created at version N must then
+ * be UPDATED, not re-INSERTed — a plain createVersion() hit
+ * `UNIQUE(nest_id, node_id, version)` when a user edited an imported draft.
+ */
+export async function upsertVersion(params: {
+  nestId: string;
+  nodeId: string;
+  version: number;
+  content: string;
+  author: string;
+  status: DocumentLifecycleStatus;
+  changeNote?: string;
+  tags?: string[];
+}): Promise<DocumentVersion> {
+  const db = getDb();
+  const contentHash = hashContent(params.content);
+  const sql = insertOrReplace(
+    db,
+    `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, change_note, tags_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ["nest_id", "node_id", "version"],
+    `content_hash = excluded.content_hash, author = excluded.author, status = excluded.status, change_note = excluded.change_note, tags_json = excluded.tags_json`,
+  );
+  await db.run(sql, [
+    params.nestId,
+    params.nodeId,
+    params.version,
+    contentHash,
+    params.author,
+    params.status,
+    params.changeNote || null,
+    params.tags ? JSON.stringify(params.tags) : null,
+  ]);
+
+  return {
+    version: params.version,
+    content: params.content,
+    editedBy: params.author,
+    editedAt: new Date().toISOString(),
+    changeNote: params.changeNote,
+    status: params.status,
+  };
+}
+
 // ─── Query Versions ─────────────────────────────────────────────────────
 
 export async function getVersions(

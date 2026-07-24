@@ -976,7 +976,11 @@ export async function updateNode(
           );
           throw err;
         }
-        await versions.createVersion({
+        // upsert, not insert: the engine publishes a draft in place (draft N →
+        // published N, no version bump), so a governance row may already exist
+        // at this version (e.g. an imported draft). A plain insert here hit
+        // UNIQUE(nest_id, node_id, version) when editing such a draft.
+        await versions.upsertVersion({
           nestId,
           nodeId,
           version: publishedVersion,
