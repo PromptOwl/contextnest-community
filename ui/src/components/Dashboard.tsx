@@ -805,6 +805,24 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                           </span>
                         </p>
                       )}
+                      {/* Provenance for imported nests: the importer is the
+                          owner (import sets user_id to the caller) and the
+                          import time is the row's created_at. */}
+                      {nest.is_imported && (
+                        <p
+                          className="flex items-center gap-1 mt-1 text-xs text-muted-foreground truncate"
+                          title={`Imported ${new Date(nest.created_at).toLocaleString()}`}
+                        >
+                          <FolderInput className="h-3 w-3 shrink-0" />
+                          <span className="truncate">
+                            Imported by{" "}
+                            <span className="font-medium">
+                              {nest.is_owner ? "you" : nest.owner_email || "unknown user"}
+                            </span>{" "}
+                            · {new Date(nest.created_at).toLocaleDateString()}
+                          </span>
+                        </p>
+                      )}
                       <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground flex-wrap">
                         <span
                           className="inline-flex items-center gap-1"
