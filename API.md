@@ -240,6 +240,26 @@ Errors:
 
 Source-folder cleanup is best-effort. If `rmSync` fails (locked file etc.) the nest is still fully built; the orphan source dir just keeps showing up in `GET /nests/unsynced` until removed manually. Same admin gate exposed as MCP tools `context_unsynced_list` + `context_sync_folder` on any nest's `/mcp` endpoint.
 
+### DELETE `/nests/unsynced/sync` (server-admin only outside open mode)
+Deletes an unsynced folder outright — for leftover files the user does **not** want as a nest. No nest is created. Same guards as sync (`assertSafeFolderName` + live-nest-storage-root check, so it can never delete a real nest or escape `DATA_ROOT` via traversal) and the same admin gate.
+
+Body:
+```json
+{ "name": "nodes/architecture" }
+```
+- `name` — required, as returned by `GET /nests/unsynced`. In the body (not a path-param) because leaf paths contain slashes.
+
+Response (200):
+```json
+{ "ok": true }
+```
+
+Errors:
+- `400 name is required` — missing/blank name.
+- `400` — unsafe/reserved/hidden name (traversal, `nests`, dot-prefixed, `node_modules`).
+- `404 Folder not found` — path doesn't exist under `DATA_ROOT`.
+- `403 Only the server admin can delete folders` — non-admin in non-open mode.
+
 ---
 
 ## 3. Collaborators (direct nest sharing)

@@ -16,7 +16,8 @@
  *   - POST is write-tier, GET read-tier via the standard nest middleware
  *     (public nests serve their media publicly, same as their docs)
  *   - size is capped per type in the POST handler (images 10 MB, video
- *     100 MB). The global MAX_BODY_BYTES request cap still applies to
+ *     env-configurable via VIDEO_MAX_MB, default 30 MB). The global
+ *     MAX_BODY_BYTES request cap still applies to
  *     every other route; app.ts raises ONLY this route's effective
  *     Content-Length limit to ASSET_MAX_REQUEST_BYTES so video uploads
  *     aren't rejected before the handler runs.

@@ -101,7 +101,7 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 | Custom logo / branding | ✅ | ✅ |
 | Admin password reset + user removal (in-platform) | ✅ | ✅ |
 | Wiki backlinks, outline, hover-preview, link health | ✅ | ✅ |
-| Rich editor — tables, callouts, toggles, code highlight, find/replace | ✅ | ✅ |
+| Rich editor — tables, callouts, toggles, code highlight, find/replace, image & video upload | ✅ | ✅ |
 | Steward version revert | ✅ | ✅ |
 | MCP server for AI agents | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
