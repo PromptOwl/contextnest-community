@@ -409,12 +409,16 @@ export async function getReviewQueue(params: {
   const where =
     whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
-  const total = (
-    (await db.get(
-      `SELECT COUNT(*) as c FROM review_requests ${where}`,
-      args,
-    )) as { c: number }
-  ).c;
+  // Number(): Postgres returns COUNT(*) as a string (bigint); coerce so
+  // callers (e.g. /me/work's pagination.total) get a real number, not "3".
+  const total = Number(
+    (
+      (await db.get(
+        `SELECT COUNT(*) as c FROM review_requests ${where}`,
+        args,
+      )) as { c: number }
+    ).c,
+  );
 
   const limit = params.limit || 50;
   const offset = params.offset || 0;
