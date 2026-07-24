@@ -820,7 +820,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                       {/* Provenance for imported nests: the importer is the
                           owner (import sets user_id to the caller) and the
                           import time is the row's created_at. */}
-                      {nest.is_imported && (
+                      {nest.is_imported ? (
                         <p
                           className="flex items-center gap-1 mt-1 text-xs text-muted-foreground truncate"
                           title={`Imported ${new Date(nest.created_at).toLocaleString()}`}
@@ -834,7 +834,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                             · {new Date(nest.created_at).toLocaleDateString()}
                           </span>
                         </p>
-                      )}
+                      ) : null}
                       <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground flex-wrap">
                         <span
                           className="inline-flex items-center gap-1"
