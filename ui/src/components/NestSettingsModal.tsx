@@ -32,7 +32,7 @@ interface NestSettingsModalProps {
   /** False hides the stewardship section. Server still enforces. */
   canManageStewardship: boolean;
   onClose: () => void;
-  onChanged: () => void;
+  onChanged: (next: { stewardshipEnabled: boolean; allowSelfApprove: boolean }) => void;
 }
 
 export function NestSettingsModal({
@@ -79,7 +79,12 @@ export function NestSettingsModal({
         setLoading(false);
         return;
       }
-      onChanged();
+      // Hand the accepted values back so the parent can flip the governance
+      // UI immediately (optimistic) instead of waiting on a full refetch.
+      onChanged({
+        stewardshipEnabled: result.stewardship_enabled,
+        allowSelfApprove: result.allow_self_approve,
+      });
     } catch (err: any) {
       setError(err.message);
       setLoading(false);
