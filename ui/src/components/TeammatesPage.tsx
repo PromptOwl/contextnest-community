@@ -3,6 +3,7 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
+import { useAuth } from "../auth/AuthContext";
 import { copyTextWithToast } from "../lib/clipboard";
 import {
   ArrowLeft, UserPlus, Shield, ShieldCheck, ShieldOff, Users, Copy, Check,
@@ -37,7 +38,11 @@ interface Teammate {
 }
 
 export function TeammatesPage({ onBack }: TeammatesPageProps) {
+  const { adminStatus } = useAuth();
+  const myEmail = adminStatus?.me?.email?.toLowerCase() ?? null;
   const [teammates, setTeammates] = useState<Teammate[]>([]);
+  const [search, setSearch] = useState("");
+  const [roleFilter, setRoleFilter] = useState<"all" | "admin" | "normal">("all");
   const [pendingStewards, setPendingStewards] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +95,17 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
   };
 
   useEffect(() => { fetchTeammates(); }, []);
+
+  const q = search.trim().toLowerCase();
+  const filtered = teammates.filter((t) => {
+    if (roleFilter === "admin" && !t.is_admin) return false;
+    if (roleFilter === "normal" && t.is_admin) return false;
+    if (!q) return true;
+    return (
+      t.email.toLowerCase().includes(q) ||
+      (t.name || "").toLowerCase().includes(q)
+    );
+  });
 
   const formatDate = (d: string | null) => {
     if (!d) return "Never";
@@ -147,118 +163,161 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
               No teammates yet. Click "Invite Teammate" to add one.
             </div>
           ) : (
-            <div className="space-y-2">
-              {teammates.map((t) => (
-                <div
-                  key={t.id}
-                  className="flex items-center gap-3 p-3 rounded-lg border"
-                >
-                  <Avatar className="h-9 w-9">
-                    <AvatarFallback>
-                      {(t.email[0] || "?").toUpperCase()}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium truncate">
-                        {t.name || t.email}
-                      </span>
-                      {t.is_admin && (
-                        <Badge
-                          variant="outline"
-                          className="gap-1 border-blue-200 bg-blue-50 text-blue-700"
-                        >
-                          <Shield className="h-3 w-3" />
-                          Admin
-                        </Badge>
-                      )}
-                      {!!t.is_invited && (
-                        <Badge
-                          variant="outline"
-                          className="border-amber-200 bg-amber-50 text-amber-700"
-                          title="Added with a temporary password. They can sign in with their email + that password (use Reset password to re-issue one), then change it."
-                        >
-                          Invited
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="text-xs text-muted-foreground flex items-center gap-3">
-                      <span>{t.email}</span>
-                      <span>·</span>
-                      <span>
-                        {t.key_count} key{t.key_count !== 1 ? "s" : ""}
-                      </span>
-                      {t.last_active && (
-                        <>
+            <>
+              <div className="flex flex-wrap items-center gap-2 mb-3">
+                <Input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search by name or email…"
+                  className="h-8 max-w-xs text-sm"
+                />
+                <div className="flex items-center rounded-md border p-0.5 text-xs">
+                  {([
+                    ["all", "All"],
+                    ["admin", "Superadmins"],
+                    ["normal", "Members"],
+                  ] as const).map(([val, label]) => (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setRoleFilter(val)}
+                      className={`px-2.5 py-1 rounded ${roleFilter === val
+                        ? "bg-primary text-primary-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                        }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {filtered.length === 0 ? (
+                <div className="text-center py-8 text-sm text-muted-foreground">
+                  No users match your filters.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {filtered.map((t) => (
+                    <div
+                      key={t.id}
+                      className="flex items-center gap-3 p-3 rounded-lg border"
+                    >
+                      <Avatar className="h-9 w-9">
+                        <AvatarFallback>
+                          {(t.email[0] || "?").toUpperCase()}
+                        </AvatarFallback>
+                      </Avatar>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium truncate">
+                            {t.name || t.email}
+                          </span>
+                          {myEmail && t.email.toLowerCase() === myEmail && (
+                            <Badge
+                              variant="outline"
+                              className="border-emerald-200 bg-emerald-50 text-emerald-700"
+                            >
+                              You
+                            </Badge>
+                          )}
+                          {t.is_admin && (
+                            <Badge
+                              variant="outline"
+                              className="gap-1 border-blue-200 bg-blue-50 text-blue-700"
+                            >
+                              <Shield className="h-3 w-3" />
+                              Admin
+                            </Badge>
+                          )}
+                          {!!t.is_invited && (
+                            <Badge
+                              variant="outline"
+                              className="border-amber-200 bg-amber-50 text-amber-700"
+                              title="Added with a temporary password. They can sign in with their email + that password (use Reset password to re-issue one), then change it."
+                            >
+                              Invited
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="text-xs text-muted-foreground flex items-center gap-3">
+                          <span>{t.email}</span>
                           <span>·</span>
-                          <span>last active {formatDate(t.last_active)}</span>
+                          <span>
+                            {t.key_count} key{t.key_count !== 1 ? "s" : ""}
+                          </span>
+                          {t.last_active && (
+                            <>
+                              <span>·</span>
+                              <span>last active {formatDate(t.last_active)}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      {t.is_admin &&
+                        adminSource[t.email.toLowerCase()]?.source === "granted" &&
+                        !adminSource[t.email.toLowerCase()]?.self && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                            onClick={() => setRevokeTarget(t)}
+                            title="Revoke this user's superadmin access"
+                          >
+                            <ShieldOff className="h-4 w-4 mr-2" />
+                            Revoke superadmin
+                          </Button>
+                        )}
+                      {!t.is_admin && (
+                        <>
+                          {!t.is_invited && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setGrantTarget(t)}
+                              title="Grant this user superadmin access"
+                            >
+                              <ShieldCheck className="h-4 w-4 mr-2" />
+                              Grant superadmin
+                            </Button>
+                          )}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={!!resetPw}
+                            onClick={async () => {
+                              setResetPw({ email: t.email, password: null });
+                              try {
+                                const r = await api.resetUserPassword(t.id);
+                                setResetPw({
+                                  email: t.email,
+                                  password: r.temporary_password || "",
+                                });
+                                await fetchTeammates();
+                              } catch (e: any) {
+                                setResetPw(null);
+                                setError(e.message);
+                              }
+                            }}
+                            title="Generate a temporary password to share with this user (no email is sent)"
+                          >
+                            Reset password
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                            onClick={() => setRemoveTarget(t)}
+                            title="Remove this user and revoke all access"
+                          >
+                            Remove
+                          </Button>
                         </>
                       )}
                     </div>
-                  </div>
-                  {t.is_admin &&
-                    adminSource[t.email.toLowerCase()]?.source === "granted" &&
-                    !adminSource[t.email.toLowerCase()]?.self && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                      onClick={() => setRevokeTarget(t)}
-                      title="Revoke this user's superadmin access"
-                    >
-                      <ShieldOff className="h-4 w-4 mr-2" />
-                      Revoke superadmin
-                    </Button>
-                  )}
-                  {!t.is_admin && (
-                    <>
-                    {!t.is_invited && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setGrantTarget(t)}
-                        title="Grant this user superadmin access"
-                      >
-                        <ShieldCheck className="h-4 w-4 mr-2" />
-                        Grant superadmin
-                      </Button>
-                    )}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={!!resetPw}
-                      onClick={async () => {
-                        setResetPw({ email: t.email, password: null });
-                        try {
-                          const r = await api.resetUserPassword(t.id);
-                          setResetPw({
-                            email: t.email,
-                            password: r.temporary_password || "",
-                          });
-                          await fetchTeammates();
-                        } catch (e: any) {
-                          setResetPw(null);
-                          setError(e.message);
-                        }
-                      }}
-                      title="Generate a temporary password to share with this user (no email is sent)"
-                    >
-                      Reset password
-                    </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                        onClick={() => setRemoveTarget(t)}
-                        title="Remove this user and revoke all access"
-                      >
-                        Remove
-                      </Button>
-                    </>
-                  )}
+                  ))}
                 </div>
-              ))}
-            </div>
+              )}
+            </>
           )}
         </CardContent>
       </Card>
