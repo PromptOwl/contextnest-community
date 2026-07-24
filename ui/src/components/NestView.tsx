@@ -3000,7 +3000,15 @@ export function NestView({
           allowSelfApprove={allowSelfApprove}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
-          onChanged={() => { setShowSettings(false); fetchData(); }}
+          onChanged={(next) => {
+            setShowSettings(false);
+            // Flip the governance UI (Pending/AI Ready/Review Queue tiles,
+            // Stewards tab, etc.) instantly instead of waiting for the full
+            // refetch to land — then reconcile counts in the background.
+            setStewardshipEnabled(next.stewardshipEnabled);
+            setAllowSelfApprove(next.allowSelfApprove);
+            fetchData();
+          }}
         />
       )}
 
