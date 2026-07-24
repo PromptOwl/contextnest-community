@@ -23,8 +23,13 @@ import {
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
 import { syncNodeTags } from "../governance/tag-index-service.js";
-import { isStewardshipEnabled, resolveNestPath } from "../nests/service.js";
+import {
+  isStewardshipEnabled,
+  resolveNestPath,
+  nestAllowsSelfApprove,
+} from "../nests/service.js";
 import { getPendingReview } from "../governance/review-service.js";
+import { resolveUserRoles } from "../governance/stewardship-service.js";
 import {
   resolveCallerEmail,
   filterAccessible,
@@ -458,6 +463,23 @@ export interface NodeMutationResult {
   version: number;
 }
 
+/**
+ * Owner/admin edits skip the review queue when the nest opts into self-approve:
+ * their create/update publishes immediately instead of landing as a draft that
+ * needs submit-review + approval. This is the meaning of the "Allow self-approve"
+ * nest flag — a governance bypass for the two roles that already hold approval
+ * rights, NOT a change to the editor/reviewer flow (they still draft → review →
+ * approve regardless of the flag). Reviewer/editor callers return false here.
+ */
+async function actorAutoPublishes(
+  nestId: string,
+  userEmail: string
+): Promise<boolean> {
+  if (!(await nestAllowsSelfApprove(nestId))) return false;
+  const roles = await resolveUserRoles(nestId, userEmail);
+  return roles.includes("owner") || roles.includes("admin");
+}
+
 export async function createNode(
   nestId: string,
   input: CreateNodeInput,
@@ -520,9 +542,12 @@ export async function createNode(
   }
 
   const hasStewards = await isStewardshipEnabled(nestId);
-  const initialStatus = hasStewards ? "draft" : "published";
-  // Ungoverned starts at v=0 so engine publish bump lands at v=1.
-  const initialVersion = hasStewards ? 1 : 0;
+  // Ungoverned always publishes; a governed nest publishes too when an
+  // owner/admin creates it under self-approve (their work bypasses review).
+  const autoPublish = !hasStewards || (await actorAutoPublishes(nestId, userEmail));
+  const initialStatus = autoPublish ? "published" : "draft";
+  // Publish path starts at v=0 so the engine publish bump lands at v=1.
+  const initialVersion = autoPublish ? 0 : 1;
 
   let node: ContextNode = {
     id,
@@ -548,7 +573,7 @@ export async function createNode(
   await syncNodeTags(nestId, id, tags);
 
   let savedVersion = 1;
-  if (hasStewards) {
+  if (!autoPublish) {
     try {
       await versionManager.createVersion(node, userEmail);
     } catch (err) {
@@ -887,12 +912,17 @@ export async function updateNode(
       }
 
       const hasStewards = await isStewardshipEnabled(nestId);
+      // Owner/admin edits publish straight through when the nest opts into
+      // self-approve; editors/reviewers still draft → review → approve.
+      const autoPublish =
+        !hasStewards || (await actorAutoPublishes(nestId, userEmail));
       const currentTags = (node.frontmatter.tags || []) as string[];
 
       // Stewardship lock: a node with an open review request is frozen. The
       // reviewer is evaluating a specific version, so edits are rejected (423)
       // until the review is approved or rejected — that's the only path that
-      // releases the lock.
+      // releases the lock. Applies even to an owner/admin auto-publisher: a
+      // teammate's pending review must be resolved before it's overwritten.
       if (hasStewards && (await getPendingReview(nestId, nodeId))) {
         throw new LockedError(
           "This document is awaiting steward review and is locked. Approve or reject the pending review before editing."
@@ -900,7 +930,7 @@ export async function updateNode(
       }
 
       let responseVersion: number;
-      if (hasStewards) {
+      if (!autoPublish) {
         const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
         const newVersion = currentVersion + 1;
         node = {
