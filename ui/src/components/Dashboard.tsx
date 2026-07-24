@@ -5,7 +5,7 @@ import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -50,7 +50,9 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     items: api.WorkItem[];
     waiting: api.WorkItem[];
     notifications?: api.WatcherNotification[];
+    pagination?: api.WorkPagination;
   }>({ items: [], waiting: [] });
+  const [loadingMoreWork, setLoadingMoreWork] = useState(false);
   const [acting, setActing] = useState<Record<string, boolean>>({});
   const [nests, setNests] = useState<any[]>([]);
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
@@ -95,6 +97,25 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
       console.error("[Dashboard] fetchNests failed", e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Jump to a page of pending reviews (Prev/Next). Replaces the current page
+  // rather than appending — offset is clamped ≥ 0 by the caller.
+  const goToWorkPage = async (offset: number) => {
+    setLoadingMoreWork(true);
+    try {
+      const next = await api.getMyWork({ offset });
+      setWork((prev) => ({
+        items: next.items,
+        waiting: next.waiting,
+        notifications: next.notifications ?? prev.notifications,
+        pagination: next.pagination,
+      }));
+    } catch (e) {
+      console.error("[Dashboard] goToWorkPage failed", e);
+    } finally {
+      setLoadingMoreWork(false);
     }
   };
 
@@ -370,6 +391,36 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                 </button>
               ))}
             </div>
+          </div>
+        )}
+        {work.pagination && work.pagination.total > work.pagination.limit && (
+          <div className="flex items-center justify-center gap-3 pt-1 text-sm text-muted-foreground">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={loadingMoreWork || work.pagination.offset === 0}
+              onClick={() =>
+                goToWorkPage(Math.max(0, work.pagination!.offset - work.pagination!.limit))
+              }
+            >
+              <ChevronLeft className="h-3.5 w-3.5 mr-1" />
+              Prev
+            </Button>
+            <span>
+              Page {Math.floor(work.pagination.offset / work.pagination.limit) + 1} of{" "}
+              {Math.max(1, Math.ceil(work.pagination.total / work.pagination.limit))}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={loadingMoreWork || !work.pagination.has_more}
+              onClick={() =>
+                goToWorkPage(work.pagination!.offset + work.pagination!.limit)
+              }
+            >
+              Next
+              <ChevronRight className="h-3.5 w-3.5 ml-1" />
+            </Button>
           </div>
         )}
       </div>

@@ -369,6 +369,7 @@ export async function cancelReview(params: {
 
 export async function getReviewQueue(params: {
   nestId?: string;
+  nestIds?: string[];
   status?: ReviewRequestStatus | ReviewRequestStatus[];
   stewardEmail?: string;
   limit?: number;
@@ -381,6 +382,18 @@ export async function getReviewQueue(params: {
   if (params.nestId) {
     whereClauses.push("nest_id = ?");
     args.push(params.nestId);
+  }
+
+  // Scope to a set of nests (the caller's visible nests, for the cross-nest
+  // /me/work inbox). An empty set means "no visible nests" — short-circuit
+  // rather than emit `IN ()`, which is invalid SQL and would otherwise scan
+  // every nest before the caller filters them out anyway.
+  if (params.nestIds) {
+    if (params.nestIds.length === 0) return { requests: [], total: 0 };
+    whereClauses.push(
+      `nest_id IN (${params.nestIds.map(() => "?").join(",")})`,
+    );
+    args.push(...params.nestIds);
   }
 
   if (params.status) {

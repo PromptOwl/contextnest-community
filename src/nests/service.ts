@@ -420,6 +420,73 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
   return direct;
 }
 
+/**
+ * Every nest the caller can see — owned + shared — in ONE query instead of
+ * listNests + listSharedNests' separate round trips. This is the union of
+ * those two, so it stays faithful to their access rules:
+ *   - owned                → n.user_id = caller (or anon-owned in open mode)
+ *   - collaborator grant   → nest_collaborators row
+ *   - active steward       → stewards row matched by email
+ *   - server admin         → every nest (short-circuit)
+ *   - team-shared          → folded in from nestsSharedViaTeams (JSON, not SQL)
+ *
+ * Callers that stitched owned+shared themselves (/me/work inbox, /stats) should
+ * use this — it also dedupes, which the naive concat did not (a server admin's
+ * owned anon nests appeared in both lists).
+ */
+export async function listVisibleNests(userId: string): Promise<Nest[]> {
+  const db = getDb();
+
+  // Server admin administers every nest, so owned ∪ all-others = all nests.
+  // Mirrors the admin branches in listNests + listSharedNests. One query.
+  const caller = (await db.get("SELECT email FROM users WHERE id = ?", [
+    userId,
+  ])) as { email?: string } | undefined;
+  const isServerAdmin =
+    (await isLicenseAdminUserId(userId)) ||
+    (caller?.email ? isSuperAdmin(caller.email) : false);
+  if (isServerAdmin) {
+    return (await db.all(
+      "SELECT * FROM nests ORDER BY created_at DESC",
+    )) as Nest[];
+  }
+
+  // Owned OR collaborator OR active-steward — the same join listSharedNests
+  // uses, but with `n.user_id = ?` folded into the WHERE so owned rows come
+  // back in the same pass. Anon-owned nests join in under open mode (the
+  // ungoverned commons, matching listNests' includeAnon branch).
+  const includeAnon = config.AUTH_MODE === "open";
+  const params = includeAnon
+    ? [userId, userId, userId, ANON_USER_ID]
+    : [userId, userId, userId];
+  const rows = (await db.all(
+    `SELECT DISTINCT n.* FROM nests n
+       LEFT JOIN nest_collaborators nc
+         ON nc.nest_id = n.id AND nc.user_id = ?
+       LEFT JOIN users u ON u.id = ?
+       LEFT JOIN stewards s
+         ON s.nest_id = n.id AND s.is_active = 1
+        AND LOWER(s.user_email) = LOWER(u.email)
+      WHERE n.user_id = ?
+         OR nc.user_id IS NOT NULL
+         OR s.id IS NOT NULL
+         ${includeAnon ? "OR n.user_id = ?" : ""}
+      ORDER BY n.created_at DESC`,
+    params,
+  )) as Nest[];
+
+  // Team-shared nests live as JSON (team roster + share refs), so they can't
+  // join in SQL — fold them in separately, deduped by id.
+  const seen = new Set(rows.map((n) => n.id));
+  for (const n of await nestsSharedViaTeams(userId)) {
+    if (!seen.has(n.id)) {
+      rows.push(n);
+      seen.add(n.id);
+    }
+  }
+  return rows;
+}
+
 /** Public nests not owned/shared by caller. Route dedupes vs listNests. */
 export async function listPublicNests(userId: string): Promise<Nest[]> {
   const db = getDb();
