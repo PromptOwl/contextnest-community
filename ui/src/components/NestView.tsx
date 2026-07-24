@@ -1625,26 +1625,10 @@ export function NestView({
             </div>
           ) : (
             <>
-              {/* Stat tiles */}
-              <div
-                className={`grid gap-3 ${stewardshipEnabled ? "sm:grid-cols-4" : "sm:grid-cols-3"
-                  } grid-cols-2`}
-              >
-                <Card className="border-muted/60">
-                  <CardContent className="p-4 flex items-center gap-3">
-                    <div className="rounded-md bg-primary/10 text-primary p-2">
-                      <FileStack className="h-4 w-4" />
-                    </div>
-                    <div>
-                      <div className="text-2xl font-semibold leading-none">
-                        {stats.total}
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-1">
-                        Document{stats.total === 1 ? "" : "s"}
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
+              {/* Stat tiles — only the metrics NOT already in the top stat
+                  cards (Total Documents / AI Ready live there). This row adds
+                  folder + recency context, so nothing is repeated. */}
+              <div className="grid gap-3 grid-cols-2">
                 <Card className="border-muted/60">
                   <CardContent className="p-4 flex items-center gap-3">
                     <div className="rounded-md bg-blue-500/10 text-blue-600 p-2">
@@ -1675,23 +1659,6 @@ export function NestView({
                     </div>
                   </CardContent>
                 </Card>
-                {stewardshipEnabled && (
-                  <Card className="border-muted/60">
-                    <CardContent className="p-4 flex items-center gap-3">
-                      <div className="rounded-md bg-emerald-500/10 text-emerald-600 p-2">
-                        <CheckCircle2 className="h-4 w-4" />
-                      </div>
-                      <div>
-                        <div className="text-2xl font-semibold leading-none">
-                          {stats.approved}
-                        </div>
-                        <div className="text-xs text-muted-foreground mt-1">
-                          Approved
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                )}
               </div>
 
               {/* Recently edited */}
