@@ -278,7 +278,7 @@ export async function importNest(
   // no orphan nest.
   mkdirSync(dest, { recursive: true });
   try {
-    writeImportedFiles(dest, files);
+    await writeImportedFiles(dest, files);
   } catch (err) {
     console.error("[nests] import write failed", dest, err);
     discardImportDir(dest);
