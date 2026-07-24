@@ -2,6 +2,7 @@ import { join, dirname } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { z } from "zod";
 
 // ── .env loading ────────────────────────────────────────────────────────
 // Load .env before any getter reads process.env. Try cwd first (typical
@@ -48,8 +49,12 @@ let oidcIssuerWarned = false;
  * getters and the /admin/settings validator so env-set and UI-set values gate
  * identically.
  */
+const EMAIL_SCHEMA = z.email();
 export function isEmailish(v: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) && !/[\r\n]/.test(v);
+  // Delegate to zod's maintained email validator (rejects junk like
+  // `*'/*'/8////@gmail.com`). Keep the explicit CR/LF reject to close the
+  // header-injection shape a trailing "\n" could otherwise sneak past.
+  return EMAIL_SCHEMA.safeParse(v.trim()).success && !/[\r\n]/.test(v);
 }
 /** Comma-separated recipient list where every entry is isEmailish(). */
 export function isEmailListish(v: string): boolean {

@@ -15,6 +15,7 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
 import { normalizeEmail } from "../shared/email.js";
+import { isEmailish } from "../config.js";
 import {
   ValidationError,
   NotFoundError,
@@ -277,6 +278,11 @@ export async function addMember(params: {
   }
   if (rank < OWNER_RANK && ROLE_RANK[params.role] > rank) {
     throw new ForbiddenError("You can't give a member a higher role than your own.");
+  }
+  // Reject a malformed address before it mints a placeholder user (interactive
+  // add only — the import path resolves identities separately).
+  if (!params.userId && params.email && !isEmailish(params.email)) {
+    throw new ValidationError("Enter a valid email address.");
   }
   const { userId: resolvedId, email: resolvedEmail } =
     await resolveMemberIdentity(params);
