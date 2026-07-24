@@ -13,7 +13,7 @@ import { buildTitleMap } from "./title-resolver.js";
 import { resolveNestPermission } from "../shared/access.js";
 import { resolveTeamRolesForUser } from "./teams-service.js";
 import { nestAllowsSelfApprove } from "../nests/service.js";
-import { config } from "../config.js";
+import { config, isEmailish } from "../config.js";
 import {
   type EffectiveRole,
   collabPermToRole,
@@ -298,6 +298,9 @@ export async function createStewardRecord(params: {
   for (const user of params.users) {
     const email = user.email.trim().toLowerCase();
     if (!email) continue;
+    if (!isEmailish(email)) {
+      throw new ValidationError(`"${user.email}" is not a valid email address.`);
+    }
 
     if (email === actor) {
       throw new ValidationError(
