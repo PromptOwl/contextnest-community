@@ -221,8 +221,28 @@ export async function createNest(
   description?: string,
 ): Promise<Nest> {
   const id = uuid();
-  const slug = toSlug(name);
   const db = getDb();
+
+  const trimmed = name.trim();
+  if (!trimmed) throw new ValidationError("Name cannot be empty");
+  const slug = toSlug(trimmed);
+  if (!slug) {
+    throw new ValidationError(
+      "Name must contain at least one alphanumeric character",
+    );
+  }
+  // Surface the duplicate BEFORE the INSERT would trip UNIQUE(user_id, slug) —
+  // the raw constraint error otherwise bubbled up as a generic 500 with no
+  // hint that the name was taken. Mirrors renameNest's conflict guard.
+  const conflict = (await db.get(
+    "SELECT id FROM nests WHERE user_id = ? AND slug = ? LIMIT 1",
+    [userId, slug],
+  )) as { id: string } | undefined;
+  if (conflict) {
+    throw new ValidationError(
+      "You already have a nest with this name. Pick a different one.",
+    );
+  }
 
   // Ungoverned (anon-owned) nests default to public so the shared commons
   // stays visible to everyone in both open and key modes. Admin can flip
@@ -231,13 +251,13 @@ export async function createNest(
 
   await db.run(
     "INSERT INTO nests (id, user_id, name, slug, description, visibility) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, userId, name, slug, description || null, visibility],
+    [id, userId, trimmed, slug, description || null, visibility],
   );
 
   const path = resolveNestPath(id);
   mkdirSync(path, { recursive: true });
   const storage = new NestStorage(path);
-  await storage.init(name);
+  await storage.init(trimmed);
 
   trackEvent("nest.create", { nestId: id, userId });
 
@@ -278,7 +298,7 @@ export async function importNest(
   // no orphan nest.
   mkdirSync(dest, { recursive: true });
   try {
-    writeImportedFiles(dest, files);
+    await writeImportedFiles(dest, files);
   } catch (err) {
     console.error("[nests] import write failed", dest, err);
     discardImportDir(dest);
@@ -418,6 +438,73 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
     a.created_at === b.created_at ? 0 : a.created_at < b.created_at ? 1 : -1,
   );
   return direct;
+}
+
+/**
+ * Every nest the caller can see — owned + shared — in ONE query instead of
+ * listNests + listSharedNests' separate round trips. This is the union of
+ * those two, so it stays faithful to their access rules:
+ *   - owned                → n.user_id = caller (or anon-owned in open mode)
+ *   - collaborator grant   → nest_collaborators row
+ *   - active steward       → stewards row matched by email
+ *   - server admin         → every nest (short-circuit)
+ *   - team-shared          → folded in from nestsSharedViaTeams (JSON, not SQL)
+ *
+ * Callers that stitched owned+shared themselves (/me/work inbox, /stats) should
+ * use this — it also dedupes, which the naive concat did not (a server admin's
+ * owned anon nests appeared in both lists).
+ */
+export async function listVisibleNests(userId: string): Promise<Nest[]> {
+  const db = getDb();
+
+  // Server admin administers every nest, so owned ∪ all-others = all nests.
+  // Mirrors the admin branches in listNests + listSharedNests. One query.
+  const caller = (await db.get("SELECT email FROM users WHERE id = ?", [
+    userId,
+  ])) as { email?: string } | undefined;
+  const isServerAdmin =
+    (await isLicenseAdminUserId(userId)) ||
+    (caller?.email ? isSuperAdmin(caller.email) : false);
+  if (isServerAdmin) {
+    return (await db.all(
+      "SELECT * FROM nests ORDER BY created_at DESC",
+    )) as Nest[];
+  }
+
+  // Owned OR collaborator OR active-steward — the same join listSharedNests
+  // uses, but with `n.user_id = ?` folded into the WHERE so owned rows come
+  // back in the same pass. Anon-owned nests join in under open mode (the
+  // ungoverned commons, matching listNests' includeAnon branch).
+  const includeAnon = config.AUTH_MODE === "open";
+  const params = includeAnon
+    ? [userId, userId, userId, ANON_USER_ID]
+    : [userId, userId, userId];
+  const rows = (await db.all(
+    `SELECT DISTINCT n.* FROM nests n
+       LEFT JOIN nest_collaborators nc
+         ON nc.nest_id = n.id AND nc.user_id = ?
+       LEFT JOIN users u ON u.id = ?
+       LEFT JOIN stewards s
+         ON s.nest_id = n.id AND s.is_active = 1
+        AND LOWER(s.user_email) = LOWER(u.email)
+      WHERE n.user_id = ?
+         OR nc.user_id IS NOT NULL
+         OR s.id IS NOT NULL
+         ${includeAnon ? "OR n.user_id = ?" : ""}
+      ORDER BY n.created_at DESC`,
+    params,
+  )) as Nest[];
+
+  // Team-shared nests live as JSON (team roster + share refs), so they can't
+  // join in SQL — fold them in separately, deduped by id.
+  const seen = new Set(rows.map((n) => n.id));
+  for (const n of await nestsSharedViaTeams(userId)) {
+    if (!seen.has(n.id)) {
+      rows.push(n);
+      seen.add(n.id);
+    }
+  }
+  return rows;
 }
 
 /** Public nests not owned/shared by caller. Route dedupes vs listNests. */

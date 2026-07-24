@@ -8,7 +8,7 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
-import { listNests, listSharedNests } from "./nests/service.js";
+import { listVisibleNests } from "./nests/service.js";
 import { getReviewQueue } from "./governance/review-service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
@@ -1013,13 +1013,22 @@ export function createApp(): Hono<AuthEnv> {
     const userId = c.get("userId");
     const me = await resolveCallerEmail(userId);
     const nestName = new Map<string, string>();
-    for (const n of [
-      ...(await listNests(userId)),
-      ...(await listSharedNests(userId)),
-    ])
+    for (const n of await listVisibleNests(userId))
       nestName.set(n.id, n.name ?? n.id);
 
-    const { requests } = await getReviewQueue({ status: "pending", limit: 200 });
+    // Page the queue — 50 at a time by default — instead of pulling 200 up
+    // front. limit/offset are query params (?limit=&offset=), clamped to sane
+    // bounds. Scoping to the caller's visible nests up front also keeps
+    // getReviewQueue from title-mapping (= filesystem-scanning) nests they
+    // can't see.
+    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 50, 1), 100);
+    const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+    const { requests, total } = await getReviewQueue({
+      status: "pending",
+      nestIds: [...nestName.keys()],
+      limit,
+      offset,
+    });
     const toItem = (r: (typeof requests)[number]) => ({
       type: "review" as const,
       nest_id: r.nestId,
@@ -1030,15 +1039,23 @@ export function createApp(): Hono<AuthEnv> {
       requested_at: r.requestedAt,
       priority: r.priority,
     });
-    const mine = requests.filter((r) => nestName.has(r.nestId));
+    // Every request is already in a visible nest (nestIds scoped the query), so
+    // no post-filter is needed — just split this page into the two buckets.
     const byNewest = (a: { requested_at: string }, b: { requested_at: string }) =>
       a.requested_at < b.requested_at ? 1 : -1;
     // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
-    const items = mine.filter((r) => r.requestedBy !== me).map(toItem).sort(byNewest);
-    const waiting = mine.filter((r) => r.requestedBy === me).map(toItem).sort(byNewest);
+    const items = requests.filter((r) => r.requestedBy !== me).map(toItem).sort(byNewest);
+    const waiting = requests.filter((r) => r.requestedBy === me).map(toItem).sort(byNewest);
     // Watcher notifications (HITL tags) ride along so the inbox is one call.
     const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });
-    return c.json({ items, waiting, notifications });
+    return c.json({
+      items,
+      waiting,
+      notifications,
+      // total = all pending across visible nests (both buckets); has_more drives
+      // the "Load more" control on the client.
+      pagination: { total, limit, offset, has_more: offset + requests.length < total },
+    });
   });
 
   // Watcher notifications — read + mark-read (auth via the /me/* middleware).
@@ -1064,9 +1081,7 @@ export function createApp(): Hono<AuthEnv> {
     const userId = c.get("userId");
     const userEmail = await resolveCallerEmail(userId);
 
-    const owned = await listNests(userId);
-    const sharedNests = await listSharedNests(userId);
-    const visibleNests = [...owned, ...sharedNests];
+    const visibleNests = await listVisibleNests(userId);
 
     // Count accessible documents across every nest the caller can see.
     // Mirrors the per-nest filterAccessible logic used by GET /nests/:id/nodes

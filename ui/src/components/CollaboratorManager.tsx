@@ -29,6 +29,7 @@ import { Trash2, Loader2, AlertCircle, UserPlus, Users, Share2 } from "lucide-re
 import { toast } from "sonner";
 import * as api from "../lib/api";
 import type { Team, TeamMember } from "../lib/api";
+import { isEmailish } from "../lib/utils";
 
 export interface Collaborator {
   id: string;
@@ -149,6 +150,13 @@ export function CollaboratorManager({
     e.preventDefault();
     const email = inviteEmail.trim();
     if (!email) return;
+    // Reject malformed input before it hits the server — a bad address would
+    // otherwise land in "People with access" as an entry that can never match
+    // a real account.
+    if (!isEmailish(email)) {
+      setError("Enter a valid email address.");
+      return;
+    }
     setAdding(true);
     setError(null);
     try {

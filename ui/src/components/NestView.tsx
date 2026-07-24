@@ -2508,14 +2508,22 @@ export function NestView({
                             <span className="text-sm font-medium">
                               {node.label}
                             </span>
-                            {/* Direct doc count only. Container folders (no
-                                  node file of their own) show no badge. */}
-                            {node.count > 0 && (
+                            {/* Recursive subtree total (this folder + all
+                                  descendants), matching the Overview Contents
+                                  card. Direct-count-only made a folder holding
+                                  hundreds of nested docs read as "3", so the
+                                  Documents tab looked like it was hiding docs. */}
+                            {node.total > 0 && (
                               <Badge
                                 variant="secondary"
                                 className="text-[10px] px-1.5 py-0 h-5"
+                                title={
+                                  node.count !== node.total
+                                    ? `${node.count} here · ${node.total} in this folder`
+                                    : undefined
+                                }
                               >
-                                {node.count}
+                                {node.total}
                               </Badge>
                             )}
                             {canEditDocs && (
@@ -2955,7 +2963,7 @@ export function NestView({
         )}
       </Tabs>
 
-      {!stewardshipEnabled && !isReadOnly && canManageGovernance && (
+      {activeTab === "review" && !stewardshipEnabled && !isReadOnly && canManageGovernance && (
         <Card className="mt-4">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">

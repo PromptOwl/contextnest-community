@@ -57,11 +57,17 @@ Governance gates two things: who can **approve**, and who can **read**.
 In key mode, when stewardship is enabled on a nest:
 - Node list / single-read / search / query responses are filtered to docs the caller can access
 - A non-steward gets an empty list or a 403 on the node they asked for
-- The nest **owner** and any resolved **steward (any role)** can read; **super admins** configured in `access.yaml` bypass the check
+- The nest **owner** and any resolved **steward (any role)** can read; **super admins** bypass the check
 
 ## Server super-admins
 
-`access.yaml: super_admins` lists emails who administer **every** nest on the server without being added per-nest. A super-admin can:
+Super-admins administer **every** nest on the server without being added per-nest. The effective set is the union of three sources:
+
+- **license** — the PromptOwl account that owns the installed license (always; never revocable)
+- **config** — emails in `access.yaml: super_admins` (the bootstrap; edit the file + restart to change)
+- **granted** — grants managed from **Teammates → Superadmins** in the UI, or `GET/POST /admin/super-admins` (see `API.md`)
+
+A super-admin can:
 
 - Read every document (bypasses the read gate, even with stewardship enabled)
 - Change a nest's visibility (public / private)

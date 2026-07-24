@@ -246,8 +246,13 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const { nest } = await getNest(nestId);
+        const { nest, permission } = await getNest(nestId);
         if (cancelled) return;
+        // Deep-link / refresh nav has no is_owner from a nest-list row, so
+        // derive it from the authoritative permission — resolveNestPermission
+        // returns "owner" only for the real owner. Hardcoding false here hid
+        // owner-only UI (Nest settings) after a refresh, even for the owner.
+        const isOwner = permission === "owner";
         setDeepLinkProbe({
           status: "ok",
           nestId: nest.id,
@@ -262,7 +267,7 @@ export default function App() {
             nestId: nest.id,
             nestName: nest.name,
             nodeId: docId,
-            isOwner: false,
+            isOwner,
             isAnonOwned: false,
             // ?thread=<id> → open the doc with that comment thread focused.
             initialThreadId: params.get("thread") || undefined,
@@ -284,7 +289,7 @@ export default function App() {
             page: subPage,
             nestId: nest.id,
             nestName: nest.name,
-            isOwner: false,
+            isOwner,
             isAnonOwned: false,
           });
           return;
@@ -293,7 +298,7 @@ export default function App() {
           page: "nest",
           nestId: nest.id,
           nestName: nest.name,
-          isOwner: false,
+          isOwner,
           isAnonOwned: false,
         });
       } catch {

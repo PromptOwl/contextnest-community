@@ -318,6 +318,46 @@ describe("imported vault: discovery + registration", () => {
     expect(byId["rev"]).toBe("draft"); // 'review' alias normalizes to pending_review
   });
 
+  it("edits an imported draft without a version collision (publish-in-place upsert)", async () => {
+    // Import a doc that stays a draft — registration seeds a node_versions row
+    // at its version.
+    const files: FileEntry[] = [
+      mdFile("draft-notes.md", "title: Draft Notes\nstatus: draft", "original body"),
+    ];
+    const imp = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Draft Edit", files },
+      alice.apiKey,
+    );
+    expect(imp.status).toBe(201);
+    const nestId = imp.data.nest.id;
+
+    // Editing it auto-publishes (no stewards). The engine publishes the draft
+    // IN PLACE — same version number — so the governance row already at that
+    // version must be updated, not re-inserted. Before the upsert fix this 500'd
+    // with UNIQUE(nest_id, node_id, version).
+    const patch = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/draft-notes`,
+      { content: "edited body", changeNote: "tweak" },
+      alice.apiKey,
+    );
+    expect(patch.status).toBe(200);
+
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    const doc = list.data.nodes.find((n: any) => n.id === "draft-notes");
+    expect(doc.status).toBe("published");
+  });
+
   it("sets the importer as author, ignoring the vault's own author (no phantom collaborator)", async () => {
     const files: FileEntry[] = [
       mdFile("owned.md", "title: Owned\nstatus: published\nauthor: stranger@nowhere.com", "body"),
