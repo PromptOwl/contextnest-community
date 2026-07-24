@@ -31,6 +31,7 @@ import Typography from "@tiptap/extension-typography";
 import CharacterCount from "@tiptap/extension-character-count";
 import { DragHandle } from "@tiptap/extension-drag-handle-react";
 import { NodeRange } from "@tiptap/extension-node-range";
+import type { Transaction } from "@tiptap/pm/state";
 import { Markdown, type MarkdownStorage } from "tiptap-markdown";
 
 // tiptap-markdown's storage isn't in TipTap's Storage type; cast.
@@ -915,6 +916,25 @@ export const MarkdownEditor = forwardRef<
     };
   }, [editor]);
 
+  // Keep blockTarget.pos valid across document edits. The drag handle only
+  // re-reports its position via onNodeChange when the pointed node changes, so
+  // a paste (or any edit that shifts positions) leaves the last-reported pos
+  // stale — the block menu would then act on the wrong block. Remap it through
+  // each transaction's mapping so it always points at the same block.
+  useEffect(() => {
+    if (!editor) return;
+    const onTr = ({ transaction }: { transaction: Transaction }) => {
+      if (!transaction.docChanged) return;
+      setBlockTarget((bt) =>
+        bt ? { pos: transaction.mapping.map(bt.pos) } : bt,
+      );
+    };
+    editor.on("transaction", onTr);
+    return () => {
+      editor.off("transaction", onTr);
+    };
+  }, [editor]);
+
   // Close the open block menu on any outside mousedown. Handle/menu stop
   // propagation so their own clicks don't trip this.
   useEffect(() => {
@@ -1011,6 +1031,38 @@ export const MarkdownEditor = forwardRef<
     if (!editor || !blockTarget) return;
     const chain = editor.chain().focus().setTextSelection(blockTarget.pos + 1);
     apply(chain);
+    closeBlockMenu();
+  };
+
+  // "Turn into → Toggle". setDetails() wraps the line into the collapsed BODY
+  // with an empty summary — the text vanishes and the block reads as a stray
+  // bullet. Instead build the toggle with the line's text as its SUMMARY
+  // (the visible header) and open it, so nothing is hidden.
+  const turnIntoToggle = () => {
+    if (!editor || !blockTarget) return;
+    const node = editor.state.doc.nodeAt(blockTarget.pos);
+    if (!node) return;
+    const from = blockTarget.pos;
+    const to = from + node.nodeSize;
+    const text = node.textContent;
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(
+        { from, to },
+        {
+          type: "details",
+          attrs: { open: true },
+          content: [
+            {
+              type: "detailsSummary",
+              ...(text ? { content: [{ type: "text", text }] } : {}),
+            },
+            { type: "detailsContent", content: [{ type: "paragraph" }] },
+          ],
+        },
+      )
+      .run();
     closeBlockMenu();
   };
 
@@ -1523,7 +1575,7 @@ export const MarkdownEditor = forwardRef<
             <Info className="h-3.5 w-3.5" /> Callout
           </BlockMenuItem>
           <BlockMenuItem
-            onClick={() => turnBlockInto((c) => c.setDetails().run())}
+            onClick={turnIntoToggle}
           >
             <ChevronRight className="h-3.5 w-3.5" /> Toggle
           </BlockMenuItem>
