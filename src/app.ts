@@ -9,12 +9,14 @@ import { grantRoutes } from "./nests/grant-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
 import { listVisibleNests } from "./nests/service.js";
+import { canApproveWith } from "./governance/roles.js";
 import { getReviewQueue } from "./governance/review-service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import {
   resolveStewardsForNode,
   canManageStewards,
+  resolveUserRoles,
 } from "./governance/stewardship-service.js";
 import { resolveNodeGrant, hasAnyGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
@@ -153,6 +155,25 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 
   return c.json({ error: "Missing or invalid credentials" }, 401);
 });
+
+// Short-TTL cache for the /me/work approve-capability check. The dashboard
+// polls this inbox, and a caller's nest roles change rarely — so caching the
+// per-(nest, user) "can approve here?" boolean for a few seconds skips the
+// repeated resolveUserRoles round-trips on each poll, without holding stale
+// governance long enough to matter. Global map (single-process server).
+// ponytail: bare TTL map, no size cap. Add an LRU bound only if a deployment
+// ever holds enough (nest × user) pairs for this to grow unbounded.
+const APPROVE_CACHE_TTL_MS = 30_000;
+const approveCache = new Map<string, { ok: boolean; exp: number }>();
+async function canApproveInNest(nestId: string, email: string): Promise<boolean> {
+  const key = `${nestId} ${email.toLowerCase()}`;
+  const now = Date.now();
+  const hit = approveCache.get(key);
+  if (hit && hit.exp > now) return hit.ok;
+  const ok = canApproveWith(await resolveUserRoles(nestId, email));
+  approveCache.set(key, { ok, exp: now + APPROVE_CACHE_TTL_MS });
+  return ok;
+}
 
 export function createApp(): Hono<AuthEnv> {
   // LinearRouter, not the default SmartRouter — parity with upstream
@@ -1039,12 +1060,34 @@ export function createApp(): Hono<AuthEnv> {
       requested_at: r.requestedAt,
       priority: r.priority,
     });
-    // Every request is already in a visible nest (nestIds scoped the query), so
-    // no post-filter is needed — just split this page into the two buckets.
     const byNewest = (a: { requested_at: string }, b: { requested_at: string }) =>
       a.requested_at < b.requested_at ? 1 : -1;
     // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
-    const items = requests.filter((r) => r.requestedBy !== me).map(toItem).sort(byNewest);
+    // An editor/viewer can SEE a nest but can't approve — the "waiting on me"
+    // bucket must only surface reviews this caller can actually action, else the
+    // inbox nags editors/viewers to approve work they have no rights over.
+    // Approve capability is a nest-level property here (a reviewer/admin role
+    // anywhere on the nest, or the owner with self-approve), so resolve it ONCE
+    // per distinct nest — not per request — in parallel. Bounded by nest count,
+    // not queue length, so no per-item latency blowup.
+    // ponytail: nest-granularity check. A reviewer scoped to only one doc/tag
+    // will see that whole nest's pending items, not just their scoped docs.
+    // Tighten to per-node canUserApprove if that over-inclusion ever matters.
+    const others = requests.filter((r) => r.requestedBy !== me);
+    const nestApprove = new Map<string, boolean>(
+      await Promise.all(
+        [...new Set(others.map((r) => r.nestId))].map(
+          async (nestId): Promise<[string, boolean]> => [
+            nestId,
+            await canApproveInNest(nestId, me),
+          ],
+        ),
+      ),
+    );
+    const items = others
+      .filter((r) => nestApprove.get(r.nestId))
+      .map(toItem)
+      .sort(byNewest);
     const waiting = requests.filter((r) => r.requestedBy === me).map(toItem).sort(byNewest);
     // Watcher notifications (HITL tags) ride along so the inbox is one call.
     const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });

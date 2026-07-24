@@ -108,3 +108,38 @@ it("bob sees only his own nest's review", async () => {
   expect(all.length).toBe(1);
   expect(all[0].nest_id).toBe(bobNest);
 });
+
+it("hides approve-inbox items from an editor, shows them to a reviewer", async () => {
+  // Only ONE fresh registration — /auth/register is rate-limited to 3/hr/IP and
+  // beforeAll already spent 2 (alice, bob). Reuse bob as the reviewer.
+  const carol = await registerUser(app, "carol@acme.com", "Carol"); // editor
+  const nestId = await governedNest(alice, "Shared Nest");
+  // Re-sync stewards: alice reviewer (owner), carol editor, bob reviewer.
+  const nestPath = join(env.dataDir, "nests", nestId);
+  writeFileSync(
+    join(nestPath, "stewards.yaml"),
+    `version: 1\nnest:\n  - email: ${alice.email}, role: reviewer\n` +
+      `  - email: ${carol.email}, role: editor\n` +
+      `  - email: ${bob.email}, role: reviewer\n`,
+  );
+  await jsonRequest(app, "POST", `/nests/${nestId}/stewards/sync`, {}, alice.apiKey);
+  await submitDoc(alice, nestId, "shared-doc"); // alice requests → pending
+
+  const carolWork = await jsonRequest(app, "GET", "/me/work", undefined, carol.apiKey);
+  const bobWork = await jsonRequest(app, "GET", "/me/work", undefined, bob.apiKey);
+
+  // Editor can't approve → the pending review must NOT be in her actionable items.
+  expect(carolWork.data.items.some((w: any) => w.nest_id === nestId)).toBe(false);
+  // Reviewer can approve → it shows in his items.
+  expect(bobWork.data.items.some((w: any) => w.nest_id === nestId)).toBe(true);
+
+  // Belt-and-braces: the server hard-blocks an editor's approve attempt too.
+  const approve = await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes/nodes/shared-doc/approve`,
+    {},
+    carol.apiKey,
+  );
+  expect(approve.status).toBe(403);
+});
