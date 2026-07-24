@@ -198,14 +198,16 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
       if (action === "approve")
         await api.approveReview(w.nest_id, w.node_id);
       else await api.rejectReview(w.nest_id, w.node_id, "Rejected from inbox");
-      // Optimistic: drop the row, then reconcile from the server.
+      // Optimistic: drop the row, then reconcile from the server. Refetch the
+      // CURRENT inbox page (not fetchNests, which reloads page 1) so a user
+      // mid-triage on page 2+ isn't bounced back to the top.
       setWork((prev) => ({
         ...prev,
         items: prev.items.filter(
           (i) => !(i.nest_id === w.nest_id && i.node_id === w.node_id),
         ),
       }));
-      fetchNests();
+      void goToWorkPage(work.pagination?.offset ?? 0);
     } catch (e) {
       console.error("[Dashboard] review action failed", e);
     } finally {

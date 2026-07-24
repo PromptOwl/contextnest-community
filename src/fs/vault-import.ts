@@ -46,8 +46,8 @@ function safeSegments(rel: string): string[] | null {
   return segs;
 }
 
-/** Files written per parallel batch — see writeImportedFiles. */
-// ponytail: fixed batch of 32; tune if a huge vault exhausts file handles.
+/** Files written per parallel batch — see writeImportedFiles.
+ *  NOTE: fixed batch of 32; tune if a huge vault exhausts file handles. */
 const WRITE_CONCURRENCY = 32;
 
 /**

@@ -95,7 +95,10 @@ export async function upsertVersion(params: {
     `INSERT INTO node_versions (nest_id, node_id, version, content_hash, author, status, change_note, tags_json)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ["nest_id", "node_id", "version"],
-    `content_hash = excluded.content_hash, author = excluded.author, status = excluded.status, change_note = excluded.change_note, tags_json = excluded.tags_json`,
+    // Reset created_at on conflict too: SQLite's INSERT OR REPLACE deletes+
+    // reinserts (created_at → now), so mirror that on Postgres — otherwise a
+    // draft edited in place would keep its original (import-time) "edited at".
+    `content_hash = excluded.content_hash, author = excluded.author, status = excluded.status, change_note = excluded.change_note, tags_json = excluded.tags_json, created_at = ${nowExpr(db)}`,
   );
   await db.run(sql, [
     params.nestId,
