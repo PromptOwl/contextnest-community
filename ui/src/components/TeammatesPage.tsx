@@ -52,6 +52,10 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
   // Temp password to reveal after an admin reset (no email — shown once).
   // password === null means we're still generating (shows a loader).
   const [resetPw, setResetPw] = useState<{ email: string; password: string | null } | null>(null);
+  // "Copied" flash on the temp-password Copy button. Reset whenever a new
+  // password is generated so a prior flash doesn't leak across resets.
+  const [resetCopied, setResetCopied] = useState(false);
+  useEffect(() => setResetCopied(false), [resetPw?.password]);
   // User pending removal confirmation.
   const [removeTarget, setRemoveTarget] = useState<Teammate | null>(null);
   const [removing, setRemoving] = useState(false);
@@ -428,9 +432,28 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => void copyTextWithToast(resetPw.password!)}
+                    onClick={async () => {
+                      const ok = await copyTextWithToast(
+                        resetPw.password!,
+                        "Temporary password copied",
+                      );
+                      if (ok) {
+                        setResetCopied(true);
+                        setTimeout(() => setResetCopied(false), 1500);
+                      }
+                    }}
                   >
-                    Copy
+                    {resetCopied ? (
+                      <>
+                        <Check className="h-3.5 w-3.5 mr-1 text-green-600" />
+                        Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3.5 w-3.5 mr-1" />
+                        Copy
+                      </>
+                    )}
                   </Button>
                 </div>
                 <div className="mt-4 text-right">
