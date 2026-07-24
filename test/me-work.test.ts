@@ -143,3 +143,43 @@ it("hides approve-inbox items from an editor, shows them to a reviewer", async (
   );
   expect(approve.status).toBe(403);
 });
+
+it("bare owner sees the inbox item only when self-approve is on", async () => {
+  // Owner with NO reviewer/admin steward role. canUserApprove gates such an
+  // owner behind allow_self_approve: OFF → approvals go to reviewers (owner
+  // can't approve → item must be hidden); ON → owner can approve → item shows.
+  // Guards the regression where a pure role check (canApproveWith) treated
+  // "owner" as always approve-capable and put a dead button back in front of
+  // owners who delegated approval. Both nests are read in ONE /me/work call so
+  // the 30s approve-cache can't make the two assertions race.
+  const mkNest = async (name: string, selfApprove: boolean) => {
+    const { data } = await jsonRequest(app, "POST", "/nests", { name }, alice.apiKey);
+    const id = data.nest.id;
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${id}/settings`,
+      { stewardship_enabled: true, allow_self_approve: selfApprove },
+      alice.apiKey,
+    );
+    // bob as EDITOR submits; alice (owner) holds no reviewer/admin role.
+    const p = join(env.dataDir, "nests", id);
+    mkdirSync(p, { recursive: true });
+    writeFileSync(
+      join(p, "stewards.yaml"),
+      `version: 1\nnest:\n  - email: ${bob.email}, role: editor\n`,
+    );
+    await jsonRequest(app, "POST", `/nests/${id}/stewards/sync`, {}, alice.apiKey);
+    return id;
+  };
+  const offNest = await mkNest("SA Off", false);
+  const onNest = await mkNest("SA On", true);
+  await submitDoc(bob, offNest, "off-doc"); // requestedBy = bob, not alice
+  await submitDoc(bob, onNest, "on-doc");
+
+  const { data } = await jsonRequest(app, "GET", "/me/work", undefined, alice.apiKey);
+  // Bare owner, self-approve OFF → hidden (approving it would 403).
+  expect(data.items.some((w: any) => w.nest_id === offNest)).toBe(false);
+  // Bare owner, self-approve ON → shown.
+  expect(data.items.some((w: any) => w.nest_id === onNest)).toBe(true);
+});

@@ -592,7 +592,9 @@ export async function createNode(
     try {
       const result = await safePublishDocument(storage, id, {
         editedBy: userEmail,
-        note: "Auto-published on create (no stewards configured)",
+        note: hasStewards
+          ? "Auto-published on create (owner/admin self-approve)"
+          : "Auto-published on create (no stewards configured)",
       });
       savedVersion = result.node.frontmatter.version || 1;
       await versions.createVersion({
@@ -994,7 +996,11 @@ export async function updateNode(
         try {
           const result = await safePublishDocument(storage, nodeId, {
             editedBy: userEmail,
-            note: patch.changeNote || "Auto-published on edit (no stewards)",
+            note:
+              patch.changeNote ||
+              (hasStewards
+                ? "Auto-published on edit (owner/admin self-approve)"
+                : "Auto-published on edit (no stewards)"),
           });
           publishedVersion =
             result.node.frontmatter.version || publishedVersion;

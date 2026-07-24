@@ -8,8 +8,7 @@ import { sharingRoutes } from "./nests/sharing-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
-import { listVisibleNests } from "./nests/service.js";
-import { canApproveWith } from "./governance/roles.js";
+import { listVisibleNests, nestAllowsSelfApprove } from "./nests/service.js";
 import { getReviewQueue } from "./governance/review-service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
@@ -161,8 +160,6 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 // per-(nest, user) "can approve here?" boolean for a few seconds skips the
 // repeated resolveUserRoles round-trips on each poll, without holding stale
 // governance long enough to matter. Global map (single-process server).
-// ponytail: bare TTL map, no size cap. Add an LRU bound only if a deployment
-// ever holds enough (nest × user) pairs for this to grow unbounded.
 const APPROVE_CACHE_TTL_MS = 30_000;
 const approveCache = new Map<string, { ok: boolean; exp: number }>();
 async function canApproveInNest(nestId: string, email: string): Promise<boolean> {
@@ -170,7 +167,22 @@ async function canApproveInNest(nestId: string, email: string): Promise<boolean>
   const now = Date.now();
   const hit = approveCache.get(key);
   if (hit && hit.exp > now) return hit.ok;
-  const ok = canApproveWith(await resolveUserRoles(nestId, email));
+  // MUST mirror canUserApprove's nest-level gate, not the pure canApproveWith:
+  // admin/reviewer approve always, but a BARE owner (no admin/reviewer steward
+  // role) can only approve when the nest allows self-approve. Using
+  // canApproveWith here — which treats "owner" as always approve-capable — put
+  // a dead Approve button back in front of owners who delegated approval to a
+  // reviewer and left self-approve off (the default SoD setup). Fetch the flag
+  // only for the owner-only case so reviewers/admins skip the extra read.
+  const roles = await resolveUserRoles(nestId, email);
+  let ok = roles.includes("admin") || roles.includes("reviewer");
+  if (!ok && roles.includes("owner")) ok = await nestAllowsSelfApprove(nestId);
+  // Cheap bound: sweep expired entries when the map grows, so a long-running
+  // server polling /me/work across many (nest, user) pairs doesn't accumulate
+  // stale keys forever. O(n) but only past a threshold, amortized to nothing.
+  if (approveCache.size > 500) {
+    for (const [k, v] of approveCache) if (v.exp <= now) approveCache.delete(k);
+  }
   approveCache.set(key, { ok, exp: now + APPROVE_CACHE_TTL_MS });
   return ok;
 }
