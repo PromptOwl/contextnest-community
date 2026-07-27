@@ -94,7 +94,7 @@ export function msTeamsPayload(title: string, message: string): unknown {
           type: "AdaptiveCard",
           version: "1.4",
           msteams: { width: "Full" },
-          fallbackText: `[${title}] ${toPlainText(message)}`,
+          fallbackText: `[${toPlainText(title)}] ${toPlainText(message)}`,
           body: [
             {
               // Same pipeline as the message: the nest name is user-

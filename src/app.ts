@@ -71,7 +71,6 @@ import {
   getSuspensionReason,
   getCurrentLicense,
   installLicenseKey,
-  isLicenseAdminUserId,
 } from "./auth/license.js";
 import { persistSetting } from "./db/settings.js";
 import { isOidcReady } from "./auth/oidc.js";
@@ -422,9 +421,6 @@ export function createApp(): Hono<AuthEnv> {
   // superadmin) only.
   app.use("/admin/settings", flexAuthMiddleware);
   app.use("/admin/settings/*", flexAuthMiddleware);
-  const adminSettingsAllowed = async (c: any) =>
-    config.AUTH_MODE === "open" ||
-    (await isLicenseAdminUserId(c.get("userId")));
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     manual_sign_in: config.MANUAL_SIGN_IN,
@@ -474,7 +470,7 @@ export function createApp(): Hono<AuthEnv> {
   // Send a test notification to the saved Slack/Teams webhook so the admin can
   // confirm the connector works without waiting for a real governance event.
   app.post("/admin/settings/test-notification", async (c) => {
-    if (!(await adminSettingsAllowed(c)))
+    if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can do this." }, 403);
     let body: { channel?: unknown };
     try {

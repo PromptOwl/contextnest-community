@@ -490,4 +490,24 @@ describe("send test notification", () => {
     expect(res.status).toBe(502);
     expect(res.data.error).toBeTruthy();
   });
+
+  it("a key-mode superadmin (not the license admin) is allowed — 403 here would be the authz bug", async () => {
+    // access.yaml superadmin, no ownerEmail → superadmin but NOT license admin.
+    // The route must gate on server-admin (license admin OR superadmin), the
+    // same guard as GET/PATCH /admin/settings, not license-admin-only.
+    const keyApp = await createTestApp("key", { superAdmins: ["super@acme.com"] });
+    const superUser = await registerUser(keyApp, "super@acme.com", "Super");
+    delete process.env.MSTEAMS_WEBHOOK_URL;
+    const res = await jsonRequest(
+      keyApp,
+      "POST",
+      "/admin/settings/test-notification",
+      { channel: "teams" },
+      superUser.apiKey,
+    );
+    // Authz passes (not 403); the handler then reports no webhook configured.
+    expect(res.status).not.toBe(403);
+    expect(res.status).toBe(502);
+    expect(res.data.error).toMatch(/webhook URL first/i);
+  });
 });
