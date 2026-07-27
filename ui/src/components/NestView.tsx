@@ -462,6 +462,11 @@ export function NestView({
    */
   const handleMoveNode = async (nodeId: string, targetFolder: string) => {
     if (folderOfNode(nodeId) === targetFolder) return true; // already there
+    const dest = targetFolder ? prettyFolderPath(targetFolder) : "nest root";
+    // Processing indicator while the move is in flight — the drop can take a
+    // beat (id rewrite + refetch), so show it on both the drop and dialog
+    // paths. Reuse the same toast id so it swaps to success/error in place.
+    const toastId = toast.loading(`Moving to ${dest}…`);
     try {
       const { node: moved, previousId } = await api.moveNode(
         nestId,
@@ -470,10 +475,9 @@ export function NestView({
       );
       const previousFolder = folderOfNode(previousId);
       toast.success(
-        targetFolder
-          ? `Moved to ${prettyFolderPath(targetFolder)}`
-          : "Moved to nest root",
+        targetFolder ? `Moved to ${dest}` : "Moved to nest root",
         {
+          id: toastId,
           // Undo = the same move call, back to where it came from. Must use
           // the NEW id (moved.id) — the old id no longer exists.
           action: {
@@ -496,18 +500,25 @@ export function NestView({
       return true;
     } catch (err: any) {
       console.error("[NestView] moveNode failed", nestId, nodeId, targetFolder, err);
-      toast.error(err?.message || "Move failed");
+      toast.error(err?.message || "Move failed", { id: toastId });
       return false;
     }
   };
 
-  const handleDropOnFolder = async (targetFolder: string) => {
+  const handleDropOnFolder = (targetFolder: string) => {
     const nodeId = dragNodeId;
     setDragNodeId(null);
     setDropFolder(null);
     cancelDragExpand();
     if (!nodeId) return;
-    await handleMoveNode(nodeId, targetFolder);
+    // Defer the move+refetch one tick. The move rewrites the node id, so the
+    // refetch unmounts the row we just dragged; if that happens before the
+    // browser fires `dragend` and tears down its drag session (which races
+    // the move on a fast/local server), Chrome leaves the session half-open
+    // and silently ignores the NEXT dragstart — drag "randomly" dies after a
+    // successful move. Letting the current event loop finish first makes it
+    // deterministic. ponytail: setTimeout(0), not a drag-lifecycle library.
+    setTimeout(() => void handleMoveNode(nodeId, targetFolder), 0);
   };
 
   // "Move to folder" menu dialog — the accessible, keyboard-reachable path
@@ -2306,6 +2317,14 @@ export function NestView({
                     setMoveDest(folderOfNode(node.id));
                     setMoveTarget(node);
                   };
+                  // A doc row is a drop proxy for the folder it sits in: drag
+                  // active, not onto itself, and the dragged doc isn't already
+                  // in this row's folder. List mode only (cards aren't draggable).
+                  const dropOntoRowValid = () =>
+                    !cards &&
+                    !!dragNodeId &&
+                    dragNodeId !== node.id &&
+                    folderOfNode(dragNodeId) !== folderOfNode(node.id);
                   // Cards: collapse every row action into a 3-dot menu kept on
                   // the title line. List keeps inline hover buttons below.
                   const actionMenu = (
@@ -2386,6 +2405,23 @@ export function NestView({
                         setDragNodeId(null);
                         setDropFolder(null);
                         cancelDragExpand();
+                      }}
+                      onDragOver={(e) => {
+                        // Dropping onto a document means "into the folder that
+                        // holds it" — a doc row is a proxy target for its own
+                        // folder, so the drop zone isn't just the folder header.
+                        if (!dropOntoRowValid()) return;
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                      }}
+                      onDragEnter={() => {
+                        if (dropOntoRowValid()) setDropFolder(folderOfNode(node.id));
+                      }}
+                      onDrop={(e) => {
+                        if (!dropOntoRowValid()) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        handleDropOnFolder(folderOfNode(node.id));
                       }}
                       data-testid={`document-row-${node.id}`}
                     >
@@ -2594,12 +2630,17 @@ export function NestView({
                               e.dataTransfer.dropEffect = "move";
                             }}
                             onDragEnter={() => {
+                              // Spring a collapsed folder open on hover so its
+                              // subfolders become reachable — even when this
+                              // folder is the dragged doc's OWN folder (not a
+                              // valid drop target itself). Otherwise a doc in a
+                              // collapsed parent can never be dragged into one
+                              // of that parent's subfolders: hovering the parent
+                              // wouldn't expand it, so the subfolders never show.
+                              if (dragNodeId && collapsible && collapsed)
+                                scheduleDragExpand(node.path);
                               if (!validDrop) return;
                               setDropFolder(node.path);
-                              // Hovering a collapsed folder springs it open
-                              // after a beat so its subfolders become targets.
-                              if (collapsible && collapsed)
-                                scheduleDragExpand(node.path);
                             }}
                             onDragLeave={() => {
                               setDropFolder((d) => (d === node.path ? null : d));
