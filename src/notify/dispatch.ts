@@ -139,8 +139,17 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
   const db = getDb();
   const nestName = await resolveNestName(ev.nestId);
 
-  // Implicit server-wide slack connector (super-admin Settings).
-  if (config.SLACK_WEBHOOK_URL) {
+  // Implicit server-wide Slack + Microsoft Teams connectors (super-admin
+  // Settings). MSTEAMS_*, never "teams": that name means user groups here.
+  //
+  // Review events are SKIPPED on both because review-service fires each of them
+  // down BOTH paths — dispatchEvent (this file, immediate) AND notifyNestEvent
+  // (notify.ts, debounced digest) — and both would land on the same server-wide
+  // webhook, posting every review event twice. The digest path wins for those
+  // kinds (it collapses bursts into one message); these implicit connectors
+  // deliver only the kinds the digest path never sees (run_failed).
+  // Per-nest connector rows below are unaffected: they are dispatch-only.
+  if (config.SLACK_WEBHOOK_URL && !DIGEST_DELIVERED_KINDS.has(ev.kind)) {
     void postWebhook(
       config.SLACK_WEBHOOK_URL,
       formatBody("slack", nestName, ev),
@@ -148,20 +157,6 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
     );
   }
 
-  // Implicit server-wide Microsoft Teams connector (super-admin Settings) —
-  // parity with the slack one above. MSTEAMS_*, never "teams": that name
-  // means user groups in this codebase.
-  //
-  // Review events are SKIPPED here because review-service fires each of them
-  // down BOTH paths — dispatchEvent (this file, immediate) AND notifyNestEvent
-  // (notify.ts, debounced digest) — and both would land on the same
-  // MSTEAMS_WEBHOOK_URL, posting every review event twice. The digest path
-  // wins for those kinds (it collapses bursts into one message); this implicit
-  // connector delivers only the kinds the digest path never sees (run_failed).
-  // NOTE: the implicit server-slack connector above has this exact double-post
-  // today (dispatchEvent + notifySlackForNest both hit SLACK_WEBHOOK_URL) —
-  // pre-existing behavior, left unchanged in this PR; ticket separately.
-  // Per-nest connector rows below are unaffected: they are dispatch-only.
   if (config.MSTEAMS_WEBHOOK_URL && !DIGEST_DELIVERED_KINDS.has(ev.kind)) {
     void postWebhook(
       config.MSTEAMS_WEBHOOK_URL,
