@@ -47,6 +47,10 @@ If nothing matches and no steward resolves, the **nest owner** is the implicit s
 3. A **Reviewer steward** opens the review queue, reads the doc, clicks **Approve** or **Reject**. Rejecting requires a note.
 4. On approve, the doc becomes **approved** and is now AI-readable. The approved version number is pinned (`approvedVersion`), so subsequent drafts don't automatically replace it — AI keeps getting the last blessed version until a new one is approved.
 
+### Auto-publish owner & admin edits (`allow_self_approve`)
+
+A per-nest flag (**off** by default; nest Settings → "Auto-publish owner & admin edits"). When it's **on**, a create or edit by the nest **owner** or an **admin** publishes immediately — it skips steps 2–4 entirely instead of landing as a draft. This is a governance *bypass* for the two roles that already hold approval authority, not a separation-of-duties exception. **Editor and reviewer flows are unchanged**: their edits still save as drafts and go through Submit → Review → Approve regardless of the flag. The pending-review edit lock still applies, so an owner/admin can't overwrite a doc a teammate has in review. Turning the flag back off doesn't unpublish anything; it only affects future edits.
+
 ## Who sees what
 
 Governance gates two things: who can **approve**, and who can **read**.

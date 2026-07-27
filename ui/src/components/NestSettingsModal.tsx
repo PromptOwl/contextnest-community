@@ -189,14 +189,15 @@ export function NestSettingsModal({
               <div className="space-y-1">
                 <Label className="flex items-center gap-2 text-sm font-medium">
                   <UserCheck className="h-4 w-4" />
-                  Allow self-approve
+                  Auto-publish owner &amp; admin edits
                 </Label>
                 <p className="text-xs text-muted-foreground">
-                  Default off. When enabled, the same person can submit a draft and
-                  approve it — useful while seeding a single-person nest or running
-                  solo. Turning this back off does not retroactively revoke
-                  approvals; it only changes future behavior. Stewardship audit logs
-                  still record the actor; the trail is intact, the separation isn't.
+                  Default off. When enabled, edits by an owner or admin publish
+                  immediately — their changes skip the review queue instead of
+                  waiting for approval. Editors and reviewers are unaffected: they
+                  still submit drafts for review as usual. Turning this back off
+                  only changes future behavior; it doesn't unpublish anything.
+                  Audit logs still record every actor.
                 </p>
               </div>
               <Switch checked={selfApprove} onCheckedChange={setSelfApprove} />
