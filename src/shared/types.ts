@@ -17,6 +17,11 @@ export interface Nest {
   // into <DATA_ROOT>/nests/<id>); drives the "Imported" badge and flat
   // discovery. 0 for default nests.
   is_imported: number;
+  // 1 when draft-first + approval workflow is enabled. Read straight off the
+  // row by the dashboard annotate() path, so keep it on the type — a query
+  // that narrowed its columns would otherwise report every nest ungoverned
+  // with no compiler warning.
+  stewardship_enabled: number;
 }
 
 export interface ApiKey {

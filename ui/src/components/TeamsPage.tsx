@@ -36,6 +36,7 @@ import * as api from "../lib/api";
 import type { Team, TeamMember, TeamRole } from "../lib/api";
 import { TEAM_ROLES } from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
+import { isEmailish } from "../lib/utils";
 
 const MAX_VISIBLE_MEMBERS = 5;
 const roleLabel = (role: string) =>
@@ -374,40 +375,56 @@ function AddMemberRow({
   const grantable = TEAM_ROLES.filter((r) => ROLE_RANK[r.value] <= maxRank);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<TeamRole>(grantable[0]?.value ?? "viewer");
+  const [error, setError] = useState<string | null>(null);
   const submit = () => {
     const e = email.trim();
     if (!e) return;
+    // Reject malformed input before it becomes a member chip — the server
+    // trusts the email, so a bad value would otherwise stick as a phantom
+    // member that can never register/match.
+    if (!isEmailish(e)) {
+      setError("Enter a valid email address.");
+      return;
+    }
+    setError(null);
     void Promise.resolve(onAdd(e, role)).then(() => {
       setEmail("");
       setRole(grantable[0]?.value ?? "viewer");
     });
   };
   return (
-    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-      <Input
-        type="email"
-        placeholder="person@company.com"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && submit()}
-        className="h-8 flex-1"
-      />
-      <Select value={role} onValueChange={(v) => setRole(v as TeamRole)}>
-        <SelectTrigger className="w-full sm:w-[130px] h-8">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {grantable.map((r) => (
-            <SelectItem key={r.value} value={r.value}>
-              {r.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Button size="sm" onClick={submit} disabled={busy || !email.trim()}>
-        <UserPlus className="h-4 w-4 mr-1" />
-        Add
-      </Button>
+    <div className="space-y-1">
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+        <Input
+          type="email"
+          placeholder="person@company.com"
+          value={email}
+          onChange={(e) => {
+            setEmail(e.target.value);
+            if (error) setError(null);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          aria-invalid={!!error}
+          className="h-8 flex-1"
+        />
+        <Select value={role} onValueChange={(v) => setRole(v as TeamRole)}>
+          <SelectTrigger className="w-full sm:w-[130px] h-8">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {grantable.map((r) => (
+              <SelectItem key={r.value} value={r.value}>
+                {r.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button size="sm" onClick={submit} disabled={busy || !email.trim()}>
+          <UserPlus className="h-4 w-4 mr-1" />
+          Add
+        </Button>
+      </div>
+      {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
 }

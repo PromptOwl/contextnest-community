@@ -88,6 +88,27 @@ describe("PATCH /nests/:nestId", () => {
     expect(status).toBe(400);
   });
 
+  it("rejects creating a nest whose name (slug) the owner already uses", async () => {
+    const dup = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Renamed Nest" }, // alice already owns this slug
+      alice.apiKey,
+    );
+    expect(dup.status).toBe(400);
+    expect(dup.data.error).toMatch(/already have a nest/i);
+    // A different owner can still use the same name.
+    const bobDup = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Renamed Nest" },
+      bob.apiKey,
+    );
+    expect(bobDup.status).toBe(201);
+  });
+
   it("blocks non-owners (and non-admins) from renaming", async () => {
     const { status } = await jsonRequest(
       app,

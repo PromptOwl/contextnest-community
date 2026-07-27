@@ -7,7 +7,7 @@
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2 } from "lucide-react";
+import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -136,15 +136,34 @@ function TextField({
   onChange: (v: string) => void;
   type?: string;
 }) {
+  // Secret fields get a show/hide toggle so an admin can verify what they
+  // typed. noAutofill stays keyed on the DECLARED type (password), so revealing
+  // it doesn't re-open the door to credential managers stuffing the box.
+  const isPassword = type === "password";
+  const [reveal, setReveal] = useState(false);
   return (
-    <Input
-      value={value}
-      type={type}
-      placeholder={placeholder}
-      onChange={(e) => onChange(e.target.value)}
-      className="flex-1"
-      {...noAutofill(type)}
-    />
+    <div className="relative flex-1">
+      <Input
+        value={value}
+        type={isPassword && reveal ? "text" : type}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        className={isPassword ? "flex-1 pr-9" : "flex-1"}
+        {...noAutofill(type)}
+      />
+      {isPassword && (
+        <button
+          type="button"
+          tabIndex={-1}
+          onClick={() => setReveal((r) => !r)}
+          className="absolute inset-y-0 right-0 flex items-center px-2.5 text-muted-foreground hover:text-foreground"
+          title={reveal ? "Hide" : "Show"}
+          aria-label={reveal ? "Hide value" : "Show value"}
+        >
+          {reveal ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+        </button>
+      )}
+    </div>
   );
 }
 

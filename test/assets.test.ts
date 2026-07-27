@@ -85,15 +85,17 @@ describe("asset upload", () => {
   });
 
   it("rejects an oversized video with a clear per-type error", async () => {
+    // Default video cap is 30 MB (config.VIDEO_MAX_BYTES) — under Cloud Run's
+    // 32 MiB request limit so oversized videos fail with our message, not a 413.
     const res = await upload(
       "huge.mp4",
       owner.apiKey,
-      new Uint8Array(100 * 1024 * 1024 + 1),
+      new Uint8Array(30 * 1024 * 1024 + 1),
     );
     expect(res.status).toBe(400);
     const data = await res.json();
     expect(data.error).toMatch(/video too large/i);
-    expect(data.error).toContain("max 100 MB");
+    expect(data.error).toContain("max 30 MB");
   }, 60_000);
 
   it("image cap is unchanged at 10 MB, rejected before the bytes are read", async () => {

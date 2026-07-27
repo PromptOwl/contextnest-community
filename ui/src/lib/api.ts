@@ -673,6 +673,13 @@ export async function syncUnsyncedFolder(name: string) {
   return out;
 }
 
+export async function deleteUnsyncedFolder(name: string) {
+  return request<{ ok: true }>("/nests/unsynced/sync", {
+    method: "DELETE",
+    body: JSON.stringify({ name }),
+  });
+}
+
 export async function setNestVisibility(
   nestId: string,
   visibility: "private" | "public",
@@ -1648,12 +1655,24 @@ export interface WatcherNotification {
   read_at: string | null;
 }
 
-export async function getMyWork() {
+export interface WorkPagination {
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export async function getMyWork(opts?: { limit?: number; offset?: number }) {
+  const q = new URLSearchParams();
+  if (opts?.limit != null) q.set("limit", String(opts.limit));
+  if (opts?.offset != null) q.set("offset", String(opts.offset));
+  const qs = q.toString();
   return request<{
     items: WorkItem[];
     waiting: WorkItem[];
     notifications?: WatcherNotification[];
-  }>("/me/work");
+    pagination?: WorkPagination;
+  }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
 
 export async function approveReview(nestId: string, nodeId: string, note?: string) {
