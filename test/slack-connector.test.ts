@@ -212,6 +212,12 @@ tags:
     expect(res.status).toBe(201);
     await settle();
 
+    // Exactly ONE post for one review_requested. review-service fires the event
+    // down two paths — dispatchEvent (immediate) and notifyNestEvent (debounced
+    // digest) — both hitting the same global webhook, so without dispatch.ts's
+    // DIGEST_DELIVERED_KINDS suppression this would be 2. The digest path owns
+    // review events; the implicit dispatch connector only sends run_failed.
+    expect(lsent).toHaveLength(1);
     const msg = lsent.find((t) => t.includes("Rate Limits"));
     expect(msg).toBeTruthy();
     expect(msg).toContain(":memo:");
@@ -235,6 +241,7 @@ tags:
       { note: "lgtm" }, jane.apiKey);
     expect(res.status).toBe(200);
     await settle();
+    expect(lsent).toHaveLength(1); // single delivery — digest path only
     const msg = lsent.find((t) => t.includes("Approve Me"));
     expect(msg).toBeTruthy();
     expect(msg).toContain(":white_check_mark:");
@@ -251,6 +258,7 @@ tags:
       { note: "<!here> missing section" }, jane.apiKey);
     expect(res.status).toBe(200);
     await settle();
+    expect(lsent).toHaveLength(1); // single delivery — digest path only
     const msg = lsent.find((t) => t.includes("Reject Me"));
     expect(msg).toBeTruthy();
     expect(msg).toContain(":x:");

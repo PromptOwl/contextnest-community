@@ -290,8 +290,7 @@ tags:
     // event down two paths — dispatchEvent (immediate) and notifyNestEvent
     // (debounced digest) — and both target the same global webhook, so
     // without dispatch.ts's DIGEST_DELIVERED_KINDS suppression this would be
-    // 2. (Slack has that double-post today, pre-existing — tracked
-    // separately; this pins Teams to single delivery via the digest path.)
+    // 2. Pins Teams to single delivery via the digest path (Slack too).
     expect(lsent).toHaveLength(1);
     const card = lsent.find((p) => ltext(p).includes("Rate Limits"));
     expect(card).toBeTruthy();
