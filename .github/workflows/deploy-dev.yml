@@ -6,9 +6,10 @@
 # PROD_* secret names; dev secrets are DEV_* so the two never collide.
 #
 # Required GitHub secrets (Settings → Secrets and variables → Actions):
-#   GCP_DEV_SA_KEY                     JSON key for a deployer service account
+#   GCP_DEV_SA_KEY                     base64 of the deployer service-account JSON key
 #                                      (roles: run.admin, artifactregistry.writer,
 #                                       iam.serviceAccountUser, storage.admin)
+#                                      encode:  base64 -w0 key.json   (mac: base64 -i key.json)
 #   DEV_DB_PASSWORD                    Postgres password for user `community`
 #   DEV_PROMPTOWL_KEY                  License key (pk_...)
 #   DEV_PROMPTOWL_BYPASS_SECRET        PromptOwl bypass secret
@@ -34,7 +35,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
 
     env:
       PROJECT: theowl-462315
@@ -54,13 +54,18 @@ jobs:
         id: tag
         run: echo "tag=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_DEV_SA_KEY }}
-
       - name: Set up gcloud
         uses: google-github-actions/setup-gcloud@v2
+
+      - name: Authenticate to Google Cloud
+        env:
+          GCP_DEV_SA_KEY: ${{ secrets.GCP_DEV_SA_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$GCP_DEV_SA_KEY" ] || { echo "::error::missing secret GCP_DEV_SA_KEY"; exit 1; }
+          printf '%s' "$GCP_DEV_SA_KEY" | base64 -d > "$RUNNER_TEMP/gcp-key.json"
+          gcloud auth activate-service-account --key-file="$RUNNER_TEMP/gcp-key.json"
+          gcloud config set project "$PROJECT"
 
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
@@ -126,6 +131,6 @@ jobs:
             --add-cloudsql-instances="$SQL_INSTANCE" \
             --min-instances=1 --max-instances=1 --allow-unauthenticated
 
-      - name: Clean up env file
+      - name: Clean up secrets on disk
         if: always()
-        run: rm -f env.yaml
+        run: rm -f env.yaml "$RUNNER_TEMP/gcp-key.json"
