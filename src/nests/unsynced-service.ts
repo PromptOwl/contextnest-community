@@ -275,3 +275,33 @@ export async function syncUnsyncedFolder(
 
   return { nest, documents };
 }
+
+/**
+ * Delete an unsynced folder outright (the user doesn't want it as a nest — it's
+ * just leftover files taking up space). Same guards as sync: the name is
+ * validated against traversal/reserved/dot segments, and the live nest storage
+ * root is never removable even if a NEST_STORAGE_ROOT slipped past name checks.
+ * Only reachable by a server admin (route-gated), so this can't be used to wipe
+ * arbitrary disk.
+ */
+export function deleteUnsyncedFolder(folderName: string): void {
+  console.log(`[unsynced] delete requested folder="${folderName}"`);
+  assertSafeFolderName(folderName);
+
+  const src = join(config.DATA_ROOT, folderName);
+  if (isNestStorageRoot(src)) {
+    throw new ValidationError("Folder is not eligible for delete");
+  }
+  let stat;
+  try {
+    stat = statSync(src);
+  } catch {
+    throw new NotFoundError(`Folder not found: ${folderName}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new ValidationError(`Not a directory: ${folderName}`);
+  }
+
+  rmSync(src, { recursive: true, force: true });
+  console.log(`[unsynced] deleted folder ${src}`);
+}

@@ -101,7 +101,7 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 | Custom logo / branding | ✅ | ✅ |
 | Admin password reset + user removal (in-platform) | ✅ | ✅ |
 | Wiki backlinks, outline, hover-preview, link health | ✅ | ✅ |
-| Rich editor — tables, callouts, toggles, code highlight, find/replace | ✅ | ✅ |
+| Rich editor — tables, callouts, toggles, code highlight, find/replace, image & video upload | ✅ | ✅ |
 | Steward version revert | ✅ | ✅ |
 | MCP server for AI agents | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
@@ -113,67 +113,9 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 
 For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <https://promptowl.ai/contextnest/>.
 
-## What's new in 1.6.0
+## What's new
 
-- **PostgreSQL / Cloud SQL backend** — run the server on PostgreSQL alongside SQLite via an async DB adapter, so metadata survives on Cloud Run and other deployments where local disk isn't durable. Supports the Cloud SQL Auth Proxy (unix socket) and TCP + TLS. New `DB_*` env vars (`DB_DRIVER`, `DATABASE_URL`, `CLOUD_SQL_CONNECTION_NAME`, `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME`, `DB_POOL_MAX`, `DB_SSL`, `DB_SSL_CA`); SQLite stays the default when nothing is configured. See [CONFIGURATION.md](./CONFIGURATION.md).
-- **Configurable `NEST_STORAGE_ROOT`** — store nest vault files (markdown + version history) outside `DATA_ROOT` — e.g. on a Cloud Storage (GCS) volume mount — while the database stays on `DATA_ROOT`. Defaults to `<DATA_ROOT>/nests`, so existing deployments are unchanged. On a GCS FUSE mount, set `DRIFT_SCAN_INTERVAL_MS=0` and run a single instance.
-- **Security fix** — the admin guard on `/admin/settings` (GET/PATCH) is now correctly awaited; without it a non-admin could read or change server-wide settings in key mode.
-- **AdminLoginModal respects `PROMPTOWL_SIGN_IN_GATE`** — the "Sign in with PromptOwl" affordance follows the configured gate (`open` / `admin-only` / `disabled`).
-- **Drift scanner toggle** — `DRIFT_SCAN_INTERVAL_MS=0` now actually disables the drift scanner (previously reset to the 30s default).
-- **Safer folder sync** — unsynced-folder detection no longer treats a configured nest storage root as a sync candidate, preventing accidental duplication/removal of live nests when `NEST_STORAGE_ROOT` is nested under `DATA_ROOT`.
-
-Full history in [CHANGELOG.md](./CHANGELOG.md).
-
-## What's new in 1.3.0
-
-- **Server super-admins** — emails listed in `access.yaml: super_admins` administer every nest (change visibility, manage collaborators and stewards) without being added per-nest. Owner-only operations (delete, transfer) still require the nest owner. See [STEWARDSHIP.md](./STEWARDSHIP.md).
-- **License persistence under `DATA_ROOT`** — `PROMPTOWL_KEY` now writes to `$DATA_ROOT/.env` (was `$cwd/.env`, which is root-owned `/app` in the official Docker image and silently lost the key on container recreate). The License Setup Page also surfaces write failures instead of failing quietly. Override via `ENV_FILE_PATH`. See [CONFIGURATION.md](./CONFIGURATION.md).
-- **Case-insensitive email** across registration, login, invite, and access checks. Migration dedupes existing accounts that differ only in case; fixes "I can't log in because I capitalized my email" and access-guard / lockout mismatches.
-- **Document version history + inline diff** — every saved version is browsable in the document detail view, and an inline diff highlights what changed between any two versions.
-- **Nest Overview / index landing** — every nest opens on a grouped table-of-contents with a "recently edited" strip instead of a flat list.
-- **Public/private toggle on the nest header** — visibility is set directly from the header, not buried in a dialog.
-- **Review queue surfaces submitted-for-review edits** — reviewers see the pending versions a contributor staged, not just net-new documents.
-- **Internal-folder sync over MCP** — agents can list a nest's unsynced filesystem folders and pull them into the nest on demand. New `unsynced-service.ts` + MCP tools, covered by `test/unsynced-folder.test.ts` and `test/mcp-unsynced.test.ts`.
-- **Telemetry `batch_id` + user email** — usage events carry a stable `batch_id` (de-duped on the receiver) and the authenticated user email alongside the user id, so the PromptOwl ingest bridge can meter credits to the right account.
-- **Hyperlink navigation fix** — hyperlinks in the editor and viewer navigate to their configured target URL correctly.
-- **Repo / DX** — `CLAUDE.md` at the repo root with project-specific guidance for Claude Code; `claude.yml` (PR assistant) and `claude-code-review.yml` (auto review on PRs) GitHub Actions workflows.
-
-Full history in [CHANGELOG.md](./CHANGELOG.md).
-
-## What's new in 1.2.0
-
-- **Admin user management (no email server needed)** — `POST /auth/admin/reset-password/:userId` sets a user's password or returns a one-time temp password; `DELETE /auth/users/:userId` removes a user and revokes their API keys, sessions, and role rows. New self-service **Change password** in the user menu blocks reusing the current password.
-- **`PROMPTOWL_SIGN_IN_GATE`** — `open` / `admin-only` / `disabled` restricts "Sign in with PromptOwl" (admin reaches it via `?admin=1`). See [CONFIGURATION.md](./CONFIGURATION.md).
-- **Plain-text agent view** — `?format=markdown` on a node returns frontmatter + body as `text/markdown` for LLM-friendly consumption.
-- **Steward version revert** — `POST .../revert` restores an earlier version as a new one; pending-review docs are now editable (saving withdraws the review).
-- **Editor — always-editable surface** — Notion-style buttery headline, selection bubble toolbar (format-on-highlight), turn-into block conversion, Cmd+F find & replace, rich blocks (tables, callouts, toggles, syntax-highlighted code, columns), and wiki/code-safety fixes.
-- **Wiki usability** — backlinks panel ("Linked from N documents"), outline/TOC for 3+-heading docs, hover-preview on `[[wiki links]]`, multi-tag AND filtering with clickable chips, per-doc copy link, rename-safety warning for title-form links, link-health report (broken links + orphans), recently-edited strip.
-- **Sharing clarity** — share button reads "Share nest"; dialog clarifies nest-wide scope; deep links open documents directly.
-- **Security** — hardened scanner gate (PolinRider + Shai-Hulud preflight) in `bin/`.
-
-Full history in [CHANGELOG.md](./CHANGELOG.md).
-
-## What's new in 1.1.0
-
-- **Vault import** — import an existing folder of markdown files into a new nest in one step, from the dashboard ("Import folder") or via the API. Frontmatter, wiki links, and folder structure are preserved.
-- **Nest sharing + collaborators** — set per-nest visibility and add collaborators with read or write access. A Share affordance is now inline in the document view.
-- **Public read-only nests** — flip a nest to `visibility=public` to serve it to unauthenticated readers (bypasses auth for GETs only); writes still require a key.
-- **Custom logo / branding** — set `LOGO_URL` to show your own logo in the UI header and login screen. See [CONFIGURATION.md](./CONFIGURATION.md).
-- **Governance** — nest owners can self-approve their own changes; new per-nest auto-approve toggle; role-based action gating (buttons reflect the viewer's role); stewards can edit scope during a role change.
-- **Editor** — `[[wikilink]]` autocomplete, broken-link click creates a new doc with the title pre-filled, tag chips filter the nest list, Notion-style H1 title, click-to-edit, and an unsaved-changes warning.
-- **Stability** — added an error boundary so a render error in one view no longer blanks the whole app; bumped `uuid` to 14.
-
-Full history in [CHANGELOG.md](./CHANGELOG.md).
-
-## What's new in 1.0.1
-
-- **Document hashing pipeline** — external-edit detection, conflict-aware safe-publish, and inline version diffs powered by `@promptowl/contextnest-engine`. When a file is edited outside the UI, the editor shows an "External edit detected" banner with a side-by-side diff and an adopt / keep choice.
-- **Markdown rendering** — new `DocumentViewer` (react-markdown + remark-gfm + wikilink support) renders CLI/MCP-authored markdown correctly, with a view/edit toggle.
-- **License revocation now blocks writes synchronously** — revoke flips an in-process "writes blocked" flag immediately; the next write returns `503`.
-- **Dashboard stats** — new `GET /stats` endpoint surfaces nest / document / user counts.
-- **Docker fix** — Dockerfile now installs via npm against the shipped `package-lock.json`; base image bumped to `node:22-slim`.
-
-Full history in [CHANGELOG.md](./CHANGELOG.md).
+Release notes live in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Licensing
 

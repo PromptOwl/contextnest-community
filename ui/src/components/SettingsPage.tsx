@@ -7,8 +7,7 @@
  * list and to that tab's `keys` (so the unsaved-changes dot tracks it).
  */
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2 } from "lucide-react";
-import { toast } from "sonner";
+import { ArrowLeft, Check, Copy, KeyRound, Shield, Loader2, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -20,8 +19,11 @@ import {
   CardContent,
 } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { BetaBadge } from "@/components/ui/beta-badge";
 import type { AdminSettings, SignInGate, ManualSignIn } from "../lib/api";
 import { sendTestNotification } from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
+import { toast } from "sonner";
 
 interface SettingsPageProps {
   onBack: () => void;
@@ -75,6 +77,7 @@ const TABS: {
       "oidc_client_secret",
       "oidc_allowed_domains",
       "oidc_auto_provision",
+      "oidc_department_tagging",
     ],
   },
   {
@@ -89,7 +92,10 @@ const TABS: {
       "telemetry_enabled",
       "max_body_bytes",
       "trace_retention_days",
+      "type_artifact_enabled",
+      "type_table_enabled",
       "workflow_plane_enabled",
+      "promptowl_teams_enabled",
       "subagent_runs_enabled",
       "subagent_max_depth",
       "subagent_max_children",
@@ -132,15 +138,34 @@ function TextField({
   onChange: (v: string) => void;
   type?: string;
 }) {
+  // Secret fields get a show/hide toggle so an admin can verify what they
+  // typed. noAutofill stays keyed on the DECLARED type (password), so revealing
+  // it doesn't re-open the door to credential managers stuffing the box.
+  const isPassword = type === "password";
+  const [reveal, setReveal] = useState(false);
   return (
-    <Input
-      value={value}
-      type={type}
-      placeholder={placeholder}
-      onChange={(e) => onChange(e.target.value)}
-      className="flex-1"
-      {...noAutofill(type)}
-    />
+    <div className="relative flex-1">
+      <Input
+        value={value}
+        type={isPassword && reveal ? "text" : type}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+        className={isPassword ? "flex-1 pr-9" : "flex-1"}
+        {...noAutofill(type)}
+      />
+      {isPassword && (
+        <button
+          type="button"
+          tabIndex={-1}
+          onClick={() => setReveal((r) => !r)}
+          className="absolute inset-y-0 right-0 flex items-center px-2.5 text-muted-foreground hover:text-foreground"
+          title={reveal ? "Hide" : "Show"}
+          aria-label={reveal ? "Hide value" : "Show value"}
+        >
+          {reveal ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -793,30 +818,7 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                           variant="outline"
                           size="sm"
                           onClick={async () => {
-                            // navigator.clipboard throws on insecure contexts
-                            // (plain-HTTP local setups) — fall back to the
-                            // legacy execCommand path, and if that fails too,
-                            // tell the admin to copy by hand.
-                            try {
-                              await navigator.clipboard.writeText(redirectUri);
-                            } catch {
-                              try {
-                                const ta = document.createElement("textarea");
-                                ta.value = redirectUri;
-                                ta.style.position = "fixed";
-                                ta.style.opacity = "0";
-                                document.body.appendChild(ta);
-                                ta.select();
-                                const ok = document.execCommand("copy");
-                                document.body.removeChild(ta);
-                                if (!ok) throw new Error("copy failed");
-                              } catch {
-                                toast.error(
-                                  "Couldn't copy automatically — select the URI text and copy it manually.",
-                                );
-                                return;
-                              }
-                            }
+                            if (!(await copyTextWithToast(redirectUri))) return;
                             setCopiedRedirect(true);
                             setTimeout(() => setCopiedRedirect(false), 1500);
                           }}
@@ -868,6 +870,22 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   <Switch
                     checked={draft.oidc_auto_provision}
                     onCheckedChange={(v) => set({ oidc_auto_provision: v })}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-medium">
+                      Department auto-tagging
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Tag new documents with the creator's directory department
+                      (requires the department claim from your IdP).
+                    </p>
+                  </div>
+                  <Switch
+                    checked={draft.oidc_department_tagging}
+                    onCheckedChange={(v) => set({ oidc_department_tagging: v })}
                   />
                 </div>
 
@@ -1042,10 +1060,50 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
               </CardContent>
             </Card>
 
+            {/* Content types — per-type creation toggles (default on).
+                Soft-disable: turning one off refuses NEW nodes of the type;
+                existing nodes still read/render/version. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Content types</CardTitle>
+                <CardDescription>
+                  Which node types can be created on this server. Turning one
+                  off hides it from the editor and refuses new creations —
+                  existing nodes of that type stay readable and versioned.
+                  Runnable types (agent, skill, tool) are governed by the
+                  workflow plane below.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    Artifacts (hosted HTML) —{" "}
+                    {draft.type_artifact_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.type_artifact_enabled}
+                    onCheckedChange={(v) => set({ type_artifact_enabled: v })}
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    Tables (CSV fact stores) —{" "}
+                    {draft.type_table_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.type_table_enabled}
+                    onCheckedChange={(v) => set({ type_table_enabled: v })}
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
             {/* Workflow plane ("turing" track) */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Workflow plane</CardTitle>
+                <CardTitle className="text-base">
+                  Workflow plane <BetaBadge className="ml-1 align-middle" />
+                </CardTitle>
                 <CardDescription>
                   Typed edges, an edge-type registry, and governed runs — the
                   automation layer. Optional; off by default. Turning it on adds
@@ -1069,6 +1127,32 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                         ...(v ? {} : { subagent_runs_enabled: false }),
                       })
                     }
+                  />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Import teams from PromptOwl */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">
+                  Import teams from PromptOwl
+                </CardTitle>
+                <CardDescription>
+                  Lets users who signed in with PromptOwl pull their PromptOwl
+                  teams in as local teams. Off by default. When off, the
+                  PromptOwl Teams panel is hidden and the import API is
+                  unavailable.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.promptowl_teams_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.promptowl_teams_enabled}
+                    onCheckedChange={(v) => set({ promptowl_teams_enabled: v })}
                   />
                 </div>
               </CardContent>

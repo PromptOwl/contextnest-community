@@ -19,6 +19,7 @@ import type { ImportedFile } from "../lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
@@ -35,10 +36,32 @@ interface ImportFolderModalProps {
 const TEXT_FILE = /\.(md|markdown|ya?ml|txt|json)$/i;
 
 // A path segment we never recurse into. `.versions` is the exception — it
-// carries engine history we want to preserve on import.
+// carries engine history we want to preserve on import. `_suggestions` is the
+// engine's per-doc staged-suggestion store — a nest's own derived governance
+// state that must NOT ride along (it would surface as phantom external edits).
 function isSkippedDir(name: string): boolean {
   if (name === ".versions") return false;
-  return name.startsWith(".") || name === "node_modules";
+  return name.startsWith(".") || name === "node_modules" || name === "_suggestions";
+}
+
+// Engine/agent files that ride along but never become documents — mirrors
+// FlatNestStorage discovery so the modal's "will import" count matches what
+// the server actually registers.
+const META_FILES = new Set([
+  "INDEX.md", "CONTEXT.md", "CLAUDE.md", "GEMINI.md", "AGENTS.md", "QWEN.md",
+]);
+
+/** How many collected files will actually become documents. The upload also
+ *  carries .versions history + yaml/txt/json, none of which are docs, so the
+ *  raw file count badly overstates what gets imported. */
+function countImportableDocs(files: ImportedFile[]): number {
+  return files.filter((f) => {
+    const segs = f.path.split("/");
+    const name = segs[segs.length - 1];
+    if (!name.endsWith(".md")) return false; // discovery keys off .md only
+    if (META_FILES.has(name)) return false;
+    return !segs.some((s) => s.startsWith(".") || s === "node_modules");
+  }).length;
 }
 
 /** Walk a FileSystemDirectoryHandle, collecting text files with relative paths. */
@@ -79,6 +102,7 @@ export function ImportFolderModal({ isOpen, onClose, onImported }: ImportFolderM
   const [name, setName] = useState("");
   const [scanning, setScanning] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -89,6 +113,7 @@ export function ImportFolderModal({ isOpen, onClose, onImported }: ImportFolderM
     setError(null);
     setScanning(false);
     setImporting(false);
+    setProgress(null);
   };
 
   const handleClose = () => {
@@ -153,15 +178,19 @@ export function ImportFolderModal({ isOpen, onClose, onImported }: ImportFolderM
   const handleImport = async () => {
     if (!files) return;
     setImporting(true);
+    setProgress(null);
     setError(null);
     try {
-      await api.importNest(name.trim() || folderName, files);
+      await api.importNest(name.trim() || folderName, files, (done, total) =>
+        setProgress({ done, total }),
+      );
       onImported();
       handleClose();
     } catch (err: any) {
       console.error("[ImportFolderModal] import failed", err);
       setError(err?.message || "Import failed");
       setImporting(false);
+      setProgress(null);
     }
   };
 
@@ -207,13 +236,17 @@ export function ImportFolderModal({ isOpen, onClose, onImported }: ImportFolderM
               )}
               Choose folder
             </Button>
-            {files && (
-              <p className="break-words text-sm text-muted-foreground">
-                <span className="font-medium text-foreground">{folderName}</span>
-                {" — "}
-                {files.length} file{files.length === 1 ? "" : "s"}
-              </p>
-            )}
+            {files && (() => {
+              const docs = countImportableDocs(files);
+              return (
+                <p className="break-words text-sm text-muted-foreground">
+                  <span className="font-medium text-foreground">{folderName}</span>
+                  {" — "}
+                  {docs} document{docs === 1 ? "" : "s"}
+                  <span className="text-xs"> · {files.length} file{files.length === 1 ? "" : "s"} scanned</span>
+                </p>
+              );
+            })()}
           </div>
 
           <div className="space-y-1">
@@ -224,6 +257,21 @@ export function ImportFolderModal({ isOpen, onClose, onImported }: ImportFolderM
               onChange={(e) => setName(e.target.value)}
             />
           </div>
+
+          {importing && (
+            <div className="space-y-1">
+              <Progress
+                value={progress && progress.total > 0
+                  ? Math.round((progress.done / progress.total) * 100)
+                  : undefined}
+              />
+              <p className="text-xs text-muted-foreground">
+                {progress
+                  ? `Registering ${progress.done} of ${progress.total} documents…`
+                  : "Uploading and preparing…"}
+              </p>
+            </div>
+          )}
 
           {error && <p className="text-sm text-destructive">{error}</p>}
         </div>

@@ -185,6 +185,21 @@ export function rowsToMarkdownTable(
   return [line(header), separator, ...body.map(line)].join("\n");
 }
 
+/** RFC-4180 cell quoting: wrap when the cell carries a comma, quote, or newline. */
+function csvEscapeCell(cell: string): string {
+  return /[",\n\r]/.test(cell) ? `"${cell.replace(/"/g, '""')}"` : cell;
+}
+
+/**
+ * Rows → canonical comma-CSV (no trailing newline). Used by the table-node
+ * source editor to normalize TSV/semicolon grids (spreadsheet clipboards,
+ * European exports) into the body format the server's table parser and
+ * /table-query read.
+ */
+export function rowsToCsv(rows: string[][]): string {
+  return rows.map((r) => r.map(csvEscapeCell).join(",")).join("\n");
+}
+
 export interface DetectedTable {
   delimiter: Delimiter;
   rows: string[][];
@@ -231,6 +246,103 @@ export function looksLikeDelimitedTable(text: string): DetectedTable | null {
     }
   }
   return null;
+}
+
+/**
+ * Single-ROW variant of the paste detection: is this one line (no newline)
+ * a tab- or semicolon-delimited grid row? Copying a single row from a
+ * spreadsheet yields exactly this (`A\tB\tC`, no trailing newline), which
+ * `looksLikeDelimitedTable` deliberately rejects (it requires ≥2 rows) —
+ * without this check the literal tabs would land inside one comma-cell.
+ *
+ * Tab: ≥2 cells is a strong spreadsheet signal. Semicolon: appears in
+ * prose, so additionally no cell may read as a sentence (same length cap
+ * as the multi-row heuristic). Comma lines are already canonical CSV and
+ * are never matched.
+ */
+export function looksLikeDelimitedRow(text: string): DetectedTable | null {
+  const trimmed = text.replace(/\s+$/, "");
+  if (!trimmed || trimmed.includes("\n") || trimmed.includes("\r")) return null;
+
+  if (trimmed.includes("\t")) {
+    const rows = parseDelimited(trimmed, "\t");
+    if (rows.length === 1 && rows[0].length >= 2) {
+      return { delimiter: "\t", rows };
+    }
+    return null;
+  }
+
+  if (trimmed.includes(";") && !trimmed.includes(",")) {
+    const rows = parseDelimited(trimmed, ";");
+    if (
+      rows.length === 1 &&
+      rows[0].length >= 2 &&
+      rows[0].every((c) => c.length <= MAX_DETECTED_CELL_LENGTH)
+    ) {
+      return { delimiter: ";", rows };
+    }
+  }
+  return null;
+}
+
+/** Refuse to read absurdly large files into memory — a table this size
+ *  would be unusable in the editor anyway. Shared by every "table from
+ *  CSV/TSV file" upload button. */
+export const MAX_CSV_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
+
+export type UploadedTableError = "too-large" | "unreadable" | "empty";
+
+export type UploadedTableResult =
+  | { ok: true; text: string; delimiter: Delimiter; rows: string[][] }
+  | { ok: false; error: UploadedTableError };
+
+/**
+ * Shared upload pipeline for the CSV/TSV file buttons (markdown editor's
+ * "Table from CSV / TSV" insert + the table-node source editor's replace):
+ * size cap → read → delimiter resolution (a `.tsv` extension pins tab;
+ * otherwise auto-detect, with comma as the harmless single-column
+ * fallback) → parse → empty check. Callers map the error codes to toasts
+ * via uploadedTableErrorMessage so the guard copy stays in one place.
+ *
+ * The `file` parameter is structural (name/size/text) rather than the DOM
+ * `File` type, keeping this module DOM-free and the pipeline testable.
+ */
+export async function readUploadedTable(file: {
+  name: string;
+  size: number;
+  text: () => Promise<string>;
+}): Promise<UploadedTableResult> {
+  if (file.size > MAX_CSV_FILE_BYTES) return { ok: false, error: "too-large" };
+  let text: string;
+  try {
+    text = await file.text();
+  } catch {
+    return { ok: false, error: "unreadable" };
+  }
+  const delimiter = /\.tsv$/i.test(file.name)
+    ? "\t"
+    : (detectDelimiter(text) ?? ",");
+  const rows = parseDelimited(text, delimiter);
+  if (rows.length === 0) return { ok: false, error: "empty" };
+  return { ok: true, text, delimiter, rows };
+}
+
+/** One toast string per UploadedTableError, shared by both upload buttons. */
+export function uploadedTableErrorMessage(
+  error: UploadedTableError,
+  file: { size: number },
+): string {
+  switch (error) {
+    case "too-large":
+      return (
+        `That file is ${(file.size / (1024 * 1024)).toFixed(1)} MB — ` +
+        `the limit for table import is 10 MB.`
+      );
+    case "unreadable":
+      return "Couldn't read that file.";
+    case "empty":
+      return "No table rows found in that file.";
+  }
 }
 
 export interface ConvertedTable {

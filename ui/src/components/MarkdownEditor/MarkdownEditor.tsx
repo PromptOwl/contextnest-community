@@ -31,6 +31,7 @@ import Typography from "@tiptap/extension-typography";
 import CharacterCount from "@tiptap/extension-character-count";
 import { DragHandle } from "@tiptap/extension-drag-handle-react";
 import { NodeRange } from "@tiptap/extension-node-range";
+import type { Transaction } from "@tiptap/pm/state";
 import { Markdown, type MarkdownStorage } from "tiptap-markdown";
 
 // tiptap-markdown's storage isn't in TipTap's Storage type; cast.
@@ -176,9 +177,9 @@ import { toast } from "sonner";
 import {
   looksLikeDelimitedTable,
   detectHeaderRow,
-  detectDelimiter,
-  parseDelimited,
   rowsToMarkdownTable,
+  readUploadedTable,
+  uploadedTableErrorMessage,
   LARGE_TABLE_ROW_THRESHOLD,
   type Delimiter,
 } from "@/lib/csv-table";
@@ -202,6 +203,7 @@ import { toggleExtensions } from "./extensions/Toggle";
 import { columnExtensions } from "./extensions/Columns";
 import { TableControls } from "./TableControls";
 import { TaskCheckbox } from "./extensions/TaskCheckbox";
+import { VideoPreview } from "./extensions/VideoPreview";
 import { Mention } from "./extensions/Mention";
 import {
   SearchReplace,
@@ -233,8 +235,9 @@ interface MarkdownEditorProps {
   currentNodeId?: string;
   /** Toolbar "Link to document" button calls this. Parent shows the picker. */
   onRequestDocLink?: () => void;
-  /** Toolbar "Image" button: upload the picked file, resolve to its URL.
-   *  Omit to hide the button (e.g. contexts with no asset storage). */
+  /** Toolbar "Image or video" button (and file drag-drop): upload the
+   *  picked file, resolve to its asset URL. Omit to hide the button
+   *  (e.g. contexts with no asset storage). */
   onUploadImage?: (file: File) => Promise<string>;
   /** Click on a `[[Title]]` decoration inside the editor. */
   onWikiLinkClick?: (title: string, id: string | null) => void;
@@ -353,6 +356,38 @@ export const MarkdownEditor = forwardRef<
   // Lets the static `handlePaste` (captured once at useEditor time) reach
   // the live editor instance for markdown-aware insertion.
   const editorRef = useRef<Editor | null>(null);
+  // Same trick for `handleDrop`: the uploader prop is an inline arrow in
+  // the parent, so route it through a ref to avoid a stale closure.
+  const onUploadImageRef = useRef(onUploadImage);
+  onUploadImageRef.current = onUploadImage;
+
+  // ONE in-flight media upload at a time, shared by the toolbar picker and
+  // drag-drop. State drives the toolbar's disabled UI; the ref is the
+  // source of truth for the static handleDrop closure.
+  const [uploading, setUploading] = useState(false);
+  const uploadingRef = useRef(false);
+  const runMediaUpload = async (
+    ed: Editor,
+    file: File,
+    insertPos?: number,
+  ) => {
+    const upload = onUploadImageRef.current;
+    if (!upload) return;
+    if (uploadingRef.current) {
+      toast.error("An upload is already in progress — try again when it finishes.");
+      return;
+    }
+    uploadingRef.current = true;
+    setUploading(true);
+    try {
+      await uploadAndInsertMedia(ed, file, upload, insertPos);
+    } finally {
+      uploadingRef.current = false;
+      setUploading(false);
+    }
+  };
+  const runMediaUploadRef = useRef(runMediaUpload);
+  runMediaUploadRef.current = runMediaUpload;
 
   const editor = useEditor({
     extensions: [
@@ -435,6 +470,7 @@ export const MarkdownEditor = forwardRef<
           : undefined,
       }),
       TaskCheckbox,
+      VideoPreview,
       Mention.configure({ onMentionClick }),
       SearchReplace,
       // html:true keeps legacy HTML docs loadable; output is markdown.
@@ -487,6 +523,31 @@ export const MarkdownEditor = forwardRef<
           text,
           delimiter: detected.delimiter,
         });
+      },
+      // Image/video file dropped onto the editor → same upload + insert
+      // as the toolbar picker, at the drop position. Anything else falls
+      // through (return false) so ProseMirror's default drop handling —
+      // text drags, in-editor block moves — is untouched.
+      handleDrop: (view, event) => {
+        const ed = editorRef.current;
+        const upload = onUploadImageRef.current;
+        const files = event.dataTransfer?.files;
+        if (!ed || !upload || !files || files.length === 0) return false;
+        // ProseMirror fires custom handleDrop even on a read-only view —
+        // never upload/insert into a locked or preview-mode doc.
+        if (!ed.isEditable) return false;
+        const file = files[0];
+        if (!MEDIA_FILE_RE.test(file.name)) return false;
+        event.preventDefault();
+        if (files.length > 1) {
+          toast("Only the first file was uploaded — drop one file at a time.");
+        }
+        const pos = view.posAtCoords({
+          left: event.clientX,
+          top: event.clientY,
+        })?.pos;
+        void runMediaUploadRef.current(ed, file, pos);
+        return true;
       },
       handleKeyDown: (_view, event) => {
         const popup = wikiPopupRef.current;
@@ -855,6 +916,25 @@ export const MarkdownEditor = forwardRef<
     };
   }, [editor]);
 
+  // Keep blockTarget.pos valid across document edits. The drag handle only
+  // re-reports its position via onNodeChange when the pointed node changes, so
+  // a paste (or any edit that shifts positions) leaves the last-reported pos
+  // stale — the block menu would then act on the wrong block. Remap it through
+  // each transaction's mapping so it always points at the same block.
+  useEffect(() => {
+    if (!editor) return;
+    const onTr = ({ transaction }: { transaction: Transaction }) => {
+      if (!transaction.docChanged) return;
+      setBlockTarget((bt) =>
+        bt ? { pos: transaction.mapping.map(bt.pos) } : bt,
+      );
+    };
+    editor.on("transaction", onTr);
+    return () => {
+      editor.off("transaction", onTr);
+    };
+  }, [editor]);
+
   // Close the open block menu on any outside mousedown. Handle/menu stop
   // propagation so their own clicks don't trip this.
   useEffect(() => {
@@ -954,6 +1034,38 @@ export const MarkdownEditor = forwardRef<
     closeBlockMenu();
   };
 
+  // "Turn into → Toggle". setDetails() wraps the line into the collapsed BODY
+  // with an empty summary — the text vanishes and the block reads as a stray
+  // bullet. Instead build the toggle with the line's text as its SUMMARY
+  // (the visible header) and open it, so nothing is hidden.
+  const turnIntoToggle = () => {
+    if (!editor || !blockTarget) return;
+    const node = editor.state.doc.nodeAt(blockTarget.pos);
+    if (!node) return;
+    const from = blockTarget.pos;
+    const to = from + node.nodeSize;
+    const text = node.textContent;
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(
+        { from, to },
+        {
+          type: "details",
+          attrs: { open: true },
+          content: [
+            {
+              type: "detailsSummary",
+              ...(text ? { content: [{ type: "text", text }] } : {}),
+            },
+            { type: "detailsContent", content: [{ type: "paragraph" }] },
+          ],
+        },
+      )
+      .run();
+    closeBlockMenu();
+  };
+
   const syncMatchInfo = (s: SearchState) =>
     setMatchInfo({
       current: s.results.length ? s.current + 1 : 0,
@@ -1036,7 +1148,12 @@ export const MarkdownEditor = forwardRef<
             editor={editor}
             onLink={setLink}
             onRequestDocLink={onRequestDocLink}
-            onUploadImage={onUploadImage}
+            onMediaFile={
+              onUploadImage
+                ? (file) => void runMediaUpload(editor, file)
+                : undefined
+            }
+            uploading={uploading}
             previewing={previewing}
             onTogglePreview={() => setPreviewing((p) => !p)}
           />
@@ -1458,7 +1575,7 @@ export const MarkdownEditor = forwardRef<
             <Info className="h-3.5 w-3.5" /> Callout
           </BlockMenuItem>
           <BlockMenuItem
-            onClick={() => turnBlockInto((c) => c.setDetails().run())}
+            onClick={turnIntoToggle}
           >
             <ChevronRight className="h-3.5 w-3.5" /> Toggle
           </BlockMenuItem>
@@ -1620,85 +1737,126 @@ function insertDelimitedTable(
   return true;
 }
 
+// Media the editor can upload into nest assets — mirrors the server
+// allowlist in src/nests/asset-routes.ts (SVG deliberately excluded there;
+// stored-XSS surface).
+const MEDIA_ACCEPT =
+  "image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm";
+const MEDIA_FILE_RE = /\.(png|jpe?g|gif|webp|mp4|webm)$/i;
+const VIDEO_FILE_RE = /\.(mp4|webm)$/i;
+// Client-side mirrors of the server's per-type caps — fail fast with a
+// friendly toast instead of shipping the file upstream to be rejected.
+// Video mirrors the server default (config.VIDEO_MAX_BYTES = 30 MB), kept under
+// Cloud Run's 32 MiB request limit. If a deployment raises VIDEO_MAX_MB, bump
+// this to match so the client doesn't reject an upload the server would accept.
+const IMAGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
+const VIDEO_MAX_UPLOAD_BYTES = 30 * 1024 * 1024; // 30 MB
+
+/**
+ * Upload an image/video via the caller's asset uploader and insert the
+ * reference at the cursor (or at `insertPos`, e.g. drop coordinates).
+ * Images insert as an image node (persists as `![alt](url)`); videos
+ * insert as the bare asset URL on its own paragraph line — the read view
+ * upgrades same-origin asset video URLs to a <video> player.
+ * Shared by the toolbar picker and editor drag-drop.
+ */
+async function uploadAndInsertMedia(
+  editor: Editor,
+  file: File,
+  upload: (file: File) => Promise<string>,
+  insertPos?: number,
+): Promise<void> {
+  const isVideo = VIDEO_FILE_RE.test(file.name);
+  const kind = isVideo ? "video" : "image";
+  const maxBytes = isVideo ? VIDEO_MAX_UPLOAD_BYTES : IMAGE_MAX_UPLOAD_BYTES;
+  if (file.size > maxBytes) {
+    toast.error(
+      `That ${kind} is ${(file.size / (1024 * 1024)).toFixed(1)} MB — ` +
+        `the limit is ${maxBytes / (1024 * 1024)} MB.`,
+    );
+    return;
+  }
+  const toastId = toast.loading(
+    `Uploading ${kind}… (${(file.size / (1024 * 1024)).toFixed(1)} MB)`,
+  );
+  try {
+    const url = await upload(file);
+    let chain = editor.chain().focus();
+    if (insertPos !== undefined) chain = chain.setTextSelection(insertPos);
+    if (isVideo) {
+      chain
+        .insertContent({
+          type: "paragraph",
+          content: [{ type: "text", text: url }],
+        })
+        .run();
+    } else {
+      chain
+        .setImage({ src: url, alt: file.name.replace(/\.[^.]+$/, "") })
+        .run();
+    }
+    toast.success(`${isVideo ? "Video" : "Image"} uploaded.`, { id: toastId });
+  } catch (err: any) {
+    toast.error(err?.message || `${kind} upload failed`, { id: toastId });
+  }
+}
+
 function Toolbar({
   editor,
   onLink,
   onRequestDocLink,
-  onUploadImage,
+  onMediaFile,
+  uploading,
   previewing,
   onTogglePreview,
 }: {
   editor: Editor;
   onLink: () => void;
   onRequestDocLink?: () => void;
-  onUploadImage?: (file: File) => Promise<string>;
+  /** Picked image/video file. Parent owns the shared single-flight
+   *  upload guard (toolbar + drag-drop) and the insert. */
+  onMediaFile?: (file: File) => void;
+  uploading: boolean;
   previewing: boolean;
   onTogglePreview: () => void;
 }) {
   // Hidden file input driven by the "Insert table from CSV" toolbar button.
   const csvInputRef = useRef<HTMLInputElement>(null);
   const pickCsv = () => csvInputRef.current?.click();
-  // Refuse to read absurdly large files into memory — a table this size
-  // would be unusable in the editor anyway.
-  const MAX_CSV_FILE_BYTES = 10 * 1024 * 1024; // 10 MB
   const onCsvPicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
     if (!file) return;
-    if (file.size > MAX_CSV_FILE_BYTES) {
-      toast.error(
-        `That file is ${(file.size / (1024 * 1024)).toFixed(1)} MB — ` +
-          `the limit for table import is 10 MB.`,
-      );
-      return;
-    }
     const toastId = toast.loading("Processing file…");
     // Let the loader actually paint before the (synchronous, possibly heavy)
     // read + parse blocks the main thread — two frames clears the commit+paint.
     await new Promise((r) =>
       requestAnimationFrame(() => requestAnimationFrame(() => r(null))),
     );
-    let text: string;
-    try {
-      text = await file.text();
-    } catch {
-      toast.error("Couldn't read that file.", { id: toastId });
-      return;
-    }
-    // .tsv extension pins the delimiter; otherwise auto-detect
-    // (tab → comma → semicolon). Comma is a harmless single-column fallback.
-    const delimiter = /\.tsv$/i.test(file.name)
-      ? "\t"
-      : (detectDelimiter(text) ?? ",");
-    const rows = parseDelimited(text, delimiter);
-    if (rows.length === 0) {
-      toast.error("No table rows found in that file.", { id: toastId });
+    // Size cap, read, delimiter resolution, parse — shared with the
+    // table-node source editor (csv-table.readUploadedTable).
+    const res = await readUploadedTable(file);
+    if (!res.ok) {
+      toast.error(uploadedTableErrorMessage(res.error, file), { id: toastId });
       return;
     }
     // insertDelimitedTable pops its own result toast; drop the loader first.
     toast.dismiss(toastId);
-    insertDelimitedTable(editor, rows, { text, delimiter });
+    insertDelimitedTable(editor, res.rows, {
+      text: res.text,
+      delimiter: res.delimiter,
+    });
   };
 
-  // Hidden file input driven by the Image toolbar button.
-  const imageInputRef = useRef<HTMLInputElement>(null);
-  const pickImage = () => imageInputRef.current?.click();
-  const onImagePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Hidden file input driven by the "Image or video" toolbar button.
+  // Upload + insert (and the single-flight guard shared with drag-drop)
+  // live in the parent via onMediaFile.
+  const mediaInputRef = useRef<HTMLInputElement>(null);
+  const pickMedia = () => mediaInputRef.current?.click();
+  const onMediaPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
-    if (!file || !onUploadImage) return;
-    const toastId = toast.loading("Uploading image…");
-    try {
-      const url = await onUploadImage(file);
-      editor
-        .chain()
-        .focus()
-        .setImage({ src: url, alt: file.name.replace(/\.[^.]+$/, "") })
-        .run();
-      toast.success("Image uploaded.", { id: toastId });
-    } catch (err: any) {
-      toast.error(err?.message || "Image upload failed", { id: toastId });
-    }
+    if (file) onMediaFile?.(file);
   };
   // In preview mode every formatting affordance is irrelevant — collapse
   // the toolbar to just the toggle so the user has one obvious way back
@@ -1838,15 +1996,16 @@ function Toolbar({
             // Match ToolbarButton: don't blur the editor before the menu opens.
             onMouseDown={(e) => e.preventDefault()}
             className="h-7 w-7 p-0"
+            disabled={uploading}
           >
             <Upload className="h-3.5 w-3.5" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
-          {onUploadImage && (
-            <DropdownMenuItem onSelect={pickImage}>
+          {onMediaFile && (
+            <DropdownMenuItem onSelect={pickMedia}>
               <ImagePlus className="mr-2 h-4 w-4" />
-              Image
+              Image or video
             </DropdownMenuItem>
           )}
           <DropdownMenuItem onSelect={pickCsv}>
@@ -1862,13 +2021,13 @@ function Toolbar({
         className="hidden"
         onChange={onCsvPicked}
       />
-      {onUploadImage && (
+      {onMediaFile && (
         <input
-          ref={imageInputRef}
+          ref={mediaInputRef}
           type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp"
+          accept={MEDIA_ACCEPT}
           className="hidden"
-          onChange={onImagePicked}
+          onChange={onMediaPicked}
         />
       )}
 

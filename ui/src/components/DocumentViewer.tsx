@@ -85,6 +85,24 @@ const remarkStripHtml: Plugin<[], Root> = () => (tree) => {
   });
 };
 
+// Same-origin nest video assets only: a root-relative /nests/<id>/assets/
+// path with a server-minted uuid name (mirrors SAFE_NAME in
+// src/nests/asset-routes.ts). External URLs never match — they stay plain
+// links, no exceptions.
+const ASSET_VIDEO_RE =
+  /^\/nests\/[^/]+\/assets\/[0-9a-f-]{36}\.(mp4|webm)$/;
+
+// stopPropagation: block parent click-to-edit when using the controls.
+const AssetVideo = ({ src }: { src: string }) => (
+  <video
+    controls
+    preload="metadata"
+    className="max-w-full"
+    src={src}
+    onClick={(e) => e.stopPropagation()}
+  />
+);
+
 export interface DocumentViewerProps {
   /** The raw markdown source to render. Should NOT be HTML; use a
    *  read-only TipTap surface for HTML-stored legacy docs. */
@@ -178,18 +196,44 @@ export function DocumentViewer({
                 </button>
               );
             },
+            // The editor inserts uploaded videos as the bare asset URL on
+            // its own line — a paragraph whose sole text child is a
+            // same-origin asset video URL renders as the player.
+            p: ({ node, children, ...props }: any) => {
+              const kids = node?.children;
+              if (
+                kids?.length === 1 &&
+                kids[0].type === "text" &&
+                ASSET_VIDEO_RE.test(kids[0].value.trim())
+              ) {
+                return <AssetVideo src={kids[0].value.trim()} />;
+              }
+              return <p {...props}>{children}</p>;
+            },
+            // Image syntax pointing at a video asset also gets the player;
+            // real images keep react-markdown's default <img> rendering.
+            img: ({ src, ...props }: any) =>
+              typeof src === "string" && ASSET_VIDEO_RE.test(src) ? (
+                <AssetVideo src={src} />
+              ) : (
+                <img src={src} {...props} />
+              ),
             // stopPropagation: block parent click-to-edit on link click.
-            a: ({ href, children, ...props }: any) => (
-              <a
-                href={href}
-                target="_blank"
-                rel="noreferrer noopener"
-                onClick={(e) => e.stopPropagation()}
-                {...props}
-              >
-                {children}
-              </a>
-            ),
+            // Same-origin asset video links render as the player instead.
+            a: ({ href, children, ...props }: any) =>
+              typeof href === "string" && ASSET_VIDEO_RE.test(href) ? (
+                <AssetVideo src={href} />
+              ) : (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  onClick={(e) => e.stopPropagation()}
+                  {...props}
+                >
+                  {children}
+                </a>
+              ),
           } as any
         }
       >

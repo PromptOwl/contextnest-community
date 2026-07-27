@@ -17,6 +17,11 @@ export interface Nest {
   // into <DATA_ROOT>/nests/<id>); drives the "Imported" badge and flat
   // discovery. 0 for default nests.
   is_imported: number;
+  // 1 when draft-first + approval workflow is enabled. Read straight off the
+  // row by the dashboard annotate() path, so keep it on the type — a query
+  // that narrowed its columns would otherwise report every nest ungoverned
+  // with no compiler warning.
+  stewardship_enabled: number;
 }
 
 export interface ApiKey {
@@ -68,6 +73,17 @@ export interface Team {
   /** Owner's email, resolved on read for display ("Created by …"). */
   owner_email?: string;
   members: TeamMember[];
+  /**
+   * Where the team came from — 'promptowl' for an imported team, null for one
+   * created here. Drives the "imported" badge and the re-sync affordance.
+   */
+  source?: string | null;
+  /**
+   * The team's id in `source`'s system. Together with owner_id + source this is
+   * the import key: it's what makes a re-import update this row rather than
+   * create a second copy, and it survives a rename on either side.
+   */
+  external_id?: string | null;
   created_at: string;
   updated_at: string;
 }

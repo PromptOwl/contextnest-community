@@ -24,14 +24,19 @@ import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
 } from "@/components/ui/tooltip";
 import {
+  Tabs, TabsContent, TabsList, TabsTrigger,
+} from "@/components/ui/tabs";
+import {
   ArrowLeft, Users, Plus, Trash2, Loader2, AlertCircle, UserPlus,
   CheckCircle2, XCircle, Pencil, X,
 } from "lucide-react";
 import { toast } from "sonner";
+import { PromptowlTeamsPanel } from "./PromptowlTeamsPanel";
 import * as api from "../lib/api";
 import type { Team, TeamMember, TeamRole } from "../lib/api";
 import { TEAM_ROLES } from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
+import { isEmailish } from "../lib/utils";
 
 const MAX_VISIBLE_MEMBERS = 5;
 const roleLabel = (role: string) =>
@@ -56,8 +61,15 @@ interface TeamsPageProps {
 }
 
 export function TeamsPage({ onBack }: TeamsPageProps) {
-  const { adminStatus, isAdmin } = useAuth();
+  const { adminStatus, isAdmin, promptowlTeamsEnabled } = useAuth();
   const myEmail = (adminStatus?.me?.email || "").toLowerCase();
+  // Importing needs the PromptOwl token from a PromptOwl sign-in, so the tab is
+  // only offered to those sessions. Read once: it can't change without a
+  // sign-in, which remounts this anyway. The server enforces the same rule.
+  // Also gated by the PROMPTOWL_TEAMS_ENABLED feature flag: off → /teams/promptowl
+  // 404s, so hide the panel to match.
+  const [hasPromptowlSession] = useState(() => api.hasPromptowlSession());
+  const promptowlSession = promptowlTeamsEnabled && hasPromptowlSession;
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -101,6 +113,30 @@ export function TeamsPage({ onBack }: TeamsPageProps) {
     }
   };
 
+  const localTeams = loading ? (
+    <div className="flex justify-center py-12">
+      <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+    </div>
+  ) : teams.length === 0 ? (
+    <Card>
+      <CardContent className="py-10 text-center text-sm text-muted-foreground">
+        No teams yet. Create one to share a nest with a whole group at once.
+      </CardContent>
+    </Card>
+  ) : (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {teams.map((team) => (
+        <TeamCard
+          key={team.id}
+          team={team}
+          rank={myTeamRank(team, myEmail, isAdmin)}
+          onEdit={() => setEditTarget(team)}
+          onDelete={() => setDeleteTarget(team)}
+        />
+      ))}
+    </div>
+  );
+
   return (
     <TooltipProvider delayDuration={150}>
       <div className="w-full mx-auto p-4 sm:p-6 space-y-4">
@@ -133,28 +169,23 @@ export function TeamsPage({ onBack }: TeamsPageProps) {
           </Alert>
         )}
 
-        {loading ? (
-          <div className="flex justify-center py-12">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-          </div>
-        ) : teams.length === 0 ? (
-          <Card>
-            <CardContent className="py-10 text-center text-sm text-muted-foreground">
-              No teams yet. Create one to share a nest with a whole group at once.
-            </CardContent>
-          </Card>
+        {/* Without a PromptOwl sign-in there's nothing to import from, so the
+            tab strip would be a single tab — show the list bare instead. */}
+        {promptowlSession ? (
+          <Tabs defaultValue="cn">
+            <TabsList>
+              <TabsTrigger value="cn">ContextNest Teams</TabsTrigger>
+              <TabsTrigger value="po">PromptOwl Teams</TabsTrigger>
+            </TabsList>
+            <TabsContent value="cn" className="mt-4">
+              {localTeams}
+            </TabsContent>
+            <TabsContent value="po" className="mt-4">
+              <PromptowlTeamsPanel localTeams={teams} onImported={fetchTeams} />
+            </TabsContent>
+          </Tabs>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {teams.map((team) => (
-              <TeamCard
-                key={team.id}
-                team={team}
-                rank={myTeamRank(team, myEmail, isAdmin)}
-                onEdit={() => setEditTarget(team)}
-                onDelete={() => setDeleteTarget(team)}
-              />
-            ))}
-          </div>
+          localTeams
         )}
       </div>
 
@@ -256,6 +287,19 @@ function TeamCard({
               <Badge variant="secondary" className="shrink-0">
                 {team.members.length}
               </Badge>
+              {team.source === "promptowl" && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge variant="outline" className="shrink-0">
+                      PromptOwl
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Imported from PromptOwl. Re-syncing makes this roster match
+                    PromptOwl exactly.
+                  </TooltipContent>
+                </Tooltip>
+              )}
             </div>
             {team.owner_email && (
               <p className="text-xs text-muted-foreground truncate">
@@ -331,40 +375,56 @@ function AddMemberRow({
   const grantable = TEAM_ROLES.filter((r) => ROLE_RANK[r.value] <= maxRank);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<TeamRole>(grantable[0]?.value ?? "viewer");
+  const [error, setError] = useState<string | null>(null);
   const submit = () => {
     const e = email.trim();
     if (!e) return;
+    // Reject malformed input before it becomes a member chip — the server
+    // trusts the email, so a bad value would otherwise stick as a phantom
+    // member that can never register/match.
+    if (!isEmailish(e)) {
+      setError("Enter a valid email address.");
+      return;
+    }
+    setError(null);
     void Promise.resolve(onAdd(e, role)).then(() => {
       setEmail("");
       setRole(grantable[0]?.value ?? "viewer");
     });
   };
   return (
-    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-      <Input
-        type="email"
-        placeholder="person@company.com"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && submit()}
-        className="h-8 flex-1"
-      />
-      <Select value={role} onValueChange={(v) => setRole(v as TeamRole)}>
-        <SelectTrigger className="w-full sm:w-[130px] h-8">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {grantable.map((r) => (
-            <SelectItem key={r.value} value={r.value}>
-              {r.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Button size="sm" onClick={submit} disabled={busy || !email.trim()}>
-        <UserPlus className="h-4 w-4 mr-1" />
-        Add
-      </Button>
+    <div className="space-y-1">
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+        <Input
+          type="email"
+          placeholder="person@company.com"
+          value={email}
+          onChange={(e) => {
+            setEmail(e.target.value);
+            if (error) setError(null);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && submit()}
+          aria-invalid={!!error}
+          className="h-8 flex-1"
+        />
+        <Select value={role} onValueChange={(v) => setRole(v as TeamRole)}>
+          <SelectTrigger className="w-full sm:w-[130px] h-8">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {grantable.map((r) => (
+              <SelectItem key={r.value} value={r.value}>
+                {r.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button size="sm" onClick={submit} disabled={busy || !email.trim()}>
+          <UserPlus className="h-4 w-4 mr-1" />
+          Add
+        </Button>
+      </div>
+      {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
 }

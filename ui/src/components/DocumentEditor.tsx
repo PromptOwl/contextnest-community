@@ -51,6 +51,7 @@ import {
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
 import { TableViewer } from "./TableViewer";
+import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
@@ -74,6 +75,7 @@ import {
 import type { PendingChange } from "../lib/api";
 import { findBacklinks, renameImpactBacklinks, staleAliasLinks } from "../lib/backlinks";
 import { relatedDocs } from "../lib/related";
+import { copyTextWithToast } from "../lib/clipboard";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
 import { resolveWikiTarget, previewSnippet } from "../lib/wiki-preview";
@@ -150,7 +152,7 @@ export function DocumentEditor({
   onJumpBreadcrumb,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
-  const { adminStatus, isAdmin, workflowPlaneEnabled } = useAuth();
+  const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
   // you're reading it" instead of bouncing back to the nest. Same dialog
@@ -247,6 +249,13 @@ export function DocumentEditor({
     "document" | "artifact" | "agent" | "skill" | "tool" | "table"
   >("document");
   const isArtifactDraft = isNew && newType === "artifact";
+  // The node's kind for editor-surface decisions: the picked kind while
+  // drafting, the loaded type once it exists.
+  const effectiveType = isNew ? newType : (nodeType ?? "document");
+  // Source-only kinds get NO WYSIWYG: a tool's body is code and a table's
+  // body is CSV — TipTap's markdown round-trip mangles both. Edit mode is
+  // always a monospace source editor; the rich/raw toggle is meaningless.
+  const isSourceOnly = effectiveType === "tool" || effectiveType === "table";
   // Runnable = orchestrator-facing node (agent/skill) that carries a schedule.
   // For a new node it's the picked kind; for an existing one it's the loaded
   // type. Drives whether the schedule field shows and is sent on save.
@@ -260,13 +269,9 @@ export function DocumentEditor({
   const runnablesUrl = `${serverOrigin}/nests/${nestId}/runnables`;
   const [copiedRunnables, setCopiedRunnables] = useState(false);
   const copyRunnablesUrl = async () => {
-    try {
-      await navigator.clipboard.writeText(runnablesUrl);
-      setCopiedRunnables(true);
-      setTimeout(() => setCopiedRunnables(false), 1500);
-    } catch {
-      /* clipboard blocked — no-op */
-    }
+    if (!(await copyTextWithToast(runnablesUrl))) return;
+    setCopiedRunnables(true);
+    setTimeout(() => setCopiedRunnables(false), 1500);
   };
   // Inline anchored comments (annotations) parked beside the doc. commentMode
   // forces the rendered read view + highlight overlay even for editors, so
@@ -1310,13 +1315,16 @@ export function DocumentEditor({
                 testId: "document-editor-history",
                 onSelect: openVersions,
               });
-            moreActions.push({
-              // Toggle: the label names the mode you switch TO.
-              label: rawMode ? "Rich editor" : "Markdown source",
-              icon: Code2,
-              testId: "document-editor-markdown-toggle",
-              onSelect: () => setRawMode((v) => !v),
-            });
+            // Tool/table nodes ALWAYS edit as raw source (no rich editor
+            // exists for them), so there's nothing to toggle.
+            if (!isSourceOnly)
+              moreActions.push({
+                // Toggle: the label names the mode you switch TO.
+                label: rawMode ? "Rich editor" : "Markdown source",
+                icon: Code2,
+                testId: "document-editor-markdown-toggle",
+                onSelect: () => setRawMode((v) => !v),
+              });
             if (!isNew)
               moreActions.push({
                 label: "Copy link",
@@ -1325,8 +1333,10 @@ export function DocumentEditor({
                 testId: "document-editor-copy-link",
                 onSelect: () => {
                   const url = `${window.location.origin}${window.location.pathname}?nest=${encodeURIComponent(nestId)}&doc=${encodeURIComponent(nodeId)}`;
-                  navigator.clipboard.writeText(url);
-                  toast.success("Link copied — recipient needs access to this nest");
+                  void copyTextWithToast(
+                    url,
+                    "Link copied — recipient needs access to this nest",
+                  );
                 },
               });
             if (canShare)
@@ -1718,8 +1728,10 @@ export function DocumentEditor({
               {/* Icon segmented control, not a dropdown: all choices are
                   visible at once and carry the same type color language as
                   the list icons (document slate / artifact amber / agent
-                  violet / skill blue). Runnable types only when the workflow
-                  plane is on. */}
+                  violet / skill blue). Built from the enabled set: document
+                  always on; artifact/table only when their content-type
+                  toggle is on; runnable types only when the workflow plane
+                  is on. */}
               <div
                 className="inline-flex rounded-md border overflow-hidden"
                 role="radiogroup"
@@ -1729,10 +1741,18 @@ export function DocumentEditor({
                   [
                     { value: "document", label: "Document", Icon: FileText,
                       on: "bg-slate-500/15 text-slate-700 dark:text-slate-300" },
-                    { value: "artifact", label: "Artifact", Icon: Code2,
-                      on: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },
-                    { value: "table", label: "Table", Icon: Table2,
-                      on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300" },
+                    ...(typeArtifactEnabled
+                      ? [
+                          { value: "artifact", label: "Artifact", Icon: Code2,
+                            on: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },
+                        ]
+                      : []),
+                    ...(typeTableEnabled
+                      ? [
+                          { value: "table", label: "Table", Icon: Table2,
+                            on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300" },
+                        ]
+                      : []),
                     ...(workflowPlaneEnabled
                       ? [
                           { value: "agent", label: "Agent", Icon: Bot,
@@ -1893,13 +1913,23 @@ export function DocumentEditor({
           <div
             onClick={() => {
               if (commentMode || isViewOnly || isLocked || isArtifactDraft) return;
+              // Table read view is interactive (query box + buttons), so a
+              // stray click must not yank the grid away — entering edit is
+              // explicit via "Start Editing".
+              if (effectiveType === "table") return;
               if (mode === "view" && !isReviewerOnly) {
                 setMode("edit");
               }
             }}
           >
             <label className="block text-sm font-medium mb-1">
-              {isArtifactDraft ? "Artifact HTML" : "Content"}{" "}
+              {isArtifactDraft
+                ? "Artifact HTML"
+                : effectiveType === "tool"
+                  ? "Tool source (code)"
+                  : effectiveType === "table"
+                    ? "Table data (CSV)"
+                    : "Content"}{" "}
               <span className="text-destructive">*</span>
             </label>
             {compareVersion != null ? (
@@ -1985,6 +2015,39 @@ export function DocumentEditor({
                   );
                 })()}
               </div>
+            ) : isSourceOnly && mode === "edit" && !commentMode ? (
+              /* Tool/table edit is ALWAYS raw source — no TipTap, no
+                 markdown round-trip. Tables get the CSV affordances
+                 (file replace + grid-paste conversion) on top. */
+              effectiveType === "table" ? (
+                <TableSourceEditor
+                  value={content}
+                  onChange={(next) => {
+                    if (fieldsDisabled) return;
+                    setContent(next);
+                    setTouched(true);
+                  }}
+                  onBlur={saveOnBlur}
+                  readOnly={fieldsDisabled}
+                />
+              ) : (
+                <textarea
+                  value={content}
+                  onChange={(e) => {
+                    if (fieldsDisabled) return;
+                    setContent(e.target.value);
+                    setTouched(true);
+                  }}
+                  onBlur={saveOnBlur}
+                  readOnly={fieldsDisabled}
+                  spellCheck={false}
+                  placeholder={
+                    "The body is code — paste or write the tool's source."
+                  }
+                  className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                  data-testid="tool-source-editor"
+                />
+              )
             ) : rawMode ? (
               <textarea
                 value={content}
@@ -2012,7 +2075,11 @@ export function DocumentEditor({
                 spellCheck={false}
                 className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
               />
-            ) : (commentMode || mode === "view") && !looksLikeHtml(content) ? (
+            ) : (commentMode || mode === "view") &&
+              (isSourceOnly || !looksLikeHtml(content)) ? (
+              /* isSourceOnly bypasses the looksLikeHtml guard: a tool body
+                 may legitimately start with `<` (HTML/XML/JSX code) and must
+                 still render as source, never fall through to TipTap. */
               <div
                 ref={docViewRef}
                 onMouseUp={isNew ? undefined : onDocMouseUp}
@@ -2020,10 +2087,19 @@ export function DocumentEditor({
                 onMouseMove={isNew ? undefined : onDocMouseMove}
                 className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text"
               >
-                {nodeType === "table" && !isNew ? (
+                {effectiveType === "table" && !isNew ? (
                   <div className="p-4">
                     <TableViewer nestId={nestId} nodeId={nodeId} csv={content} />
                   </div>
+                ) : effectiveType === "tool" ? (
+                  /* Code block, dependency-free: no syntax highlighting,
+                     just monospace + horizontal scroll. */
+                  <pre
+                    className="overflow-x-auto p-4 font-mono text-xs leading-relaxed whitespace-pre"
+                    data-testid="tool-source-view"
+                  >
+                    <code>{content}</code>
+                  </pre>
                 ) : (
                   <DocumentViewer
                     content={content}
