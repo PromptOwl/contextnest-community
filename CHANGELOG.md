@@ -1,5 +1,35 @@
 # @promptowl/contextnest-community
 
+## 1.13.0
+
+### Minor Changes
+
+- v1.13.0 — dashboard cleanup, faster My Work, governance auto-publish, and safer email/upload handling.
+
+  ### Governance
+
+  - **Auto-publish owner & admin edits** (`src/nodes/service.ts`, `ui/src/components/NestSettingsModal.tsx`) — the nest "Allow self-approve" flag is redefined as an owner/admin governance bypass: with it on, create/update by an owner or admin publishes immediately instead of landing as a draft awaiting review. Editors and reviewers are unchanged (still draft → submit → review). Applies across REST and MCP via the shared node service, respects the pending-review edit lock, and the setting is renamed to "Auto-publish owner & admin edits".
+  - **Approval inbox hidden from non-approvers** (`src/governance/review-service.ts`) — the `/me/work` "waiting on me" bucket previously listed pending reviews from nests where the caller was only an editor or viewer, showing an Approve/Reject affordance the server would reject. It is now filtered to nests the caller can actually approve in, resolved per distinct nest and cached briefly so the polled inbox stays cheap.
+
+  ### Dashboard & My Work
+
+  - **Nests and My Work in tabs, faster load** (`ui/src/components/Dashboard.tsx`, `ui/src/lib/api.ts`) — dashboard annotate runs in parallel and My Work uses a single visible-nests query with a scoped review queue and paginated inbox.
+  - **Delete unwanted unsynced folders** (`src/nests/unsynced-service.ts`, `src/nests/routes.ts`, `ui/src/components/Dashboard.tsx`) — new `DELETE /nests/unsynced/sync` (server-admin gated, same safe-name and live-nest-root guards as sync) plus a confirmed Delete button on each unsynced card, so leftover imports can be removed instead of only synced.
+  - **Importer + date on imported nest cards** (`ui/src/components/Dashboard.tsx`) and the stray "0" / duplicate Overview stat tiles on non-imported cards are gone.
+
+  ### Teammates & nests
+
+  - **Teammate list polish** (`ui/src/components/TeammatesPage.tsx`) — a "You" badge, search, and role filter.
+  - **Private nests stay private** (`src/nests/service.ts`) — admins no longer see other users' private nests in the list.
+
+  ### Fixes
+
+  - **Email validation hardened** (`src/config.ts`, `src/auth/routes.ts`, `ui/src/components/*`) — `isEmailish` delegates to zod's email validator (rejecting junk like `*'/*'/8////@gmail.com`) while keeping the explicit CR/LF reject to close header-injection shapes; the UI validates email before adding a collaborator, steward, or team member.
+  - **Video upload cap** (`src/config.ts`, `src/nests/asset-routes.ts`) — default 30 MB, configurable via `VIDEO_MAX_MB`, kept under Cloud Run's request-body limit so oversized videos fail with a clear message instead of a bare 413.
+  - **Editor** (`ui/src/components/MarkdownEditor/MarkdownEditor.tsx`) — usable "Turn into Toggle" and the block menu survives paste.
+  - **Draft publish-in-place** (`src/nodes/service.ts`) — upsert the version on publish-in-place to avoid a UNIQUE clash.
+  - **Postgres counts** (`src/governance/review-service.ts`, `src/nests/service.ts`) — review-queue and nest-list totals are coerced to `Number` so counts are correct on Postgres.
+
 ## 1.12.0
 
 ### Minor Changes
