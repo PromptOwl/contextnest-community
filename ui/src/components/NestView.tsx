@@ -517,7 +517,7 @@ export function NestView({
     // the move on a fast/local server), Chrome leaves the session half-open
     // and silently ignores the NEXT dragstart — drag "randomly" dies after a
     // successful move. Letting the current event loop finish first makes it
-    // deterministic. ponytail: setTimeout(0), not a drag-lifecycle library.
+    // deterministic — a plain setTimeout(0) is enough; no drag library needed.
     setTimeout(() => void handleMoveNode(nodeId, targetFolder), 0);
   };
 
@@ -1712,214 +1712,189 @@ export function NestView({
             rows, and a grouped table-of-contents grid so opening a nest
             presents an index rather than just the flat node list. */}
         <TabsContent value="overview" className="space-y-4">
-          {/* Stat tiles */}
-          <div
-            className={`grid gap-3 ${stewardshipEnabled ? "sm:grid-cols-4" : "sm:grid-cols-3"
-              } grid-cols-2`}
-          >
-            <Card className="border-muted/60">
-              <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-md bg-primary/10 text-primary p-2">
-                  <FileStack className="h-4 w-4" />
-                </div>
-                <div>
-                  <div className="text-2xl font-semibold leading-none">
-                    {stats.total}
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-1">
-                    Document{stats.total === 1 ? "" : "s"}
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-            <Card className="border-muted/60">
-              <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-md bg-blue-500/10 text-blue-600 p-2">
-                  <FolderOpen className="h-4 w-4" />
-                </div>
-                <div>
-                  <div className="text-2xl font-semibold leading-none">
-                    {tocGroups.length}
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-1">
-                    Folder{tocGroups.length === 1 ? "" : "s"}
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-            <Card className="border-muted/60">
-              <CardContent className="p-4 flex items-center gap-3">
-                <div className="rounded-md bg-amber-500/10 text-amber-600 p-2">
-                  <Clock className="h-4 w-4" />
-                </div>
-                <div>
-                  <div className="text-2xl font-semibold leading-none">
-                    {recentlyEditedCount}
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-1">
-                    Edited this week
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-            {stewardshipEnabled && (
-              <Card className="border-muted/60">
-                <CardContent className="p-4 flex items-center gap-3">
-                  <div className="rounded-md bg-emerald-500/10 text-emerald-600 p-2">
-                    <CheckCircle2 className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <div className="text-2xl font-semibold leading-none">
-                      {stats.approved}
+          {initialLoad ? (
+            <div className="flex items-center justify-center py-16">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            </div>
+          ) : (
+            <>
+              {/* Stat tiles — only the metrics NOT already in the top stat
+                  cards (Total Documents / AI Ready live there). This row adds
+                  folder + recency context, so nothing is repeated. */}
+              <div className="grid gap-3 grid-cols-2">
+                <Card className="border-muted/60">
+                  <CardContent className="p-4 flex items-center gap-3">
+                    <div className="rounded-md bg-blue-500/10 text-blue-600 p-2">
+                      <FolderOpen className="h-4 w-4" />
                     </div>
-                    <div className="text-xs text-muted-foreground mt-1">
-                      Approved
+                    <div>
+                      <div className="text-2xl font-semibold leading-none">
+                        {tocGroups.length}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        Folder{tocGroups.length === 1 ? "" : "s"}
+                      </div>
                     </div>
-                  </div>
+                  </CardContent>
+                </Card>
+                <Card className="border-muted/60">
+                  <CardContent className="p-4 flex items-center gap-3">
+                    <div className="rounded-md bg-amber-500/10 text-amber-600 p-2">
+                      <Clock className="h-4 w-4" />
+                    </div>
+                    <div>
+                      <div className="text-2xl font-semibold leading-none">
+                        {recentlyEditedCount}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        Edited this week
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Recently edited */}
+              {recentlyEdited.length > 0 && (
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <Clock className="h-4 w-4 text-muted-foreground" />
+                      Recently edited
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-0">
+                    <ul className="divide-y">
+                      {recentlyEdited.map((n) => (
+                        <li key={n.id}>
+                          <button
+                            onClick={() => onOpenDocument(n.id)}
+                            className="w-full flex items-center gap-3 py-2 px-1 -mx-1 rounded hover:bg-muted/50 text-left group"
+                          >
+                            <NodeTypeIcon type={n.type} />
+                            <span className="text-sm truncate flex-1">
+                              {n.title || n.id}
+                            </span>
+                            {(() => {
+                              const p = typePill(n.type || "document");
+                              return p ? (
+                                <span
+                                  className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${p.cls}`}
+                                  title={p.title}
+                                >
+                                  {p.label}
+                                </span>
+                              ) : null;
+                            })()}
+                            {n.updated_at && (
+                              <span className="text-xs text-muted-foreground shrink-0">
+                                {timeAgo(n.updated_at)}
+                              </span>
+                            )}
+                            <ChevronRight className="h-4 w-4 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Grouped table of contents */}
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <FolderOpen className="h-4 w-4 text-muted-foreground" />
+                    Contents
+                  </CardTitle>
+                  <CardDescription>
+                    Browse documents grouped by folder.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  {tocGroups.length === 0 ? (
+                    <div className="py-8 text-center">
+                      <FileText className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
+                      <p className="text-sm text-muted-foreground">
+                        No documents yet. Create one from the Documents tab.
+                      </p>
+                    </div>
+                  ) : (
+                    <FolderTree
+                      className="space-y-1"
+                      groups={tocGroups}
+                      renderFolder={(node) => (
+                        // Overview folders navigate into the Documents tab scoped to
+                        // that folder — no collapse here; the whole tree stays open.
+                        <button
+                          type="button"
+                          onClick={() => openFolderInDocuments(node.path)}
+                          className="flex items-center gap-2 py-1 group/folder rounded px-1 -mx-1 hover:bg-muted/60 w-full text-left"
+                          title={`Browse ${prettyFolderPath(node.path)} in Documents`}
+                        >
+                          <FolderOpen className="h-4 w-4 text-muted-foreground shrink-0" />
+                          <span className="text-sm font-medium group-hover/folder:underline">
+                            {node.label}
+                          </span>
+                          <Badge
+                            variant="secondary"
+                            className="text-[10px] px-1.5 py-0 h-5"
+                          >
+                            {node.total}
+                          </Badge>
+                          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover/folder:text-muted-foreground" />
+                          {canEditDocs && (
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/folder:opacity-100 hover:text-primary hover:bg-primary/10"
+                              title={`New document in ${prettyFolderPath(node.path)}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenDocument("new", { folder: node.path });
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.stopPropagation();
+                                  onOpenDocument("new", { folder: node.path });
+                                }
+                              }}
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                            </span>
+                          )}
+                        </button>
+                      )}
+                      renderDoc={(n) => (
+                        <button
+                          onClick={() => onOpenDocument(n.id)}
+                          className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 text-left group min-w-0 w-full"
+                          title={n.title || n.id}
+                        >
+                          <NodeTypeIcon type={n.type} className="h-3.5 w-3.5" />
+                          <span className="text-sm truncate flex-1">
+                            {n.title || n.id}
+                          </span>
+                          {(() => {
+                            const p = typePill(n.type || "document");
+                            return p ? (
+                              <span
+                                className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${p.cls}`}
+                                title={p.title}
+                              >
+                                {p.label}
+                              </span>
+                            ) : null;
+                          })()}
+                          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
+                        </button>
+                      )}
+                    />
+                  )}
                 </CardContent>
               </Card>
-            )}
-          </div>
-
-          {/* Recently edited */}
-          {recentlyEdited.length > 0 && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  <Clock className="h-4 w-4 text-muted-foreground" />
-                  Recently edited
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="pt-0">
-                <ul className="divide-y">
-                  {recentlyEdited.map((n) => (
-                    <li key={n.id}>
-                      <button
-                        onClick={() => onOpenDocument(n.id)}
-                        className="w-full flex items-center gap-3 py-2 px-1 -mx-1 rounded hover:bg-muted/50 text-left group"
-                      >
-                        <NodeTypeIcon type={n.type} />
-                        <span className="text-sm truncate flex-1">
-                          {n.title || n.id}
-                        </span>
-                        {(() => {
-                          const p = typePill(n.type || "document");
-                          return p ? (
-                            <span
-                              className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${p.cls}`}
-                              title={p.title}
-                            >
-                              {p.label}
-                            </span>
-                          ) : null;
-                        })()}
-                        {n.updated_at && (
-                          <span className="text-xs text-muted-foreground shrink-0">
-                            {timeAgo(n.updated_at)}
-                          </span>
-                        )}
-                        <ChevronRight className="h-4 w-4 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </CardContent>
-            </Card>
+            </>
           )}
-
-          {/* Grouped table of contents */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2">
-                <FolderOpen className="h-4 w-4 text-muted-foreground" />
-                Contents
-              </CardTitle>
-              <CardDescription>
-                Browse documents grouped by folder.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="pt-0">
-              {tocGroups.length === 0 ? (
-                <div className="py-8 text-center">
-                  <FileText className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
-                  <p className="text-sm text-muted-foreground">
-                    No documents yet. Create one from the Documents tab.
-                  </p>
-                </div>
-              ) : (
-                <FolderTree
-                  className="space-y-1"
-                  groups={tocGroups}
-                  renderFolder={(node) => (
-                    // Overview folders navigate into the Documents tab scoped to
-                    // that folder — no collapse here; the whole tree stays open.
-                    <button
-                      type="button"
-                      onClick={() => openFolderInDocuments(node.path)}
-                      className="flex items-center gap-2 py-1 group/folder rounded px-1 -mx-1 hover:bg-muted/60 w-full text-left"
-                      title={`Browse ${prettyFolderPath(node.path)} in Documents`}
-                    >
-                      <FolderOpen className="h-4 w-4 text-muted-foreground shrink-0" />
-                      <span className="text-sm font-medium group-hover/folder:underline">
-                        {node.label}
-                      </span>
-                      <Badge
-                        variant="secondary"
-                        className="text-[10px] px-1.5 py-0 h-5"
-                      >
-                        {node.total}
-                      </Badge>
-                      <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover/folder:text-muted-foreground" />
-                      {canEditDocs && (
-                        <span
-                          role="button"
-                          tabIndex={0}
-                          className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/folder:opacity-100 hover:text-primary hover:bg-primary/10"
-                          title={`New document in ${prettyFolderPath(node.path)}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onOpenDocument("new", { folder: node.path });
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              e.stopPropagation();
-                              onOpenDocument("new", { folder: node.path });
-                            }
-                          }}
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                        </span>
-                      )}
-                    </button>
-                  )}
-                  renderDoc={(n) => (
-                    <button
-                      onClick={() => onOpenDocument(n.id)}
-                      className="flex items-center gap-2 py-1.5 px-2 rounded-md hover:bg-muted/50 text-left group min-w-0 w-full"
-                      title={n.title || n.id}
-                    >
-                      <NodeTypeIcon type={n.type} className="h-3.5 w-3.5" />
-                      <span className="text-sm truncate flex-1">
-                        {n.title || n.id}
-                      </span>
-                      {(() => {
-                        const p = typePill(n.type || "document");
-                        return p ? (
-                          <span
-                            className={`shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide ${p.cls}`}
-                            title={p.title}
-                          >
-                            {p.label}
-                          </span>
-                        ) : null;
-                      })()}
-                      <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
-                    </button>
-                  )}
-                />
-              )}
-            </CardContent>
-          </Card>
         </TabsContent>
 
         <TabsContent value="documents" className="space-y-4">
@@ -2629,7 +2604,16 @@ export function NestView({
                               e.preventDefault();
                               e.dataTransfer.dropEffect = "move";
                             }}
-                            onDragEnter={() => {
+                            onDragEnter={(e) => {
+                              // dragenter/dragleave bubble from the header's own
+                              // children (count badge, "+" button). Ignore those
+                              // inner crossings — relatedTarget still inside the
+                              // header — so the 600ms spring-open timer isn't
+                              // cancelled + rescheduled on every child hover.
+                              if (
+                                e.currentTarget.contains(e.relatedTarget as Node)
+                              )
+                                return;
                               // Spring a collapsed folder open on hover so its
                               // subfolders become reachable — even when this
                               // folder is the dragged doc's OWN folder (not a
@@ -2642,7 +2626,13 @@ export function NestView({
                               if (!validDrop) return;
                               setDropFolder(node.path);
                             }}
-                            onDragLeave={() => {
+                            onDragLeave={(e) => {
+                              // Only a true leave of the whole header counts —
+                              // moving onto a child fires a spurious leave.
+                              if (
+                                e.currentTarget.contains(e.relatedTarget as Node)
+                              )
+                                return;
                               setDropFolder((d) => (d === node.path ? null : d));
                               cancelDragExpand();
                             }}
