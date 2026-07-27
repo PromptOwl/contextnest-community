@@ -51,6 +51,14 @@ export interface AuthContextValue {
   /** Public feature flag from /health — the server's route gate, so the UI
    *  hides the workflow plane exactly when the API would 404 it. */
   workflowPlaneEnabled: boolean;
+  /** Public feature flag from /health — import teams from PromptOwl (default
+   *  OFF). Off → /teams/promptowl 404s, so the UI hides the panel to match. */
+  promptowlTeamsEnabled: boolean;
+  /** Content-type toggles from /health (default ON). The editor's type picker
+   *  hides a disabled type exactly when the API would refuse creating it;
+   *  existing nodes of the type stay readable. */
+  typeArtifactEnabled: boolean;
+  typeTableEnabled: boolean;
   /** Public feature flag from /health — sub-agent (nested) runs. Gated
    *  separately from the plane; when off the UI hides the "spawn sub-agent"
    *  option exactly when the API would reject a parent_run_id (400). */
@@ -78,6 +86,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [workflowPlaneEnabled, setWorkflowPlaneEnabled] = useState(false);
+  const [promptowlTeamsEnabled, setPromptowlTeamsEnabled] = useState(false);
+  // Content types default ON (mirrors config.ts — only an explicit "false"
+  // disables), so the picker doesn't flicker types away while /health loads.
+  const [typeArtifactEnabled, setTypeArtifactEnabled] = useState(true);
+  const [typeTableEnabled, setTypeTableEnabled] = useState(true);
   const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
   // Defaults mirror config.ts; overwritten by /health so operator overrides
   // flow through to the picker.
@@ -106,6 +119,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
       const h = await api.getHealth();
       setLogoUrl(h.logo_url ?? null);
       setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+      setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
+      setTypeArtifactEnabled(h.type_artifact_enabled !== false);
+      setTypeTableEnabled(h.type_table_enabled !== false);
       setSubagentRunsEnabled(!!h.subagent_runs_enabled);
       if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
       if (typeof h.subagent_max_children === "number") setSubagentMaxChildren(h.subagent_max_children);
@@ -143,6 +159,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setLogoUrl(h.logo_url ?? null);
         setServerVersion(h.version ?? null);
         setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+        setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
+        setTypeArtifactEnabled(h.type_artifact_enabled !== false);
+        setTypeTableEnabled(h.type_table_enabled !== false);
         setSubagentRunsEnabled(!!h.subagent_runs_enabled);
         if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
         if (typeof h.subagent_max_children === "number") setSubagentMaxChildren(h.subagent_max_children);
@@ -201,6 +220,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
     const KEY = "cnst_auth_tick";
     const onStorage = (e: StorageEvent) => {
       if (e.key !== KEY) return;
+      // Auth changed in a sibling tab — this tab's read cache may belong to
+      // the previous identity.
+      api.invalidateNestReads();
       void refresh();
     };
     const onVisible = () => {
@@ -231,6 +253,10 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const loginSuccess = useCallback(
     (user?: LoginSuccessUser) => {
       const mySeq = ++seqRef.current;
+      // The read cache may still hold the previous identity's responses
+      // (anonymous view, or another user on a shared machine) — access is
+      // per-user, so never let them cross an auth transition.
+      api.invalidateNestReads();
       if (user) {
         const name = user.name ?? null;
         setAdminStatus((prev) => ({
@@ -279,6 +305,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
       // Even if the server call fails, treat the client as logged out —
       // the cookie may already be invalid and we don't want a stuck UI.
     }
+    // Drop the read cache with the session — cached nest data belongs to the
+    // identity that just signed out.
+    api.invalidateNestReads();
     setAuthenticated(authMode === "open");
     setAdminStatus((prev) => (prev ? { ...prev, me: null } : prev));
     broadcastAuthChange();
@@ -296,6 +325,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
         authenticated,
         isAdmin,
         workflowPlaneEnabled,
+        promptowlTeamsEnabled,
+        typeArtifactEnabled,
+        typeTableEnabled,
         subagentRunsEnabled,
         subagentMaxDepth,
         subagentMaxChildren,

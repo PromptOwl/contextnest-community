@@ -21,6 +21,7 @@ import { DefinitionsPage } from "./components/DefinitionsPage";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { BetaBadge } from "@/components/ui/beta-badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -175,12 +176,12 @@ export default function App() {
     try {
       const res = await updateAdminSettings(patch);
       setServerSettings(res.settings);
-      // Feature flags gate other views (workflow-plane nav, sub-agent picker)
-      // off the /health-sourced AuthContext state, not serverSettings. Re-read
-      // health so those toggles take effect live, without a page reload.
-      if ("workflow_plane_enabled" in patch || "subagent_runs_enabled" in patch) {
-        await refreshHealth();
-      }
+      // Feature flags gate other views (workflow-plane nav, sub-agent picker,
+      // PromptOwl teams …) off the /health-sourced AuthContext state, not
+      // serverSettings. Always re-read health after a save so ANY flag exposed
+      // there takes effect live — no page reload, and no per-key allowlist to
+      // keep in sync as new flags are added.
+      await refreshHealth();
       toast.success("Settings saved");
     } catch (e: any) {
       toast.error(e?.message || "Failed to save settings");
@@ -245,8 +246,13 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const { nest } = await getNest(nestId);
+        const { nest, permission } = await getNest(nestId);
         if (cancelled) return;
+        // Deep-link / refresh nav has no is_owner from a nest-list row, so
+        // derive it from the authoritative permission — resolveNestPermission
+        // returns "owner" only for the real owner. Hardcoding false here hid
+        // owner-only UI (Nest settings) after a refresh, even for the owner.
+        const isOwner = permission === "owner";
         setDeepLinkProbe({
           status: "ok",
           nestId: nest.id,
@@ -261,7 +267,7 @@ export default function App() {
             nestId: nest.id,
             nestName: nest.name,
             nodeId: docId,
-            isOwner: false,
+            isOwner,
             isAnonOwned: false,
             // ?thread=<id> → open the doc with that comment thread focused.
             initialThreadId: params.get("thread") || undefined,
@@ -283,7 +289,7 @@ export default function App() {
             page: subPage,
             nestId: nest.id,
             nestName: nest.name,
-            isOwner: false,
+            isOwner,
             isAnonOwned: false,
           });
           return;
@@ -292,7 +298,7 @@ export default function App() {
           page: "nest",
           nestId: nest.id,
           nestName: nest.name,
-          isOwner: false,
+          isOwner,
           isAnonOwned: false,
         });
       } catch {
@@ -660,6 +666,7 @@ export default function App() {
               >
                 <Workflow className="h-3.5 w-3.5 mr-1" />
                 Workflows
+                <BetaBadge className="ml-1.5" />
               </Button>
             )}
 

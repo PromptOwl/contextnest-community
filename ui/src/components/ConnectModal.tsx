@@ -45,6 +45,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import * as api from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 import { useAuth } from "../auth/AuthContext";
 
 interface ConnectModalProps {
@@ -130,13 +131,18 @@ export function ConnectModal({
     };
   }, [isOpen, authenticated, authMode]);
 
+  // User-level key (no nest_id): one key works for every nest these
+  // credentials can read — including shared nests and the server-level /mcp
+  // endpoint. Scoping the key to the nest this dialog happened to be opened
+  // from was a trap: one key per user means generating from nest B rotated
+  // away the key an external client (e.g. PromptOwl) had stored for nest A
+  // (401), and the replacement was scoped to B so it 403'd on A.
   const generateKey = async () => {
     setError(null);
     setBusy("mint");
     try {
       const { api_key, key_prefix } = await api.createApiKey({
-        nest_id: nestId,
-        label: `connect:${slugify(nestName)}`,
+        label: "connect",
       });
       setExistingPrefix(key_prefix);
       setHasExistingKey(true);
@@ -154,9 +160,11 @@ export function ConnectModal({
     setError(null);
     setBusy("rotate");
     try {
+      // nest_id: null explicitly CLEARS any stale per-nest scope a key minted
+      // by an older build carries (omitting the field would keep it).
       const { api_key, key_prefix } = await api.rotateApiKey({
-        nest_id: nestId,
-        label: `connect:${slugify(nestName)}`,
+        nest_id: null,
+        label: "connect",
       });
       setExistingPrefix(key_prefix);
       setHasExistingKey(true);
@@ -737,11 +745,9 @@ function KeyRevealModal({
 }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(apiKey);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {}
+    if (!(await copyTextWithToast(apiKey))) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   };
   return (
     <Dialog open onOpenChange={onClose}>
@@ -828,11 +834,9 @@ function Snippet({
 function CopyButton({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {}
+    if (!(await copyTextWithToast(value))) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   };
   return (
     <Button variant="ghost" size="sm" className="h-6 px-2" onClick={copy}>

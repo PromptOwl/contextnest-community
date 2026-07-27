@@ -7,6 +7,7 @@
  */
 import React, { useEffect, useState } from "react";
 import * as api from "../../lib/api";
+import { isEmailish } from "../../lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -162,6 +163,12 @@ export function StewardModal({
     }
     if (!isEdit && !email.trim()) {
       setError("Please enter an email");
+      return;
+    }
+    // Reject malformed input before it becomes a steward row — a bad address
+    // would never match a real account, so the steward could never act.
+    if (!isEdit && !isEmailish(email.trim())) {
+      setError("Enter a valid email address.");
       return;
     }
     if (scope !== "nest" && !target.trim()) {

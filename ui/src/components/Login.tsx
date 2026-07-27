@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import * as api from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 import { useAuth } from "../auth/AuthContext";
 
 export function Login() {
@@ -76,7 +77,7 @@ export function Login() {
 
   const copyCode = async () => {
     if (!deviceCode) return;
-    await navigator.clipboard.writeText(deviceCode);
+    if (!(await copyTextWithToast(deviceCode))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };

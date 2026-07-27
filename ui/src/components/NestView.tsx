@@ -253,6 +253,10 @@ export function NestView({
   >("all");
   const [editingSteward, setEditingSteward] = useState<Steward | null>(null);
   const [loading, setLoading] = useState(true);
+  // True only until the first successful fetch. Tab CONTENT gates on this, not
+  // `loading`, so a background refetch (fired by the many mutation handlers)
+  // never blanks already-rendered tabs back to a spinner.
+  const [initialLoad, setInitialLoad] = useState(true);
   const [search, setSearch] = useState(initialSearch ?? "");
   // Multi-tag AND filter; toggled by clicking tag chips on list rows.
   const [tagFilters, setTagFilters] = useState<string[]>([]);
@@ -594,6 +598,7 @@ export function NestView({
     setRoles(nestMeta?.roles ?? []);
     setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
     setLoading(false);
+    setInitialLoad(false);
   }, [nestId]);
 
   // Next page of comment activity, appended under the feed. Offset by the
@@ -1041,7 +1046,12 @@ export function NestView({
   const stats = {
     total: nodes.length,
     pending: nodes.filter((n) => n.status === "pending_review").length,
-    approved: nodes.filter((n) => n.status === "approved").length,
+    // "published" is the engine's terminal post-approve status (approve writes
+    // 'published'; no-steward creates auto-publish) — both mean AI-visible,
+    // so the AI Ready card counts them together.
+    approved: nodes.filter(
+      (n) => n.status === "approved" || n.status === "published",
+    ).length,
     reviewQueue: reviewQueue.length,
     reviewable: reviewableQueue.length,
   };
@@ -1269,7 +1279,7 @@ export function NestView({
         if (createdIds.length) {
           toast.success(
             `Added ${createdIds.length} ${createdIds.length === 1 ? "item" : "items"}` +
-              (skipped ? ` (skipped ${skipped} unsupported)` : ""),
+            (skipped ? ` (skipped ${skipped} unsupported)` : ""),
           );
           await fetchData();
           if (createdIds.length === 1) onOpenDocument(createdIds[0]);
@@ -1380,8 +1390,8 @@ export function NestView({
               onClick={handleVisibilityToggle}
               disabled={visibilitySaving}
               className={`shrink-0 h-7 gap-1.5 ${visibility === "public"
-                  ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
-                  : ""
+                ? "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+                : ""
                 }`}
               title={
                 visibility === "public"
@@ -1633,45 +1643,45 @@ export function NestView({
             below (Overview/Documents), not on the nest as a whole. */}
         <div className="flex items-center gap-2 mb-4">
           <TabsList>
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="documents">Documents</TabsTrigger>
-          {/* Governance tabs hidden for view-only. */}
-          {showReviewTab && !isReadOnly && (
-            <TabsTrigger value="review" className="gap-2">
-              Review Queue
-              {reviewableQueue.length > 0 && (
-                <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-                  {reviewableQueue.length}
-                </Badge>
-              )}
-            </TabsTrigger>
-          )}
-          {!isReadOnly && (
-            <TabsTrigger value="external-edits" className="gap-2">
-              External Edits
-              {externalEdits.length > 0 && (
-                <Badge
-                  variant="secondary"
-                  className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
-                >
-                  {externalEdits.length}
-                </Badge>
-              )}
-            </TabsTrigger>
-          )}
-          {/* Steward roster is admin-only (list + manage), and hidden when
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="documents">Documents</TabsTrigger>
+            {/* Governance tabs hidden for view-only. */}
+            {showReviewTab && !isReadOnly && (
+              <TabsTrigger value="review" className="gap-2">
+                Review Queue
+                {reviewableQueue.length > 0 && (
+                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                    {reviewableQueue.length}
+                  </Badge>
+                )}
+              </TabsTrigger>
+            )}
+            {!isReadOnly && (
+              <TabsTrigger value="external-edits" className="gap-2">
+                External Edits
+                {externalEdits.length > 0 && (
+                  <Badge
+                    variant="secondary"
+                    className="text-[10px] px-1.5 py-0 bg-orange-100 text-orange-700"
+                  >
+                    {externalEdits.length}
+                  </Badge>
+                )}
+              </TabsTrigger>
+            )}
+            {/* Steward roster is admin-only (list + manage), and hidden when
               the admin is viewing a real user's nest. */}
-          {stewardshipEnabled && canManageGovernance && (
-            <TabsTrigger value="stewards">Stewards</TabsTrigger>
-          )}
-          {/* Collaborators — plain access sharing, independent of
+            {stewardshipEnabled && canManageGovernance && (
+              <TabsTrigger value="stewards">Stewards</TabsTrigger>
+            )}
+            {/* Collaborators — plain access sharing, independent of
               stewardship. Owner/admin manage the full roster; write
               collaborators can invite (escalation-capped server-side), so
               they see the tab too. The roster controls cap themselves by the
               caller's permission (see CollaboratorManager). */}
-          {(canManage || collabCanWrite) && (
-            <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
-          )}
+            {(canManage || collabCanWrite) && (
+              <TabsTrigger value="collaborators">Collaborators</TabsTrigger>
+            )}
           </TabsList>
           {!isReadOnly && canEditDocs && (
             <Button
@@ -1693,9 +1703,8 @@ export function NestView({
         <TabsContent value="overview" className="space-y-4">
           {/* Stat tiles */}
           <div
-            className={`grid gap-3 ${
-              stewardshipEnabled ? "sm:grid-cols-4" : "sm:grid-cols-3"
-            } grid-cols-2`}
+            className={`grid gap-3 ${stewardshipEnabled ? "sm:grid-cols-4" : "sm:grid-cols-3"
+              } grid-cols-2`}
           >
             <Card className="border-muted/60">
               <CardContent className="p-4 flex items-center gap-3">
@@ -2174,8 +2183,8 @@ export function NestView({
                         key={tag}
                         type="button"
                         className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-colors ${active
-                            ? "bg-primary text-primary-foreground border-primary"
-                            : "text-foreground/80 hover:bg-muted"
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "text-foreground/80 hover:bg-muted"
                           }`}
                         onClick={() => toggleTagFilter(tag)}
                         title={
@@ -2220,11 +2229,10 @@ export function NestView({
                     <button
                       key={n.id}
                       type="button"
-                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 hover:bg-muted truncate max-w-[180px] ${
-                        n.type === "artifact"
+                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 hover:bg-muted truncate max-w-[180px] ${n.type === "artifact"
                           ? "border-amber-300 text-amber-700 dark:text-amber-300"
                           : "text-primary"
-                      }`}
+                        }`}
                       onClick={() => onOpenDocument(n.id)}
                     >
                       {n.type === "artifact" && (
@@ -2235,7 +2243,7 @@ export function NestView({
                   ))}
                 </div>
               )}
-              {loading ? (
+              {initialLoad ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
@@ -2260,402 +2268,403 @@ export function NestView({
                   </button>
                 )
               ) : (() => {
-                  // Shared row renderer: flat grid in cards mode, folder tree
-                  // (with drag-and-drop moves) in list mode.
-                  const renderDocRow = (node: any, indent = 0) => {
-                    const cards = viewMode === "cards";
-                    // Hosted HTML artifacts get a distinct icon + badge so they
-                    // read differently from markdown documents in the list.
-                    const nodeType = node.type || "document";
-                    const isArtifact = nodeType === "artifact";
-                    const isRunnable = nodeType === "agent" || nodeType === "skill";
-                    const nodePill = typePill(nodeType);
-                    const canSubmit =
-                      stewardshipEnabled &&
-                      node.status === "draft" &&
-                      canEditNode(node);
-                    // Show Review when the server says this caller can review
-                    // this node (authoritative reviewable set, from the queue's
-                    // canUserApprove annotation — includes admin/owner/steward
-                    // scope + separation-of-duties). This replaced a client-side
-                    // steward-scope re-derivation that diverged for a reviewer-
-                    // steward reaching the nest via public visibility, hiding the
-                    // button even though the in-doc approve/reject showed it.
-                    // Fall back to the client check for an older server that
-                    // doesn't stamp canReview.
-                    const canReview = reviewableNodeIds.has(node.id)
-                      ? true
-                      : node.status === "pending_review" &&
-                        canReviewNode(node) &&
-                        (submitterByNode.get(node.id) !== currentEmail ||
-                          (isOwner && allowSelfApprove));
-                    const canEdit =
-                      node.status !== "pending_review" && canEditNode(node);
-                    const canDelete = canEditNode(node);
-                    // Move (drag OR menu) mirrors the edit gate exactly: same
-                    // stewardship scope, and the server locks moves while a
-                    // review is pending, so don't offer either path then.
-                    const canMove = canEdit;
-                    const openMoveDialog = () => {
-                      setMoveDest(folderOfNode(node.id));
-                      setMoveTarget(node);
-                    };
-                    // Cards: collapse every row action into a 3-dot menu kept on
-                    // the title line. List keeps inline hover buttons below.
-                    const actionMenu = (
-                      <div onClick={(e) => e.stopPropagation()}>
-                        <DropdownMenu modal={false}>
-                          <DropdownMenuTrigger asChild>
+                // Shared row renderer: flat grid in cards mode, folder tree
+                // (with drag-and-drop moves) in list mode.
+                const renderDocRow = (node: any, indent = 0) => {
+                  const cards = viewMode === "cards";
+                  // Hosted HTML artifacts get a distinct icon + badge so they
+                  // read differently from markdown documents in the list.
+                  const nodeType = node.type || "document";
+                  const nodePill = typePill(nodeType);
+                  const canSubmit =
+                    stewardshipEnabled &&
+                    node.status === "draft" &&
+                    canEditNode(node);
+                  // Show Review when the server says this caller can review
+                  // this node (authoritative reviewable set, from the queue's
+                  // canUserApprove annotation — includes admin/owner/steward
+                  // scope + separation-of-duties). This replaced a client-side
+                  // steward-scope re-derivation that diverged for a reviewer-
+                  // steward reaching the nest via public visibility, hiding the
+                  // button even though the in-doc approve/reject showed it.
+                  // Fall back to the client check for an older server that
+                  // doesn't stamp canReview.
+                  const canReview = reviewableNodeIds.has(node.id)
+                    ? true
+                    : node.status === "pending_review" &&
+                    canReviewNode(node) &&
+                    (submitterByNode.get(node.id) !== currentEmail ||
+                      (isOwner && allowSelfApprove));
+                  const canEdit =
+                    node.status !== "pending_review" && canEditNode(node);
+                  const canDelete = canEditNode(node);
+                  // Move (drag OR menu) mirrors the edit gate exactly: same
+                  // stewardship scope, and the server locks moves while a
+                  // review is pending, so don't offer either path then.
+                  const canMove = canEdit;
+                  const openMoveDialog = () => {
+                    setMoveDest(folderOfNode(node.id));
+                    setMoveTarget(node);
+                  };
+                  // Cards: collapse every row action into a 3-dot menu kept on
+                  // the title line. List keeps inline hover buttons below.
+                  const actionMenu = (
+                    <div onClick={(e) => e.stopPropagation()}>
+                      <DropdownMenu modal={false}>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 w-7 p-0 flex-shrink-0"
+                            title="Actions"
+                          >
+                            <MoreVertical className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="min-w-40">
+                          {canEdit && (
+                            <DropdownMenuItem onSelect={() => onOpenDocument(node.id)}>
+                              <Pencil className="h-3.5 w-3.5 mr-2" />
+                              Edit
+                            </DropdownMenuItem>
+                          )}
+                          {canMove && (
+                            <DropdownMenuItem onSelect={openMoveDialog}>
+                              <FolderInput className="h-3.5 w-3.5 mr-2" />
+                              Move to folder
+                            </DropdownMenuItem>
+                          )}
+                          {canSubmit && (
+                            <DropdownMenuItem onSelect={() => setSubmitNode(node)}>
+                              <Send className="h-3.5 w-3.5 mr-2" />
+                              Submit for review
+                            </DropdownMenuItem>
+                          )}
+                          {canReview && (
+                            <DropdownMenuItem onSelect={() => setReviewNode(node)}>
+                              <CheckCircle2 className="h-3.5 w-3.5 mr-2" />
+                              Review
+                            </DropdownMenuItem>
+                          )}
+                          <DropdownMenuItem onSelect={() => openVersions(node)}>
+                            <History className="h-3.5 w-3.5 mr-2" />
+                            History
+                          </DropdownMenuItem>
+                          {canDelete && (
+                            <>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                onSelect={() => handleDeleteNode(node)}
+                                className="text-destructive focus:text-destructive"
+                              >
+                                <Trash2 className="h-3.5 w-3.5 mr-2" />
+                                Delete
+                              </DropdownMenuItem>
+                            </>
+                          )}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  );
+                  return (
+                    <div
+                      key={node.id}
+                      onClick={() => onOpenDocument(node.id)}
+                      className={`${cards
+                        ? "flex flex-col gap-2"
+                        : "flex items-center gap-3"
+                        } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer ${dragNodeId === node.id ? "opacity-40" : ""
+                        }`}
+                      style={!cards && indent ? { marginLeft: `${indent * 1.25}rem` } : undefined}
+                      draggable={!cards && canMove}
+                      onDragStart={(e) => {
+                        e.dataTransfer.setData("text/plain", node.id);
+                        e.dataTransfer.effectAllowed = "move";
+                        setDragNodeId(node.id);
+                      }}
+                      onDragEnd={() => {
+                        setDragNodeId(null);
+                        setDropFolder(null);
+                        cancelDragExpand();
+                      }}
+                      data-testid={`document-row-${node.id}`}
+                    >
+                      {!cards && <NodeTypeIcon type={node.type} className="h-5 w-5" />}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          {cards && <NodeTypeIcon type={node.type} className="h-4 w-4" />}
+                          <span
+                            className="font-medium truncate min-w-0"
+                            title={node.title}
+                          >
+                            {node.title}
+                          </span>
+                          {nodePill && (
+                            <span
+                              className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${nodePill.cls}`}
+                              title={nodePill.title}
+                            >
+                              {nodePill.label}
+                            </span>
+                          )}
+                          <LifecycleStatusBadge
+                            status={(node.status as DocumentLifecycleStatus) || "draft"}
+                            size="sm"
+                            className="shrink-0 whitespace-nowrap"
+                          />
+                          {cards && <div className="ml-auto">{actionMenu}</div>}
+                        </div>
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
+                          <span>v{node.version || 1}</span>
+                          {node.tags?.length > 0 && (
+                            <>
+                              <span>·</span>
+                              <span className="flex items-center gap-1 truncate">
+                                {node.tags.slice(0, 3).map((t: string) => (
+                                  <button
+                                    key={t}
+                                    type="button"
+                                    title={
+                                      tagFilters.includes(t)
+                                        ? `Remove filter ${t}`
+                                        : `Filter by ${t}`
+                                    }
+                                    className={`rounded-full border px-1.5 py-px transition-colors ${tagFilters.includes(t)
+                                      ? "bg-primary text-primary-foreground border-primary"
+                                      : "hover:bg-muted"
+                                      }`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleTagFilter(t);
+                                    }}
+                                  >
+                                    {t}
+                                  </button>
+                                ))}
+                              </span>
+                            </>
+                          )}
+                          {(node.author || node.collaborators?.length > 0) && (
+                            <>
+                              <span>·</span>
+                              <AuthorshipChips
+                                author={node.author}
+                                collaborators={node.collaborators}
+                              />
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      {!cards && (
+                        <div
+                          className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {canSubmit && (
+                            <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
+                              <Send className="h-3.5 w-3.5 mr-1" />
+                              Submit
+                            </Button>
+                          )}
+                          {canReview && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setReviewNode(node)}
+                              className="border-green-200 text-green-700 hover:bg-green-50"
+                            >
+                              Review
+                            </Button>
+                          )}
+                          {canEdit && (
                             <Button
                               variant="ghost"
                               size="sm"
-                              className="h-7 w-7 p-0 flex-shrink-0"
-                              title="Actions"
+                              onClick={() => onOpenDocument(node.id)}
+                              title="Edit"
                             >
-                              <MoreVertical className="h-4 w-4" />
+                              <Pencil className="h-3.5 w-3.5" />
                             </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end" className="min-w-40">
-                            {canEdit && (
-                              <DropdownMenuItem onSelect={() => onOpenDocument(node.id)}>
-                                <Pencil className="h-3.5 w-3.5 mr-2" />
-                                Edit
-                              </DropdownMenuItem>
-                            )}
-                            {canMove && (
-                              <DropdownMenuItem onSelect={openMoveDialog}>
-                                <FolderInput className="h-3.5 w-3.5 mr-2" />
-                                Move to folder
-                              </DropdownMenuItem>
-                            )}
-                            {canSubmit && (
-                              <DropdownMenuItem onSelect={() => setSubmitNode(node)}>
-                                <Send className="h-3.5 w-3.5 mr-2" />
-                                Submit for review
-                              </DropdownMenuItem>
-                            )}
-                            {canReview && (
-                              <DropdownMenuItem onSelect={() => setReviewNode(node)}>
-                                <CheckCircle2 className="h-3.5 w-3.5 mr-2" />
-                                Review
-                              </DropdownMenuItem>
-                            )}
-                            <DropdownMenuItem onSelect={() => openVersions(node)}>
-                              <History className="h-3.5 w-3.5 mr-2" />
-                              History
-                            </DropdownMenuItem>
-                            {canDelete && (
-                              <>
-                                <DropdownMenuSeparator />
-                                <DropdownMenuItem
-                                  onSelect={() => handleDeleteNode(node)}
-                                  className="text-destructive focus:text-destructive"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5 mr-2" />
-                                  Delete
-                                </DropdownMenuItem>
-                              </>
-                            )}
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </div>
-                    );
-                    return (
-                      <div
-                        key={node.id}
-                        onClick={() => onOpenDocument(node.id)}
-                        className={`${cards
-                            ? "flex flex-col gap-2"
-                            : "flex items-center gap-3"
-                          } p-3 rounded-lg border hover:bg-muted/50 transition-colors group cursor-pointer ${
-                            dragNodeId === node.id ? "opacity-40" : ""
-                          }`}
-                        style={!cards && indent ? { marginLeft: `${indent * 1.25}rem` } : undefined}
-                        draggable={!cards && canMove}
-                        onDragStart={(e) => {
-                          e.dataTransfer.setData("text/plain", node.id);
-                          e.dataTransfer.effectAllowed = "move";
-                          setDragNodeId(node.id);
-                        }}
-                        onDragEnd={() => {
-                          setDragNodeId(null);
-                          setDropFolder(null);
-                          cancelDragExpand();
-                        }}
-                        data-testid={`document-row-${node.id}`}
-                      >
-                        {!cards && <NodeTypeIcon type={node.type} className="h-5 w-5" />}
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            {cards && <NodeTypeIcon type={node.type} className="h-4 w-4" />}
-                            <span
-                              className="font-medium truncate min-w-0"
-                              title={node.title}
-                            >
-                              {node.title}
-                            </span>
-                            {nodePill && (
-                              <span
-                                className={`shrink-0 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide ${nodePill.cls}`}
-                                title={nodePill.title}
-                              >
-                                {nodePill.label}
-                              </span>
-                            )}
-                            <LifecycleStatusBadge
-                              status={(node.status as DocumentLifecycleStatus) || "draft"}
+                          )}
+                          {canMove && (
+                            <Button
+                              variant="ghost"
                               size="sm"
-                              className="shrink-0 whitespace-nowrap"
-                            />
-                            {cards && <div className="ml-auto">{actionMenu}</div>}
-                          </div>
-                          <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                            <span>v{node.version || 1}</span>
-                            {node.tags?.length > 0 && (
-                              <>
-                                <span>·</span>
-                                <span className="flex items-center gap-1 truncate">
-                                  {node.tags.slice(0, 3).map((t: string) => (
-                                    <button
-                                      key={t}
-                                      type="button"
-                                      title={
-                                        tagFilters.includes(t)
-                                          ? `Remove filter ${t}`
-                                          : `Filter by ${t}`
-                                      }
-                                      className={`rounded-full border px-1.5 py-px transition-colors ${tagFilters.includes(t)
-                                          ? "bg-primary text-primary-foreground border-primary"
-                                          : "hover:bg-muted"
-                                        }`}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        toggleTagFilter(t);
-                                      }}
-                                    >
-                                      {t}
-                                    </button>
-                                  ))}
-                                </span>
-                              </>
-                            )}
-                            {(node.author || node.collaborators?.length > 0) && (
-                              <>
-                                <span>·</span>
-                                <AuthorshipChips
-                                  author={node.author}
-                                  collaborators={node.collaborators}
-                                />
-                              </>
-                            )}
-                          </div>
-                        </div>
-                        {!cards && (
-                          <div
-                            className="flex items-center gap-1 transition-opacity opacity-0 group-hover:opacity-100"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {canSubmit && (
-                              <Button variant="outline" size="sm" onClick={() => setSubmitNode(node)}>
-                                <Send className="h-3.5 w-3.5 mr-1" />
-                                Submit
-                              </Button>
-                            )}
-                            {canReview && (
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => setReviewNode(node)}
-                                className="border-green-200 text-green-700 hover:bg-green-50"
-                              >
-                                Review
-                              </Button>
-                            )}
-                            {canEdit && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => onOpenDocument(node.id)}
-                                title="Edit"
-                              >
-                                <Pencil className="h-3.5 w-3.5" />
-                              </Button>
-                            )}
-                            {canMove && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={openMoveDialog}
-                                title="Move to folder"
-                                data-testid={`move-node-${node.id}`}
-                              >
-                                <FolderInput className="h-3.5 w-3.5" />
-                              </Button>
-                            )}
-                            <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
-                              <History className="h-3.5 w-3.5" />
+                              onClick={openMoveDialog}
+                              title="Move to folder"
+                              data-testid={`move-node-${node.id}`}
+                            >
+                              <FolderInput className="h-3.5 w-3.5" />
                             </Button>
-                            {canDelete && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => handleDeleteNode(node)}
-                                title="Delete"
-                                className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </Button>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  };
-
-                  if (viewMode === "cards") {
-                    return (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                        {sorted.map((n) => renderDocRow(n))}
-                      </div>
-                    );
-                  }
-
-                  // List mode: nested folder tree. Folder headers collapse and
-                  // accept drops; doc rows drag. Groups under a collapsed
-                  // ancestor are skipped wholesale.
-                  return (
-                    <div className="space-y-1">
-                      {dragNodeId && folderOfNode(dragNodeId) !== baseFolder && (
-                        <div
-                          className={`flex items-center gap-2 rounded-md border-2 border-dashed px-3 py-2 text-sm ${
-                            dropFolder === baseFolder
-                              ? "border-primary bg-primary/10 text-primary"
-                              : "border-border text-muted-foreground"
-                          }`}
-                          onDragOver={(e) => {
-                            e.preventDefault();
-                            e.dataTransfer.dropEffect = "move";
-                          }}
-                          onDragEnter={() => setDropFolder(baseFolder)}
-                          onDragLeave={() =>
-                            setDropFolder((d) => (d === baseFolder ? null : d))
-                          }
-                          onDrop={(e) => {
-                            e.preventDefault();
-                            handleDropOnFolder(baseFolder);
-                          }}
-                        >
-                          <FolderInput className="h-4 w-4" />
-                          Move to {baseFolder ? prettyFolderPath(baseFolder) : "nest root"}
+                          )}
+                          <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
+                            <History className="h-3.5 w-3.5" />
+                          </Button>
+                          {canDelete && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleDeleteNode(node)}
+                              title="Delete"
+                              className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
                         </div>
                       )}
-                      <FolderTree
-                        className="space-y-1"
-                        groups={docGroups}
-                        baseFolder={baseFolder}
-                        isCollapsed={(p) => collapsedFolders.has(p)}
-                        renderFolder={(node, { collapsed }) => {
-                          // Valid drop = a doc is being dragged and this isn't
-                          // its current folder. Invalid targets get no
-                          // highlight and skip preventDefault, so the browser
-                          // shows the no-drop cursor and the drop is a no-op.
-                          // Folder rows themselves are NOT draggable: the
-                          // server has no folder-move/rename endpoint (the
-                          // move API relocates one document per call), so
-                          // folder-onto-folder would be N non-atomic moves —
-                          // document moves only until that lands server-side.
-                          const validDrop =
-                            !!dragNodeId && folderOfNode(dragNodeId) !== node.path;
-                          const isDropTarget = validDrop && dropFolder === node.path;
-                          // Only folders that DIRECTLY hold a document collapse.
-                          // A pure container (subfolders only, no node file) has
-                          // nothing of its own to hide, so it stays a static row
-                          // — no chevron, matching a file-tree's leaf folders.
-                          const collapsible = node.count > 0;
-                          return (
-                            <div
-                              className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none transition-colors ${
-                                collapsible ? "cursor-pointer" : ""
-                              } ${
-                                isDropTarget
-                                  ? "bg-primary/10 ring-1 ring-primary"
-                                  : "hover:bg-muted/50"
-                              }`}
-                              onClick={
-                                collapsible
-                                  ? () => toggleFolderCollapsed(node.path)
-                                  : undefined
-                              }
-                              onDragOver={(e) => {
-                                if (!validDrop) return;
-                                e.preventDefault();
-                                e.dataTransfer.dropEffect = "move";
-                              }}
-                              onDragEnter={() => {
-                                if (!validDrop) return;
-                                setDropFolder(node.path);
-                                // Hovering a collapsed folder springs it open
-                                // after a beat so its subfolders become targets.
-                                if (collapsible && collapsed)
-                                  scheduleDragExpand(node.path);
-                              }}
-                              onDragLeave={() => {
-                                setDropFolder((d) => (d === node.path ? null : d));
-                                cancelDragExpand();
-                              }}
-                              onDrop={(e) => {
-                                if (!validDrop) return;
-                                e.preventDefault();
-                                handleDropOnFolder(node.path);
-                              }}
-                              data-testid={`folder-header-${node.path}`}
-                            >
-                              {collapsible ? (
-                                <ChevronRight
-                                  className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${
-                                    collapsed ? "" : "rotate-90"
-                                  }`}
-                                />
-                              ) : (
-                                // Spacer so names still line up under sibling
-                                // collapsible folders.
-                                <span className="h-3.5 w-3.5 shrink-0" />
-                              )}
-                              <FolderOpen className="h-4 w-4 text-blue-500" />
-                              <span className="text-sm font-medium">
-                                {node.label}
-                              </span>
-                              {/* Direct doc count only. Container folders (no
-                                  node file of their own) show no badge. */}
-                              {node.count > 0 && (
-                                <Badge
-                                  variant="secondary"
-                                  className="text-[10px] px-1.5 py-0 h-5"
-                                >
-                                  {node.count}
-                                </Badge>
-                              )}
-                              {canEditDocs && (
-                                <button
-                                  type="button"
-                                  className="ml-1 rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
-                                  title={`New document in ${prettyFolderPath(node.path)}`}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onOpenDocument("new", { folder: node.path });
-                                  }}
-                                >
-                                  <Plus className="h-3.5 w-3.5" />
-                                </button>
-                              )}
-                            </div>
-                          );
-                        }}
-                        renderDoc={(n) => renderDocRow(n, 0)}
-                      />
                     </div>
                   );
-                })()}
+                };
+
+                if (viewMode === "cards") {
+                  return (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                      {sorted.map((n) => renderDocRow(n))}
+                    </div>
+                  );
+                }
+
+                // List mode: nested folder tree. Folder headers collapse and
+                // accept drops; doc rows drag. Groups under a collapsed
+                // ancestor are skipped wholesale.
+                return (
+                  <div className="space-y-1">
+                    {dragNodeId && folderOfNode(dragNodeId) !== baseFolder && (
+                      <div
+                        className={`flex items-center gap-2 rounded-md border-2 border-dashed px-3 py-2 text-sm ${dropFolder === baseFolder
+                            ? "border-primary bg-primary/10 text-primary"
+                            : "border-border text-muted-foreground"
+                          }`}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = "move";
+                        }}
+                        onDragEnter={() => setDropFolder(baseFolder)}
+                        onDragLeave={() =>
+                          setDropFolder((d) => (d === baseFolder ? null : d))
+                        }
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          handleDropOnFolder(baseFolder);
+                        }}
+                      >
+                        <FolderInput className="h-4 w-4" />
+                        Move to {baseFolder ? prettyFolderPath(baseFolder) : "nest root"}
+                      </div>
+                    )}
+                    <FolderTree
+                      className="space-y-1"
+                      groups={docGroups}
+                      baseFolder={baseFolder}
+                      isCollapsed={(p) => collapsedFolders.has(p)}
+                      renderFolder={(node, { collapsed }) => {
+                        // Valid drop = a doc is being dragged and this isn't
+                        // its current folder. Invalid targets get no
+                        // highlight and skip preventDefault, so the browser
+                        // shows the no-drop cursor and the drop is a no-op.
+                        // Folder rows themselves are NOT draggable: the
+                        // server has no folder-move/rename endpoint (the
+                        // move API relocates one document per call), so
+                        // folder-onto-folder would be N non-atomic moves —
+                        // document moves only until that lands server-side.
+                        const validDrop =
+                          !!dragNodeId && folderOfNode(dragNodeId) !== node.path;
+                        const isDropTarget = validDrop && dropFolder === node.path;
+                        // Only folders that DIRECTLY hold a document collapse.
+                        // A pure container (subfolders only, no node file) has
+                        // nothing of its own to hide, so it stays a static row
+                        // — no chevron, matching a file-tree's leaf folders.
+                        const collapsible = node.count > 0;
+                        return (
+                          <div
+                            className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none transition-colors ${collapsible ? "cursor-pointer" : ""
+                              } ${isDropTarget
+                                ? "bg-primary/10 ring-1 ring-primary"
+                                : "hover:bg-muted/50"
+                              }`}
+                            onClick={
+                              collapsible
+                                ? () => toggleFolderCollapsed(node.path)
+                                : undefined
+                            }
+                            onDragOver={(e) => {
+                              if (!validDrop) return;
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = "move";
+                            }}
+                            onDragEnter={() => {
+                              if (!validDrop) return;
+                              setDropFolder(node.path);
+                              // Hovering a collapsed folder springs it open
+                              // after a beat so its subfolders become targets.
+                              if (collapsible && collapsed)
+                                scheduleDragExpand(node.path);
+                            }}
+                            onDragLeave={() => {
+                              setDropFolder((d) => (d === node.path ? null : d));
+                              cancelDragExpand();
+                            }}
+                            onDrop={(e) => {
+                              if (!validDrop) return;
+                              e.preventDefault();
+                              handleDropOnFolder(node.path);
+                            }}
+                            data-testid={`folder-header-${node.path}`}
+                          >
+                            {collapsible ? (
+                              <ChevronRight
+                                className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${collapsed ? "" : "rotate-90"
+                                  }`}
+                              />
+                            ) : (
+                              // Spacer so names still line up under sibling
+                              // collapsible folders.
+                              <span className="h-3.5 w-3.5 shrink-0" />
+                            )}
+                            <FolderOpen className="h-4 w-4 text-blue-500" />
+                            <span className="text-sm font-medium">
+                              {node.label}
+                            </span>
+                            {/* Recursive subtree total (this folder + all
+                                  descendants), matching the Overview Contents
+                                  card. Direct-count-only made a folder holding
+                                  hundreds of nested docs read as "3", so the
+                                  Documents tab looked like it was hiding docs. */}
+                            {node.total > 0 && (
+                              <Badge
+                                variant="secondary"
+                                className="text-[10px] px-1.5 py-0 h-5"
+                                title={
+                                  node.count !== node.total
+                                    ? `${node.count} here · ${node.total} in this folder`
+                                    : undefined
+                                }
+                              >
+                                {node.total}
+                              </Badge>
+                            )}
+                            {canEditDocs && (
+                              <button
+                                type="button"
+                                className="ml-1 rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
+                                title={`New document in ${prettyFolderPath(node.path)}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onOpenDocument("new", { folder: node.path });
+                                }}
+                              >
+                                <Plus className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      }}
+                      renderDoc={(n) => renderDocRow(n, 0)}
+                    />
+                  </div>
+                );
+              })()}
 
               {/* Wiki link health — orphans + broken [[links]], computed
                   client-side. Collapsed by default; hidden when clean. */}
@@ -2732,11 +2741,10 @@ export function NestView({
                   key={chip.key}
                   type="button"
                   onClick={() => setFeedFilter(chip.key)}
-                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                    feedFilter === chip.key
+                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${feedFilter === chip.key
                       ? "border-primary bg-primary text-primary-foreground"
                       : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
-                  }`}
+                    }`}
                   data-testid={`feed-filter-${chip.key}`}
                 >
                   {chip.label}
@@ -2826,13 +2834,13 @@ export function NestView({
                 but aren't actionable by them (scope or SoD). */}
             {feedFilter !== "comments" &&
               reviewQueue.length > 0 && reviewableQueue.length === 0 && (
-              <p className="text-xs text-muted-foreground text-center">
-                {reviewQueue.length} pending review
-                {reviewQueue.length === 1 ? "" : "s"} in this nest, but
-                none you can act on — outside your steward scope, or
-                submitted by you (authors can't approve their own work).
-              </p>
-            )}
+                <p className="text-xs text-muted-foreground text-center">
+                  {reviewQueue.length} pending review
+                  {reviewQueue.length === 1 ? "" : "s"} in this nest, but
+                  none you can act on — outside your steward scope, or
+                  submitted by you (authors can't approve their own work).
+                </p>
+              )}
           </TabsContent>
         )}
 
@@ -2866,7 +2874,11 @@ export function NestView({
               </div>
             </CardHeader>
             <CardContent>
-              {externalEdits.length === 0 ? (
+              {initialLoad ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : externalEdits.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-8 text-center">
                   <CheckCircle2 className="h-10 w-10 text-green-500 mb-3" />
                   <p className="text-sm font-medium">No pending external edits</p>
@@ -3069,7 +3081,7 @@ export function NestView({
         )}
       </Tabs>
 
-      {!stewardshipEnabled && !isReadOnly && canManageGovernance && (
+      {activeTab === "review" && !stewardshipEnabled && !isReadOnly && canManageGovernance && (
         <Card className="mt-4">
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
@@ -3139,7 +3151,15 @@ export function NestView({
           allowSelfApprove={allowSelfApprove}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
-          onChanged={() => { setShowSettings(false); fetchData(); }}
+          onChanged={(next) => {
+            setShowSettings(false);
+            // Flip the governance UI (Pending/AI Ready/Review Queue tiles,
+            // Stewards tab, etc.) instantly instead of waiting for the full
+            // refetch to land — then reconcile counts in the background.
+            setStewardshipEnabled(next.stewardshipEnabled);
+            setAllowSelfApprove(next.allowSelfApprove);
+            fetchData();
+          }}
         />
       )}
 

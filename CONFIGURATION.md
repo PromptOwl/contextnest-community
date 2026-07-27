@@ -67,23 +67,86 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `OIDC_CLIENT_SECRET` | `""` | Client secret from your IdP app registration. Write-only on the Settings API — `GET /admin/settings` reports only `oidc_client_secret_set: true/false`, never the value. |
 | `OIDC_ALLOWED_DOMAINS` | `""` (any) | Comma-separated email-domain allowlist, e.g. `acme.com, contractors.acme.com`. When set, only accounts whose asserted email is on a listed domain may sign in (others bounce with `domain_not_allowed`). Empty allows any domain the IdP asserts. |
 | `OIDC_AUTO_PROVISION` | `true` | Create a user automatically on first successful OIDC sign-in (display name from the `name` claim). Set `false` to allow only pre-existing (invited/registered) users — unknown emails bounce with `not_invited`. |
+| `OIDC_DEPARTMENT_TAGGING` | `false` | Auto-tag newly **created** documents with the creator's directory department: `dept:<slugified-department>` (lowercase, spaces → dashes, e.g. `dept:customer-success`) is appended to the document's tags, deduped against user-supplied tags. Applies on create only — never on update, never retroactively — and a user without a stored department is a silent no-op. The department is captured from the OIDC `department` ID-token claim on every SSO login (a login without the claim clears it, so directory moves propagate), so this is only meaningful when your IdP emits that claim — see [Department auto-tagging](#department-auto-tagging). Also editable from Settings → Single sign-on. |
 | `ENV_FILE_PATH` | `$DATA_ROOT/.env` | Path to an optional `.env` file the server reads at boot (in addition to `$cwd/.env`). **No longer used for persistence** — the License Setup Page and Settings page now write to the database, not this file (see [Runtime settings persistence](#runtime-settings-persistence)). Kept for operators who bootstrap config from a mounted `.env`. |
 | `TELEMETRY_ENABLED` | `"true"` (set to `"false"` to disable) | Batched, anonymized usage events sent to PromptOwl. Off disables the loop entirely. |
 | `TELEMETRY_INTERVAL_MS` | `3600000` (1 hour) | How often buffered telemetry is flushed to PromptOwl. |
 | `TRACE_RETENTION_DAYS` | `14` | Activity-trace retention window in days (the `api_events` rows behind `GET /admin/trace` and `GET /nests/:id/trace`). Rows older than this are pruned opportunistically (every ~500 inserts). `0` = keep forever (pruning is skipped entirely). Capped at `3650`; invalid/negative values fall back to `14`. Also editable from Settings → Advanced. |
 | `CORS_ORIGINS` | `*` in open mode; `http://localhost:5173,http://localhost:3838` in key mode | Comma-separated allowlist. Set to `*` to allow any origin (**only** safe in open mode — in key mode with Bearer tokens this enables CSRF). |
-| `MAX_BODY_BYTES` | `10485760` (10 MB) | Reject requests whose `Content-Length` exceeds this. Prevents giant-payload DoS. |
+| `MAX_BODY_BYTES` | `10485760` (10 MB) | Reject requests whose `Content-Length` exceeds this. Prevents giant-payload DoS. The asset-upload route (`POST /nests/:id/assets`) is exempt up to the video cap below. |
+| `VIDEO_MAX_MB` | `30` | Max size (in MB) of a video uploaded into a doc. Default `30` keeps it under Cloud Run's ~32 MiB HTTP/1 request-body limit, so an oversized video is rejected with a clear message instead of a bare `413` from the platform. Raise only where the deployment can actually accept larger request bodies (not behind Cloud Run, or on HTTP/2 / direct-to-bucket upload). Images are fixed at 10 MB. |
 | `LOGO_URL` | _(unset)_ | Custom logo shown in the UI header + login screen. Must start with `https://`, `http://`, or `data:image/` — other schemes (`file://`, relative, `javascript:`) are rejected with a warning and the bundled icon is used. |
+| `PROMPTOWL_TEAMS_ENABLED` | _(unset — off)_ | Lets users who signed in with PromptOwl import their PromptOwl teams as local teams. Off by default; set `true` to enable, or toggle from Settings → Advanced. When off, `GET/POST /teams/promptowl` return `404` and the PromptOwl Teams panel is hidden. Independent of `PROMPTOWL_SIGN_IN_GATE`. |
+| `TYPE_ARTIFACT_ENABLED` | `true` | Set `false` to disable creation of **artifact** nodes server-wide (existing artifact nodes stay readable — never data loss). Runnable types (agent/skill/tool) are gated by `FEATURE_WORKFLOW_PLANE`, not here. Also editable from Settings (`/admin/settings`). |
+| `TYPE_TABLE_ENABLED` | `true` | Same as above for **table** nodes. |
 | `FEATURE_WORKFLOW_PLANE` | _(unset — off)_ | Enables the workflow plane: typed edges, edge-type registry, governed runs. Optional feature; also toggleable from Settings. |
 | `FEATURE_SUBAGENT_RUNS` | _(unset — off)_ | Lets runs spawn nested sub-agent runs (recursion). Gated separately from the plane; requires `FEATURE_WORKFLOW_PLANE`. Also toggleable from Settings → Advanced (turning the plane off forces this off too). Opens a recursion surface — enable only after reviewing the depth/fan-out caps. |
 | `SUBAGENT_MAX_DEPTH` | `8` | Max sub-agent nesting depth (clamped 1..32) — bounds the call tree's HEIGHT so it stays finite/haltable. |
 | `SUBAGENT_MAX_CHILDREN` | `16` | Max direct children a single run may spawn (clamped 1..128) — bounds the call tree's WIDTH. Together with `SUBAGENT_MAX_DEPTH` this caps total tree size so a runner can't fork-bomb the DB. |
 | `RUN_MAX_STEPS` | `10000` | Max steps a single run may accumulate (clamped 10..100000) — bounds a runaway/hostile runner's step log. |
+| `RUN_MAX_CONCURRENT_ROOTS` | `50` | Max concurrently-running root (depth-0) runs per nest (clamped 1..1000). The subagent caps bound a single tree; this bounds how many trees can run at once, so triggers can't flood a nest. |
+| `ANTHROPIC_API_KEY` | _(unset)_ | Server-wide default runner key for workflow-plane agent runs. Never returned by the API — the health endpoint reports presence only, and Settings shows a masked tail. |
 | `SLACK_WEBHOOK_URL` | _(unset — connector off)_ | Slack incoming-webhook URL for governance-event notifications (review submitted/approved/rejected, collaborator added). `https://` only — the URL embeds a secret. Also editable from Settings in the UI. |
+| `MSTEAMS_WEBHOOK_URL` | _(unset — connector off)_ | Microsoft Teams incoming-webhook URL for the same governance events, posted as Adaptive Cards. `https://` only — the URL embeds a secret. Also editable from Settings in the UI. See [Microsoft Teams notifications](#microsoft-teams-notifications). |
 | `SMTP_URL` | _(unset — connector off)_ | SMTP connection URL for email notifications (`smtp://` or `smtps://`, credentials inline). Requires `NOTIFY_EMAIL_FROM` and `NOTIFY_EMAIL_TO`. Also editable from Settings. |
 | `NOTIFY_EMAIL_FROM` | _(unset)_ | From address for notification emails. |
 | `NOTIFY_EMAIL_TO` | _(unset)_ | Comma-separated recipients for notification emails. |
 | `NOTIFY_DEBOUNCE_MS` | `15000` | Per-nest buffer window before notifications flush; bursts collapse into one digest message. |
+
+---
+
+## Microsoft Teams notifications
+
+Set `MSTEAMS_WEBHOOK_URL` (or paste the URL into **Settings → Notifications →
+Microsoft Teams notifications**) and the server posts the same governance
+events the Slack connector covers — review requested / approved / rejected,
+collaborator added, plus per-nest burst digests — to one Teams channel as
+[Adaptive Cards](https://adaptivecards.io/). Leave it empty to turn the
+connector off. Delivery is fire-and-forget with a short timeout: a Teams
+outage or a bad URL never slows down or fails the action that triggered the
+message.
+
+> Naming note: the setting is `msteams_webhook_url` / `MSTEAMS_WEBHOOK_URL`
+> because "teams" in this product means user groups (the `/teams` API), not
+> Microsoft Teams.
+
+### Create the incoming webhook in a Teams channel
+
+Microsoft retired the classic Office 365 "Incoming Webhook" connectors;
+webhooks are now created with the **Workflows** (Power Automate) app:
+
+1. In Microsoft Teams, open the channel that should receive notifications,
+   click **⋯ (More options) → Workflows**.
+2. Pick the template **"Post to a channel when a webhook request is
+   received"** (searching for "webhook" finds it), sign in if prompted, and
+   confirm the team + channel.
+3. Create the flow and **copy the HTTP POST URL** it shows (a
+   `https://….logic.azure.com/…` or `https://….powerplatform.com/…` address).
+4. Paste that URL into **Settings → Notifications → Microsoft Teams
+   notifications** (or set `MSTEAMS_WEBHOOK_URL`).
+5. Save, then click **Send test** on the card to post a test message and
+   confirm the channel receives it. (The button tests the *saved* URL — save
+   first, then test. The Slack card has the same button.)
+
+If your tenant still has a legacy Office 365 connector webhook, it is expected
+to accept the same payload envelope (legacy connectors documented support for
+Adaptive Card attachments, though we have not verified one end-to-end — the
+card's plain-text `fallbackText` is the safety net) — but create new hooks via
+Workflows.
+
+The URL embeds a secret — anyone holding it can post to the channel, so treat
+it like a password (it is why the setting requires `https://`). The server
+sends the standard envelope Workflows expects:
+`{"type": "message", "attachments": [{"contentType":
+"application/vnd.microsoft.card.adaptive", "content": {…card…}}]}` with a
+plain-text `fallbackText` for clients that cannot render cards.
+
+Per-nest connector rows post the same Adaptive Card format to a nest-specific
+webhook, with per-event filtering: `POST /nests/:id/connectors` with a JSON
+body like `{"channel": "teams", "url": "https://…", "events":
+["review_requested", "review_rejected"]}` (`events` may also be `["*"]`; the
+`url` may be an `env:KEY` reference into the nest's env store). Manage rows
+with `GET`/`PATCH`/`DELETE` on the same path.
 
 ---
 
@@ -97,7 +160,7 @@ the returned ID token (issuer, audience, nonce, signature against the issuer's
 JWKS) and starts a normal browser session. Users are looked up by email;
 unknown emails are created automatically when `OIDC_AUTO_PROVISION` is on.
 
-All six `OIDC_*` values are also editable at runtime from **Settings → Single
+All seven `OIDC_*` values are also editable at runtime from **Settings → Single
 sign-on** (superadmin only) — no restart needed. The Settings page shows the
 exact **redirect URI** to register with your IdP:
 
@@ -135,6 +198,33 @@ For **Google**: create an OAuth client ID (type *Web application*) in the
 Google Cloud console, add the same redirect URI under *Authorized redirect
 URIs*, and use the **Google** preset (issuer `https://accounts.google.com`)
 with that client ID/secret.
+
+### Department auto-tagging
+
+With `OIDC_DEPARTMENT_TAGGING` on (Settings → Single sign-on → **Department
+auto-tagging**), every document a user **creates** is tagged
+`dept:<slugified-department>` from their directory department — e.g. a user in
+*Customer Success* creates docs tagged `dept:customer-success`. Create-only:
+edits never add or change the tag, and existing documents are never
+retro-tagged. Users without a department (password accounts, or an IdP that
+doesn't emit the claim) create untagged documents — never an error.
+
+The department is read from the **`department` claim** in the OIDC ID token
+and stored on the user at every SSO login: a new value updates it, an absent
+claim clears it, so directory moves propagate on the user's next sign-in.
+
+Microsoft Entra ID does **not** emit the claim by default — add it to the app
+registration: *Token configuration → Add optional claim → Token type: **ID**
+→ select **department** → Add* (grant the suggested Microsoft Graph
+permission if prompted), and make sure the users' *Department* field is
+populated in Entra. Other IdPs work too as long as they emit a string
+`department` claim in the ID token (e.g. a Keycloak user-attribute mapper).
+
+> **Privacy note:** the `dept:<slug>` tag becomes part of the document's
+> visible metadata — anyone who can read the document (collaborators, shared
+> nests, public nests) can see the creator's directory department. That's
+> PII-adjacent organizational data; consider this before enabling on servers
+> where documents are shared beyond the creator's own team or made public.
 
 ### Revoking access (offboarding)
 
@@ -200,7 +290,7 @@ Postgres backend starts empty.
 ### Runtime settings persistence
 
 Settings you change at runtime — everything on the **Settings page** (`/admin/settings`:
-sign-in gate, logo, base URL, upload limit, feature flags, OIDC SSO, Slack/SMTP connectors)
+sign-in gate, logo, base URL, upload limit, feature flags, OIDC SSO, Slack/Teams/SMTP connectors)
 plus the **installed license key** — are stored in the database (`server_settings`
 table), **not** in a `.env` file. This is deliberate: on Cloud Run the container
 filesystem is ephemeral, so a file-based value was wiped by every rebuild, and each

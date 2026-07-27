@@ -13,6 +13,7 @@ import { notifyNestEvent } from "../notify/notify.js";
 import { nestName, docLink } from "../governance/title-resolver.js";
 import { ValidationError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
+import { isEmailish } from "../config.js";
 import { permissionLevel, type NestPermission } from "../shared/access.js";
 import type { NestCollaborator } from "../shared/types.js";
 
@@ -63,6 +64,11 @@ export async function addCollaborator(params: {
   // (they claim it by registering with the same address — see auth claim flow).
   let userId = params.userId;
   if (!userId && params.email) {
+    // Reject a malformed address BEFORE it becomes a placeholder user — the
+    // client validates too, but a direct API call must not slip junk in.
+    if (!isEmailish(params.email)) {
+      throw new ValidationError("Enter a valid email address.");
+    }
     const email = normalizeEmail(params.email);
     const existing = (await db.get(
       "SELECT id FROM users WHERE LOWER(email) = ?",

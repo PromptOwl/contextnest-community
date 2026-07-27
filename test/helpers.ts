@@ -119,6 +119,10 @@ export async function createTestApp(
     const dbClient = await import("../src/db/client.js");
     await dbClient.resetDb();
     await dbClient.initDb();
+    // Mirror index.ts startup: load DB-granted superadmins into the sync
+    // isSuperAdmin() cache (post-reset module instance = the one the app uses).
+    const access = await import("../src/governance/access-service.js");
+    await access.loadGrantedSuperAdmins();
   }
   const { createApp } = await import("../src/app.js");
 

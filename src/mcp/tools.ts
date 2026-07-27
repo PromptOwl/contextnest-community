@@ -20,7 +20,7 @@ import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
 } from "../nests/unsynced-service.js";
-import { isLicenseAdminUserId } from "../auth/license.js";
+import { isServerAdminUserId } from "../shared/access.js";
 import { config } from "../config.js";
 import {
   createNode,
@@ -207,7 +207,8 @@ export const TOOL_DEFINITIONS = [
         },
         type: {
           type: "string",
-          description: "Node type (default: document)",
+          description:
+            "Node type (default: document). Note: artifact and table can be disabled server-wide by an admin — creating a disabled type is rejected; existing nodes of that type stay readable.",
         },
         tags: {
           type: "array",
@@ -473,6 +474,16 @@ export async function handleToolCall(
   }
 }
 
+/**
+ * SECURITY INVARIANT — new mutating tools MUST self-gate. The /mcp transport
+ * admits READ-tier callers (MCP is always POST, so the route can't
+ * distinguish reads from writes); per-tool permission checks in the cases
+ * below are the ONLY write/governance enforcement. Follow the existing
+ * patterns: canCreateInNest / canUserEdit for content writes, canUserApprove
+ * (inside review-service) for governance, explicit admin checks for
+ * stewards/sharing/sync. A mutating case without its own check ships a
+ * privilege escalation.
+ */
 async function runTool(
   toolName: string,
   args: Record<string, any>,
@@ -738,8 +749,9 @@ async function runTool(
     }
 
     case "context_create": {
-      // Defense-in-depth: the /mcp middleware already requires nest write,
-      // but gate here too so creation stays locked if that ever changes.
+      // PRIMARY write gate: the /mcp middleware admits read-tier callers
+      // (the MCP transport is always POST), so this per-tool check is what
+      // keeps creation locked to write+ collaborators and nest-scope editors.
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
         return "You don't have permission to create documents in this nest.";
       }
@@ -1102,7 +1114,7 @@ async function runTool(
     case "context_unsynced_list": {
       // Same admin gate as REST GET /nests/unsynced — listing reflects
       // server-side filesystem state, so non-admins shouldn't probe it.
-      if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
+      if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
         return "You don't have permission to list unsynced folders. Server admin only.";
       }
       const folders = listUnsyncedFolders();
@@ -1118,7 +1130,7 @@ async function runTool(
 
     case "context_sync_folder": {
       // Same admin gate as REST POST /nests/unsynced/sync.
-      if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
+      if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
         return "You don't have permission to sync folders. Server admin only.";
       }
       try {

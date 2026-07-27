@@ -2,6 +2,7 @@ import { join, dirname } from "path";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { z } from "zod";
 
 // ── .env loading ────────────────────────────────────────────────────────
 // Load .env before any getter reads process.env. Try cwd first (typical
@@ -34,6 +35,7 @@ let canonicalEnvLoaded: string | null = null;
 // env value (set directly, bypassing the /admin/settings validator) would
 // spam the log on every submit/approve/reject/add-collaborator.
 let slackUrlWarned = false;
+let msteamsUrlWarned = false;
 let emailFromWarned = false;
 let emailToWarned = false;
 let oidcIssuerWarned = false;
@@ -48,8 +50,12 @@ let oidcIssuerWarned = false;
  * getters and the /admin/settings validator so env-set and UI-set values gate
  * identically.
  */
+const EMAIL_SCHEMA = z.email();
 export function isEmailish(v: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v) && !/[\r\n]/.test(v);
+  // Delegate to zod's maintained email validator (rejects junk like
+  // `*'/*'/8////@gmail.com`). Keep the explicit CR/LF reject to close the
+  // header-injection shape a trailing "\n" could otherwise sneak past.
+  return EMAIL_SCHEMA.safeParse(v.trim()).success && !/[\r\n]/.test(v);
 }
 /** Comma-separated recipient list where every entry is isEmailish(). */
 export function isEmailListish(v: string): boolean {
@@ -155,6 +161,16 @@ export const config = {
   },
   get PROMPTOWL_KEY() {
     return process.env.PROMPTOWL_KEY || "";
+  },
+  /**
+   * Whether importing/syncing teams FROM PromptOwl is offered. Default OFF
+   * (only an explicit "true" enables) — an operator opts the PO-team surface
+   * in from Settings or env. When off, the /teams/promptowl routes 404 and the
+   * UI hides the panel. Independent of PROMPTOWL_SIGN_IN_GATE: a user may sign
+   * in with PromptOwl yet not be allowed to pull their PO teams in.
+   */
+  get PROMPTOWL_TEAMS_ENABLED(): boolean {
+    return process.env.PROMPTOWL_TEAMS_ENABLED === "true";
   },
   /** Vercel automation-bypass secret for PO calls; unset = no bypass. */
   get PROMPTOWL_BYPASS_SECRET(): string {
@@ -301,6 +317,18 @@ export const config = {
     return process.env.OIDC_AUTO_PROVISION !== "false";
   },
   /**
+   * Auto-tag content created by SSO users with their directory department:
+   * when on, node CREATE appends `dept:<slugified-department>` to the new
+   * node's tags (never on update, never retroactively). The department is
+   * captured from the OIDC `department` claim at login (see oidc.ts), so
+   * this is only meaningful alongside an IdP that emits that claim — but
+   * there is no hard dependency on OIDC_ENABLED. Default off; superadmin-
+   * togglable at runtime via /admin/settings.
+   */
+  get OIDC_DEPARTMENT_TAGGING(): boolean {
+    return process.env.OIDC_DEPARTMENT_TAGGING === "true";
+  },
+  /**
    * Path to the .env file the server reads its config from and the license
    * install flow persists PROMPTOWL_KEY into. Defaults UNDER DATA_ROOT (not
    * $cwd) so it lands on the writable, volume-mounted, restart-surviving path
@@ -375,8 +403,45 @@ export const config = {
     return raw;
   },
 
+  /**
+   * Optional Microsoft Teams incoming-webhook URL (Workflows app) for team
+   * notifications — same events as SLACK_WEBHOOK_URL, posted as Adaptive
+   * Cards. Empty/unset = connector off. https only — a webhook carries an
+   * implicit secret in its path, so it never travels plaintext. Named
+   * MSTEAMS_* deliberately: "teams" in this codebase means user groups.
+   */
+  get MSTEAMS_WEBHOOK_URL(): string | null {
+    const raw = process.env.MSTEAMS_WEBHOOK_URL?.trim();
+    if (!raw) return null;
+    if (!/^https:\/\//i.test(raw)) {
+      if (!msteamsUrlWarned) {
+        msteamsUrlWarned = true;
+        console.warn(
+          "[config] MSTEAMS_WEBHOOK_URL rejected: must be an https:// URL. Microsoft Teams notifications disabled.",
+        );
+      }
+      return null;
+    }
+    return raw;
+  },
+
   get FEATURE_WORKFLOW_PLANE(): boolean {
     return process.env.FEATURE_WORKFLOW_PLANE === "true";
+  },
+  /**
+   * Content-type toggles — soft-disable a node type server-wide. DEFAULT ON:
+   * missing/unset/anything-but-"false" = enabled, so existing deployments see
+   * zero behavior change. Only CREATION of the type is refused when disabled;
+   * existing nodes of that type still read/render/version (never data loss).
+   * Runnable types (agent/skill/tool) are NOT governed here — they stay gated
+   * by FEATURE_WORKFLOW_PLANE. Superadmin-editable at runtime via
+   * /admin/settings (type_artifact_enabled / type_table_enabled).
+   */
+  get TYPE_ARTIFACT_ENABLED(): boolean {
+    return process.env.TYPE_ARTIFACT_ENABLED !== "false";
+  },
+  get TYPE_TABLE_ENABLED(): boolean {
+    return process.env.TYPE_TABLE_ENABLED !== "false";
   },
   /**
    * Sub-agent runs: lets a run spawn nested runs (an external runner calling
@@ -507,5 +572,16 @@ export const config = {
    */
   get MAX_BODY_BYTES() {
     return parseInt(process.env.MAX_BODY_BYTES || String(10 * 1024 * 1024), 10);
+  },
+  /**
+   * Max video upload size in bytes. Default 30 MB — kept under Cloud Run's
+   * 32 MiB HTTP/1 request-body limit so a too-big video is rejected cleanly by
+   * our own check (clear message) instead of a bare 413 from the platform.
+   * Raise via VIDEO_MAX_MB only when the deployment can actually accept it
+   * (e.g. not behind Cloud Run, or on HTTP/2 / direct-to-bucket upload).
+   */
+  get VIDEO_MAX_BYTES() {
+    const mb = parseInt(process.env.VIDEO_MAX_MB || "30", 10);
+    return (Number.isFinite(mb) && mb > 0 ? mb : 30) * 1024 * 1024;
   },
 };

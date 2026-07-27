@@ -1,6 +1,7 @@
 import { Hono } from "hono";
+import { streamText } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
-import { resolveNestPermission } from "../shared/access.js";
+import { resolveNestPermission, isServerAdminUserId } from "../shared/access.js";
 import {
   createNest,
   importNest,
@@ -20,17 +21,15 @@ import { registerImportedDocuments } from "../nodes/service.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
+  deleteUnsyncedFolder,
 } from "./unsynced-service.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import {
   resolveUserRoles,
   getStewardsForUser,
-  getCollaboratorRole,
-  getStewardRolesForUser,
+  resolveGrantRoles,
 } from "../governance/stewardship-service.js";
-import { collabPermToRole } from "../governance/roles.js";
-import { resolveTeamRolesForUser } from "../governance/teams-service.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
@@ -87,76 +86,70 @@ nestRoutes.get("/", async (c) => {
   // resolves to permission='read' (see resolveNestPermission), so the card
   // would mislabel them "Viewer" unless we surface their steward roles too.
   const callerEmail = await resolveCallerEmail(userId);
-  const annotate = async (n: { id: string; user_id: string }) => {
+  const annotate = async (n: { id: string; user_id: string; stewardship_enabled?: number }) => {
     const permission = await effectivePermission(n.id, userId);
     const is_owner = permission === "owner";
-    let owner_email: string | null = null;
-    // Role badge on shared cards. Derive from the caller's ACTUAL grant on
-    // this nest (collaborator row + steward rows), NOT resolveUserRoles —
-    // that folds a license/super admin to "admin" on every nest, so a server
-    // admin who is only an editor collaborator here would be mislabeled
-    // "Admin" on a nest they don't own. getCollaboratorRole reads the raw
-    // grant, so the badge shows their real relationship.
-    let roles: string[];
-    if (is_owner) {
-      roles = ["owner"];
-    } else {
-      const grantRole = collabPermToRole(
-        await getCollaboratorRole(n.id, callerEmail),
-      );
-      const stewardRoles = await getStewardRolesForUser(n.id, callerEmail);
-      // Team membership is a third grant path — include it so a team member's
-      // card shows their real role instead of a blank badge.
-      const teamRoles = await resolveTeamRolesForUser(n.id, userId);
-      roles = [
-        ...new Set(
-          [grantRole, ...stewardRoles, ...teamRoles].filter(Boolean) as string[],
-        ),
-      ];
-    }
-    if (!is_owner && n.user_id !== ANON_USER_ID) {
-      const row = (await db.get(ownerEmailSql, [n.user_id])) as
-        | { email?: string }
-        | undefined;
-      owner_email = row?.email ?? null;
-    }
+    const needOwnerEmail = !is_owner && n.user_id !== ANON_USER_ID;
+    // Role badge on shared cards. resolveGrantRoles merges the caller's RAW
+    // grants (collaborator + steward + team) in parallel — NOT resolveUserRoles,
+    // which folds a license/super admin to "admin" on every nest and would
+    // mislabel a server admin who is only an editor here. Owner-email lookup is
+    // independent, so fire both together.
+    const [roles, owner_email] = await Promise.all([
+      is_owner
+        ? Promise.resolve<string[]>(["owner"])
+        : resolveGrantRoles(n.id, callerEmail, userId),
+      needOwnerEmail
+        ? (db.get(ownerEmailSql, [n.user_id]) as Promise<{ email?: string } | undefined>).then(
+            (row) => row?.email ?? null,
+          )
+        : Promise.resolve<string | null>(null),
+    ]);
     // Surface governance state so the dashboard card's "Ungoverned" badge
     // reflects whether stewardship is actually on — not just anon-ownership.
+    // The column already rode in on the SELECT * row, so no per-nest query.
     return {
       ...n,
       permission,
       is_owner,
       owner_email,
       roles,
-      stewardship_enabled: await isStewardshipEnabled(n.id),
+      stewardship_enabled: !!n.stewardship_enabled,
     };
   };
-  // Dedupe by id; owner/shared rows win over public discovery row.
+  // Dedupe by id (owner/shared rows win over public discovery row), then
+  // annotate every card concurrently — the per-nest grant lookups are the
+  // dashboard's hot path, so a serial loop paid N× the latency for nothing.
   const seen = new Set<string>();
-  const out: Awaited<ReturnType<typeof annotate>>[] = [];
+  const deduped: Array<(typeof owned)[number]> = [];
   for (const n of [...owned, ...shared, ...publicExtras]) {
     if (seen.has(n.id)) continue;
     seen.add(n.id);
-    out.push(await annotate(n));
+    deduped.push(n);
   }
+  const out = await Promise.all(deduped.map(annotate));
 
   // Tile metadata: per-nest document count + people (collaborators + active
   // stewards). All three are single grouped queries rather than per-nest
   // work — the doc count uses node_versions (every live doc, API-created or
   // imported, is registered there; deletes remove its rows) so listing stays
   // one round-trip instead of a filesystem scan per card on every load.
+  // NOTE: Postgres returns COUNT(...) as a string (bigint), SQLite as a number.
+  // Coerce with Number(r.c) so document_count is a real number — otherwise the
+  // dashboard banner's `sum + n.document_count` concatenates ("40"+"0"+"346"…)
+  // instead of adding, producing a giant nonsense total.
   const docRows = (await db.all(
     "SELECT nest_id, COUNT(DISTINCT node_id) AS c FROM node_versions GROUP BY nest_id",
   )) as Array<{ nest_id: string; c: number }>;
-  const docByNest = new Map(docRows.map((r) => [r.nest_id, r.c]));
+  const docByNest = new Map(docRows.map((r) => [r.nest_id, Number(r.c)]));
   const collabRows = (await db.all(
     "SELECT nest_id, COUNT(*) AS c FROM nest_collaborators GROUP BY nest_id",
   )) as Array<{ nest_id: string; c: number }>;
-  const collabByNest = new Map(collabRows.map((r) => [r.nest_id, r.c]));
+  const collabByNest = new Map(collabRows.map((r) => [r.nest_id, Number(r.c)]));
   const stewardRows = (await db.all(
     "SELECT nest_id, COUNT(DISTINCT user_email) AS c FROM stewards WHERE is_active = 1 GROUP BY nest_id",
   )) as Array<{ nest_id: string; c: number }>;
-  const stewardByNest = new Map(stewardRows.map((r) => [r.nest_id, r.c]));
+  const stewardByNest = new Map(stewardRows.map((r) => [r.nest_id, Number(r.c)]));
   // Who, not just how many — the card face shows the actual people. Two
   // grouped queries; capped client-side to a handful of chips.
   const stewardEmailRows = (await db.all(
@@ -221,6 +214,36 @@ nestRoutes.post("/:nestId", async (c) => {
   }
   const files = Array.isArray(body.files) ? body.files : [];
   const userId = c.get("userId");
+  console.log(
+    `[import] request: name=${JSON.stringify(body.name)} files=${files.length}`,
+  );
+
+  // `?stream=1` streams NDJSON progress so the UI can render a real progress
+  // bar over a large import (register runs one publish per doc). Every other
+  // caller (tests, CLI) gets the original single JSON response below.
+  if (c.req.query("stream") === "1") {
+    const name = body.name;
+    return streamText(c, async (stream) => {
+      try {
+        await stream.writeln(JSON.stringify({ phase: "write" }));
+        const nest = await importNest(userId, name, files);
+        const email = await resolveCallerEmail(userId);
+        const documents = await registerImportedDocuments(
+          nest.id,
+          email,
+          async (done, total) => {
+            await stream.writeln(JSON.stringify({ phase: "register", done, total }));
+          },
+        );
+        await stream.writeln(JSON.stringify({ complete: true, nest, documents }));
+      } catch (err) {
+        await stream.writeln(
+          JSON.stringify({ error: (err as Error)?.message || "Import failed" }),
+        );
+      }
+    });
+  }
+
   const nest = await importNest(userId, body.name, files);
   // Seed governance rows for the documents already in the folder so they
   // list as published and edit from their real version (not from scratch).
@@ -233,8 +256,9 @@ nestRoutes.post("/:nestId", async (c) => {
 
 // GET /nests/unsynced — list folders under DATA_ROOT that are candidates for
 // sync (dropped in by the starter CLI or copied in manually). In key mode only
-// the license-admin sees them; the listing reflects server-side filesystem
-// state, so non-admins shouldn't be probing what's lying around on disk.
+// a server admin (license admin or superadmin — same resolution as /admin/*)
+// sees them; the listing reflects server-side filesystem state, so non-admins
+// shouldn't be probing what's lying around on disk.
 //
 // Served from inside the `/:nestId` param route (literal "unsynced" branch),
 // NOT as a static sibling route: RegExpRouter refuses a static path beside a
@@ -244,7 +268,7 @@ nestRoutes.post("/:nestId", async (c) => {
 // public URLs are unchanged.
 async function handleUnsyncedList(c: any) {
   const userId = c.get("userId");
-  if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
+  if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can list unsynced folders");
   }
   return c.json({ folders: listUnsyncedFolders() });
@@ -261,7 +285,7 @@ nestRoutes.post("/:nestId/sync", async (c) => {
     throw new NotFoundError("Not found");
   }
   const userId = c.get("userId");
-  if (config.AUTH_MODE !== "open" && !(await isLicenseAdminUserId(userId))) {
+  if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
     throw new ForbiddenError("Only the server admin can sync folders");
   }
   const body = await c.req.json<{ name?: string }>();
@@ -274,6 +298,26 @@ nestRoutes.post("/:nestId/sync", async (c) => {
     await resolveCallerEmail(userId),
   );
   return c.json(result, 201);
+});
+
+// DELETE /nests/unsynced/sync — remove an unsynced folder the user doesn't want
+// (leftover files taking up space, no intention to sync). Same admin-gate as
+// sync (touches server disk). Name travels in the body because leaf paths
+// contain slashes. Registered on the same literal "unsynced" branch.
+nestRoutes.delete("/:nestId/sync", async (c) => {
+  if (c.req.param("nestId") !== "unsynced") {
+    throw new NotFoundError("Not found");
+  }
+  const userId = c.get("userId");
+  if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
+    throw new ForbiddenError("Only the server admin can delete folders");
+  }
+  const body = await c.req.json<{ name?: string }>().catch(() => ({}) as { name?: string });
+  if (!body?.name) {
+    throw new ValidationError("name is required");
+  }
+  deleteUnsyncedFolder(body.name);
+  return c.json({ ok: true });
 });
 
 // GET /nests/:nestId

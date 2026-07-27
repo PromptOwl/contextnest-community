@@ -5,6 +5,8 @@
  * purge leaves behind.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -200,12 +202,15 @@ describe("GET /nests/:id/changes", () => {
 describe("GET /changes — public-reader approval signal", () => {
   let gNest: string;
   let sPub: string;
+  let bob: { apiKey: string; userId: string; email: string };
 
   beforeAll(async () => {
+    bob = await registerUser(app, "bob@acme.com", "Bob");
     const nest = await jsonRequest(app, "POST", "/nests", { name: "Public Mirror" }, alice.apiKey);
     gNest = nest.data.nest.id;
-    // allow_self_approve so the owner (also the submitter) can approve directly
-    // — separation of duties would otherwise block self-approval.
+    // allow_self_approve now means owner/admin writes publish immediately, so
+    // the owner can seed an approved public body directly. An UNAPPROVED draft
+    // can therefore only come from an editor — bob is added below for that.
     await jsonRequest(
       app,
       "PATCH",
@@ -213,9 +218,18 @@ describe("GET /changes — public-reader approval signal", () => {
       { stewardship_enabled: true, allow_self_approve: true },
       alice.apiKey,
     );
+    // bob: editor steward — can draft, never auto-publishes.
+    const nestPath = join(env.dataDir, "nests", gNest);
+    mkdirSync(nestPath, { recursive: true });
+    writeFileSync(
+      join(nestPath, "stewards.yaml"),
+      `version: 1\nnest:\n  - email: ${bob.email}, role: editor\n`,
+    );
+    await jsonRequest(app, "POST", `/nests/${gNest}/stewards/sync`, {}, alice.apiKey);
     await jsonRequest(app, "PATCH", `/nests/${gNest}/visibility`, { visibility: "public" }, alice.apiKey);
 
-    // Create + approve a doc so a public reader has an approved body to see.
+    // Owner create auto-publishes under self-approve → public reader has an
+    // approved body to see.
     await jsonRequest(
       app,
       "POST",
@@ -223,22 +237,19 @@ describe("GET /changes — public-reader approval signal", () => {
       { title: "Spec", content: "# APPROVED BODY" },
       alice.apiKey,
     );
-    // approve() requires a pending review request — submit, then approve.
-    await jsonRequest(app, "POST", `/nests/${gNest}/nodes/nodes/spec/submit-review`, { note: "r" }, alice.apiKey);
-    await jsonRequest(app, "POST", `/nests/${gNest}/nodes/nodes/spec/approve`, { note: "ok" }, alice.apiKey);
 
     await wait(20);
     sPub = new Date().toISOString();
     await wait(20);
 
-    // Unapproved draft edit AFTER sPub: bumps frontmatter updated_at, but the
-    // approved (public-visible) body is unchanged.
+    // Unapproved draft edit AFTER sPub by the EDITOR: bumps frontmatter
+    // updated_at, but the approved (public-visible) body is unchanged.
     await jsonRequest(
       app,
       "PATCH",
       `/nests/${gNest}/nodes/nodes/spec`,
       { append: "\nDRAFT ONLY" },
-      alice.apiKey,
+      bob.apiKey,
     );
   });
 
