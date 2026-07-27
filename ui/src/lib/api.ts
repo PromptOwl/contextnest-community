@@ -295,6 +295,7 @@ export interface AdminSettings {
   oidc_client_secret?: string | null;
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
+  msteams_webhook_url: string;
   smtp_url: string;
   notify_email_from: string;
   notify_email_to: string;
@@ -314,6 +315,15 @@ export async function updateAdminSettings(
   return request<{ settings: AdminSettings }>("/admin/settings", {
     method: "PATCH",
     body: JSON.stringify(patch),
+  });
+}
+
+/** Admin: send a test message to the saved Slack/Teams webhook. Resolves on
+ *  success; rejects (with the server's reason) if the webhook didn't accept it. */
+export async function sendTestNotification(channel: "slack" | "teams") {
+  return request<{ ok: true }>("/admin/settings/test-notification", {
+    method: "POST",
+    body: JSON.stringify({ channel }),
   });
 }
 

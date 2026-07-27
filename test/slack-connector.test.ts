@@ -99,6 +99,31 @@ describe("Slack connector", () => {
     expect(res.status).toBe(201);
     process.env.SLACK_WEBHOOK_URL = WEBHOOK;
   });
+
+  it("send-test posts to the saved webhook and reports success", async () => {
+    const openApp = await createTestApp("open");
+    process.env.SLACK_WEBHOOK_URL = WEBHOOK;
+    const before = sent.length;
+    const res = await jsonRequest(openApp, "POST", "/admin/settings/test-notification", {
+      channel: "slack",
+    });
+    expect(res.status).toBe(200);
+    expect(res.data.ok).toBe(true);
+    await settle();
+    expect(sent.length).toBe(before + 1);
+    expect(sent[sent.length - 1].text).toMatch(/test/i);
+  });
+
+  it("send-test errors (no throw) when the webhook is unset", async () => {
+    const openApp = await createTestApp("open");
+    delete process.env.SLACK_WEBHOOK_URL;
+    const res = await jsonRequest(openApp, "POST", "/admin/settings/test-notification", {
+      channel: "slack",
+    });
+    expect(res.status).toBe(502);
+    expect(res.data.error).toMatch(/webhook URL first/i);
+    process.env.SLACK_WEBHOOK_URL = WEBHOOK;
+  });
 });
 
 // The review lifecycle events (submit / approve / reject) each fire a Slack
