@@ -23,10 +23,11 @@ on:
     branches: [development]
   workflow_dispatch: {}   # allow manual redeploy of the current development HEAD
 
-# never let two dev deploys race
+# serialize dev deploys: queue a new run behind an in-flight one instead of
+# killing it mid-push / mid-rollout
 concurrency:
   group: deploy-dev
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
