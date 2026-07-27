@@ -18,6 +18,8 @@ import { config } from "../config.js";
 import { getDb } from "../db/client.js";
 import { envValues } from "../workflow/env-routes.js";
 import { msTeamsPayload } from "./msteams.js";
+import { escapeMrkdwn } from "./slack.js";
+import { postWebhook, resolveNestName, testWebhook } from "./webhook.js";
 
 export type ConnectorChannel = "slack" | "teams" | "webhook";
 
@@ -35,12 +37,6 @@ interface ConnectorRow {
   url: string;
   events: string;
   enabled: number;
-}
-
-/** Slack mrkdwn treats <…> as control sequences (mass-pings, deceptive
- *  links); message text carries user-controlled fragments, so escape. */
-function escapeMrkdwn(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 const EVENT_EMOJI: Record<string, string> = {
@@ -134,33 +130,6 @@ async function resolveUrl(nestId: string, raw: string): Promise<string | null> {
   return isSafeConnectorUrl(raw) ? raw : null;
 }
 
-const warned = new Set<string>();
-
-async function post(url: string, body: unknown, who: string): Promise<void> {
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 3000);
-    try {
-      await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: ctrl.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch (err) {
-    if (!warned.has(who)) {
-      warned.add(who);
-      console.warn(
-        `[connectors] delivery failed for ${who} (muting further warnings):`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
-}
-
 /**
  * Fire an event at every matching connector. Callers use `void dispatch(…)`
  * — never await in a request path beyond the row lookups; delivery is
@@ -168,19 +137,11 @@ async function post(url: string, body: unknown, who: string): Promise<void> {
  */
 export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
   const db = getDb();
-  let nestName = ev.nestId;
-  try {
-    const row = (await db.get("SELECT name FROM nests WHERE id = ?", [ev.nestId])) as
-      | { name?: string }
-      | undefined;
-    if (row?.name) nestName = row.name;
-  } catch {
-    /* cosmetic */
-  }
+  const nestName = await resolveNestName(ev.nestId);
 
   // Implicit server-wide slack connector (super-admin Settings).
   if (config.SLACK_WEBHOOK_URL) {
-    void post(
+    void postWebhook(
       config.SLACK_WEBHOOK_URL,
       formatBody("slack", nestName, ev),
       "server-slack",
@@ -202,7 +163,7 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
   // pre-existing behavior, left unchanged in this PR; ticket separately.
   // Per-nest connector rows below are unaffected: they are dispatch-only.
   if (config.MSTEAMS_WEBHOOK_URL && !DIGEST_DELIVERED_KINDS.has(ev.kind)) {
-    void post(
+    void postWebhook(
       config.MSTEAMS_WEBHOOK_URL,
       formatBody("teams", nestName, ev),
       "server-msteams",
@@ -229,6 +190,28 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
     if (!kinds.includes("*") && !kinds.includes(ev.kind)) continue;
     const url = await resolveUrl(ev.nestId, r.url);
     if (!url) continue;
-    void post(url, formatBody(r.channel, nestName, ev), `connector:${r.id}`);
+    void postWebhook(url, formatBody(r.channel, nestName, ev), `connector:${r.id}`);
   }
+}
+
+/**
+ * Send a test message to the server-wide Slack or Teams webhook and report
+ * whether it landed — powers the "Send test" button in Settings. Uses the
+ * SAVED webhook (so the admin saves first, then tests); reuses formatBody so
+ * the test renders in the exact wire format real events do.
+ */
+export async function sendTestNotification(
+  channel: "slack" | "teams",
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const url =
+    channel === "slack" ? config.SLACK_WEBHOOK_URL : config.MSTEAMS_WEBHOOK_URL;
+  const label = channel === "slack" ? "Slack" : "Microsoft Teams";
+  if (!url)
+    return { ok: false, error: `Save a ${label} webhook URL first, then test.` };
+  const ev: ConnectorEvent = {
+    kind: "test",
+    nestId: "",
+    message: "Test notification from ContextNest — your connector is working.",
+  };
+  return testWebhook(url, formatBody(channel, "ContextNest", ev));
 }

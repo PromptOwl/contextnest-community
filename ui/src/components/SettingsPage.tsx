@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import type { AdminSettings, SignInGate, ManualSignIn } from "../lib/api";
+import { sendTestNotification } from "../lib/api";
 
 interface SettingsPageProps {
   onBack: () => void;
@@ -285,6 +286,49 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
     if (settings) setDraft(settings);
     setSaveError(null);
   };
+
+  // "Send test" for the Slack/Teams webhook cards. The server tests the SAVED
+  // webhook (it reads config), so the button keys off `settings`, not `draft`:
+  // nothing saved → disabled; unsaved edits → a hint that the test hits the
+  // old value until Save.
+  const [testing, setTesting] = useState<null | "slack" | "teams">(null);
+  const sendTest = async (channel: "slack" | "teams") => {
+    setTesting(channel);
+    try {
+      await sendTestNotification(channel);
+      toast.success(
+        `Test ${channel === "slack" ? "Slack" : "Teams"} notification sent — check the channel.`,
+      );
+    } catch (e: any) {
+      toast.error(e?.message || "Test notification failed.");
+    } finally {
+      setTesting(null);
+    }
+  };
+  const testButton = (
+    channel: "slack" | "teams",
+    field: "slack_webhook_url" | "msteams_webhook_url",
+  ) => (
+    <div className="mt-3 flex items-center gap-2">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={testing === channel || !settings?.[field]}
+        onClick={() => sendTest(channel)}
+      >
+        {testing === channel && (
+          <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+        )}
+        Send test
+      </Button>
+      {dirtyKeys.includes(field) && (
+        <span className="text-xs text-muted-foreground">
+          Save first — the test uses the saved URL.
+        </span>
+      )}
+    </div>
+  );
 
   return (
     <div>
@@ -871,6 +915,7 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   placeholder="https://hooks.slack.com/services/…"
                   onChange={(v) => set({ slack_webhook_url: v })}
                 />
+                {testButton("slack", "slack_webhook_url")}
               </CardContent>
             </Card>
 
@@ -893,6 +938,7 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   placeholder="https://….logic.azure.com/workflows/…"
                   onChange={(v) => set({ msteams_webhook_url: v })}
                 />
+                {testButton("teams", "msteams_webhook_url")}
               </CardContent>
             </Card>
 

@@ -17,9 +17,7 @@
  * the message. Failures warn once, then go quiet.
  */
 import { config } from "../config.js";
-import { getDb } from "../db/client.js";
-
-let warnedOnce = false;
+import { postWebhook, resolveNestName } from "./webhook.js";
 
 /**
  * The notification one-liners are composed in Slack mrkdwn (":memo: *Doc*
@@ -54,9 +52,8 @@ function slackEmojiToUnicode(s: string): string {
  * a live, trusted-looking link in the Teams channel. Backslash first (so a
  * crafted "\[" can't un-escape our work), then both brackets; that kills
  * link syntax at the root. This is the Teams sibling of slack.ts's
- * escapeMrkdwn (also duplicated in dispatch.ts) — same intent, different
- * metacharacters; consolidating the Slack copies is deliberately out of
- * scope here.
+ * escapeMrkdwn (now shared between slack.ts and dispatch.ts) — same intent,
+ * different metacharacters.
  */
 export function escapeAdaptiveText(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
@@ -126,41 +123,12 @@ export async function notifyMsTeamsForNest(
   message: string,
 ): Promise<void> {
   if (!config.MSTEAMS_WEBHOOK_URL) return;
-  let nestName = nestId;
-  try {
-    const row = (await getDb().get("SELECT name FROM nests WHERE id = ?", [
-      nestId,
-    ])) as { name?: string } | undefined;
-    if (row?.name) nestName = row.name;
-  } catch {
-    /* name lookup is cosmetic */
-  }
+  const nestName = await resolveNestName(nestId);
   return notifyMsTeams(nestName, message);
 }
 
 async function notifyMsTeams(title: string, message: string): Promise<void> {
   const url = config.MSTEAMS_WEBHOOK_URL;
   if (!url) return;
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 3000);
-    try {
-      await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(msTeamsPayload(title, message)),
-        signal: ctrl.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch (err) {
-    if (!warnedOnce) {
-      warnedOnce = true;
-      console.warn(
-        "[msteams] notification failed (suppressing further warnings):",
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
+  await postWebhook(url, msTeamsPayload(title, message), "msteams");
 }

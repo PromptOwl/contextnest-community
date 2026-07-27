@@ -117,6 +117,9 @@ webhooks are now created with the **Workflows** (Power Automate) app:
    `https://….logic.azure.com/…` or `https://….powerplatform.com/…` address).
 4. Paste that URL into **Settings → Notifications → Microsoft Teams
    notifications** (or set `MSTEAMS_WEBHOOK_URL`).
+5. Save, then click **Send test** on the card to post a test message and
+   confirm the channel receives it. (The button tests the *saved* URL — save
+   first, then test. The Slack card has the same button.)
 
 If your tenant still has a legacy Office 365 connector webhook, it is expected
 to accept the same payload envelope (legacy connectors documented support for

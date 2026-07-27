@@ -410,3 +410,84 @@ describe("admin settings validation", () => {
     process.env.MSTEAMS_WEBHOOK_URL = WEBHOOK;
   });
 });
+
+// Self-contained (own fetch stub) — the review-lifecycle block above unstubs
+// globals in its afterAll, so this block must re-stub fetch for itself.
+describe("send test notification", () => {
+  const TWEBHOOK =
+    "https://prod-02.westus.logic.azure.com/workflows/test/triggers/manual/paths/invoke";
+  const tsent: any[] = [];
+  const realFetch = globalThis.fetch;
+
+  beforeAll(() => {
+    vi.stubGlobal("fetch", async (url: any, init?: any) => {
+      const u = String(url);
+      if (u === TWEBHOOK) {
+        tsent.push(JSON.parse(init.body));
+        return new Response("ok", { status: 200 });
+      }
+      if (u.includes("logic.azure.com")) throw new Error("simulated outage");
+      return realFetch(url, init);
+    });
+  });
+  afterAll(() => {
+    vi.unstubAllGlobals();
+    delete process.env.MSTEAMS_WEBHOOK_URL;
+  });
+
+  it("posts an Adaptive Card to the saved webhook and reports success", async () => {
+    const openApp = await createTestApp("open");
+    process.env.MSTEAMS_WEBHOOK_URL = TWEBHOOK;
+    const before = tsent.length;
+    const res = await jsonRequest(
+      openApp,
+      "POST",
+      "/admin/settings/test-notification",
+      { channel: "teams" },
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.ok).toBe(true);
+    await settle();
+    expect(tsent.length).toBe(before + 1);
+    expectAdaptiveCardEnvelope(tsent[tsent.length - 1]);
+  });
+
+  it("returns an error (not a throw) when no webhook is configured", async () => {
+    const openApp = await createTestApp("open");
+    delete process.env.MSTEAMS_WEBHOOK_URL;
+    const res = await jsonRequest(
+      openApp,
+      "POST",
+      "/admin/settings/test-notification",
+      { channel: "teams" },
+    );
+    expect(res.status).toBe(502);
+    expect(res.data.error).toMatch(/webhook URL first/i);
+  });
+
+  it("rejects an unknown channel", async () => {
+    const openApp = await createTestApp("open");
+    const res = await jsonRequest(
+      openApp,
+      "POST",
+      "/admin/settings/test-notification",
+      { channel: "bogus" },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("surfaces a webhook outage as an error", async () => {
+    const openApp = await createTestApp("open");
+    // A different logic.azure.com URL the fetch stub treats as an outage.
+    process.env.MSTEAMS_WEBHOOK_URL =
+      "https://prod-99.westus.logic.azure.com/workflows/dead/triggers/manual/paths/invoke";
+    const res = await jsonRequest(
+      openApp,
+      "POST",
+      "/admin/settings/test-notification",
+      { channel: "teams" },
+    );
+    expect(res.status).toBe(502);
+    expect(res.data.error).toBeTruthy();
+  });
+});

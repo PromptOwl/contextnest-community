@@ -207,6 +207,15 @@ export async function updateAdminSettings(
   });
 }
 
+/** Admin: send a test message to the saved Slack/Teams webhook. Resolves on
+ *  success; rejects (with the server's reason) if the webhook didn't accept it. */
+export async function sendTestNotification(channel: "slack" | "teams") {
+  return request<{ ok: true }>("/admin/settings/test-notification", {
+    method: "POST",
+    body: JSON.stringify({ channel }),
+  });
+}
+
 // ─── License ───────────────────────────────────────────────────────────
 
 export interface LicenseStatus {
