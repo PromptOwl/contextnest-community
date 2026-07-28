@@ -77,7 +77,13 @@ export async function exportNestBundle(
       // The raw on-disk working copy can carry `status: draft` + a bumped
       // version even for a governance-published node, which would re-import as
       // an unpublished draft — so we override status/version/body here.
-      body = (await resolveExportBody(nestId, doc.id, body)) ?? body;
+      const approvedBody = await resolveExportBody(nestId, doc.id, body);
+      // null = the approved version couldn't be reconstructed. Do NOT fall back
+      // to the working copy — that would ship unapproved bytes stamped
+      // `status: published`, exactly what the approved-only export prevents.
+      // Skip the doc instead (it's dropped from this export).
+      if (approvedBody == null) continue;
+      body = approvedBody;
       frontmatter.status = "published";
       frontmatter.version = approved;
     } else {
@@ -89,17 +95,33 @@ export async function exportNestBundle(
     count++;
   }
 
-  // Ship the engine's on-disk sidecars verbatim so the version history and nest
-  // config travel with the content: `.versions/**` (keyframes + history the
-  // engine reconstructs older versions from — under the nest root and under
-  // nodes/), `.context/**` (config.yaml), and CONTEXT.md. Node .md files are
-  // serialized above from their approved state, so these never collide with
-  // them. The importer copies them to the new nest folder untouched.
+  // Ship the engine's on-disk sidecars verbatim so version history + nest config
+  // travel with the content:
+  //   - `.versions/**` — keyframes + history the engine reconstructs older
+  //     versions from (under the nest root and under nodes/).
+  //   - `.context/config.yaml` — the nest's non-identity config only.
+  //   - `CONTEXT.md`.
+  // Node .md files are serialized above from their approved state, so these
+  // never collide with them; the importer copies them untouched.
+  //
+  // SECURITY: only `.context/config.yaml` is whitelisted — NOT the whole
+  // `.context/**`. That directory can also hold `.context/stewards.yaml`
+  // (steward emails + roles); shipping it would leak the source host's people
+  // AND let the destination activate them by email via `stewards/sync`. People
+  // and governance must never travel (see the export design). Any new identity
+  // file under `.context` stays excluded by this allowlist by default.
+  //
+  // ENGINE BOUNDARY (see CLAUDE.md): this reaches into the engine's private
+  // on-disk `.versions` layout directly. A future engine storage-format change
+  // would break exports with no compile-time signal — track replacing this with
+  // an engine-exported "export version history" API upstream.
   const nestPath = resolveNestPath(nestId);
   for (const rel of walkFiles(nestPath)) {
     const segs = rel.split("/");
     const keep =
-      segs.includes(".versions") || segs[0] === ".context" || rel === "CONTEXT.md";
+      segs.includes(".versions") ||
+      rel === ".context/config.yaml" ||
+      rel === "CONTEXT.md";
     if (!keep) continue;
     zip.file(rel, readFileSync(join(nestPath, rel)));
   }

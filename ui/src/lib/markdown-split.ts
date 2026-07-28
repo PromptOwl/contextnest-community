@@ -6,6 +6,11 @@ import type { ImportedFile } from "./api";
  * joined by `\n\n---\n\n`) back into one ImportedFile per document, so that
  * file can be re-imported through the normal folder importer.
  *
+ * This must stay in lockstep with the SERVER serialization in
+ * `src/nodes/markdown-export.ts` (`nodeToMarkdown`/`nodesToMarkdown`) — it is
+ * the inverse of that format. If the export shape changes, update both; the
+ * unit tests here mirror that server format so a drift shows up as a failure.
+ *
  * A normal single-doc markdown file (one frontmatter block, no separator)
  * passes through unchanged as `[{ path: fallbackName, content }]`.
  *

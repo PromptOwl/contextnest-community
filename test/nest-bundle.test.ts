@@ -11,6 +11,8 @@
  *  - only the owner/admin may export a bundle
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
 import JSZip from "jszip";
 import {
   setupTestEnv,
@@ -110,6 +112,25 @@ describe("nest export bundle → existing folder import", () => {
     expect(list.data.nodes.length).toBe(2);
     expect(list.data.nodes.every((n: any) => n.status === "published")).toBe(true);
   }, 60000);
+
+  it("never exports .context/stewards.yaml (identity), keeps config.yaml", async () => {
+    // Plant a steward roster on the source nest's disk — the file
+    // loadStewardsConfig reads and stewards/sync activates by email.
+    const ctx = join(env.dataDir, "nests", nestId, ".context");
+    mkdirSync(ctx, { recursive: true });
+    writeFileSync(
+      join(ctx, "stewards.yaml"),
+      "stewards:\n  - email: leaked-steward@example.com\n    role: reviewer\n",
+    );
+
+    const files = await unzipToFiles(await (await exportBundle(alice.apiKey)).arrayBuffer());
+    const paths = files.map((f) => f.path);
+    // Identity file excluded; non-identity config still travels.
+    expect(paths.some((p) => p.endsWith(".context/stewards.yaml"))).toBe(false);
+    expect(paths).toContain(".context/config.yaml");
+    // The steward's email must not leak anywhere in the bundle.
+    expect(files.every((f) => !f.content.includes("leaked-steward@example.com"))).toBe(true);
+  });
 
   it("includes drafts with ?includeDrafts=1", async () => {
     const res = await exportBundle(alice.apiKey, true);
