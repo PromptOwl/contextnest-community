@@ -9,7 +9,8 @@ import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { isSuperAdmin } from "./access-service.js";
 import { ConflictError, ValidationError } from "../shared/errors.js";
-import { buildTitleMap } from "./title-resolver.js";
+import { buildTitleMap, nestName, docLink } from "./title-resolver.js";
+import { sendEmailToRecipient } from "../notify/email.js";
 import { resolveNestPermission } from "../shared/access.js";
 import { resolveTeamRolesForUser } from "./teams-service.js";
 import { nestAllowsSelfApprove } from "../nests/service.js";
@@ -263,6 +264,8 @@ export async function createStewardRecord(params: {
     role?: StewardRole;
   }>;
   assignedBy: string;
+  /** Request origin, for building the notification's nest link. */
+  baseUrl?: string;
 }): Promise<Steward[]> {
   if (params.users.length === 0) {
     throw new Error("At least one user is required");
@@ -381,6 +384,36 @@ export async function createStewardRecord(params: {
     "UPDATE nests SET stewardship_enabled = 1 WHERE id = ? AND stewardship_enabled = 0",
     [params.nestId],
   );
+
+  // Email each newly-assigned steward that they now hold the role — best-effort
+  // (a dead SMTP must never fail the assignment; skips silently when the email
+  // connector is unconfigured). Resolve the nest name + link once for the batch.
+  if (results.length > 0) {
+    let scopeLabel: string;
+    if (params.scope === "document") {
+      const titles = await buildTitleMap(params.nestId);
+      const docTitle = titles.get(nodePattern!) || nodePattern!;
+      const capitalized = docTitle.charAt(0).toUpperCase() + docTitle.slice(1);
+      scopeLabel = `"${capitalized}" document`;
+    } else if (params.scope === "tag") {
+      scopeLabel = `#${tagName}`;
+    } else {
+      scopeLabel = "the whole nest";
+    }
+    const shareNestName = await nestName(params.nestId);
+    const link = docLink(params.nestId, undefined, params.baseUrl);
+    for (const s of results) {
+      void sendEmailToRecipient(s.userEmail, {
+        status: "steward",
+        docTitle: shareNestName,
+        path: shareNestName,
+        permission: s.role,
+        scopeLabel,
+        by: params.assignedBy || undefined,
+        link,
+      });
+    }
+  }
 
   return results;
 }
