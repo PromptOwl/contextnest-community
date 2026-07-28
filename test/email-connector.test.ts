@@ -6,7 +6,12 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
-import { withTimeouts, withPool, isRateLimited } from "../src/notify/email.js";
+import {
+  withTimeouts,
+  withPool,
+  isRateLimited,
+  recipientEnvelope,
+} from "../src/notify/email.js";
 
 const sendMail = vi.fn(async () => ({ messageId: "test" }));
 const verify = vi.fn(async () => true);
@@ -181,6 +186,21 @@ describe("withTimeouts (SMTP URL socket-timeout hardening)", () => {
     expect(preset.match(/rateLimit=/g)).toHaveLength(1);
     expect(preset).toContain("rateLimit=20");
     expect(preset).toContain("pool=true");
+  });
+
+  it("puts a lone recipient on To, but many on Bcc so nobody sees the roster", () => {
+    // One recipient → plain To.
+    expect(recipientEnvelope("solo@acme.com", "nest@co.com")).toEqual({
+      to: "solo@acme.com",
+    });
+    // Several recipients → Bcc (To falls back to the sender), so no reviewer /
+    // team member sees another's address.
+    const many = recipientEnvelope(
+      ["a@acme.com", "b@acme.com", "c@acme.com"],
+      "nest@co.com",
+    );
+    expect(many.to).toBe("nest@co.com");
+    expect(many.bcc).toEqual(["a@acme.com", "b@acme.com", "c@acme.com"]);
   });
 
   it("classifies rate-limit / throttle errors as retryable, hard rejects as not", () => {

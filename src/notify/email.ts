@@ -218,6 +218,22 @@ export async function notifyEmailForNest(
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Choose the envelope so a multi-recipient send (every reviewer steward, a
+ * team's members) never exposes the roster: a single recipient goes on `To`,
+ * but two or more go on `Bcc` (with `To` set to the sender) so no recipient
+ * sees another's address. Each person still receives their own copy.
+ */
+export function recipientEnvelope(
+  to: string | string[],
+  from: string,
+): { to: string; bcc?: string[] } {
+  const recipients = Array.isArray(to) ? to : [to];
+  return recipients.length > 1
+    ? { to: from, bcc: recipients }
+    : { to: recipients[0] };
+}
+
+/**
  * A provider throttle ("too many emails", 4xx greylist, Mailtrap's 550 5.7.0
  * rate reply) is transient — the send will land on a retry. A hard reject
  * (bad recipient, auth) is not, so we only retry the throttle shapes and let
@@ -271,7 +287,7 @@ export async function sendEmailToRecipient(
     const { subject, text, html } = renderEmail(details);
     await sendMailWithRetry(transporter, {
       from,
-      to,
+      ...recipientEnvelope(to, from),
       subject,
       text,
       html,
