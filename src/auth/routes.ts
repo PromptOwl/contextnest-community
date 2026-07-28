@@ -42,6 +42,8 @@ import { verifySsoTicket } from "./sso-token.js";
 import { oidcRoutes } from "./oidc.js";
 import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { sendEmailToRecipient } from "../notify/email.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 
 /** is_admin for user-facing payloads: license admin OR superadmin. */
 function isServerAdminEmail(email: string): boolean {
@@ -1152,6 +1154,22 @@ authRoutes.post("/invite", async (c) => {
   }
 
   trackEvent("admin.invite", { adminId: callerId, email });
+
+  // Email the invitee their temp password + a sign-in link (best-effort — a
+  // dead SMTP must never fail the invite; the admin still gets the password in
+  // the response to hand over manually). Off unless the email connector is set.
+  const inviter = (await db.get("SELECT email FROM users WHERE id = ?", [
+    callerId,
+  ])) as { email?: string } | undefined;
+  void sendEmailToRecipient(email, {
+    status: "invited",
+    docTitle: "ContextNest",
+    path: "",
+    actor: email,
+    by: inviter?.email || undefined,
+    tempPassword,
+    link: requestBaseUrl(c.req.url),
+  });
 
   return c.json(
     {
