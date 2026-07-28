@@ -32,7 +32,7 @@ export async function safePublishDocument(
   return publishDocument(storage, docId, options);
 }
 
-function stripUndefinedDeep(value: unknown): unknown {
+export function stripUndefinedDeep(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value
       .filter((v) => v !== undefined)

@@ -885,6 +885,45 @@ export async function exportNestMarkdown(
   return res.text();
 }
 
+/**
+ * Download the full-fidelity portability bundle (.zip) for a nest — content +
+ * version history + structural governance. Owner/admin only. Triggers a browser
+ * download; resolves once the blob is fetched.
+ */
+export async function exportNestBundle(
+  nestId: string,
+  opts: { nestName?: string; includeDrafts?: boolean } = {},
+): Promise<void> {
+  const params = new URLSearchParams({ format: "bundle" });
+  if (opts.includeDrafts) params.set("includeDrafts", "1");
+  const res = await fetch(
+    `${API_BASE}/nests/${nestId}/export?${params.toString()}`,
+    { credentials: "include" },
+  );
+  if (!res.ok) {
+    const body = await res.text();
+    let msg = `Export failed (${res.status})`;
+    try {
+      msg = (JSON.parse(body) as { error?: string }).error || msg;
+    } catch {
+      // non-JSON error body — keep the status message
+    }
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  const slug =
+    (opts.nestName || "nest").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
+    "nest";
+  a.download = `${slug}-bundle.zip`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export async function listTags(nestId: string): Promise<string[]> {
   const res = await request<{ tags?: Record<string, number> }>(
     `/nests/${nestId}/overview`,
