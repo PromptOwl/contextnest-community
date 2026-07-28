@@ -47,7 +47,7 @@ describe("renderEmail", () => {
     expect(html).toContain("A review has been requested");
   });
 
-  it("renders a share event in the third person with the permission", () => {
+  it("renders a share event addressed to the invitee with the permission", () => {
     const { subject, text, html } = renderEmail({
       status: "shared",
       docTitle: "Marketing",
@@ -57,9 +57,48 @@ describe("renderEmail", () => {
       by: "owner@acme.com",
       link: "https://nest.acme.com/?nest=n1",
     });
-    expect(subject).toBe("New collaborator on Marketing");
-    expect(text).toContain("new@acme.com was added to Marketing as write");
+    expect(subject).toBe("You've been added to Marketing");
+    expect(text).toContain("You've been given write access to Marketing by owner@acme.com");
     expect(html).toContain("<strong>write</strong>");
+    expect(html).toContain(">Open nest<");
+    // Details show the invitee's role, not a generic "Shared" badge.
+    expect(html).toContain(">Role<");
+    expect(html).toContain(">Nest<");
+  });
+
+  it("renders a teammate invite with the temp password and a sign-in link", () => {
+    const { subject, text, html } = renderEmail({
+      status: "invited",
+      docTitle: "ContextNest",
+      path: "",
+      actor: "new@acme.com",
+      by: "admin@acme.com",
+      tempPassword: "abc123def456ghij",
+      link: "https://nest.acme.com",
+    });
+    expect(subject).toBe("You've been invited to ContextNest");
+    expect(text).toContain("You've been invited to ContextNest by admin@acme.com");
+    expect(text).toContain("Temporary password: abc123def456ghij");
+    expect(html).toContain("abc123def456ghij");
+    expect(html).toContain(">Temporary password<");
+    expect(html).toContain(">Sign in<");
+  });
+
+  it("renders a steward assignment with role and scope", () => {
+    const { subject, text, html } = renderEmail({
+      status: "steward",
+      docTitle: "Marketing",
+      path: "Marketing",
+      permission: "reviewer",
+      scopeLabel: "#billing",
+      by: "owner@acme.com",
+      link: "https://nest.acme.com/?nest=n1",
+    });
+    expect(subject).toBe("You're now a steward of Marketing");
+    expect(text).toContain("You've been assigned as a reviewer steward of #billing by owner@acme.com");
+    expect(text).toContain("Scope: #billing");
+    expect(html).toContain("<strong>reviewer</strong>");
+    expect(html).toContain(">Scope<");
     expect(html).toContain(">Open nest<");
   });
 

@@ -26,7 +26,7 @@ const DIGEST_LINE_CAP = 10;
 const buffers = new Map<
   string,
   {
-    events: Array<{ line: string; details?: EmailEventDetails }>;
+    events: Array<{ line: string; details?: EmailEventDetails; skipEmail?: boolean }>;
     timer: ReturnType<typeof setTimeout>;
   }
 >();
@@ -54,10 +54,15 @@ async function flush(nestId: string): Promise<void> {
   // the digest text (the connector's generic renderHtml/renderText path).
   const details =
     buf.events.length === 1 ? buf.events[0].details : undefined;
+  // The team-channel email is suppressed only when EVERY buffered event opted
+  // out (skipEmail) — e.g. a nest invite, which emails the invitee directly at
+  // their own address instead of the shared NOTIFY_EMAIL_TO inbox. Slack/Teams
+  // still get every event; the opt-out is email-only.
+  const emailAllowed = buf.events.some((e) => !e.skipEmail);
   await Promise.allSettled([
     notifySlackForNest(nestId, text),
     notifyMsTeamsForNest(nestId, text),
-    notifyEmailForNest(nestId, text, details),
+    emailAllowed ? notifyEmailForNest(nestId, text, details) : Promise.resolve(),
   ]);
 }
 
@@ -71,6 +76,7 @@ export async function notifyNestEvent(
   nestId: string,
   message: string,
   details?: EmailEventDetails,
+  opts?: { skipEmail?: boolean },
 ): Promise<void> {
   // Nothing configured → don't even buffer.
   if (
@@ -85,10 +91,13 @@ export async function notifyNestEvent(
     // Fixed batching window, not a trailing-edge debounce: a later event in the
     // burst joins the buffer but does NOT reset the timer, so a steady stream
     // can't delay the digest indefinitely.
-    buf.events.push({ line: message, details });
+    buf.events.push({ line: message, details, skipEmail: opts?.skipEmail });
     return;
   }
   const timer = setTimeout(() => void flush(nestId), config.NOTIFY_DEBOUNCE_MS);
   timer.unref?.();
-  buffers.set(nestId, { events: [{ line: message, details }], timer });
+  buffers.set(nestId, {
+    events: [{ line: message, details, skipEmail: opts?.skipEmail }],
+    timer,
+  });
 }
