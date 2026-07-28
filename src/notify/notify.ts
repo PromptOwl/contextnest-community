@@ -26,7 +26,7 @@ const DIGEST_LINE_CAP = 10;
 const buffers = new Map<
   string,
   {
-    events: Array<{ line: string; details?: EmailEventDetails }>;
+    events: Array<{ line: string; details?: EmailEventDetails; skipEmail?: boolean }>;
     timer: ReturnType<typeof setTimeout>;
   }
 >();
@@ -48,16 +48,26 @@ async function flush(nestId: string): Promise<void> {
   const buf = buffers.get(nestId);
   if (!buf) return;
   buffers.delete(nestId);
+  // Slack/Teams get every buffered event.
   const text = buildText(buf.events.map((e) => e.line));
+  // The team-channel email is opt-out PER EVENT: an event that set skipEmail
+  // (a nest invite, an approve/reject verdict) emails the person directly and
+  // must never reach the shared NOTIFY_EMAIL_TO inbox — not even folded into a
+  // digest when it happens to share a debounce window with a non-skipped event.
+  // So the email text/details are built from the non-skipped events ONLY.
+  const emailEvents = buf.events.filter((e) => !e.skipEmail);
+  const emailText = buildText(emailEvents.map((e) => e.line));
   // A lone event carries its structured details for a rich per-event email; a
   // multi-event digest has no single event to describe, so email falls back to
   // the digest text (the connector's generic renderHtml/renderText path).
-  const details =
-    buf.events.length === 1 ? buf.events[0].details : undefined;
+  const emailDetails =
+    emailEvents.length === 1 ? emailEvents[0].details : undefined;
   await Promise.allSettled([
     notifySlackForNest(nestId, text),
     notifyMsTeamsForNest(nestId, text),
-    notifyEmailForNest(nestId, text, details),
+    emailEvents.length > 0
+      ? notifyEmailForNest(nestId, emailText, emailDetails)
+      : Promise.resolve(),
   ]);
 }
 
@@ -71,6 +81,7 @@ export async function notifyNestEvent(
   nestId: string,
   message: string,
   details?: EmailEventDetails,
+  opts?: { skipEmail?: boolean },
 ): Promise<void> {
   // Nothing configured → don't even buffer.
   if (
@@ -85,10 +96,13 @@ export async function notifyNestEvent(
     // Fixed batching window, not a trailing-edge debounce: a later event in the
     // burst joins the buffer but does NOT reset the timer, so a steady stream
     // can't delay the digest indefinitely.
-    buf.events.push({ line: message, details });
+    buf.events.push({ line: message, details, skipEmail: opts?.skipEmail });
     return;
   }
   const timer = setTimeout(() => void flush(nestId), config.NOTIFY_DEBOUNCE_MS);
   timer.unref?.();
-  buffers.set(nestId, { events: [{ line: message, details }], timer });
+  buffers.set(nestId, {
+    events: [{ line: message, details, skipEmail: opts?.skipEmail }],
+    timer,
+  });
 }

@@ -97,6 +97,7 @@ governanceRoutes.post("/stewards", async (c) => {
       tagName: body.tagName,
       users: body.users,
       assignedBy,
+      baseUrl: requestBaseUrl(c.req.url),
     });
     return c.json({ stewards: created }, 201);
   }
@@ -117,6 +118,7 @@ governanceRoutes.post("/stewards", async (c) => {
       },
     ],
     assignedBy,
+    baseUrl: requestBaseUrl(c.req.url),
   });
   return c.json({ steward: created[0] }, 201);
 });
