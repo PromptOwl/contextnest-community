@@ -16,6 +16,8 @@ import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
 import { normalizeEmail } from "../shared/email.js";
 import { isEmailish } from "../config.js";
+import { sendEmailToRecipient } from "../notify/email.js";
+import { nestName, docLink } from "./title-resolver.js";
 import {
   ValidationError,
   NotFoundError,
@@ -507,9 +509,12 @@ export async function shareTeamWithNest(params: {
   teamId: string;
   callerUserId: string;
   allowAdmin?: boolean;
+  /** Request origin, for building the notification's nest link. */
+  baseUrl?: string;
 }): Promise<SharedTeamRef[]> {
   const db = getDb();
-  return db.transaction(async (tx) => {
+  let sharedMembers: TeamMember[] = [];
+  const refs = await db.transaction(async (tx) => {
     const team = (await tx.get(
       "SELECT id, name, owner_id, members FROM teams WHERE id = ?",
       [params.teamId],
@@ -550,7 +555,9 @@ export async function shareTeamWithNest(params: {
     // Without this, an editor-via-team would gate nothing (stewardship-disabled
     // nests are open read/write). An admin-only team is collaborator-style and
     // does not force stewardship.
-    const hasGovernanceRole = parseMembers(team.members).some(
+    const members = parseMembers(team.members);
+    sharedMembers = members;
+    const hasGovernanceRole = members.some(
       (m) => m.role === "viewer" || m.role === "editor",
     );
     if (hasGovernanceRole) {
@@ -560,6 +567,40 @@ export async function shareTeamWithNest(params: {
     }
     return refs;
   });
+
+  // Email every team member that the nest was shared with them — one send per
+  // distinct role (each carries a different access level), best-effort so a
+  // dead SMTP never fails the share. Skip the person doing the sharing.
+  try {
+    const caller = (await db.get("SELECT email FROM users WHERE id = ?", [
+      params.callerUserId,
+    ])) as { email?: string } | undefined;
+    const callerEmail = caller?.email?.toLowerCase();
+    const shareNestName = await nestName(params.nestId);
+    const link = docLink(params.nestId, undefined, params.baseUrl);
+    const byRole = new Map<string, string[]>();
+    for (const m of sharedMembers) {
+      if (!m.email || m.email.toLowerCase() === callerEmail) continue;
+      const arr = byRole.get(m.role) ?? [];
+      arr.push(m.email);
+      byRole.set(m.role, arr);
+    }
+    for (const [role, emails] of byRole) {
+      if (emails.length === 0) continue;
+      void sendEmailToRecipient(emails, {
+        status: "shared",
+        docTitle: shareNestName,
+        path: shareNestName,
+        link,
+        permission: role,
+        by: caller?.email || undefined,
+      });
+    }
+  } catch (err) {
+    console.error("[notify] team-share email fan-out failed", params.nestId, err);
+  }
+
+  return refs;
 }
 
 /** Remove a team's share from a nest. */
