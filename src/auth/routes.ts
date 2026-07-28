@@ -26,7 +26,7 @@ import {
 } from "./sessions.js";
 import { ValidationError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
-import { config } from "../config.js";
+import { config, isEmailish } from "../config.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import {
   getCurrentLicense,
@@ -295,6 +295,9 @@ authRoutes.post("/register", async (c) => {
 
   if (!body.email || !body.password) {
     throw new ValidationError("email and password are required");
+  }
+  if (!isEmailish(body.email)) {
+    throw new ValidationError("Enter a valid email address.");
   }
   assertValidPassword(body.password);
   const email = normalizeEmail(body.email);
@@ -1080,6 +1083,9 @@ authRoutes.delete("/users/:userId", async (c) => {
 authRoutes.post("/invite", async (c) => {
   const body = await c.req.json<{ email?: string; label?: string }>();
   if (!body.email) throw new ValidationError("email is required");
+  if (!isEmailish(body.email)) {
+    throw new ValidationError("Enter a valid email address.");
+  }
   const email = normalizeEmail(body.email);
 
   const callerId = await resolveCallerUserId(c);

@@ -11,7 +11,7 @@ import { config } from "../config.js";
 import { resolveNestPath } from "../shared/paths.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
-import { isSuperAdmin } from "../governance/access-service.js";
+import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError } from "../shared/errors.js";
 import type { Nest } from "../shared/types.js";
@@ -392,22 +392,11 @@ async function nestsSharedViaTeams(userId: string): Promise<Nest[]> {
 
 export async function listSharedNests(userId: string): Promise<Nest[]> {
   const db = getDb();
-  // Server admin (license admin or access.yaml super_admin) administers every
-  // nest (resolveNestPermission grants 'admin'), so surface every non-owned
-  // nest in the shared list — otherwise private nests they govern aren't
-  // reachable from the dashboard.
-  const caller = (await db.get("SELECT email FROM users WHERE id = ?", [
-    userId,
-  ])) as { email?: string } | undefined;
-  const isServerAdmin =
-    (await isLicenseAdminUserId(userId)) ||
-    (caller?.email ? isSuperAdmin(caller.email) : false);
-  if (isServerAdmin) {
-    return (await db.all(
-      "SELECT * FROM nests WHERE user_id != ? ORDER BY created_at DESC",
-      [userId],
-    )) as Nest[];
-  }
+  // A server admin is NOT auto-shown every nest here. Administering a nest
+  // (resolveNestPermission → 'admin') still grants ACCESS via a direct link,
+  // but it must not surface another user's private nest in the admin's
+  // dashboard — an admin only sees nests actually shared with them (below),
+  // plus their own and the public/anonymous commons (listNests/listPublicNests).
   // Shared = collaborator grant OR active steward assignment (matched by
   // email, since steward rows may predate the account) OR membership of a team
   // shared onto the nest. Independent paths to a nest the user doesn't own.
@@ -434,6 +423,24 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
       seen.add(n.id);
     }
   }
+
+  // Server admins additionally see the anonymous commons — nests owned by the
+  // ANON user (the ungoverned shared workspace), even if a commons nest was
+  // flipped private. This is the ONLY non-shared, non-owned category an admin
+  // is shown: another real user's private nest still stays hidden.
+  if (await isServerAdminUserId(userId)) {
+    const anon = (await db.all(
+      "SELECT * FROM nests WHERE user_id = ? ORDER BY created_at DESC",
+      [ANON_USER_ID],
+    )) as Nest[];
+    for (const n of anon) {
+      if (!seen.has(n.id)) {
+        direct.push(n);
+        seen.add(n.id);
+      }
+    }
+  }
+
   direct.sort((a, b) =>
     a.created_at === b.created_at ? 0 : a.created_at < b.created_at ? 1 : -1,
   );
@@ -447,35 +454,25 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
  *   - owned                → n.user_id = caller (or anon-owned in open mode)
  *   - collaborator grant   → nest_collaborators row
  *   - active steward       → stewards row matched by email
- *   - server admin         → every nest (short-circuit)
  *   - team-shared          → folded in from nestsSharedViaTeams (JSON, not SQL)
  *
+ * A server admin is NOT auto-shown every nest — same rule as listSharedNests:
+ * administering a nest grants access via direct link, not dashboard/inbox
+ * visibility of another user's private nest.
+ *
  * Callers that stitched owned+shared themselves (/me/work inbox, /stats) should
- * use this — it also dedupes, which the naive concat did not (a server admin's
- * owned anon nests appeared in both lists).
+ * use this — it also dedupes, which the naive concat did not.
  */
 export async function listVisibleNests(userId: string): Promise<Nest[]> {
   const db = getDb();
 
-  // Server admin administers every nest, so owned ∪ all-others = all nests.
-  // Mirrors the admin branches in listNests + listSharedNests. One query.
-  const caller = (await db.get("SELECT email FROM users WHERE id = ?", [
-    userId,
-  ])) as { email?: string } | undefined;
-  const isServerAdmin =
-    (await isLicenseAdminUserId(userId)) ||
-    (caller?.email ? isSuperAdmin(caller.email) : false);
-  if (isServerAdmin) {
-    return (await db.all(
-      "SELECT * FROM nests ORDER BY created_at DESC",
-    )) as Nest[];
-  }
-
   // Owned OR collaborator OR active-steward — the same join listSharedNests
   // uses, but with `n.user_id = ?` folded into the WHERE so owned rows come
-  // back in the same pass. Anon-owned nests join in under open mode (the
-  // ungoverned commons, matching listNests' includeAnon branch).
-  const includeAnon = config.AUTH_MODE === "open";
+  // back in the same pass. Anon-owned nests (the ungoverned commons) join in
+  // under open mode OR for a server admin — the only non-owned, non-shared
+  // category an admin sees; another user's private nest still stays hidden.
+  const includeAnon =
+    config.AUTH_MODE === "open" || (await isServerAdminUserId(userId));
   const params = includeAnon
     ? [userId, userId, userId, ANON_USER_ID]
     : [userId, userId, userId];

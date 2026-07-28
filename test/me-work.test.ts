@@ -108,3 +108,78 @@ it("bob sees only his own nest's review", async () => {
   expect(all.length).toBe(1);
   expect(all[0].nest_id).toBe(bobNest);
 });
+
+it("hides approve-inbox items from an editor, shows them to a reviewer", async () => {
+  // Only ONE fresh registration — /auth/register is rate-limited to 3/hr/IP and
+  // beforeAll already spent 2 (alice, bob). Reuse bob as the reviewer.
+  const carol = await registerUser(app, "carol@acme.com", "Carol"); // editor
+  const nestId = await governedNest(alice, "Shared Nest");
+  // Re-sync stewards: alice reviewer (owner), carol editor, bob reviewer.
+  const nestPath = join(env.dataDir, "nests", nestId);
+  writeFileSync(
+    join(nestPath, "stewards.yaml"),
+    `version: 1\nnest:\n  - email: ${alice.email}, role: reviewer\n` +
+      `  - email: ${carol.email}, role: editor\n` +
+      `  - email: ${bob.email}, role: reviewer\n`,
+  );
+  await jsonRequest(app, "POST", `/nests/${nestId}/stewards/sync`, {}, alice.apiKey);
+  await submitDoc(alice, nestId, "shared-doc"); // alice requests → pending
+
+  const carolWork = await jsonRequest(app, "GET", "/me/work", undefined, carol.apiKey);
+  const bobWork = await jsonRequest(app, "GET", "/me/work", undefined, bob.apiKey);
+
+  // Editor can't approve → the pending review must NOT be in her actionable items.
+  expect(carolWork.data.items.some((w: any) => w.nest_id === nestId)).toBe(false);
+  // Reviewer can approve → it shows in his items.
+  expect(bobWork.data.items.some((w: any) => w.nest_id === nestId)).toBe(true);
+
+  // Belt-and-braces: the server hard-blocks an editor's approve attempt too.
+  const approve = await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes/nodes/shared-doc/approve`,
+    {},
+    carol.apiKey,
+  );
+  expect(approve.status).toBe(403);
+});
+
+it("bare owner sees the inbox item only when self-approve is on", async () => {
+  // Owner with NO reviewer/admin steward role. canUserApprove gates such an
+  // owner behind allow_self_approve: OFF → approvals go to reviewers (owner
+  // can't approve → item must be hidden); ON → owner can approve → item shows.
+  // Guards the regression where a pure role check (canApproveWith) treated
+  // "owner" as always approve-capable and put a dead button back in front of
+  // owners who delegated approval. Both nests are read in ONE /me/work call so
+  // the 30s approve-cache can't make the two assertions race.
+  const mkNest = async (name: string, selfApprove: boolean) => {
+    const { data } = await jsonRequest(app, "POST", "/nests", { name }, alice.apiKey);
+    const id = data.nest.id;
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${id}/settings`,
+      { stewardship_enabled: true, allow_self_approve: selfApprove },
+      alice.apiKey,
+    );
+    // bob as EDITOR submits; alice (owner) holds no reviewer/admin role.
+    const p = join(env.dataDir, "nests", id);
+    mkdirSync(p, { recursive: true });
+    writeFileSync(
+      join(p, "stewards.yaml"),
+      `version: 1\nnest:\n  - email: ${bob.email}, role: editor\n`,
+    );
+    await jsonRequest(app, "POST", `/nests/${id}/stewards/sync`, {}, alice.apiKey);
+    return id;
+  };
+  const offNest = await mkNest("SA Off", false);
+  const onNest = await mkNest("SA On", true);
+  await submitDoc(bob, offNest, "off-doc"); // requestedBy = bob, not alice
+  await submitDoc(bob, onNest, "on-doc");
+
+  const { data } = await jsonRequest(app, "GET", "/me/work", undefined, alice.apiKey);
+  // Bare owner, self-approve OFF → hidden (approving it would 403).
+  expect(data.items.some((w: any) => w.nest_id === offNest)).toBe(false);
+  // Bare owner, self-approve ON → shown.
+  expect(data.items.some((w: any) => w.nest_id === onNest)).toBe(true);
+});

@@ -5,6 +5,7 @@ import {
 } from "@tiptap/extension-details";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { MarkdownSerializerState } from "prosemirror-markdown";
+import { Plugin } from "@tiptap/pm/state";
 import container from "markdown-it-container";
 
 const noop = { serialize() {}, parse: {} };
@@ -47,6 +48,36 @@ export function setupToggleContainer(markdownit: unknown): void {
  * shape the Details nodes parse from.
  */
 export const Toggle = Details.configure({ persist: true }).extend({
+  // The library only wires the chevron button to expand/collapse. Make the
+  // whole summary (header) toggle on a single click too; double-click still
+  // places the cursor so the header text stays editable.
+  addProseMirrorPlugins() {
+    const detailsType = this.type;
+    return [
+      new Plugin({
+        props: {
+          handleClick(view, pos, event) {
+            if ((event as MouseEvent).detail > 1) return false; // dbl-click = edit
+            const $pos = view.state.doc.resolve(pos);
+            for (let d = $pos.depth; d > 0; d--) {
+              if ($pos.node(d).type.name !== "detailsSummary") continue;
+              const details = $pos.node(d - 1);
+              if (details.type !== detailsType) return false;
+              const detailsPos = $pos.before(d - 1);
+              view.dispatch(
+                view.state.tr.setNodeMarkup(detailsPos, undefined, {
+                  ...details.attrs,
+                  open: !details.attrs.open,
+                }),
+              );
+              return true;
+            }
+            return false;
+          },
+        },
+      }),
+    ];
+  },
   addStorage() {
     return {
       markdown: {

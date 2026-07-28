@@ -32,16 +32,17 @@ export function isSkippedSegment(segment: string): boolean {
 /**
  * Validate a client-supplied relative path and return its safe segments, or
  * null if it must be rejected. Guards against path traversal (`..`), absolute
- * paths, and non-content dirs (hidden/node_modules) — `.versions` is allowed
- * so engine history survives the import.
+ * paths, and non-content dirs (hidden/node_modules) — `.versions` (engine
+ * history) and `.context` (nest config) are allowed so they survive the import.
  */
+const ALLOWED_DOT_DIRS = new Set([".versions", ".context"]);
 function safeSegments(rel: string): string[] | null {
   if (!rel || isAbsolute(rel)) return null;
   const segs = rel.split(/[\\/]/).filter(Boolean);
   if (!segs.length) return null;
   for (const s of segs) {
     if (s === "..") return null;
-    if (s !== ".versions" && isSkippedSegment(s)) return null;
+    if (!ALLOWED_DOT_DIRS.has(s) && isSkippedSegment(s)) return null;
   }
   return segs;
 }

@@ -9,9 +9,7 @@
  * would otherwise spam the log on every event).
  */
 import { config } from "../config.js";
-import { getDb } from "../db/client.js";
-
-let warnedOnce = false;
+import { postWebhook, resolveNestName } from "./webhook.js";
 
 /** Prefix the message with the nest's human name (best-effort). */
 export async function notifySlackForNest(
@@ -19,15 +17,7 @@ export async function notifySlackForNest(
   message: string,
 ): Promise<void> {
   if (!config.SLACK_WEBHOOK_URL) return;
-  let nestName = nestId;
-  try {
-    const row = (await getDb().get("SELECT name FROM nests WHERE id = ?", [
-      nestId,
-    ])) as { name?: string } | undefined;
-    if (row?.name) nestName = row.name;
-  } catch {
-    /* name lookup is cosmetic */
-  }
+  const nestName = await resolveNestName(nestId);
   return notifySlack(`*[${nestName}]* ${message}`);
 }
 
@@ -35,35 +25,15 @@ export async function notifySlackForNest(
  * Slack's mrkdwn treats <...> as control sequences: <!channel> mass-pings,
  * <url|label> renders deceptive links. Message text carries user-controlled
  * fragments (notes, emails, nest names), so escape &, <, > per Slack's own
- * escaping rules before sending. Our * and ` formatting is unaffected.
+ * escaping rules before sending. Our * and ` formatting is unaffected. Shared
+ * with dispatch.ts's per-nest slack connector — one definition, no drift.
  */
-function escapeMrkdwn(s: string): string {
+export function escapeMrkdwn(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 async function notifySlack(text: string): Promise<void> {
   const url = config.SLACK_WEBHOOK_URL;
   if (!url) return;
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 3000);
-    try {
-      await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: escapeMrkdwn(text) }),
-        signal: ctrl.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch (err) {
-    if (!warnedOnce) {
-      warnedOnce = true;
-      console.warn(
-        "[slack] notification failed (suppressing further warnings):",
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
+  await postWebhook(url, { text: escapeMrkdwn(text) }, "slack");
 }
