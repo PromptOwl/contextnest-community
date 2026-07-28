@@ -263,7 +263,7 @@ export function renderEmail(d: EmailEventDetails): {
     ...rows.map((r) => `  ${r.label}: ${r.text}`),
     ...(d.link ? [`  ${linkLabel}: ${d.link}`] : []),
   ];
-  const text = ["Hi,", "", t.lineT(ctx), "", ...detailLines, "", "Regards,", "ContextNest"].join("\n");
+  const text = ["Hi,", "", t.lineT(ctx), "", ...detailLines, "", "Regards,", "Community Nest"].join("\n");
 
   // HTML detail rows from the same row specs (the value cell is pre-rendered).
   const detailRows = rows.map((r) => detailRow(r.label, r.html)).join("");
@@ -299,10 +299,7 @@ export function renderEmail(d: EmailEventDetails): {
     </td></tr>
     ${buttonRow}
     <tr><td style="padding:22px 24px 24px;font-size:14px;line-height:1.6;color:#374151;">
-      Regards,<br>ContextNest
-    </td></tr>
-    <tr><td style="padding:14px 24px;border-top:1px solid #f0f0f0;font-size:11px;line-height:1.5;color:#9ca3af;">
-      Automated governance notification from ContextNest. You received this because email notifications are enabled on this server.
+      Regards,<br>Community Nest
     </td></tr>
   </table>
 </div>`;
@@ -333,9 +330,6 @@ export function renderHtml(message: string, nestName: string): string {
         <td valign="top" style="font-size:22px;line-height:1;padding-right:14px;">${meta.icon}</td>
         <td valign="top" style="font-size:15px;line-height:1.55;color:#111827;border-left:3px solid ${meta.color};padding-left:14px;">${body}</td>
       </tr></table>
-    </td></tr>
-    <tr><td style="padding:14px 24px;border-top:1px solid #f0f0f0;font-size:11px;line-height:1.5;color:#9ca3af;">
-      Automated governance notification from ContextNest. You received this because email notifications are enabled on this server.
     </td></tr>
   </table>
 </div>`;
