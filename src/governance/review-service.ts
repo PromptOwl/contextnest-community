@@ -10,6 +10,7 @@ import { getDb } from "../db/client.js";
 import { notifyReviewRequested, notifyReviewResolved } from "./notify-service.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 import { notifyNestEvent } from "../notify/notify.js";
+import { sendEmailToRecipient } from "../notify/email.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
@@ -102,6 +103,38 @@ export async function submitForReview(params: {
     requestedBy: params.requestedBy,
     reviewId: id,
   });
+
+  // Email every reviewer steward so the people who can approve it know it's
+  // waiting — one send to the whole list, best-effort, complementing the
+  // team-channel digest + inbox fan-out above. Skip the submitter.
+  try {
+    const stewards = await resolveStewardsForNode(params.nestId, params.nodeId);
+    const reviewers = [
+      ...new Set(
+        stewards
+          .filter((s) => s.steward.role === "reviewer")
+          .map((s) => s.steward.userEmail.toLowerCase()),
+      ),
+    ].filter((email) => email !== params.requestedBy.toLowerCase());
+    if (reviewers.length > 0) {
+      void sendEmailToRecipient(reviewers, {
+        status: "pending_review",
+        docTitle: reviewCtx.docTitle,
+        path: reviewCtx.path,
+        link: reviewCtx.link,
+        actor: params.requestedBy,
+        version: params.version,
+        note: params.note || null,
+      });
+    }
+  } catch (err) {
+    console.error(
+      "[notify] reviewer email fan-out failed",
+      params.nestId,
+      params.nodeId,
+      err,
+    );
+  }
 
   return (await getReviewRequest(id))!;
 }
@@ -250,7 +283,23 @@ export async function approve(params: {
       actor: params.approvedBy,
       version: params.version,
     },
+    // The verdict emails the submitter directly (below), not the shared
+    // NOTIFY_EMAIL_TO team inbox — skip the team-channel email; Slack/Teams fire.
+    { skipEmail: true },
   );
+
+  // Email the submitter their verdict, unless they approved it themselves.
+  if (pending.requested_by?.toLowerCase() !== params.approvedBy.toLowerCase()) {
+    void sendEmailToRecipient(pending.requested_by, {
+      status: "approved",
+      docTitle: approveCtx.docTitle,
+      path: approveCtx.path,
+      link: approveCtx.link,
+      actor: params.approvedBy,
+      version: params.version,
+      note: params.note || null,
+    });
+  }
 
   return (await getReviewRequest(pending.id))!;
 }
@@ -319,7 +368,22 @@ export async function reject(params: {
       version: params.version,
       note: params.note || null,
     },
+    // Verdict emails the submitter directly (below), not the team inbox.
+    { skipEmail: true },
   );
+
+  // Email the submitter their verdict, unless they rejected it themselves.
+  if (pending.requested_by?.toLowerCase() !== params.rejectedBy.toLowerCase()) {
+    void sendEmailToRecipient(pending.requested_by, {
+      status: "rejected",
+      docTitle: rejectCtx.docTitle,
+      path: rejectCtx.path,
+      link: rejectCtx.link,
+      actor: params.rejectedBy,
+      version: params.version,
+      note: params.note || null,
+    });
+  }
 
   // Verdict fan-out: submitter + watchers hear the rejection. Best-effort.
   await notifyReviewResolved({
