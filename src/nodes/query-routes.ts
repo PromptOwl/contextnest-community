@@ -3,7 +3,7 @@ import { serializeDocument } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
-import { ValidationError, NotFoundError } from "../shared/errors.js";
+import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import { queryTableNode } from "../tables/query.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { syncNodeTags } from "../governance/tag-index-service.js";
@@ -20,7 +20,8 @@ import {
 import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
-import { permissionLevel, isPublicReader } from "../shared/access.js";
+import { permissionLevel, isPublicReader, resolveNestPermission } from "../shared/access.js";
+import { exportNestBundle } from "../nests/bundle-service.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
 import { listNodesForCaller, RUNNABLE_NODE_TYPES } from "./service.js";
 import { getDb } from "../db/client.js";
@@ -610,11 +611,30 @@ queryRoutes.get("/context", async (c) => {
 // `selector` narrows the set via the engine selector grammar. Reuses the
 // same permission gate as /context (filterAccessible).
 queryRoutes.get("/export", async (c) => {
-  if (!isMarkdownFormat(c)) {
-    throw new ValidationError("format=markdown is required");
+  const nestId = c.req.param("nestId")!;
+
+  // Portability bundle (?format=bundle): the nest's documents as a .zip that
+  // the existing folder importer (POST /nests/import) ingests. Owner/admin only.
+  // `?includeDrafts=1` also exports unapproved drafts; default is approved only.
+  if (c.req.query("format") === "bundle") {
+    const perm = await resolveNestPermission(nestId, c.get("userId"));
+    if (perm !== "owner" && perm !== "admin") {
+      throw new ForbiddenError("Only the nest owner or an admin can export a bundle");
+    }
+    const draftsParam = c.req.query("includeDrafts");
+    const includeDrafts = draftsParam === "1" || draftsParam === "true";
+    const zip = await exportNestBundle(nestId, includeDrafts);
+    const filename = `nest-${nestId}.zip`;
+    return c.body(zip, 200, {
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+    });
   }
 
-  const nestId = c.req.param("nestId")!;
+  if (!isMarkdownFormat(c)) {
+    throw new ValidationError("format=markdown or format=bundle is required");
+  }
+
   const { storage, query: queryEngine } = await engineCache.get(nestId);
   const selector = c.req.query("selector")?.trim() || null;
 

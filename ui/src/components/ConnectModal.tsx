@@ -18,10 +18,13 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Tooltip,
@@ -43,6 +46,7 @@ import {
   ShieldAlert,
   Download,
   Sparkles,
+  Package,
 } from "lucide-react";
 import * as api from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -76,6 +80,9 @@ export function ConnectModal({
   const exportUrl = `${serverUrl}/nests/${nestId}/export?format=markdown`;
 
   const [downloading, setDownloading] = useState(false);
+  const [downloadingBundle, setDownloadingBundle] = useState(false);
+  const [bundleOpen, setBundleOpen] = useState(false);
+  const [includeDrafts, setIncludeDrafts] = useState(false);
 
   const [hasExistingKey, setHasExistingKey] = useState<boolean | null>(null);
   const [existingPrefix, setExistingPrefix] = useState<string | null>(null);
@@ -190,6 +197,19 @@ export function ConnectModal({
 
   // Download the whole nest as a single markdown file (approved content only,
   // server-side). Same URL agents fetch — surfaced here as a one-click action.
+  const downloadBundle = async () => {
+    setError(null);
+    setDownloadingBundle(true);
+    try {
+      await api.exportNestBundle(nestId, { nestName, includeDrafts });
+      setBundleOpen(false);
+    } catch (err: any) {
+      setError(err?.message || "Bundle export failed");
+    } finally {
+      setDownloadingBundle(false);
+    }
+  };
+
   const downloadExport = async () => {
     setError(null);
     setDownloading(true);
@@ -700,6 +720,32 @@ export function ConnectModal({
             <Snippet label="Export URL (text/markdown)" value={exportUrl} />
           </div>
 
+          {/* Portability bundle — full-fidelity .zip (content + version history
+              + structural governance) to move this nest to another host. */}
+          <div className="border-t pt-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm min-w-0">
+                <Package className="h-3.5 w-3.5 shrink-0" />
+                <span className="font-medium truncate">Portability bundle</span>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                onClick={() => setBundleOpen(true)}
+                aria-label="Export this nest as a portable .zip bundle"
+              >
+                <Package className="h-3.5 w-3.5 mr-1" />
+                Export .zip
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Whole nest — nodes, full version history, tags, definitions and
+              edges — as one .zip. Import it on another ContextNest host to
+              recreate the nest. Owner/admin only.
+            </p>
+          </div>
+
           <div className="border-t pt-3">
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span>Nest ID:</span>
@@ -719,6 +765,55 @@ export function ConnectModal({
           onClose={closeReveal}
         />
       )}
+
+      <Dialog open={bundleOpen} onOpenChange={(o) => !downloadingBundle && setBundleOpen(o)}>
+        <DialogContent className="sm:max-w-[420px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Package className="h-5 w-5" />
+              Export portability bundle
+            </DialogTitle>
+            <DialogDescription>
+              Downloads a <code>.zip</code> of this nest's documents. On another
+              ContextNest host, unzip it and bring it in with the existing{" "}
+              <strong>Import Folder</strong> button.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex items-start justify-between gap-3 py-2">
+            <div className="space-y-0.5">
+              <Label htmlFor="include-drafts" className="text-sm font-medium">
+                Include draft documents
+              </Label>
+              <p className="text-xs text-muted-foreground">
+                Off: approved / published documents only. On: also export
+                unapproved drafts.
+              </p>
+            </div>
+            <Switch
+              id="include-drafts"
+              checked={includeDrafts}
+              onCheckedChange={setIncludeDrafts}
+            />
+          </div>
+
+          {error && <p className="text-sm text-destructive">{error}</p>}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBundleOpen(false)} disabled={downloadingBundle}>
+              Cancel
+            </Button>
+            <Button onClick={downloadBundle} disabled={downloadingBundle}>
+              {downloadingBundle ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <Download className="h-4 w-4 mr-2" />
+              )}
+              Download .zip
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
