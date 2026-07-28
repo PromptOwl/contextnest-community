@@ -48,21 +48,26 @@ async function flush(nestId: string): Promise<void> {
   const buf = buffers.get(nestId);
   if (!buf) return;
   buffers.delete(nestId);
+  // Slack/Teams get every buffered event.
   const text = buildText(buf.events.map((e) => e.line));
+  // The team-channel email is opt-out PER EVENT: an event that set skipEmail
+  // (a nest invite, an approve/reject verdict) emails the person directly and
+  // must never reach the shared NOTIFY_EMAIL_TO inbox — not even folded into a
+  // digest when it happens to share a debounce window with a non-skipped event.
+  // So the email text/details are built from the non-skipped events ONLY.
+  const emailEvents = buf.events.filter((e) => !e.skipEmail);
+  const emailText = buildText(emailEvents.map((e) => e.line));
   // A lone event carries its structured details for a rich per-event email; a
   // multi-event digest has no single event to describe, so email falls back to
   // the digest text (the connector's generic renderHtml/renderText path).
-  const details =
-    buf.events.length === 1 ? buf.events[0].details : undefined;
-  // The team-channel email is suppressed only when EVERY buffered event opted
-  // out (skipEmail) — e.g. a nest invite, which emails the invitee directly at
-  // their own address instead of the shared NOTIFY_EMAIL_TO inbox. Slack/Teams
-  // still get every event; the opt-out is email-only.
-  const emailAllowed = buf.events.some((e) => !e.skipEmail);
+  const emailDetails =
+    emailEvents.length === 1 ? emailEvents[0].details : undefined;
   await Promise.allSettled([
     notifySlackForNest(nestId, text),
     notifyMsTeamsForNest(nestId, text),
-    emailAllowed ? notifyEmailForNest(nestId, text, details) : Promise.resolve(),
+    emailEvents.length > 0
+      ? notifyEmailForNest(nestId, emailText, emailDetails)
+      : Promise.resolve(),
   ]);
 }
 
