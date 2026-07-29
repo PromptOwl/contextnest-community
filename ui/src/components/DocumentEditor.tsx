@@ -788,7 +788,17 @@ export function DocumentEditor({
   // 423 while a review is open (nodes/routes). Plain drafts stay editable —
   // only status==='pending_review' locks, so the editor flows normally until
   // a review is actually requested.
-  const isLocked = status === "pending_review";
+  //
+  // Exception: the AUTHOR of the pending review may keep revising it. The
+  // server accepts their edit and repoints the open review onto the new
+  // draft (no withdraw/resubmit), so only OTHER users' pending reviews lock
+  // the editor here.
+  const isOwnPendingReview =
+    status === "pending_review" &&
+    !!pendingReviewBy &&
+    !!currentEmail &&
+    pendingReviewBy.toLowerCase() === currentEmail;
+  const isLocked = status === "pending_review" && !isOwnPendingReview;
 
   // Fields read-only when locked or outside edit mode; "Start Editing" or
   // dblclick opts in (drafts only — a locked doc can't enter edit).
@@ -1011,10 +1021,7 @@ export function DocumentEditor({
   //   bare owner                   -> ONLY when the nest allows self-approve
   // SoD: you can't approve a review YOU submitted — unless you're the owner
   // and the nest allows self-approve (the seeding switch).
-  const isOwnSubmission =
-    !!pendingReviewBy &&
-    !!currentEmail &&
-    pendingReviewBy.toLowerCase() === currentEmail;
+  const isOwnSubmission = isOwnPendingReview;
   const hasAdminApprove =
     isAdmin || permission === "admin" || myNodeRoles.includes("admin");
   const canApproveCapability =

@@ -139,6 +139,41 @@ export async function submitForReview(params: {
   return (await getReviewRequest(id))!;
 }
 
+// ─── Repoint pending review ─────────────────────────────────────────────
+// The author edited their own pending submission. The engine appended a new
+// draft version (N+1) via its normal hash-chain append — we do NOT touch
+// history.yaml here. Just move the open review request onto the new version
+// so the steward approves the edited content, keeping the SAME review row
+// (no restart, no re-notify, no duplicate submission). The old version drops
+// back to draft; the new one carries the pending_review flag.
+export async function repointPendingReview(params: {
+  nestId: string;
+  nodeId: string;
+  newVersion: number;
+}): Promise<void> {
+  const db = getDb();
+
+  const pending = (await db.get(
+    "SELECT id, version FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' ORDER BY requested_at DESC LIMIT 1",
+    [params.nestId, params.nodeId],
+  )) as { id: string; version: number } | undefined;
+
+  if (!pending || pending.version === params.newVersion) return;
+
+  await db.run("UPDATE review_requests SET version = ? WHERE id = ?", [
+    params.newVersion,
+    pending.id,
+  ]);
+  await db.run(
+    "UPDATE node_versions SET status = 'draft' WHERE nest_id = ? AND node_id = ? AND version = ?",
+    [params.nestId, params.nodeId, pending.version],
+  );
+  await db.run(
+    "UPDATE node_versions SET status = 'pending_review' WHERE nest_id = ? AND node_id = ? AND version = ?",
+    [params.nestId, params.nodeId, params.newVersion],
+  );
+}
+
 // ─── Approve ────────────────────────────────────────────────────────────
 // Ported from PromptOwl approveVersion()
 

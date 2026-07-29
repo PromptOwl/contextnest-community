@@ -75,7 +75,7 @@ describe("governance: review lock (423)", () => {
     expect(status).toBe(200);
   });
 
-  it("edit is locked with 423 while a review is pending", async () => {
+  it("edit is locked with 423 for a non-author while a review is pending", async () => {
     await jsonRequest(
       app,
       "POST",
@@ -91,15 +91,18 @@ describe("governance: review lock (423)", () => {
       dev.apiKey,
     );
 
+    // reviewer@acme.com did not submit this — a teammate's pending review is
+    // what the steward is evaluating, so their edit stays locked.
     const edit = await jsonRequest(
       app,
       "PATCH",
       `/nests/${nestId}/nodes/nodes/locked-doc`,
       { content: "sneaky edit" },
-      dev.apiKey,
+      reviewer.apiKey,
     );
     expect(edit.status).toBe(423);
 
+    // Delete stays frozen for everyone, including the author.
     const del = await jsonRequest(
       app,
       "DELETE",
@@ -110,13 +113,88 @@ describe("governance: review lock (423)", () => {
     expect(del.status).toBe(423);
   });
 
-  it("revert is locked with 423 while a review is pending", async () => {
+  it("author can revise their own pending review without withdrawing", async () => {
+    // Author edits the doc they submitted — allowed, lands as a new draft
+    // version, and the SAME review request repoints to it (no restart).
+    const edit = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/nodes/locked-doc`,
+      { content: "author revision" },
+      dev.apiKey,
+    );
+    expect(edit.status).toBe(200);
+
+    // Still exactly one pending review (not a duplicate), now pointing at the
+    // freshly drafted version.
+    const queue = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/review-queue`,
+      undefined,
+      dev.apiKey,
+    );
+    const pending = queue.data.requests.filter(
+      (r: any) => r.nodeId === "nodes/locked-doc",
+    );
+    expect(pending.length).toBe(1);
+    expect(pending[0].version).toBe(2);
+  });
+
+  it("steward approves the author's final edited version", async () => {
+    // Self-contained doc: submit, author revises, steward approves — the
+    // approved content must be the edit, not the originally submitted version.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Approve Doc", content: "first draft" },
+      dev.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/approve-doc/submit-review`,
+      {},
+      dev.apiKey,
+    );
+    const edit = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/nodes/approve-doc`,
+      { content: "final edited body" },
+      dev.apiKey,
+    );
+    expect(edit.status).toBe(200);
+
+    const approve = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/approve-doc/approve`,
+      {},
+      reviewer.apiKey,
+    );
+    expect(approve.status).toBe(200);
+
+    const read = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/approve-doc`,
+      undefined,
+      dev.apiKey,
+    );
+    expect(read.data.node.content).toContain("final edited body");
+  });
+
+  it("revert is locked with 423 for a non-author while a review is pending", async () => {
+    // Revert is an author-content edit routed through updateNode, so a
+    // non-author is frozen the same way a direct edit is.
     const { status } = await jsonRequest(
       app,
       "POST",
       `/nests/${nestId}/nodes/nodes/locked-doc/revert`,
       { targetVersion: 1 },
-      dev.apiKey,
+      reviewer.apiKey,
     );
     expect(status).toBe(423);
   });
@@ -158,13 +236,13 @@ describe("governance: review lock (423)", () => {
       dev.apiKey,
     );
 
-    // Lock is on: edit blocked while review pending.
+    // Lock is on: a non-author's edit is blocked while review pending.
     const locked = await jsonRequest(
       app,
       "PATCH",
       `/nests/${nestId}/nodes/nodes/toggle-doc`,
       { content: "blocked" },
-      dev.apiKey,
+      reviewer.apiKey,
     );
     expect(locked.status).toBe(423);
 
