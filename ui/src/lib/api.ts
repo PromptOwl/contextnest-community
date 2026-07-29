@@ -295,6 +295,7 @@ export interface AdminSettings {
   oidc_client_secret?: string | null;
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
+  msteams_webhook_url: string;
   smtp_url: string;
   notify_email_from: string;
   notify_email_to: string;
@@ -314,6 +315,15 @@ export async function updateAdminSettings(
   return request<{ settings: AdminSettings }>("/admin/settings", {
     method: "PATCH",
     body: JSON.stringify(patch),
+  });
+}
+
+/** Admin: send a test message to the saved Slack/Teams webhook. Resolves on
+ *  success; rejects (with the server's reason) if the webhook didn't accept it. */
+export async function sendTestNotification(channel: "slack" | "teams") {
+  return request<{ ok: true }>("/admin/settings/test-notification", {
+    method: "POST",
+    body: JSON.stringify({ channel }),
   });
 }
 
@@ -873,6 +883,45 @@ export async function exportNestMarkdown(
     throw new Error(msg);
   }
   return res.text();
+}
+
+/**
+ * Download the full-fidelity portability bundle (.zip) for a nest — content +
+ * version history + structural governance. Owner/admin only. Triggers a browser
+ * download; resolves once the blob is fetched.
+ */
+export async function exportNestBundle(
+  nestId: string,
+  opts: { nestName?: string; includeDrafts?: boolean } = {},
+): Promise<void> {
+  const params = new URLSearchParams({ format: "bundle" });
+  if (opts.includeDrafts) params.set("includeDrafts", "1");
+  const res = await fetch(
+    `${API_BASE}/nests/${nestId}/export?${params.toString()}`,
+    { credentials: "include" },
+  );
+  if (!res.ok) {
+    const body = await res.text();
+    let msg = `Export failed (${res.status})`;
+    try {
+      msg = (JSON.parse(body) as { error?: string }).error || msg;
+    } catch {
+      // non-JSON error body — keep the status message
+    }
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  const slug =
+    (opts.nestName || "nest").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") ||
+    "nest";
+  a.download = `${slug}-bundle.zip`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 export async function listTags(nestId: string): Promise<string[]> {

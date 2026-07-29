@@ -99,6 +99,31 @@ describe("Slack connector", () => {
     expect(res.status).toBe(201);
     process.env.SLACK_WEBHOOK_URL = WEBHOOK;
   });
+
+  it("send-test posts to the saved webhook and reports success", async () => {
+    const openApp = await createTestApp("open");
+    process.env.SLACK_WEBHOOK_URL = WEBHOOK;
+    const before = sent.length;
+    const res = await jsonRequest(openApp, "POST", "/admin/settings/test-notification", {
+      channel: "slack",
+    });
+    expect(res.status).toBe(200);
+    expect(res.data.ok).toBe(true);
+    await settle();
+    expect(sent.length).toBe(before + 1);
+    expect(sent[sent.length - 1].text).toMatch(/test/i);
+  });
+
+  it("send-test errors (no throw) when the webhook is unset", async () => {
+    const openApp = await createTestApp("open");
+    delete process.env.SLACK_WEBHOOK_URL;
+    const res = await jsonRequest(openApp, "POST", "/admin/settings/test-notification", {
+      channel: "slack",
+    });
+    expect(res.status).toBe(502);
+    expect(res.data.error).toMatch(/webhook URL first/i);
+    process.env.SLACK_WEBHOOK_URL = WEBHOOK;
+  });
 });
 
 // The review lifecycle events (submit / approve / reject) each fire a Slack
@@ -187,6 +212,12 @@ tags:
     expect(res.status).toBe(201);
     await settle();
 
+    // Exactly ONE post for one review_requested. review-service fires the event
+    // down two paths — dispatchEvent (immediate) and notifyNestEvent (debounced
+    // digest) — both hitting the same global webhook, so without dispatch.ts's
+    // DIGEST_DELIVERED_KINDS suppression this would be 2. The digest path owns
+    // review events; the implicit dispatch connector only sends run_failed.
+    expect(lsent).toHaveLength(1);
     const msg = lsent.find((t) => t.includes("Rate Limits"));
     expect(msg).toBeTruthy();
     expect(msg).toContain(":memo:");
@@ -210,6 +241,7 @@ tags:
       { note: "lgtm" }, jane.apiKey);
     expect(res.status).toBe(200);
     await settle();
+    expect(lsent).toHaveLength(1); // single delivery — digest path only
     const msg = lsent.find((t) => t.includes("Approve Me"));
     expect(msg).toBeTruthy();
     expect(msg).toContain(":white_check_mark:");
@@ -226,6 +258,7 @@ tags:
       { note: "<!here> missing section" }, jane.apiKey);
     expect(res.status).toBe(200);
     await settle();
+    expect(lsent).toHaveLength(1); // single delivery — digest path only
     const msg = lsent.find((t) => t.includes("Reject Me"));
     expect(msg).toBeTruthy();
     expect(msg).toContain(":x:");

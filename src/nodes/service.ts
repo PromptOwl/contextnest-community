@@ -28,7 +28,7 @@ import {
   resolveNestPath,
   nestAllowsSelfApprove,
 } from "../nests/service.js";
-import { getPendingReview } from "../governance/review-service.js";
+import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { resolveUserRoles } from "../governance/stewardship-service.js";
 import {
   resolveCallerEmail,
@@ -42,6 +42,7 @@ import {
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { config } from "../config.js";
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
@@ -108,25 +109,6 @@ async function departmentTagFor(userEmail: string): Promise<string | null> {
     console.error("[dept-tag] department lookup failed (tag skipped):", err);
     return null;
   }
-}
-
-// Serialize writes per node. Without this, concurrent saves (rapid autosave,
-// two tabs, MCP + REST) each read the same base version and append "base+1",
-// producing duplicate/swapped version numbers that break the engine diff
-// chain and split the DB count from history.yaml. Chaining a node's writes
-// through one promise makes read→write→version-append atomic. In-process is
-// enough: single-process server over local SQLite + filesystem.
-const nodeWriteChains = new Map<string, Promise<unknown>>();
-function withNodeWriteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const prev = (nodeWriteChains.get(key) ?? Promise.resolve()).catch(() => {});
-  const run = prev.then(fn);
-  nodeWriteChains.set(key, run);
-  void run
-    .catch(() => {})
-    .finally(() => {
-      if (nodeWriteChains.get(key) === run) nodeWriteChains.delete(key);
-    });
-  return run;
 }
 
 // Convert any thrown value into a client-safe error. Domain AppErrors
@@ -359,12 +341,12 @@ export async function listNodesForCaller(
   const authorship = publicReader
     ? null
     : await resolveAuthorship(
-        nestId,
-        accessible.map((d) => ({
-          id: d.id,
-          frontmatterAuthor: d.frontmatter.author ?? null,
-        })),
-      );
+      nestId,
+      accessible.map((d) => ({
+        id: d.id,
+        frontmatterAuthor: d.frontmatter.author ?? null,
+      })),
+    );
 
   const enriched = await Promise.all(
     accessible.map(async (doc) => {
@@ -861,7 +843,7 @@ export async function updateNode(
   patch: UpdateNodePatch,
   userEmail: string
 ): Promise<NodeMutationResult> {
-  return withNodeWriteLock(`${nestId}::${nodeId}`, async () => {
+  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     try {
       const { storage, versions: versionManager } = await engineCache.get(
         nestId
@@ -920,19 +902,29 @@ export async function updateNode(
         !hasStewards || (await actorAutoPublishes(nestId, userEmail));
       const currentTags = (node.frontmatter.tags || []) as string[];
 
-      // Stewardship lock: a node with an open review request is frozen. The
-      // reviewer is evaluating a specific version, so edits are rejected (423)
-      // until the review is approved or rejected — that's the only path that
-      // releases the lock. Applies even to an owner/admin auto-publisher: a
-      // teammate's pending review must be resolved before it's overwritten.
-      if (hasStewards && (await getPendingReview(nestId, nodeId))) {
+      // Stewardship lock: a node with an open review request is frozen for
+      // everyone EXCEPT its own author. A teammate's pending review is what
+      // the steward is evaluating, so their edits are rejected (423) until it
+      // resolves. The author, though, may keep revising their own submission —
+      // the edit lands as a new draft version and the open review repoints to
+      // it (see repointPendingReview below), so the steward reviews the final
+      // edited version without the author having to withdraw and resubmit.
+      const pendingReview = hasStewards
+        ? await getPendingReview(nestId, nodeId)
+        : null;
+      const isAuthorEditingOwnReview =
+        !!pendingReview &&
+        pendingReview.requestedBy.toLowerCase() === userEmail.toLowerCase();
+      if (pendingReview && !isAuthorEditingOwnReview) {
         throw new LockedError(
           "This document is awaiting steward review and is locked. Approve or reject the pending review before editing."
         );
       }
 
       let responseVersion: number;
-      if (!autoPublish) {
+      // Author editing their own pending review always drafts a new version
+      // (never auto-publishes past the reviewer), then repoints the review.
+      if (!autoPublish || isAuthorEditingOwnReview) {
         const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
         const newVersion = currentVersion + 1;
         node = {
@@ -975,6 +967,11 @@ export async function updateNode(
           tags: currentTags,
           changeNote: patch.changeNote,
         });
+        // Author revised their own pending submission: move the open review
+        // onto this fresh version so the steward approves the edited content.
+        if (isAuthorEditingOwnReview) {
+          await repointPendingReview({ nestId, nodeId, newVersion });
+        }
         responseVersion = newVersion;
       } else {
         node = {

@@ -312,15 +312,50 @@
   padding: 0.5rem 0.75rem;
 }
 
-/* ── Toggle / details (Toggle.ts) ──────────────────────────────────── */
-.ProseMirror details {
+/* ── Toggle / details (Toggle.ts) ──────────────────────────────────────
+   TipTap's Details nodeView renders a <div data-type="details"> wrapper
+   (NOT a native <details>) holding an empty <button> chevron + a content
+   div. Style the button so the disclosure control is visible/clickable and
+   kill the <summary> UA list-item disc. Open state = .is-open on wrapper. */
+.ProseMirror [data-type="details"] {
+  display: flex;
+  gap: 0.25rem;
   margin: 0.75rem 0;
   border: 1px solid hsl(var(--border));
   border-radius: 0.375rem;
   padding: 0.25rem 0.75rem;
 }
 
-.ProseMirror details summary {
+.ProseMirror [data-type="details"] > button {
+  flex: none;
+  align-self: flex-start;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  padding: 0;
+  width: 1.25rem;
+  height: 1.75rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.ProseMirror [data-type="details"] > button::before {
+  content: "▶";
+  font-size: 0.7em;
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+
+.ProseMirror [data-type="details"].is-open > button::before {
+  transform: rotate(90deg);
+}
+
+.ProseMirror [data-type="details"] > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ProseMirror [data-type="details"] summary {
+  display: block; /* kills the UA list-item disc marker */
   cursor: pointer;
   font-weight: 500;
   padding: 0.25rem 0;

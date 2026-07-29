@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { isLicenseAdminUserId } from "../auth/license.js";
 import { ValidationError } from "../shared/errors.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 import {
   listNestTeams,
   shareTeamWithNest,
@@ -47,6 +48,7 @@ nestTeamRoutes.post("/", async (c) => {
     teamId: body.team_id,
     callerUserId: userId,
     allowAdmin: await isLicenseAdminUserId(userId),
+    baseUrl: requestBaseUrl(c.req.url),
   });
   return c.json({ teams }, 201);
 });

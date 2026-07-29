@@ -10,13 +10,16 @@
  *
  * All delivery is fire-and-forget with a short timeout: an outage or a bad
  * URL must never slow down or fail the action that raised the event. The
- * server-wide SLACK_WEBHOOK_URL (super-admin Settings) acts as an implicit
- * slack connector for every nest, so the simple one-channel setup needs no
- * rows at all.
+ * server-wide SLACK_WEBHOOK_URL and MSTEAMS_WEBHOOK_URL (super-admin
+ * Settings) act as implicit slack/teams connectors for every nest, so the
+ * simple one-channel setup needs no rows at all.
  */
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
 import { envValues } from "../workflow/env-routes.js";
+import { msTeamsPayload } from "./msteams.js";
+import { escapeMrkdwn } from "./slack.js";
+import { postWebhook, resolveNestName, testWebhook } from "./webhook.js";
 
 export type ConnectorChannel = "slack" | "teams" | "webhook";
 
@@ -36,18 +39,21 @@ interface ConnectorRow {
   enabled: number;
 }
 
-/** Slack mrkdwn treats <…> as control sequences (mass-pings, deceptive
- *  links); message text carries user-controlled fragments, so escape. */
-function escapeMrkdwn(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 const EVENT_EMOJI: Record<string, string> = {
   review_requested: ":memo:",
   review_approved: ":white_check_mark:",
   review_rejected: ":x:",
   run_failed: ":rotating_light:",
 };
+
+/** Event kinds review-service ALSO sends through notify.ts's debounced
+ *  digest (notifyNestEvent) — i.e. the kinds a server-wide webhook already
+ *  receives via that path. See the server-msteams block in dispatchEvent. */
+const DIGEST_DELIVERED_KINDS = new Set([
+  "review_requested",
+  "review_approved",
+  "review_rejected",
+]);
 
 /** Channel presets: same event, three wire formats. */
 function formatBody(
@@ -60,9 +66,10 @@ function formatBody(
     return { text: escapeMrkdwn(`${EVENT_EMOJI[ev.kind] ?? ""} *[${nestName}]* ${ev.message}`) };
   }
   if (channel === "teams") {
-    // Teams incoming webhooks accept simple text or MessageCard; text keeps
-    // us schema-proof across the connector migration to Workflows.
-    return { text: line };
+    // Workflows-app incoming webhooks (the only kind Microsoft still issues)
+    // expect the Bot Framework message envelope with an Adaptive Card — plain
+    // {text} was an O365-connector shape and those were retired.
+    return msTeamsPayload(nestName, `${EVENT_EMOJI[ev.kind] ?? ""} ${ev.message}`.trim());
   }
   // Raw webhook: the whole event, machine-readable — the integration brick.
   return {
@@ -123,33 +130,6 @@ async function resolveUrl(nestId: string, raw: string): Promise<string | null> {
   return isSafeConnectorUrl(raw) ? raw : null;
 }
 
-const warned = new Set<string>();
-
-async function post(url: string, body: unknown, who: string): Promise<void> {
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 3000);
-    try {
-      await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: ctrl.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-  } catch (err) {
-    if (!warned.has(who)) {
-      warned.add(who);
-      console.warn(
-        `[connectors] delivery failed for ${who} (muting further warnings):`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
-}
-
 /**
  * Fire an event at every matching connector. Callers use `void dispatch(…)`
  * — never await in a request path beyond the row lookups; delivery is
@@ -157,22 +137,31 @@ async function post(url: string, body: unknown, who: string): Promise<void> {
  */
 export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
   const db = getDb();
-  let nestName = ev.nestId;
-  try {
-    const row = (await db.get("SELECT name FROM nests WHERE id = ?", [ev.nestId])) as
-      | { name?: string }
-      | undefined;
-    if (row?.name) nestName = row.name;
-  } catch {
-    /* cosmetic */
-  }
+  const nestName = await resolveNestName(ev.nestId);
 
-  // Implicit server-wide slack connector (super-admin Settings).
-  if (config.SLACK_WEBHOOK_URL) {
-    void post(
+  // Implicit server-wide Slack + Microsoft Teams connectors (super-admin
+  // Settings). MSTEAMS_*, never "teams": that name means user groups here.
+  //
+  // Review events are SKIPPED on both because review-service fires each of them
+  // down BOTH paths — dispatchEvent (this file, immediate) AND notifyNestEvent
+  // (notify.ts, debounced digest) — and both would land on the same server-wide
+  // webhook, posting every review event twice. The digest path wins for those
+  // kinds (it collapses bursts into one message); these implicit connectors
+  // deliver only the kinds the digest path never sees (run_failed).
+  // Per-nest connector rows below are unaffected: they are dispatch-only.
+  if (config.SLACK_WEBHOOK_URL && !DIGEST_DELIVERED_KINDS.has(ev.kind)) {
+    void postWebhook(
       config.SLACK_WEBHOOK_URL,
       formatBody("slack", nestName, ev),
       "server-slack",
+    );
+  }
+
+  if (config.MSTEAMS_WEBHOOK_URL && !DIGEST_DELIVERED_KINDS.has(ev.kind)) {
+    void postWebhook(
+      config.MSTEAMS_WEBHOOK_URL,
+      formatBody("teams", nestName, ev),
+      "server-msteams",
     );
   }
 
@@ -196,6 +185,28 @@ export async function dispatchEvent(ev: ConnectorEvent): Promise<void> {
     if (!kinds.includes("*") && !kinds.includes(ev.kind)) continue;
     const url = await resolveUrl(ev.nestId, r.url);
     if (!url) continue;
-    void post(url, formatBody(r.channel, nestName, ev), `connector:${r.id}`);
+    void postWebhook(url, formatBody(r.channel, nestName, ev), `connector:${r.id}`);
   }
+}
+
+/**
+ * Send a test message to the server-wide Slack or Teams webhook and report
+ * whether it landed — powers the "Send test" button in Settings. Uses the
+ * SAVED webhook (so the admin saves first, then tests); reuses formatBody so
+ * the test renders in the exact wire format real events do.
+ */
+export async function sendTestNotification(
+  channel: "slack" | "teams",
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const url =
+    channel === "slack" ? config.SLACK_WEBHOOK_URL : config.MSTEAMS_WEBHOOK_URL;
+  const label = channel === "slack" ? "Slack" : "Microsoft Teams";
+  if (!url)
+    return { ok: false, error: `Save a ${label} webhook URL first, then test.` };
+  const ev: ConnectorEvent = {
+    kind: "test",
+    nestId: "",
+    message: "Test notification from ContextNest — your connector is working.",
+  };
+  return testWebhook(url, formatBody(channel, "ContextNest", ev));
 }

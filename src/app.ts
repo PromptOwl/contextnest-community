@@ -32,6 +32,7 @@ import {
 import { scheduleRoutes } from "./workflow/schedule-routes.js";
 import { envRoutes } from "./workflow/env-routes.js";
 import { connectorRoutes } from "./notify/connector-routes.js";
+import { sendTestNotification } from "./notify/dispatch.js";
 import { hookNestRoutes, hookFireRoutes } from "./workflow/hook-routes.js";
 import {
   listNotifications,
@@ -70,7 +71,6 @@ import {
   getSuspensionReason,
   getCurrentLicense,
   installLicenseKey,
-  isLicenseAdminUserId,
 } from "./auth/license.js";
 import { persistSetting } from "./db/settings.js";
 import { isOidcReady } from "./auth/oidc.js";
@@ -420,6 +420,7 @@ export function createApp(): Hono<AuthEnv> {
   // admin may edit; in key mode it's the server admin (license admin or
   // superadmin) only.
   app.use("/admin/settings", flexAuthMiddleware);
+  app.use("/admin/settings/*", flexAuthMiddleware);
   const currentServerSettings = () => ({
     promptowl_sign_in_gate: config.PROMPTOWL_SIGN_IN_GATE,
     manual_sign_in: config.MANUAL_SIGN_IN,
@@ -454,6 +455,7 @@ export function createApp(): Hono<AuthEnv> {
       ? `••••${process.env.ANTHROPIC_API_KEY.slice(-4)}`
       : null,
     slack_webhook_url: config.SLACK_WEBHOOK_URL ?? "",
+    msteams_webhook_url: config.MSTEAMS_WEBHOOK_URL ?? "",
     smtp_url: config.SMTP_URL ?? "",
     notify_email_from: config.NOTIFY_EMAIL_FROM ?? "",
     notify_email_to: config.NOTIFY_EMAIL_TO ?? "",
@@ -463,6 +465,23 @@ export function createApp(): Hono<AuthEnv> {
     if (!(await serverAdminAllowed(c)))
       return c.json({ error: "Only the server admin can view this." }, 403);
     return c.json(currentServerSettings());
+  });
+
+  // Send a test notification to the saved Slack/Teams webhook so the admin can
+  // confirm the connector works without waiting for a real governance event.
+  app.post("/admin/settings/test-notification", async (c) => {
+    if (!(await serverAdminAllowed(c)))
+      return c.json({ error: "Only the server admin can do this." }, 403);
+    let body: { channel?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    if (body.channel !== "slack" && body.channel !== "teams")
+      return c.json({ error: "channel must be 'slack' or 'teams'" }, 400);
+    const result = await sendTestNotification(body.channel);
+    return result.ok ? c.json({ ok: true }) : c.json({ error: result.error }, 502);
   });
 
   app.patch("/admin/settings", async (c) => {
@@ -716,6 +735,15 @@ export function createApp(): Hono<AuthEnv> {
       if (v && !/^https:\/\//i.test(v))
         addError("slack_webhook_url", "Slack webhook must be an https:// URL (or leave it empty to turn Slack notifications off).");
       else pending.push({ name: "SLACK_WEBHOOK_URL", value: v || null });
+    }
+    if ("msteams_webhook_url" in body) {
+      const v = String(body.msteams_webhook_url ?? "").trim();
+      // Empty clears (connector off). A webhook URL carries an implicit
+      // secret in its path — https only. msteams_*, never teams_*: "teams"
+      // in this codebase means user groups.
+      if (v && !/^https:\/\//i.test(v))
+        addError("msteams_webhook_url", "Microsoft Teams webhook must be an https:// URL (or leave it empty to turn Teams notifications off).");
+      else pending.push({ name: "MSTEAMS_WEBHOOK_URL", value: v || null });
     }
     if ("smtp_url" in body) {
       const v = String(body.smtp_url ?? "").trim();

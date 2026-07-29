@@ -6,7 +6,12 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
-import { withTimeouts } from "../src/notify/email.js";
+import {
+  withTimeouts,
+  withPool,
+  isRateLimited,
+  recipientEnvelope,
+} from "../src/notify/email.js";
 
 const sendMail = vi.fn(async () => ({ messageId: "test" }));
 const verify = vi.fn(async () => true);
@@ -58,6 +63,12 @@ describe("email connector", () => {
       alice.apiKey,
     );
     await waitForSend();
+    // An invite emails the INVITEE directly, not the shared NOTIFY_EMAIL_TO
+    // team inbox (the team-channel email is suppressed for invite events).
+    await settle();
+    const recipients = sendMail.mock.calls.map((c) => (c[0] as any).to);
+    expect(recipients).toContain("bob@acme.com");
+    expect(recipients).not.toContain("team@test.local");
 
     // Transport built from the SMTP URL with file/URL access disabled.
     expect(createTransport).toHaveBeenCalled();
@@ -77,12 +88,14 @@ describe("email connector", () => {
       }),
     );
 
-    expect(sendMail).toHaveBeenCalled();
-    const msg = sendMail.mock.calls[0][0] as any;
+    // Inspect the invitee's direct email — addressed to them in the second
+    // person ("You've been given write access …"), not the third.
+    const msg = sendMail.mock.calls.find(
+      (c) => (c[0] as any).to === "bob@acme.com",
+    )![0] as any;
     expect(msg.from).toBe("nest@test.local");
-    expect(msg.to).toBe("team@test.local");
     expect(msg.subject).toContain("Mail Nest");
-    expect(msg.text).toContain("bob@acme.com");
+    expect(msg.text).toContain("You've been given write access to Mail Nest");
     // Multipart: a branded HTML part is sent alongside the plain-text fallback,
     // *bold* markup is rendered, and the raw shortcode markers don't leak.
     expect(msg.html).toContain("ContextNest");
@@ -134,8 +147,11 @@ describe("email connector", () => {
     expect(msg.subject).not.toContain("\r");
   });
 
-  it("does nothing when from/to are missing", async () => {
-    delete process.env.NOTIFY_EMAIL_TO;
+  it("does nothing when from is missing (email channel off)", async () => {
+    // FROM gates BOTH the team-channel digest AND the invitee-direct email, so
+    // clearing it disables all email delivery (TO alone only silences the team
+    // channel — the invitee is still emailed at their own address).
+    delete process.env.NOTIFY_EMAIL_FROM;
     sendMail.mockClear();
     const res = await jsonRequest(
       app,
@@ -147,7 +163,7 @@ describe("email connector", () => {
     expect(res.status).toBe(201);
     await settle();
     expect(sendMail).not.toHaveBeenCalled();
-    process.env.NOTIFY_EMAIL_TO = "team@test.local";
+    process.env.NOTIFY_EMAIL_FROM = "nest@test.local";
   });
 });
 
@@ -157,6 +173,44 @@ describe("withTimeouts (SMTP URL socket-timeout hardening)", () => {
     expect(out).toContain("connectionTimeout=5000");
     expect(out).toContain("greetingTimeout=5000");
     expect(out).toContain("socketTimeout=10000");
+  });
+
+  it("adds pool + rate-limit params, and never duplicates an admin-set one", () => {
+    const out = withPool("smtps://u:p@host:465");
+    expect(out).toContain("pool=true");
+    expect(out).toContain("maxConnections=1");
+    expect(out).toContain("rateDelta=1000");
+    expect(out).toContain("rateLimit=8");
+    // An admin-supplied rateLimit wins and is not appended a second time.
+    const preset = withPool("smtps://u:p@host:465?rateLimit=20");
+    expect(preset.match(/rateLimit=/g)).toHaveLength(1);
+    expect(preset).toContain("rateLimit=20");
+    expect(preset).toContain("pool=true");
+  });
+
+  it("puts a lone recipient on To, but many on Bcc so nobody sees the roster", () => {
+    // One recipient → plain To.
+    expect(recipientEnvelope("solo@acme.com", "nest@co.com")).toEqual({
+      to: "solo@acme.com",
+    });
+    // Several recipients → Bcc (To falls back to the sender), so no reviewer /
+    // team member sees another's address.
+    const many = recipientEnvelope(
+      ["a@acme.com", "b@acme.com", "c@acme.com"],
+      "nest@co.com",
+    );
+    expect(many.to).toBe("nest@co.com");
+    expect(many.bcc).toEqual(["a@acme.com", "b@acme.com", "c@acme.com"]);
+  });
+
+  it("classifies rate-limit / throttle errors as retryable, hard rejects as not", () => {
+    // The exact Mailtrap reply from the field, plus common throttle shapes.
+    expect(isRateLimited({ message: "Data command failed: 550 5.7.0 Too many emails per second", responseCode: 550 })).toBe(true);
+    expect(isRateLimited({ message: "Too many requests", responseCode: 429 })).toBe(true);
+    expect(isRateLimited({ message: "421 4.7.0 try again later", responseCode: 421 })).toBe(true);
+    // Hard failures must NOT retry (would waste attempts and never succeed).
+    expect(isRateLimited({ message: "550 5.1.1 No such user", responseCode: 550 })).toBe(false);
+    expect(isRateLimited({ message: "535 Authentication failed", responseCode: 535 })).toBe(false);
   });
 
   it("preserves an admin-supplied timeout and never duplicates the key", () => {

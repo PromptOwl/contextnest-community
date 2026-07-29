@@ -12,6 +12,7 @@ ContextNest Community Edition is a self-hosted server that lets you:
 
 - Store, version, and govern markdown-based context documents ("nests")
 - Import an existing folder or vault of markdown files in one step
+- Export a nest as a portable bundle and re-import it on another self-hosted host
 - Apply stewardship workflows — draft, pending review, approved
 - Share nests with collaborators or publish them read-only to the public
 - Serve approved context to AI agents via MCP, HTTP, or CLI
@@ -93,6 +94,7 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 | Configurable nest storage (external / GCS volume mount) | ✅ | ✅ |
 | Markdown + YAML frontmatter vaults | ✅ | ✅ |
 | Import existing folder / vault | ✅ | ✅ |
+| Export nest as portable bundle (.zip) | ✅ | ✅ |
 | Markdown rendering + wiki cross-linking | ✅ | ✅ |
 | External-edit detection + version diff | ✅ | ✅ |
 | Stewardship workflow (draft/review/approve) | ✅ | ✅ |
