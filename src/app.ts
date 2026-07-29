@@ -1267,8 +1267,30 @@ export function createApp(): Hono<AuthEnv> {
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
 
-  // Use flexible auth: open mode = no key needed, key mode = key required
-  nestsApp.use("*", flexAuthMiddleware);
+  // Use flexible auth: open mode = no key needed, key mode = key required.
+  // Three per-nest paths additionally honor PromptOwl service tickets —
+  // POST :id/context (deterministic retrieval for prompt data sources),
+  // GET :id/nodes (doc listing for the source picker), and :id/mcp (the
+  // per-nest MCP transport, so a PromptOwl block granted read & write on
+  // one nest can reach the write tools that deliberately don't exist on
+  // the server-level /mcp). Safe for the same reason cnst_ keys are: the
+  // permission gate below applies to tickets too, and every mutating tool
+  // re-checks its own permission inside runTool. Everything else under
+  // /nests still requires real credentials.
+  nestsApp.use("*", async (c, next) => {
+    const parts = c.req.path
+      .replace(/^\/nests\//, "")
+      .split("/")
+      .filter(Boolean);
+    const ticketEligible =
+      parts.length === 2 &&
+      ((c.req.method === "POST" && parts[1] === "context") ||
+        (c.req.method === "GET" && parts[1] === "nodes") ||
+        parts[1] === "mcp");
+    return ticketEligible
+      ? flexAuthWithPromptowlTicket(c, next)
+      : flexAuthMiddleware(c, next);
+  });
 
   // Access control for nest-scoped routes
   nestsApp.use("*", async (c, next) => {
