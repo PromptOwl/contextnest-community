@@ -1401,6 +1401,17 @@ export function DocumentEditor({
             </Alert>
           )}
 
+          {isOwnPendingReview && (
+            <Alert>
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>
+                This is still under review. Your edits update the same pending
+                submission — no need to withdraw and resubmit — and the steward
+                reviews your latest version.
+              </AlertDescription>
+            </Alert>
+          )}
+
           {/* Notion-style h1 in view mode; Input in edit mode. */}
           <div>
             {mode === "view" && !isNew ? (

@@ -97,3 +97,53 @@ it("editor edit still drafts — the bypass is owner/admin only", async () => {
   // Editor's write lands as a draft awaiting review, NOT published.
   expect(await statusOf(owner, "doc-a")).toBe("draft");
 });
+
+it("owner editing their OWN pending review stays in review — self-approve doesn't bypass the open review", async () => {
+  // Owner creates a doc (auto-published under self-approve), then submits it
+  // for review. Even though owner edits normally auto-publish, editing their
+  // own pending submission must take the draft path and repoint the open
+  // review — NOT publish past it.
+  await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes`,
+    { title: "owner-review-doc", content: "# owner-review-doc\n\nv1" },
+    owner.apiKey,
+  );
+  await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes/nodes/owner-review-doc/submit-review`,
+    {},
+    owner.apiKey,
+  );
+
+  const pendingVersion = async (): Promise<number | undefined> => {
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/review-queue`,
+      undefined,
+      owner.apiKey,
+    );
+    return data.requests.find(
+      (r: any) => r.nodeId === "nodes/owner-review-doc",
+    )?.version;
+  };
+  const submittedVersion = await pendingVersion();
+  expect(submittedVersion).toBeGreaterThan(0);
+
+  const edit = await jsonRequest(
+    app,
+    "PATCH",
+    `/nests/${nestId}/nodes/nodes/owner-review-doc`,
+    { content: "# owner-review-doc\n\nv2 by owner" },
+    owner.apiKey,
+  );
+  expect(edit.status).toBe(200);
+
+  // Still exactly one pending review, now repointed to the newer draft —
+  // proof the edit drafted (and repointed) instead of auto-publishing past it.
+  expect(await statusOf(owner, "owner-review-doc")).toBe("pending_review");
+  expect(await pendingVersion()).toBeGreaterThan(submittedVersion!);
+});

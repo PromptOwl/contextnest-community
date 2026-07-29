@@ -161,18 +161,24 @@ export async function repointPendingReview(params: {
 
   if (!pending || pending.version === params.newVersion) return;
 
-  await db.run("UPDATE review_requests SET version = ? WHERE id = ?", [
-    params.newVersion,
-    pending.id,
-  ]);
-  await db.run(
-    "UPDATE node_versions SET status = 'draft' WHERE nest_id = ? AND node_id = ? AND version = ?",
-    [params.nestId, params.nodeId, pending.version],
-  );
-  await db.run(
-    "UPDATE node_versions SET status = 'pending_review' WHERE nest_id = ? AND node_id = ? AND version = ?",
-    [params.nestId, params.nodeId, params.newVersion],
-  );
+  // One transaction: the review pointer and both version-status flips must
+  // land together. A partial write would leave review_requests.version and
+  // node_versions.status disagreeing about which version is under review —
+  // wrong per-version history badges until the next resolve.
+  await db.transaction(async (tx) => {
+    await tx.run("UPDATE review_requests SET version = ? WHERE id = ?", [
+      params.newVersion,
+      pending.id,
+    ]);
+    await tx.run(
+      "UPDATE node_versions SET status = 'draft' WHERE nest_id = ? AND node_id = ? AND version = ?",
+      [params.nestId, params.nodeId, pending.version],
+    );
+    await tx.run(
+      "UPDATE node_versions SET status = 'pending_review' WHERE nest_id = ? AND node_id = ? AND version = ?",
+      [params.nestId, params.nodeId, params.newVersion],
+    );
+  });
 }
 
 // ─── Approve ────────────────────────────────────────────────────────────
