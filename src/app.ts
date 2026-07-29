@@ -166,6 +166,14 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 // access never auto-provisions; PromptOwl relies on that to only auto-connect
 // users who hold accounts on both sides. Non-JWT bearers (cnst_ keys),
 // cookies, and open mode fall through to flexAuthMiddleware unchanged.
+/** Path segments under /nests, e.g. "/nests/abc/mcp" → ["abc", "mcp"]. Shared
+ *  by the ticket-eligibility gate and the access-control gate so their view of
+ *  the route can't silently drift (the ticket allowlist must always describe
+ *  the same paths the access boundary enforces). */
+function nestPathParts(path: string): string[] {
+  return path.replace(/^\/nests\//, "").split("/").filter(Boolean);
+}
+
 const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
   async (c, next) => {
     const header = c.req.header("Authorization") || "";
@@ -183,7 +191,12 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     } catch {
       return c.json({ error: "Invalid service ticket" }, 401);
     }
-    if ((claims as { scope?: string }).scope !== "mcp") {
+    // Require the MCP scope AND reject a present jti. A one-time-use jti is the
+    // mark of an SSO *login* ticket (redeemable at GET /auth/sso for a browser
+    // session); an MCP bearer must carry neither, so we don't rely on the
+    // issuer keeping scope and jti mutually exclusive — this side enforces it,
+    // and /auth/sso rejects scope "mcp" for the symmetric guarantee.
+    if (claims.scope !== "mcp" || claims.jti) {
       return c.json({ error: "Invalid service ticket" }, 401);
     }
     // Audience binding — same policy as GET /auth/sso: enforced when
@@ -1278,10 +1291,7 @@ export function createApp(): Hono<AuthEnv> {
   // re-checks its own permission inside runTool. Everything else under
   // /nests still requires real credentials.
   nestsApp.use("*", async (c, next) => {
-    const parts = c.req.path
-      .replace(/^\/nests\//, "")
-      .split("/")
-      .filter(Boolean);
+    const parts = nestPathParts(c.req.path);
     const ticketEligible =
       parts.length === 2 &&
       ((c.req.method === "POST" && parts[1] === "context") ||
@@ -1294,8 +1304,7 @@ export function createApp(): Hono<AuthEnv> {
 
   // Access control for nest-scoped routes
   nestsApp.use("*", async (c, next) => {
-    const localPath = c.req.path.replace(/^\/nests\//, "");
-    const parts = localPath.split("/").filter(Boolean);
+    const parts = nestPathParts(c.req.path);
     if (parts.length < 2) return next();
 
     // "unsynced" is a server-admin namespace under /nests, not a nest id.

@@ -764,6 +764,13 @@ authRoutes.get("/sso", async (c) => {
     return ssoError("invalid_ticket");
   }
 
+  // Reject an MCP bearer ticket here: this endpoint mints a full login
+  // session, so a `scope: "mcp"` ticket (server-to-server, no jti) must never
+  // be redeemable for one. Symmetric with flexAuthWithPromptowlTicket, which
+  // requires scope "mcp" — neither ticket kind can stand in for the other,
+  // and neither side has to trust the issuer to keep the jti/scope invariant.
+  if ((claims.scope || "") === "mcp") return ssoError("invalid_ticket");
+
   // Audience binding — a ticket minted for a different server is rejected, so
   // it can't be replayed elsewhere even if the secret were shared. When
   // PUBLIC_BASE_URL is unset this binding is DISABLED (the secret is the only

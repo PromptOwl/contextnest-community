@@ -7,7 +7,12 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createHmac, randomUUID } from "crypto";
-import { setupTestEnv, createTestApp, registerUser } from "./helpers";
+import {
+  setupTestEnv,
+  createTestApp,
+  registerUser,
+  resetAuthRateLimit,
+} from "./helpers";
 
 const SECRET = "official-sso-secret-abcdef";
 const BASE_URL = "https://community.test";
@@ -94,6 +99,25 @@ describe("PromptOwl service ticket on /index and /mcp", () => {
       ),
     });
     expect(res.status).toBe(401);
+  });
+
+  it("rejects an mcp ticket that carries a jti (login-ticket shape)", async () => {
+    // Forward guard: an MCP bearer must have no jti. Enforced locally, not by
+    // trusting the issuer to keep scope and jti mutually exclusive.
+    const res = await app.request("/index", {
+      headers: bearer(serviceTicket({ jti: randomUUID() })),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("GET /auth/sso refuses an mcp-scoped ticket (no login session cross-over)", async () => {
+    // Reverse guard: even a well-formed, one-time-use (jti) ticket cannot mint
+    // a browser session if it is scoped for MCP.
+    const res = await app.request(
+      `/auth/sso?ticket=${serviceTicket({ jti: randomUUID() })}`,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("sso_error=invalid_ticket");
   });
 
   it("rejects a bad signature", async () => {
@@ -223,6 +247,52 @@ describe("PromptOwl ticket can bootstrap content via server-level /mcp", () => {
   it("rejects duplicate nest names with a friendly message, not a crash", async () => {
     const dup = await callTool("nest_create", { name: "from PO" }, 13);
     expect(dup).toContain("already have a nest with this name");
+  });
+
+  it("a nest-scoped key cannot nest_create on server-level /mcp", async () => {
+    // A nest-scoped cnst_ key sets nestScope, which must confine it to that one
+    // nest — minting new nests would exceed the scope the key was issued for.
+    await resetAuthRateLimit(); // this adds a 4th registration to the suite
+    const dave = await registerUser(app, "dave@example.com");
+    const nestRes = await app.request("/nests", {
+      method: "POST",
+      headers: { ...bearer(dave.apiKey), "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Dave Nest" }),
+    });
+    const daveNestId = ((await nestRes.json()) as any).nest.id;
+    const rotate = await app.request("/auth/keys/rotate", {
+      method: "POST",
+      headers: { ...bearer(dave.apiKey), "Content-Type": "application/json" },
+      body: JSON.stringify({ nest_id: daveNestId }),
+    });
+    const scopedKey = (await rotate.json()).api_key;
+
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        ...bearer(scopedKey),
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 20,
+        method: "tools/call",
+        params: { name: "nest_create", arguments: { name: "Should Fail" } },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const ct = res.headers.get("content-type") || "";
+    const body = ct.includes("application/json")
+      ? await res.json()
+      : JSON.parse(
+          (await res.text())
+            .split("\n")
+            .find((l: string) => l.startsWith("data: "))!
+            .slice("data: ".length),
+        );
+    const text = body.result.content.map((cc: any) => cc.text).join("");
+    expect(text).toContain("scoped to a single nest");
   });
 
   it("ticket reads per-nest /context and /nodes, but cannot write via REST", async () => {

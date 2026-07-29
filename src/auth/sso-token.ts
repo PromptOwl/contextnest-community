@@ -19,6 +19,11 @@ export interface SsoTicketClaims {
   name?: string;
   /** intended audience — this server's canonical base URL */
   aud?: string;
+  /** ticket purpose. "mcp" = server-to-server MCP bearer (no jti, not
+   *  redeemable for a login session); absent/other = one-click SSO login
+   *  ticket. Load-bearing for auth: the MCP middleware requires "mcp" and
+   *  GET /auth/sso rejects it, so the two ticket kinds can't cross over. */
+  scope?: string;
   /** unique ticket id, for one-time-use enforcement */
   jti?: string;
   /** issued-at (seconds) */
