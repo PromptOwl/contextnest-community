@@ -14,6 +14,8 @@ import {
   registerUser,
   resetAuthRateLimit,
 } from "./helpers";
+import { createNest } from "../src/nests/service.js";
+import { ANON_USER_ID } from "../src/shared/constants.js";
 
 describe("governance: org super-admin over nest visibility + collaborators", () => {
   let env: ReturnType<typeof setupTestEnv>;
@@ -91,16 +93,46 @@ describe("governance: org super-admin over nest visibility + collaborators", () 
     expect(res.status).toBe(404);
   });
 
-  it("super-admin's GET /nests surfaces other users' private nests with admin permission", async () => {
-    // Nest is private (last test reset it). Without the listSharedNests
-    // super-admin branch, admin would not see it in their dashboard at all —
-    // they could only reach it by direct URL.
+  it("super-admin's GET /nests does NOT list another user's private nest", async () => {
+    // Nest is private (last test reset it) and not shared with the admin.
+    // Admin still ADMINISTERS it (direct-URL access resolves to 'admin'), but
+    // it must not appear in their dashboard — governing a nest is not the same
+    // as being shown someone else's private workspace.
     const res = await jsonRequest(app, "GET", "/nests", undefined, admin.apiKey);
     expect(res.status).toBe(200);
-    const row = res.data.nests.find((n: any) => n.id === nestId);
-    expect(row).toBeTruthy();
-    expect(row.is_owner).toBe(false);
-    expect(row.permission).toBe("admin");
+    expect(res.data.nests.find((n: any) => n.id === nestId)).toBeUndefined();
+  });
+
+  it("super-admin still ACCESSES another user's private nest by direct URL", async () => {
+    // Not listed, but still governable — GET /nests/:id resolves 'admin'.
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, admin.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.permission).toBe("admin");
+  });
+
+  it("super-admin DOES list an anon-owned (commons) nest, even when private", async () => {
+    // The anon user isn't seeded in this key-mode test — insert the row so the
+    // nest's user_id FK resolves.
+    const { getDb } = await import("../src/db/client.js");
+    await getDb().run(
+      "INSERT OR IGNORE INTO users (id, email, name, password_hash) VALUES (?, ?, ?, ?)",
+      [ANON_USER_ID, "anonymous@local", "Anonymous", "x"],
+    );
+    // Seed a nest owned by the ANON user, then make it private so it can't
+    // surface via public discovery — only the admin's anon-commons path does.
+    const commons = await createNest(ANON_USER_ID, "Commons Nest");
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${commons.id}/visibility`,
+      { visibility: "private" },
+      admin.apiKey,
+    );
+    const adminRes = await jsonRequest(app, "GET", "/nests", undefined, admin.apiKey);
+    expect(adminRes.data.nests.find((n: any) => n.id === commons.id)).toBeTruthy();
+    // A plain user does NOT see a private commons nest.
+    const nobodyRes = await jsonRequest(app, "GET", "/nests", undefined, nobody.apiKey);
+    expect(nobodyRes.data.nests.find((n: any) => n.id === commons.id)).toBeUndefined();
   });
 
   it("non-super-admin's shared list does NOT include nests they have no grant on", async () => {

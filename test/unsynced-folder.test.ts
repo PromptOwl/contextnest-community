@@ -152,4 +152,51 @@ describe("unsynced folder discovery + sync", () => {
     );
     expect(status).toBe(404);
   });
+
+  it("deletes an unsynced folder off disk without syncing it", async () => {
+    // "loose" is still an unsynced candidate from the seed layout.
+    expect(existsSync(join(env.dataDir, "loose"))).toBe(true);
+
+    const { status, data } = await jsonRequest(
+      app,
+      "DELETE",
+      "/nests/unsynced/sync",
+      { name: "loose" },
+      alice.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.ok).toBe(true);
+
+    // Files gone, no longer listed, and no nest was created for it.
+    expect(existsSync(join(env.dataDir, "loose"))).toBe(false);
+    const { data: after } = await jsonRequest(
+      app,
+      "GET",
+      "/nests/unsynced",
+      undefined,
+      alice.apiKey,
+    );
+    expect(after.folders.map((f: any) => f.name)).not.toContain("loose");
+  });
+
+  it("rejects unsafe names + missing folder on delete", async () => {
+    for (const bad of ["nests", "../escape", ".hidden"]) {
+      const { status } = await jsonRequest(
+        app,
+        "DELETE",
+        "/nests/unsynced/sync",
+        { name: bad },
+        alice.apiKey,
+      );
+      expect(status).toBe(400);
+    }
+    const { status } = await jsonRequest(
+      app,
+      "DELETE",
+      "/nests/unsynced/sync",
+      { name: "nothing-here" },
+      alice.apiKey,
+    );
+    expect(status).toBe(404);
+  });
 });

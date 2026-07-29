@@ -1672,7 +1672,7 @@ function CanvasPanel({ nestId }: { nestId: string }) {
             and it appears here, ready to wire up.
           </div>
         ) : (
-          <div className="overflow-auto" ref={setScrollEl}>
+          <div className="overflow-auto max-h-[70vh]" ref={setScrollEl}>
             <svg
               width={width}
               height={height}
@@ -2388,7 +2388,7 @@ function SchedulesPanel({ nestId }: { nestId: string }) {
   const everyLabel = (m: number) => (m >= 1440 ? `${m / 1440}d` : m >= 60 ? `${m / 60}h` : `${m}m`);
 
   return (
-    <div className="max-w-2xl space-y-4">
+    <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
         A schedule decides <b>when a run starts</b> and its stop-after bound
         decides <b>when it's done</b>. What happens <em>inside</em> a run —
@@ -2593,7 +2593,7 @@ function EnvPanel({ nestId }: { nestId: string }) {
   }, [load]);
 
   return (
-    <details className="max-w-2xl rounded-lg border px-4 py-3">
+    <details className="rounded-lg border px-4 py-3">
       <summary className="cursor-pointer select-none text-sm font-medium flex items-center gap-2">
         <Wrench className="h-4 w-4 text-teal-500 inline" /> Tool environment
         ({env.length} key{env.length === 1 ? "" : "s"})
@@ -2708,7 +2708,7 @@ function RunnerKeyCallout({ nestId }: { nestId: string }) {
 
   if (hasKey !== false) {
     return justSet ? (
-      <div className="max-w-2xl rounded-lg border border-emerald-400/50 bg-emerald-500/5 px-4 py-3 text-sm">
+      <div className="rounded-lg border border-emerald-400/50 bg-emerald-500/5 px-4 py-3 text-sm">
         ✓ Key stored (masked from here on). Runners pick it up from the run
         bundle — start one in poll mode and your queued runs execute.
       </div>
@@ -2716,7 +2716,7 @@ function RunnerKeyCallout({ nestId }: { nestId: string }) {
   }
 
   return (
-    <div className="max-w-2xl rounded-lg border border-amber-400/60 bg-amber-500/5 px-4 py-3">
+    <div className="rounded-lg border border-amber-400/60 bg-amber-500/5 px-4 py-3">
       <div className="text-sm font-medium mb-1">
         🔑 Add your Anthropic API key to execute runs
       </div>
@@ -2808,7 +2808,7 @@ function ConnectorsPanel({ nestId }: { nestId: string }) {
   };
 
   return (
-    <details className="max-w-2xl rounded-lg border px-4 py-3" open={connectors.length > 0}>
+    <details className="rounded-lg border px-4 py-3" open={connectors.length > 0}>
       <summary className="cursor-pointer select-none text-sm font-medium">
         📤 Connectors ({connectors.length}) — send events to Slack / Teams / webhooks
       </summary>

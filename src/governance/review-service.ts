@@ -369,6 +369,7 @@ export async function cancelReview(params: {
 
 export async function getReviewQueue(params: {
   nestId?: string;
+  nestIds?: string[];
   status?: ReviewRequestStatus | ReviewRequestStatus[];
   stewardEmail?: string;
   limit?: number;
@@ -381,6 +382,18 @@ export async function getReviewQueue(params: {
   if (params.nestId) {
     whereClauses.push("nest_id = ?");
     args.push(params.nestId);
+  }
+
+  // Scope to a set of nests (the caller's visible nests, for the cross-nest
+  // /me/work inbox). An empty set means "no visible nests" — short-circuit
+  // rather than emit `IN ()`, which is invalid SQL and would otherwise scan
+  // every nest before the caller filters them out anyway.
+  if (params.nestIds) {
+    if (params.nestIds.length === 0) return { requests: [], total: 0 };
+    whereClauses.push(
+      `nest_id IN (${params.nestIds.map(() => "?").join(",")})`,
+    );
+    args.push(...params.nestIds);
   }
 
   if (params.status) {
@@ -396,12 +409,16 @@ export async function getReviewQueue(params: {
   const where =
     whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";
 
-  const total = (
-    (await db.get(
-      `SELECT COUNT(*) as c FROM review_requests ${where}`,
-      args,
-    )) as { c: number }
-  ).c;
+  // Number(): Postgres returns COUNT(*) as a string (bigint); coerce so
+  // callers (e.g. /me/work's pagination.total) get a real number, not "3".
+  const total = Number(
+    (
+      (await db.get(
+        `SELECT COUNT(*) as c FROM review_requests ${where}`,
+        args,
+      )) as { c: number }
+    ).c,
+  );
 
   const limit = params.limit || 50;
   const offset = params.offset || 0;
