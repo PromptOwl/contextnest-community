@@ -926,9 +926,10 @@ async function runTool(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
-
       try {
+        // Report the version the resolution actually landed on (request.version),
+        // not a pre-read — an author revising their pending submission can bump
+        // it between here and the lock-protected approve.
         const request = await reviews.approve({
           nestId: ctx.nestId,
           nodeId: node.id,
@@ -937,7 +938,7 @@ async function runTool(
           baseUrl: ctx.baseUrl,
         });
 
-        return `Approved "${args.title}" v${currentVersion}. This version is now live for AI queries.${args.note ? `\nNote: ${args.note}` : ""}`;
+        return `Approved "${args.title}" v${request.version}. This version is now live for AI queries.${args.note ? `\nNote: ${args.note}` : ""}`;
       } catch (err: any) {
         return `Cannot approve: ${err.message}`;
       }
@@ -950,8 +951,6 @@ async function runTool(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
-
       try {
         const request = await reviews.reject({
           nestId: ctx.nestId,
@@ -961,7 +960,7 @@ async function runTool(
           baseUrl: ctx.baseUrl,
         });
 
-        return `Rejected "${args.title}" v${currentVersion}.\nReason: ${args.note}`;
+        return `Rejected "${args.title}" v${request.version}.\nReason: ${args.note}`;
       } catch (err: any) {
         return `Cannot reject: ${err.message}`;
       }
