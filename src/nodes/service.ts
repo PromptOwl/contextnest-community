@@ -42,6 +42,7 @@ import {
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import { ANON_USER_ID } from "../shared/constants.js";
+import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { config } from "../config.js";
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
@@ -108,25 +109,6 @@ async function departmentTagFor(userEmail: string): Promise<string | null> {
     console.error("[dept-tag] department lookup failed (tag skipped):", err);
     return null;
   }
-}
-
-// Serialize writes per node. Without this, concurrent saves (rapid autosave,
-// two tabs, MCP + REST) each read the same base version and append "base+1",
-// producing duplicate/swapped version numbers that break the engine diff
-// chain and split the DB count from history.yaml. Chaining a node's writes
-// through one promise makes read→write→version-append atomic. In-process is
-// enough: single-process server over local SQLite + filesystem.
-const nodeWriteChains = new Map<string, Promise<unknown>>();
-function withNodeWriteLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const prev = (nodeWriteChains.get(key) ?? Promise.resolve()).catch(() => {});
-  const run = prev.then(fn);
-  nodeWriteChains.set(key, run);
-  void run
-    .catch(() => {})
-    .finally(() => {
-      if (nodeWriteChains.get(key) === run) nodeWriteChains.delete(key);
-    });
-  return run;
 }
 
 // Convert any thrown value into a client-safe error. Domain AppErrors
@@ -359,12 +341,12 @@ export async function listNodesForCaller(
   const authorship = publicReader
     ? null
     : await resolveAuthorship(
-        nestId,
-        accessible.map((d) => ({
-          id: d.id,
-          frontmatterAuthor: d.frontmatter.author ?? null,
-        })),
-      );
+      nestId,
+      accessible.map((d) => ({
+        id: d.id,
+        frontmatterAuthor: d.frontmatter.author ?? null,
+      })),
+    );
 
   const enriched = await Promise.all(
     accessible.map(async (doc) => {
@@ -861,7 +843,7 @@ export async function updateNode(
   patch: UpdateNodePatch,
   userEmail: string
 ): Promise<NodeMutationResult> {
-  return withNodeWriteLock(`${nestId}::${nodeId}`, async () => {
+  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
     try {
       const { storage, versions: versionManager } = await engineCache.get(
         nestId

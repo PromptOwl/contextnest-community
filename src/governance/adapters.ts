@@ -68,7 +68,6 @@ export interface ReviewAdapter {
   approve(params: {
     nestId: string;
     nodeId: string;
-    version: number;
     approvedBy: string;
     note?: string;
     override?: boolean;
@@ -77,7 +76,6 @@ export interface ReviewAdapter {
   reject(params: {
     nestId: string;
     nodeId: string;
-    version: number;
     rejectedBy: string;
     note: string;
   }): Promise<ReviewRequest>;

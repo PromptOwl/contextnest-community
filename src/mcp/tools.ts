@@ -736,9 +736,8 @@ async function runTool(
           const quote = t.anchor?.quote
             ? `> ${t.anchor.quote.replace(/\n/g, " ")}\n\n`
             : "";
-          const head = `### ${i + 1}. [${t.status}]${
-            t.anchor?.quote ? "" : " (whole-document)"
-          }`;
+          const head = `### ${i + 1}. [${t.status}]${t.anchor?.quote ? "" : " (whole-document)"
+            }`;
           const comments = t.comments
             .map((c) => `- **${c.author}** (${c.createdAt}): ${c.body}`)
             .join("\n");
@@ -933,7 +932,6 @@ async function runTool(
         const request = await reviews.approve({
           nestId: ctx.nestId,
           nodeId: node.id,
-          version: currentVersion,
           approvedBy: ctx.userEmail,
           note: args.note,
           baseUrl: ctx.baseUrl,
@@ -958,7 +956,6 @@ async function runTool(
         const request = await reviews.reject({
           nestId: ctx.nestId,
           nodeId: node.id,
-          version: currentVersion,
           rejectedBy: ctx.userEmail,
           note: args.note,
           baseUrl: ctx.baseUrl,
