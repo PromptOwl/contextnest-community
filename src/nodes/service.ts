@@ -926,7 +926,11 @@ export async function updateNode(
       // (never auto-publishes past the reviewer), then repoints the review.
       if (!autoPublish || isAuthorEditingOwnReview) {
         const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
-        const newVersion = currentVersion + 1;
+        // Number past the engine's history.yaml too, not just the DB row. When
+        // the DB lags the on-disk chain (imported nest, a mirrored append that
+        // failed) `currentVersion + 1` reuses a version number, which grafts a
+        // second chain onto the first and breaks reconstruction from there on.
+        const newVersion = await versionManager.nextVersion(nodeId, currentVersion);
         node = {
           ...node,
           frontmatter: {

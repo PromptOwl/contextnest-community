@@ -299,26 +299,73 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   const allVersions = await versions.getVersions(nestId, nodeId);
   const approved = await versions.getApprovedVersion(nestId, nodeId);
 
-  // getVersions returns content:"" (bodies live on disk, not the table).
-  // Reconstruct each version's body so the history panel can preview it
-  // before restoring. Failures just leave content empty for that row.
+  // getVersions returns content:"" (bodies live on disk, not the table). Attach
+  // each version's stored change log — the unified diff from the version before
+  // it — which is one small file read apiece. Reconstructing every body here
+  // instead would replay the chain once per row and ship N full copies of the
+  // document just to open the history panel; the single body a caller actually
+  // previews or restores is fetched by GET .../versions/:version.
   const { versions: versionManager } = await engineCache.get(nestId);
-  const withContent = await Promise.all(
+
+  // Who approved/rejected each version. node_versions carries the status but
+  // not the resolver's email, so the latest resolution per version comes from
+  // review_requests — that is what the row's "approved by X" hint renders.
+  const resolutions = (await getDb().all(
+    `SELECT version, status, resolved_by
+       FROM review_requests
+      WHERE nest_id = ? AND node_id = ?
+        AND status IN ('approved', 'rejected')
+        AND resolved_by IS NOT NULL
+      ORDER BY resolved_at DESC`,
+    [nestId, nodeId],
+  )) as Array<{ version: number; status: string; resolved_by: string }>;
+  const byVersion = new Map<number, { status: string; resolvedBy: string }>();
+  for (const r of resolutions) {
+    if (!byVersion.has(r.version)) {
+      byVersion.set(r.version, { status: r.status, resolvedBy: r.resolved_by });
+    }
+  }
+
+  const enriched = await Promise.all(
     allVersions.map(async (v) => {
+      const r = byVersion.get(v.version);
+      const resolution = r
+        ? { resolvedBy: r.resolvedBy, resolutionStatus: r.status }
+        : {};
       try {
-        const raw = await versionManager.reconstructVersion(nodeId, v.version);
-        return { ...v, content: bodyOnly(nodeId, raw) };
+        const diff = await versionManager.getDiff(nodeId, v.version);
+        return { ...v, ...resolution, diff: diff ?? undefined };
       } catch {
-        return v;
+        return { ...v, ...resolution };
       }
     }),
   );
 
   return c.json({
-    versions: withContent,
+    versions: enriched,
     approvedVersion: approved,
     currentVersion: allVersions[0]?.version || 0,
   });
+});
+
+// GET /nests/:nestId/nodes/:nodeId/versions/:version — one version's full body,
+// reconstructed on demand (keyframe + replay). Split out from the list above so
+// opening the history panel costs N small diff reads instead of N chain replays.
+governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const version = Number(c.req.param("version"));
+
+  const { versions: versionManager } = await engineCache.get(nestId);
+  try {
+    const raw = await versionManager.reconstructVersion(nodeId, version);
+    return c.json({ version, content: bodyOnly(nodeId, raw) });
+  } catch (err) {
+    // A version whose chain no longer replays is a real state, not a 500 —
+    // the panel renders "(no content)" for it and Restore stays disabled.
+    console.error("reconstructVersion failed", nestId, nodeId, version, err);
+    return c.json({ version, content: null }, 200);
+  }
 });
 
 // GET /nests/:nestId/nodes/:nodeId/reviews

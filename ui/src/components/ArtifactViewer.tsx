@@ -828,6 +828,9 @@ export function ArtifactViewer({
           versionData={versionData}
           previewAs="source"
           onView={viewVersion}
+          onLoadContent={async (v) =>
+            (await api.getNodeVersionContent(nestId, nodeId, v)).content
+          }
           onRestore={
             canRestore
               ? async (v) => {

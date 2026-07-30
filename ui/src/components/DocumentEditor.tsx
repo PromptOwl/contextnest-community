@@ -2306,6 +2306,9 @@ export function DocumentEditor({
           onClose={() => setShowVersions(false)}
           title={title || nodeId}
           versionData={versionData}
+          onLoadContent={async (v) =>
+            (await api.getNodeVersionContent(nestId, nodeId, v)).content
+          }
           onRestore={
             isViewOnly
               ? undefined
