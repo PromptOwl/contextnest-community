@@ -32,6 +32,16 @@ export interface SsoTicketClaims {
   exp?: number;
 }
 
+/**
+ * True if a ticket `sub` is a usable email. The SAME shape check GET /auth/sso
+ * and the MCP ticket middleware (flexAuthWithPromptowlTicket) both apply, so a
+ * whitespace/garbage sub can't create a degenerate empty-email user row on one
+ * path while the other rejects it. Caller trims first.
+ */
+export function isValidTicketSub(sub: string): boolean {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(sub) && sub.length <= 254;
+}
+
 function b64urlToBuffer(input: string): Buffer {
   const pad = input.length % 4 === 0 ? "" : "=".repeat(4 - (input.length % 4));
   return Buffer.from(input.replace(/-/g, "+").replace(/_/g, "/") + pad, "base64");

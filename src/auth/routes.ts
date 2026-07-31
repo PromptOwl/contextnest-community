@@ -38,7 +38,7 @@ import { isSuperAdmin } from "../governance/access-service.js";
 // same operator powers as the license owner (see shared/access.ts).
 import { isServerAdminUserId } from "../shared/access.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
-import { verifySsoTicket } from "./sso-token.js";
+import { verifySsoTicket, isValidTicketSub } from "./sso-token.js";
 import { oidcRoutes } from "./oidc.js";
 import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
@@ -794,7 +794,7 @@ authRoutes.get("/sso", async (c) => {
   // PromptOwl (trusted), but a whitespace/garbage sub would otherwise create a
   // degenerate user row with an empty email that can never match a grant.
   const sub = (claims.sub || "").trim();
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(sub) || sub.length > 254) {
+  if (!isValidTicketSub(sub)) {
     return ssoError("invalid_ticket");
   }
 

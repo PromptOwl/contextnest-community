@@ -54,7 +54,11 @@ import {
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
-import { verifySsoTicket, type SsoTicketClaims } from "./auth/sso-token.js";
+import {
+  verifySsoTicket,
+  isValidTicketSub,
+  type SsoTicketClaims,
+} from "./auth/sso-token.js";
 import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
@@ -207,10 +211,17 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
       return c.json({ error: "Invalid service ticket" }, 401);
     }
 
+    // Same sub-shape guard as GET /auth/sso (shared helper so the two
+    // ticket-consuming paths can't drift): a whitespace/garbage sub must never
+    // resolve a user here either.
+    const sub = claims.sub.trim();
+    if (!isValidTicketSub(sub)) {
+      return c.json({ error: "Invalid service ticket" }, 401);
+    }
     const db = getDb();
     const user = (await db.get(
       "SELECT id FROM users WHERE LOWER(email) = LOWER(?)",
-      [claims.sub.trim()],
+      [sub],
     )) as { id: string } | undefined;
     if (!user) {
       return c.json(

@@ -24,12 +24,13 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // Lower this as schemas migrate to `@promptowl/contextnest-engine/api`.
 //
 // Raising it is normally forbidden — new inline schemas are the divergence this guard
-// prevents. Raised 40 -> 41 in 1.10.0 for `context_table_query` as a deliberate exception:
-// `@promptowl/contextnest-engine/api` has not shipped yet (engine 1.2.1 exports `index`
-// only), so inline remains the only way to declare a tool schema here. The new tool follows
-// the same pattern as the other 40 rather than introducing drift. Migrate all 41 to the
-// engine module once it lands, then ratchet this back down.
-const BASELINE = 41;
+// prevents. Raised 40 -> 41 in 1.10.0 for `context_table_query`, then 41 -> 43 in 1.12.0 for
+// the server-level `nest_create` / `context_create` bootstrap writes — both deliberate
+// exceptions for the same reason: `@promptowl/contextnest-engine/api` has not shipped yet
+// (engine 1.2.1 exports `index` only), so inline remains the only way to declare a tool
+// schema here. The new tools follow the same pattern as the others rather than introducing
+// drift. Migrate all 43 to the engine module once it lands, then ratchet this back down.
+const BASELINE = 43;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
