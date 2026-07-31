@@ -1177,7 +1177,8 @@ export function DocumentEditor({
             ))}
             <span className="text-muted-foreground shrink-0">›</span>
             <h3
-              className="text-sm font-bold text-foreground truncate mb-0 leading-none"
+              className="text-sm font-bold text-foreground truncate max-w-[320px] mb-0 leading-none"
+              title={title || undefined}
               data-testid="document-editor-header-title"
             >
               {title || (isNew ? "New document" : "Untitled")}
@@ -1446,6 +1447,11 @@ export function DocumentEditor({
                 }}
                 onBlur={saveOnBlur}
                 placeholder="Untitled"
+                // Mirrors MAX_TITLE_LENGTH in src/nodes/service.ts — a hard
+                // stop here so the server's 400 is unreachable from the UI.
+                // maxLength never truncates an existing longer value, so
+                // grandfathered titles still load and save.
+                maxLength={120}
                 disabled={fieldsDisabled}
                 data-testid="document-editor-title"
                 className="border-0 px-0 h-auto py-0 text-3xl font-bold leading-tight shadow-none focus-visible:ring-0 placeholder:text-muted-foreground/40"
