@@ -490,6 +490,8 @@ export async function createNode(
   // than reject. Keeps storage.writeDocument off ENAMETOOLONG without making
   // a legal title a 400. (Two titles sharing their first 100 slug chars
   // collide on id — same as two identical titles already do.)
+  // Order matters: slice THEN strip. A cut can land right after a run of
+  // dashes, so stripping first would leave a trailing "-" on the id.
   const slug = slugify(input.title).slice(0, 100).replace(/-+$/, "");
   // Slugifying per segment means "../x" or absolute paths can never escape
   // the vault — traversal characters collapse to "-" and empty segments drop.

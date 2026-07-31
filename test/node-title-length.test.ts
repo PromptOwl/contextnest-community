@@ -131,4 +131,44 @@ describe("title length bound", () => {
     );
     expect(rename.status).toBe(400);
   });
+
+  it("still projects the derived annotations node for an at-cap artifact title", async () => {
+    // The derived title appends " — Annotations" (14 chars). Without bounding
+    // the source title, an at-cap artifact pushes it past the limit and
+    // createNode throws into syncAnnotationsNode's best-effort catch — the
+    // projection silently never appears.
+    const artifact = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      {
+        title: "A".repeat(120),
+        content: "<h1>deck</h1>",
+        type: "artifact",
+      },
+      alice.apiKey,
+    );
+    expect(artifact.status).toBe(201);
+    const artifactId = artifact.data.node.id;
+
+    const thread = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${artifactId}/annotations`,
+      { body: "needs a stronger close" },
+      alice.apiKey,
+    );
+    expect(thread.status).toBe(201);
+
+    const derivedId = `${artifactId}--annotations`;
+    const derived = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${encodeURIComponent(derivedId)}`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(derived.status).toBe(200);
+    expect(derived.data.node.title.length).toBeLessThanOrEqual(120);
+  });
 });
