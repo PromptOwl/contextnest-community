@@ -57,6 +57,21 @@ async function userIdFromEmail(email: string): Promise<string> {
 
 const normalizeTag = (t: string) => (t.startsWith("#") ? t : `#${t}`);
 
+/** Max characters in a human-readable title. The id/slug bound (100 per
+ *  segment, below) doesn't cover this: a title of emoji or non-latin text
+ *  slugifies to almost nothing, so an unbounded title still lands in
+ *  frontmatter and stretches every header that renders it. */
+const MAX_TITLE_LENGTH = 120;
+
+/** Shared choke point for REST + MCP: both create and rename route here. */
+function assertTitleLength(title: string): void {
+  if (title.length > MAX_TITLE_LENGTH) {
+    throw new ValidationError(
+      `title must be at most ${MAX_TITLE_LENGTH} characters`
+    );
+  }
+}
+
 const slugify = (s: string) =>
   s
     .toLowerCase()
@@ -469,7 +484,13 @@ export async function createNode(
 ): Promise<NodeMutationResult> {
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
-  const slug = slugify(input.title);
+  assertTitleLength(input.title);
+  // The id slug is derived, not user-facing: a title within MAX_TITLE_LENGTH
+  // can still slugify past the 100-char path-segment bound, so truncate rather
+  // than reject. Keeps storage.writeDocument off ENAMETOOLONG without making
+  // a legal title a 400. (Two titles sharing their first 100 slug chars
+  // collide on id — same as two identical titles already do.)
+  const slug = slugify(input.title).slice(0, 100).replace(/-+$/, "");
   // Slugifying per segment means "../x" or absolute paths can never escape
   // the vault — traversal characters collapse to "-" and empty segments drop.
   // An explicit id wins outright: folder is documented as ignored then, so
@@ -477,14 +498,6 @@ export async function createNode(
   let id = input.id;
   if (!id) {
     const folderSegments = folderToSegments(input.folder ?? "");
-    // Bound the title slug too, so an overlong title fails as a clean 400
-    // instead of an ENAMETOOLONG surfacing as an unhandled 500 at
-    // storage.writeDocument.
-    if ([...folderSegments, slug].some((seg) => seg.length > 100)) {
-      throw new ValidationError(
-        "each folder or title segment must be at most 100 characters"
-      );
-    }
     id =
       folderSegments.length > 0
         ? `nodes/${folderSegments.join("/")}/${slug}`
@@ -876,6 +889,12 @@ export async function updateNode(
         };
       }
       if (patch.title) {
+        // Grandfathered: docs saved before this bound existed keep their long
+        // title. The editor sends `title` on EVERY save, so a flat check would
+        // make those docs unsavable — enforce only on an actual rename.
+        if (patch.title !== node.frontmatter.title) {
+          assertTitleLength(patch.title);
+        }
         node = {
           ...node,
           frontmatter: { ...node.frontmatter, title: patch.title },
