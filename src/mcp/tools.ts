@@ -30,6 +30,7 @@ import {
   listNodesForCallerByEmail,
 } from "../nodes/service.js";
 import { listThreads } from "../annotations/service.js";
+import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 
@@ -198,7 +199,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "context_create",
-    description: "Create a new knowledge node in the vault.",
+    description:
+      "Create a new knowledge node in the vault. The title must not already be in use — these tools resolve documents by title, so a duplicate is refused rather than filed as an unreachable twin. To change an existing document use context_update; to refile it use context_move.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -221,7 +223,7 @@ export const TOOL_DEFINITIONS = [
         folder: {
           type: "string",
           description:
-            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified',
+            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified. A leading "nodes/" is accepted and not doubled, so "nodes/gtm/deals" and "gtm/deals" mean the same folder.',
         },
       },
       required: ["title", "content"],
@@ -261,7 +263,7 @@ export const TOOL_DEFINITIONS = [
     // repo has no contextnest:// resolver on any surface, so accepting one
     // would promise a resolution it can't do.
     description:
-      "Delete a node from the vault by title or id. Removes its version history, review state, annotations, and any steward assignments scoped to it. Irreversible — the node must be recreated to come back, and it comes back with no history and no stewards.",
+      "Delete a node from the vault by title or id. Removes everything keyed to it: version history, review state, annotations, comments, watchers, schedules, trigger hooks, workflow edges, document grants, and any steward assignments scoped to it. Irreversible — the node must be recreated to come back, and it comes back clean: no history, no stewards, no shares. A node under open review is frozen unless you can approve it (owner, admin, or its reviewer).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -282,7 +284,7 @@ export const TOOL_DEFINITIONS = [
     // new concept, so the surfaces agree. If move is ever promoted to a core
     // operation upstream, adopt that descriptor and drop this schema.
     description:
-      "Move a node to a different folder. The id changes; version history, review state, annotations, comments, links, and grants all follow. The title and its [[wiki-link]] stay valid.",
+      "Move a node to a different folder. The id changes; version history, review state, annotations, comments, watchers, schedules, links, and document grants all follow. The title and its [[wiki-link]] stay valid. A node under open review is frozen unless you can approve it (owner, admin, or its reviewer).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -848,19 +850,35 @@ async function runTool(
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
         return "You don't have permission to create documents in this nest.";
       }
-      const { node } = await createNode(
-        nestId,
-        {
-          title: args.title,
-          content: args.content,
-          type: args.type,
-          tags: args.tags,
-          scope: args.scope,
-          folder: args.folder,
-        },
-        userEmail,
-      );
-      return `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`;
+      // Refuse a title already used ANYWHERE in the vault, not just in the
+      // requested folder: every title-addressed tool here resolves by title, so
+      // a twin filed elsewhere is unreachable for all of them (CU-wdqcpzxcg8).
+      // Scan and create under one nest-wide key — createNode's own lock is per
+      // id, and two twins land on DIFFERENT ids, so only a shared key stops
+      // both from passing the scan before either writes.
+      const wanted = String(args.title ?? "").toLowerCase();
+      return withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
+        const existingDocs = await storage.discoverDocuments();
+        const twin = existingDocs.find(
+          (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
+        );
+        if (twin) {
+          return `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`;
+        }
+        const { node } = await createNode(
+          nestId,
+          {
+            title: args.title,
+            content: args.content,
+            type: args.type,
+            tags: args.tags,
+            scope: args.scope,
+            folder: args.folder,
+          },
+          userEmail,
+        );
+        return `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`;
+      });
     }
 
     case "context_update": {

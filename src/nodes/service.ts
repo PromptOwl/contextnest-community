@@ -7,6 +7,7 @@ import {
   serializeDocument,
   parseDocument,
   normalizeStatus,
+  DocumentNotFoundError,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm } from "node:fs/promises";
@@ -30,6 +31,7 @@ import {
 } from "../nests/service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { resolveUserRoles } from "../governance/stewardship-service.js";
+import { canApproveWith } from "../governance/roles.js";
 import {
   resolveCallerEmail,
   filterAccessible,
@@ -41,6 +43,7 @@ import {
 } from "../governance/grants-service.js";
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
+import type { Querier } from "../db/adapter.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { config } from "../config.js";
@@ -536,84 +539,94 @@ export async function createNode(
     );
   }
 
-  // Optional dept:<slug> auto-tag — after the validations above so a request
-  // that fails them never pays the DB lookup. Deduped case-insensitively
-  // against the user-supplied tags (normalizeTag keeps the user's casing, so
-  // "#Dept:Engineering" must still match the all-lowercase auto tag).
-  const deptTag = await departmentTagFor(userEmail);
-  if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
-    tags.push(deptTag);
-  }
-
-  const hasStewards = await isStewardshipEnabled(nestId);
-  // Ungoverned always publishes; a governed nest publishes too when an
-  // owner/admin creates it under self-approve (their work bypasses review).
-  const autoPublish = !hasStewards || (await actorAutoPublishes(nestId, userEmail));
-  const initialStatus = autoPublish ? "published" : "draft";
-  // Publish path starts at v=0 so the engine publish bump lands at v=1.
-  const initialVersion = autoPublish ? 0 : 1;
-
-  let node: ContextNode = {
-    id,
-    filePath: "",
-    frontmatter: {
-      title: input.title,
-      type: requestedType as any,
-      tags,
-      status: (input.status as any) || (initialStatus as any),
-      version: initialVersion,
-      created_at: now,
-      updated_at: now,
-      metadata: {
-        owners: ["*"],
-        scope: input.scope || "team",
-        ...(input.schedule ? { schedule: input.schedule } : {}),
-      } as any,
-    },
-    body: input.content,
-    rawContent: "",
-  };
-  await storage.writeDocument(id, serializeDocument(node));
-  await syncNodeTags(nestId, id, tags);
-
-  let savedVersion = 1;
-  if (!autoPublish) {
+  // Check-then-write must be atomic per node id, or two concurrent creates
+  // (two tabs, REST + MCP, an agent retry) both see a free id and the second
+  // overwrites the first. Same lock updateNode and the governance writes take.
+  return withNodeWriteLock(nodeWriteKey(nestId, id), async () => {
+    // writeDocument overwrites, so a create onto an occupied id silently
+    // replaced that document and restarted its history (CU-wdqcpzxcg8).
+    // moveNode already refuses an occupied destination; create now agrees.
+    let occupied = false;
     try {
-      await versionManager.createVersion(node, userEmail);
+      await storage.readDocument(id);
+      occupied = true;
     } catch (err) {
-      console.error("VersionManager.createVersion failed (node create)", err);
+      // Fail closed: only a missing document means the id is free. Any other
+      // failure could be hiding a real one, so rethrow rather than overwrite.
+      if (!(err instanceof DocumentNotFoundError)) throw err;
     }
-    await versions.createVersion({
-      nestId,
-      nodeId: id,
-      version: 1,
-      content: input.content,
-      author: userEmail,
-      status: "draft",
-      tags,
-    });
-  } else {
-    try {
-      const result = await safePublishDocument(storage, id, {
-        editedBy: userEmail,
-        note: hasStewards
-          ? "Auto-published on create (owner/admin self-approve)"
-          : "Auto-published on create (no stewards configured)",
+    if (occupied) {
+      throw new ConflictError(
+        `A document already exists at ${id}. Update it, or create this one under a different folder or title.`,
+      );
+    }
+
+    // Rows can outlive their document when a file goes missing outside the app
+    // — deleteNode's purge never runs because the delete 404s first. Those rows
+    // crashed the create on node_versions' unique constraint; clear them all so
+    // the new document starts clean instead of inheriting a stranger's history.
+    const db = getDb();
+    const orphan = await db.get(
+      "SELECT 1 AS present FROM node_versions WHERE nest_id = ? AND node_id = ? LIMIT 1",
+      [nestId, id],
+    );
+    if (orphan) {
+      console.warn(
+        `[nodes] clearing orphaned rows for ${id} — version history exists but no document does`,
+      );
+      await db.transaction(async (tx) => {
+        await purgeNodeKeyedRows(tx, nestId, id);
       });
-      savedVersion = result.node.frontmatter.version || 1;
-      await versions.createVersion({
-        nestId,
-        nodeId: id,
-        version: savedVersion,
-        content: result.node.body || "",
-        author: userEmail,
-        status: "published",
+    }
+
+    // Optional dept:<slug> auto-tag — after the validations above so a request
+    // that fails them never pays the DB lookup. Deduped case-insensitively
+    // against the user-supplied tags (normalizeTag keeps the user's casing, so
+    // "#Dept:Engineering" must still match the all-lowercase auto tag).
+    const deptTag = await departmentTagFor(userEmail);
+    if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
+      tags.push(deptTag);
+    }
+
+    const hasStewards = await isStewardshipEnabled(nestId);
+    // Ungoverned always publishes; a governed nest publishes too when an
+    // owner/admin creates it under self-approve (their work bypasses review).
+    const autoPublish =
+      !hasStewards || (await actorAutoPublishes(nestId, userEmail));
+    const initialStatus = autoPublish ? "published" : "draft";
+    // Publish path starts at v=0 so the engine publish bump lands at v=1.
+    const initialVersion = autoPublish ? 0 : 1;
+
+    let node: ContextNode = {
+      id,
+      filePath: "",
+      frontmatter: {
+        title: input.title,
+        type: requestedType as any,
         tags,
-      });
-      await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
-      node = result.node;
-    } catch (err) {
-      console.error("publishDocument failed (node create auto-publish)", err);
+        status: (input.status as any) || (initialStatus as any),
+        version: initialVersion,
+        created_at: now,
+        updated_at: now,
+        metadata: {
+          owners: ["*"],
+          scope: input.scope || "team",
+          ...(input.schedule ? { schedule: input.schedule } : {}),
+        } as any,
+      },
+      body: input.content,
+      rawContent: "",
+    };
+    await storage.writeDocument(id, serializeDocument(node));
+    await syncNodeTags(nestId, id, tags);
+
+    let savedVersion = 1;
+    if (!autoPublish) {
+      try {
+        await versionManager.createVersion(node, userEmail);
+      } catch (err) {
+        console.error("VersionManager.createVersion failed (node create)", err);
+      }
       await versions.createVersion({
         nestId,
         nodeId: id,
@@ -623,11 +636,43 @@ export async function createNode(
         status: "draft",
         tags,
       });
+    } else {
+      try {
+        const result = await safePublishDocument(storage, id, {
+          editedBy: userEmail,
+          note: hasStewards
+            ? "Auto-published on create (owner/admin self-approve)"
+            : "Auto-published on create (no stewards configured)",
+        });
+        savedVersion = result.node.frontmatter.version || 1;
+        await versions.createVersion({
+          nestId,
+          nodeId: id,
+          version: savedVersion,
+          content: result.node.body || "",
+          author: userEmail,
+          status: "published",
+          tags,
+        });
+        await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
+        node = result.node;
+      } catch (err) {
+        console.error("publishDocument failed (node create auto-publish)", err);
+        await versions.createVersion({
+          nestId,
+          nodeId: id,
+          version: 1,
+          content: input.content,
+          author: userEmail,
+          status: "draft",
+          tags,
+        });
+      }
     }
-  }
 
-  await trackEvent("node.create", { nestId, nodeId: id });
-  return { node, version: savedVersion };
+    await trackEvent("node.create", { nestId, nodeId: id });
+    return { node, version: savedVersion };
+  });
 }
 
 /**
@@ -1075,10 +1120,107 @@ export async function updateNode(
   });
 }
 
+/**
+ * A node under open review is frozen so it can't move or vanish while a
+ * reviewer is looking at it. Approvers (owner/admin/reviewer) are exempt —
+ * they can reject the review and then act, so the lock only cost them a round
+ * trip and left admins unable to clean up superseded docs at all.
+ */
+async function assertNotReviewLocked(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+  action: "moving" | "deleting",
+): Promise<void> {
+  if (!(await isStewardshipEnabled(nestId))) return;
+  if (!(await getPendingReview(nestId, nodeId))) return;
+  if (canApproveWith(await resolveUserRoles(nestId, userEmail, { nodeId }))) return;
+  throw new LockedError(
+    `This document is awaiting steward review and is locked. Approve or reject the pending review before ${action}, or ask a reviewer to.`,
+  );
+}
+
 /** Mirror of annotations/service.ts derivedAnnotationsId — duplicated here
  *  because importing it would close the annotations→nodes import cycle. */
 function derivedIdOf(sourceNodeId: string): string {
   return `nodes/${sourceNodeId.replace(/^nodes\//, "")}--annotations`;
+}
+
+/**
+ * Every nest-scoped table keying rows to a node id, as [table, column]. ONE
+ * list so delete (purge) and move (repoint) can't drift — a node id derives
+ * from its title, so leftovers get inherited by the next doc to take that id.
+ *
+ * Predicated references (document-scoped stewards, document grants) sit beside
+ * the loop in both helpers. `runs`/`run_steps` are absent deliberately: a trace
+ * records what happened, so move retargets it but delete keeps it.
+ */
+export const NODE_KEYED_TABLES = [
+  ["node_versions", "node_id"],
+  ["review_requests", "node_id"],
+  ["approved_versions", "node_id"],
+  ["annotation_threads", "node_id"],
+  ["comments", "node_id"],
+  ["node_tag_index", "node_id"],
+  ["watchers", "node_id"],
+  ["schedules", "agent_node"],
+  // A live capability token bound to one agent node — deleting the agent must
+  // revoke it, or a later node at that id answers the old webhook.
+  ["trigger_hooks", "agent_node"],
+  ["edges", "from_node"],
+  ["edges", "to_node"],
+] as const;
+
+/** Drop every row keyed to a node id. Caller supplies the transaction. */
+async function purgeNodeKeyedRows(
+  tx: Querier,
+  nestId: string,
+  nodeId: string,
+): Promise<void> {
+  for (const [table, column] of NODE_KEYED_TABLES) {
+    await tx.run(`DELETE FROM ${table} WHERE nest_id = ? AND ${column} = ?`, [
+      nestId,
+      nodeId,
+    ]);
+  }
+  // Document-scoped stewards and grants pin to this exact id. Tag- and
+  // nest-scoped stewards, and folder grants, govern more than this document
+  // and stay.
+  await tx.run(
+    `DELETE FROM stewards
+     WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
+    [nestId, nodeId],
+  );
+  await tx.run(
+    `DELETE FROM grants
+     WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
+    [nestId, nodeId],
+  );
+}
+
+/** Repoint every row keyed to `oldId` at `newId`. Caller supplies the transaction. */
+async function rewriteNodeKeyedRows(
+  tx: Querier,
+  nestId: string,
+  oldId: string,
+  newId: string,
+): Promise<void> {
+  for (const [table, column] of NODE_KEYED_TABLES) {
+    await tx.run(
+      `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
+      [newId, nestId, oldId],
+    );
+  }
+  await tx.run(
+    `UPDATE stewards SET node_pattern = ?
+     WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
+    [newId, nestId, oldId],
+  );
+  await tx.run(
+    `UPDATE grants SET target = ?
+     WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
+    [newId, nestId, oldId],
+  );
 }
 
 export interface MoveNodeResult {
@@ -1115,11 +1257,7 @@ export async function moveNode(
 
   // Same freeze as edit/delete: a node under open review is what the
   // reviewer is looking at — its identity can't change mid-review.
-  if ((await isStewardshipEnabled(nestId)) && (await getPendingReview(nestId, nodeId))) {
-    throw new LockedError(
-      "This document is awaiting steward review and is locked. Approve or reject the pending review before moving.",
-    );
-  }
+  await assertNotReviewLocked(nestId, nodeId, userEmail, "moving");
 
   const leaf = nodeId.split("/").pop()!;
   const segments = folderToSegments(folder);
@@ -1127,113 +1265,86 @@ export async function moveNode(
     segments.length > 0 ? `nodes/${segments.join("/")}/${leaf}` : `nodes/${leaf}`;
   if (newId === nodeId) return { node, previousId: nodeId };
 
-  try {
-    await storage.readDocument(newId);
-    throw new ConflictError(
-      `A document already exists at that location: ${newId}`,
-    );
-  } catch (err) {
-    if (err instanceof ConflictError) throw err;
-    /* target free — proceed */
-  }
-
-  const moved: ContextNode = {
-    ...node,
-    id: newId,
-    frontmatter: {
-      ...node.frontmatter,
-      updated_at: new Date().toISOString(),
-    },
-  };
-  await storage.writeDocument(newId, serializeDocument(moved));
-
-  // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
-  // doc) so reconstructVersion keeps working for pre-move versions. Layout is
-  // engine-owned, so this is best-effort: if the chain isn't where the
-  // structured layout puts it (e.g. flat imported nests), history still
-  // serves from the governance DB rows migrated below.
-  try {
-    const nestPath = resolveNestPath(nestId);
-    const oldChain = join(nestPath, dirname(nodeId), ".versions", leaf);
-    const newChain = join(nestPath, dirname(newId), ".versions", leaf);
-    if (oldChain !== newChain) {
-      await mkdir(dirname(newChain), { recursive: true });
-      await rename(oldChain, newChain);
+  // Destination check through write under the destination's lock — same
+  // check-then-write race create takes it for, and the same key, so a
+  // concurrent create at that id can't slip in between either.
+  return withNodeWriteLock(nodeWriteKey(nestId, newId), async () => {
+    try {
+      await storage.readDocument(newId);
+      throw new ConflictError(
+        `A document already exists at that location: ${newId}`,
+      );
+    } catch (err) {
+      if (err instanceof ConflictError) throw err;
+      // Fail closed: only a missing document leaves the destination free.
+      if (!(err instanceof DocumentNotFoundError)) throw err;
     }
-  } catch {
-    /* no on-disk chain to carry */
-  }
 
-  await storage.deleteDocument(nodeId);
+    const moved: ContextNode = {
+      ...node,
+      id: newId,
+      frontmatter: {
+        ...node.frontmatter,
+        updated_at: new Date().toISOString(),
+      },
+    };
+    await storage.writeDocument(newId, serializeDocument(moved));
 
-  // Rewrite every table that keys on the node id — the same reference set
-  // DELETE purges, plus workflow edges, grants, and run traces. One
-  // transaction: a half-moved node would be worse than a failed move.
-  const oldDerived = derivedIdOf(nodeId);
-  const newDerived = derivedIdOf(newId);
-  const db = getDb();
-  await db.transaction(async (tx) => {
-    for (const [table, column] of [
-      ["node_versions", "node_id"],
-      ["review_requests", "node_id"],
-      ["approved_versions", "node_id"],
-      ["annotation_threads", "node_id"],
-      ["comments", "node_id"],
-      ["node_tag_index", "node_id"],
-    ] as const) {
+    // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
+    // doc) so reconstructVersion keeps working for pre-move versions. Layout is
+    // engine-owned, so this is best-effort: if the chain isn't where the
+    // structured layout puts it (e.g. flat imported nests), history still
+    // serves from the governance DB rows migrated below.
+    try {
+      const nestPath = resolveNestPath(nestId);
+      const oldChain = join(nestPath, dirname(nodeId), ".versions", leaf);
+      const newChain = join(nestPath, dirname(newId), ".versions", leaf);
+      if (oldChain !== newChain) {
+        await mkdir(dirname(newChain), { recursive: true });
+        await rename(oldChain, newChain);
+      }
+    } catch {
+      /* no on-disk chain to carry */
+    }
+
+    await storage.deleteDocument(nodeId);
+
+    // Repoint every node-keyed table for the source doc and its derived
+    // annotations node, plus the run traces delete keeps. One transaction: a
+    // half-moved node would be worse than a failed move.
+    const oldDerived = derivedIdOf(nodeId);
+    const newDerived = derivedIdOf(newId);
+    const db = getDb();
+    await db.transaction(async (tx) => {
+      await rewriteNodeKeyedRows(tx, nestId, nodeId, newId);
+      await rewriteNodeKeyedRows(tx, nestId, oldDerived, newDerived);
       await tx.run(
-        `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
+        "UPDATE runs SET agent_node = ? WHERE nest_id = ? AND agent_node = ?",
         [newId, nestId, nodeId],
       );
       await tx.run(
-        `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
-        [newDerived, nestId, oldDerived],
+        `UPDATE run_steps SET node_id = ?
+         WHERE node_id = ? AND run_id IN (SELECT id FROM runs WHERE nest_id = ?)`,
+        [newId, nodeId, nestId],
       );
+    });
+
+    // The derived annotations node (if any) lives beside its source — move its
+    // storage doc too. Best-effort, same as delete's handling of it.
+    try {
+      const derivedDoc = await storage.readDocument(oldDerived);
+      await storage.writeDocument(
+        newDerived,
+        serializeDocument({ ...derivedDoc, id: newDerived }),
+      );
+      await storage.deleteDocument(oldDerived);
+    } catch {
+      /* no derived annotations node */
     }
-    await tx.run(
-      `UPDATE stewards SET node_pattern = ?
-       WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      `UPDATE grants SET target = ?
-       WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      "UPDATE edges SET from_node = ? WHERE nest_id = ? AND from_node = ?",
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      "UPDATE edges SET to_node = ? WHERE nest_id = ? AND to_node = ?",
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      "UPDATE runs SET agent_node = ? WHERE nest_id = ? AND agent_node = ?",
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      `UPDATE run_steps SET node_id = ?
-       WHERE node_id = ? AND run_id IN (SELECT id FROM runs WHERE nest_id = ?)`,
-      [newId, nodeId, nestId],
-    );
+
+    await trackEvent("node.move", { nestId, nodeId, newId });
+    return { node: moved, previousId: nodeId };
   });
-
-  // The derived annotations node (if any) lives beside its source — move its
-  // storage doc too. Best-effort, same as delete's handling of it.
-  try {
-    const derivedDoc = await storage.readDocument(oldDerived);
-    await storage.writeDocument(
-      newDerived,
-      serializeDocument({ ...derivedDoc, id: newDerived }),
-    );
-    await storage.deleteDocument(oldDerived);
-  } catch {
-    /* no derived annotations node */
-  }
-
-  await trackEvent("node.move", { nestId, nodeId, newId });
-  return { node: moved, previousId: nodeId };
 }
 
 /**
@@ -1254,11 +1365,7 @@ export async function deleteNode(
 
   // Stewardship lock: a node under open review can't be deleted out from
   // under the reviewer (423). Mirrors the edit lock in updateNode.
-  if ((await isStewardshipEnabled(nestId)) && (await getPendingReview(nestId, nodeId))) {
-    throw new LockedError(
-      "This document is awaiting steward review and is locked. Approve or reject the pending review before deleting.",
-    );
-  }
+  await assertNotReviewLocked(nestId, nodeId, userEmail, "deleting");
 
   try {
     await storage.deleteDocument(nodeId);
@@ -1281,58 +1388,13 @@ export async function deleteNode(
     /* no derived annotations node — nothing to remove */
   }
 
-  // Purge governance rows tied to this node id. Without this, recreating
-  // a doc with the same title (→ same slug → same node id) hits a UNIQUE
-  // constraint on node_versions(nest_id, node_id, version) because the
-  // old version rows still exist. We also drop pending/historic review
-  // requests and the approved-version pin so the recreated doc starts
-  // from a clean slate.
+  // Purge every row tied to this node id and its derived annotations node, so
+  // a later doc landing on the same id inherits no history, readers, watchers
+  // or comments. Annotation comments cascade via their thread FK.
   const db = getDb();
   await db.transaction(async (tx) => {
-    await tx.run(
-      "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    await tx.run(
-      "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    await tx.run(
-      "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    // Document-scoped steward rows pin to this exact node_pattern. Tag
-    // and nest-scoped stewards stay — they govern the whole nest, not
-    // this single doc. Without this purge, recreating a doc with the
-    // same slug silently inherits the prior doc's reviewer assignments.
-    await tx.run(
-      `DELETE FROM stewards
-       WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
-      [nestId, nodeId],
-    );
-    // Annotation threads for this node — comments cascade via the thread FK.
-    await tx.run(
-      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    // The derived annotations node's own rows (version history it accrued, plus
-    // any stray threads if someone commented on it before this cleanup existed).
-    await tx.run(
-      "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
-    await tx.run(
-      "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
-    await tx.run(
-      "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
-    await tx.run(
-      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
+    await purgeNodeKeyedRows(tx, nestId, nodeId);
+    await purgeNodeKeyedRows(tx, nestId, derivedId);
     // Deletion tombstone — the one record that survives the purge above, so
     // GET /changes can tell external mirrors a doc was removed. Upsert:
     // delete → recreate → delete again just refreshes the timestamp.

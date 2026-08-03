@@ -464,7 +464,8 @@ Lists all readable docs.
 }
 ```
 - Slug derived from title → `nodes/<slug>`.
-- Optional `folder` (string) nests the doc → `nodes/<folder>/<slug>`. Each `/`-separated segment is slugified independently (so `../` or absolute paths can't escape the vault); empty segments drop. Max 8 levels deep; each segment (and the title slug) max 100 chars — otherwise `400`.
+- Optional `folder` (string) nests the doc → `nodes/<folder>/<slug>`. Each `/`-separated segment is slugified independently (so `../` or absolute paths can't escape the vault); empty segments drop. A leading `nodes/` segment is stripped, so `nodes/gtm/deals` and `gtm/deals` mean the same folder. Max 8 levels deep; each segment (and the title slug) max 100 chars — otherwise `400`.
+- `409` when the derived id is already taken (same folder + same title). The existing document is left untouched — update it, or pick another folder or title. The same title in a *different* folder is still allowed here; MCP `context_create` is stricter and refuses it (see [§9 MCP](#9-mcp)).
 - Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Auto-syncs tag index for steward resolution.
@@ -522,6 +523,10 @@ Requires nest write permission.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
+
+A node with a pending review is frozen — `423` — for callers who can't clear that review. Approvers (nest owner, admin, assigned reviewer) go through: they can reject and then delete, so the lock only cost them a round trip. Same rule on `POST /nodes/:nodeId/move`; editing under review is unchanged (still author-only).
+
+Purges everything keyed to the node id — version history, review requests, the approved-version pin, tag index, annotations and their comments, review comments, watchers, schedules, trigger hooks, workflow edges, document-scoped stewards and document grants — and leaves a deletion tombstone for `GET /changes`. Node ids derive from titles, so a later document can land on the same id; it must inherit none of the old one's readers, reviewers or history. Run traces are kept: they record what happened, not what exists. `POST /nests/:nestId/nodes/:nodeId/move` carries that same set to the new id instead of dropping it (folder grants excepted — they cover a path prefix, so a moved doc leaves one share and joins another).
 
 ### POST `/nests/:nestId/assets`
 Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
@@ -1176,6 +1181,8 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 **Transport is read-tier.** MCP Streamable HTTP is always POST (even `initialize` / `tools/list`), so the per-nest gate admits any credential with read access; every mutating tool re-checks its own permission inside the tool handler (create/edit via stewardship, approve/reject via reviewer rights, stewards/sharing/sync via their own admin checks).
 
 **Denials are JSON-RPC.** Gate rejections on the MCP transport path return a JSON-RPC error envelope — `{ "jsonrpc": "2.0", "id": <echoed>, "error": { "code": -32000, "message": "<what failed — actionable reason>" } }` — instead of plain `{error}` JSON, so external clients (PromptOwl, Claude Desktop, Cursor) surface *why* a connection failed: key scoped to a different nest, server suspended, license required, or nest not found / no access.
+
+**Titles are unique on this surface.** `context_get`, `context_update`, `context_delete`, and `context_move` all resolve a document by title, so `context_create` refuses a title already used anywhere in the nest — including in another folder — and answers with the existing node's id plus what to do instead (`context_update` to change it, `context_move` to refile it). A duplicate would otherwise be unreachable by every tool here. REST `POST /nodes` keeps the looser rule (same title in a different folder is fine); both surfaces refuse a create whose id is already taken.
 
 Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same as their REST counterparts):
 - `context_unsynced_list` — mirrors `GET /nests/unsynced`.
