@@ -146,6 +146,16 @@ describe("node move", () => {
     expect(JSON.stringify(ctx.data)).toContain("Link Target");
   });
 
+  it("strips a leading nodes/ segment on move, not just on create", async () => {
+    // Same fix as the create-side regression in nested-folders.test.ts: both
+    // callers share one folder-path helper, so move must not double-nest
+    // either. A caller thinking in node ids writes "nodes/archive".
+    await create("Prefixed Destination");
+    const res = await move("nodes/prefixed-destination", "nodes/archive");
+    expect(res.status).toBe(200);
+    expect(res.data.node.id).toBe("nodes/archive/prefixed-destination");
+  });
+
   it("locks (423) a move while a review is pending", async () => {
     // Enable stewardship so submit-review works. The reviewer must not be
     // the nest owner (self-stewarding is rejected), so bring in bob.

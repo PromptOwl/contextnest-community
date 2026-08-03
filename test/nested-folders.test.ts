@@ -69,6 +69,20 @@ describe("nested folder creation", () => {
     expect(res.data.node.id).toBe("nodes/etc/passwd/sneaky");
   });
 
+  it("strips a leading nodes/ segment instead of double-nesting", async () => {
+    // Regression: callers think in node ids, so `folder: "nodes/signals"` is
+    // natural — it used to produce nodes/nodes/signals/<slug>.
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Signal Harvest", content: "# S", folder: "nodes/signals" },
+      alice.apiKey,
+    );
+    expect(res.status).toBe(201);
+    expect(res.data.node.id).toBe("nodes/signals/signal-harvest");
+  });
+
   it("rejects folders nested deeper than 8 levels", async () => {
     const res = await jsonRequest(
       app,
