@@ -198,7 +198,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "context_create",
-    description: "Create a new knowledge node in the vault.",
+    description:
+      "Create a new knowledge node in the vault. The title must not already be in use — these tools resolve documents by title, so a duplicate is refused rather than filed as an unreachable twin. To change an existing document use context_update; to refile it use context_move.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -221,7 +222,7 @@ export const TOOL_DEFINITIONS = [
         folder: {
           type: "string",
           description:
-            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified',
+            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified. A leading "nodes/" is accepted and not doubled, so "nodes/gtm/deals" and "gtm/deals" mean the same folder.',
         },
       },
       required: ["title", "content"],
@@ -847,6 +848,23 @@ async function runTool(
       // keeps creation locked to write+ collaborators and nest-scope editors.
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
         return "You don't have permission to create documents in this nest.";
+      }
+      // Refuse a title that already exists ANYWHERE in the vault, not just in
+      // the requested folder. Every title-addressed tool here (context_get,
+      // context_update, context_delete, context_move) resolves by title, so a
+      // second node sharing a title makes all of them ambiguous — the caller
+      // ends up with an unreachable twin it can't edit or clean up
+      // (CU-wdqcpzxcg8). The service's id-conflict guard only catches the
+      // same-folder case; this catches the same title filed elsewhere. Costs
+      // the same vault scan context_update already pays.
+      const existingDocs = await storage.discoverDocuments();
+      const twin = existingDocs.find(
+        (n) =>
+          n.frontmatter.title.toLowerCase() ===
+          String(args.title ?? "").toLowerCase(),
+      );
+      if (twin) {
+        return `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`;
       }
       const { node } = await createNode(
         nestId,

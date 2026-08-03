@@ -536,6 +536,25 @@ export async function createNode(
     );
   }
 
+  // A create must never land on an id that is already taken. writeDocument
+  // overwrites, so a second create at the same folder+title silently replaced
+  // the first document's body and restarted its version history — the caller
+  // got a 201 and no hint anything was lost (CU-wdqcpzxcg8). moveNode already
+  // refuses an occupied destination; create now agrees. Reading the id
+  // directly costs one file read, not a vault scan.
+  let occupied = false;
+  try {
+    await storage.readDocument(id);
+    occupied = true;
+  } catch {
+    // Nothing there — the id is free.
+  }
+  if (occupied) {
+    throw new ConflictError(
+      `A document already exists at ${id}. Update it, or create this one under a different folder or title.`,
+    );
+  }
+
   // Optional dept:<slug> auto-tag — after the validations above so a request
   // that fails them never pays the DB lookup. Deduped case-insensitively
   // against the user-supplied tags (normalizeTag keeps the user's casing, so
