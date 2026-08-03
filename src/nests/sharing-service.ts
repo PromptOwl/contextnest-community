@@ -10,6 +10,8 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { notifyNestEvent } from "../notify/notify.js";
+import { sendEmailToRecipient } from "../notify/email.js";
+import { notifyNestInvite } from "../governance/notify-service.js";
 import { nestName, docLink } from "../governance/title-resolver.js";
 import { ValidationError, ConflictError, ForbiddenError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
@@ -158,7 +160,40 @@ export async function addCollaborator(params: {
       permission: params.permission,
       by: params.grantedByEmail || undefined,
     },
+    // Invite email goes to the invitee directly (below), NOT the shared
+    // NOTIFY_EMAIL_TO team inbox — so skip the team-channel email for this
+    // event. Slack/Teams still fire.
+    { skipEmail: true },
   );
+
+  // Direct-to-invitee surfaces, independent of the team-channel notifyNestEvent
+  // above: a rich email at the invitee's OWN address + a Hootie inbox row, so
+  // the person added actually hears about it (not just a shared team inbox).
+  // Both best-effort — a delivery failure must never fail the invite.
+  const inviteeEmail =
+    params.email ||
+    (
+      (await db.get("SELECT email FROM users WHERE id = ?", [userId])) as
+        | { email?: string }
+        | undefined
+    )?.email;
+  if (inviteeEmail) {
+    void sendEmailToRecipient(inviteeEmail, {
+      status: "shared",
+      docTitle: shareNestName,
+      path: shareNestName,
+      link: docLink(nestId, undefined, params.baseUrl),
+      actor: inviteeEmail,
+      permission: params.permission,
+      by: params.grantedByEmail || undefined,
+    });
+    void notifyNestInvite({
+      nestId,
+      inviteeEmail,
+      permission: params.permission,
+      nestName: shareNestName,
+    });
+  }
 
   return (await db.get(
     "SELECT * FROM nest_collaborators WHERE id = ?",

@@ -97,6 +97,7 @@ governanceRoutes.post("/stewards", async (c) => {
       tagName: body.tagName,
       users: body.users,
       assignedBy,
+      baseUrl: requestBaseUrl(c.req.url),
     });
     return c.json({ stewards: created }, 201);
   }
@@ -117,6 +118,7 @@ governanceRoutes.post("/stewards", async (c) => {
       },
     ],
     assignedBy,
+    baseUrl: requestBaseUrl(c.req.url),
   });
   return c.json({ steward: created[0] }, 201);
 });
@@ -556,7 +558,6 @@ governanceNodeRoutes.post("/:nodeId{.+}/approve", async (c) => {
     const request = await reviews.approve({
       nestId,
       nodeId,
-      version: await versions.getCurrentVersion(nestId, nodeId),
       approvedBy: userEmail,
       note: body.note,
       override: body.override && isAdmin,
@@ -584,7 +585,6 @@ governanceNodeRoutes.post("/:nodeId{.+}/reject", async (c) => {
     const request = await reviews.reject({
       nestId,
       nodeId,
-      version: await versions.getCurrentVersion(nestId, nodeId),
       rejectedBy: userEmail,
       note: body.note,
       baseUrl: requestBaseUrl(c.req.url),

@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
+import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -645,13 +646,11 @@ export function DocumentEditor({
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
   const [touched, setTouched] = useState(false);
 
-  // Save on blur, not on every keystroke. Per-keystroke autosave spun up
-  // dozens of versions for one editing session; instead we persist once when
-  // the user clicks out of the editor. Unlike the old SILENT autosave this is
-  // visible — it drives the Save button's spinner + "Saved" state so the user
-  // can see their changes landed. Skips new docs (a silent create is
-  // surprising), locked/reviewer/view-only sessions, and clean state.
+  // "Saved" hint on the Save button — set by an explicit save only. The server
+  // is written on Save (or Save-and-leave); blur only parks a local draft.
   const [justSaved, setJustSaved] = useState(false);
+  // Local draft couldn't be stored (quota exhausted / storage blocked).
+  const [draftUnbacked, setDraftUnbacked] = useState(false);
 
   // Settings → Submit-for-Review visibility; permission → read-only gate.
   useEffect(() => {
@@ -742,6 +741,20 @@ export function DocumentEditor({
       };
       loadedTitleRef.current = loadedTitle;
       setTouched(false);
+      // Restore unsaved edits parked in localStorage, but only if they were
+      // taken from the version we just loaded — a newer server copy wins.
+      const draft = readDraft(nestId, nodeId);
+      if (draft) {
+        if (draft.baseVersion !== node?.version) {
+          clearDraft(nestId, nodeId);
+        } else {
+          setTitle(draft.title);
+          setContent(draft.content);
+          setTags(draft.tags);
+          setSchedule(draft.schedule);
+          setTouched(true);
+        }
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -788,7 +801,17 @@ export function DocumentEditor({
   // 423 while a review is open (nodes/routes). Plain drafts stay editable —
   // only status==='pending_review' locks, so the editor flows normally until
   // a review is actually requested.
-  const isLocked = status === "pending_review";
+  //
+  // Exception: the AUTHOR of the pending review may keep revising it. The
+  // server accepts their edit and repoints the open review onto the new
+  // draft (no withdraw/resubmit), so only OTHER users' pending reviews lock
+  // the editor here.
+  const isOwnPendingReview =
+    status === "pending_review" &&
+    !!pendingReviewBy &&
+    !!currentEmail &&
+    pendingReviewBy.toLowerCase() === currentEmail;
+  const isLocked = status === "pending_review" && !isOwnPendingReview;
 
   // Fields read-only when locked or outside edit mode; "Start Editing" or
   // dblclick opts in (drafts only — a locked doc can't enter edit).
@@ -873,6 +896,8 @@ export function DocumentEditor({
       tags: [...tags],
       schedule: schedule.trim(),
     };
+    // Edits are on the server now; the local draft is spent.
+    if (!isNew) clearDraft(nestId, nodeId);
     setTouched(false);
     return { ok: true, savedId };
   };
@@ -884,9 +909,6 @@ export function DocumentEditor({
   } | null>(null);
 
   // Single save path; afterSave continuation feeds onSaved or stashed intent.
-  // Shares the blur-autosave in-flight guard (saveInFlight/savePending, defined
-  // below) so a field blur that fires right before a Save click — or a blur
-  // save already running — can't double-write the same edit into two versions.
   const runSave = async (afterSave: (savedId: string) => void) => {
     if (!canSave) {
       setError(
@@ -896,7 +918,6 @@ export function DocumentEditor({
       );
       return;
     }
-    saveInFlight.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -906,14 +927,7 @@ export function DocumentEditor({
     } catch (err: any) {
       setError(err.message);
     } finally {
-      saveInFlight.current = false;
       setSaving(false);
-      // A blur that arrived mid-save was parked; run one trailing save so the
-      // latest edit lands (no-ops if already clean).
-      if (savePending.current) {
-        savePending.current = false;
-        void saveOnBlurRef.current();
-      }
     }
   };
 
@@ -924,40 +938,29 @@ export function DocumentEditor({
     if (isDirty) setJustSaved(false);
   }, [isDirty]);
 
-  // Coalesce to one save at a time. The server serializes version writes, but
-  // a second in-flight request is wasted work — mark it pending and run one
-  // trailing save after the current finishes so the latest edit still lands.
-  const saveInFlight = useRef(false);
-  const savePending = useRef(false);
+  // Blur parks edits in localStorage, it does NOT hit the server. Blur-autosave
+  // used to persist, which both spun up a version per field-exit and made the
+  // leave dialog's "Discard" a lie (the edit was already written).
+  // ponytail: blur-only draft write — a crash mid-typing loses that burst.
+  // Move to a debounced effect on isDirty if that turns out to matter.
   const saveOnBlurRef = useRef<() => void>(() => { });
-  saveOnBlurRef.current = async () => {
+  saveOnBlurRef.current = () => {
     if (isNew) return;
     if (isLocked || isReviewerOnly || isViewOnly) return;
-    if (title.trim().length === 0 || content.trim().length === 0) return;
     if (!isDirty) return;
-    if (saveInFlight.current) {
-      savePending.current = true;
-      return;
-    }
-    saveInFlight.current = true;
-    setSaving(true);
-    setError(null);
-    try {
-      await persistCurrent();
-      setJustSaved(true);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      saveInFlight.current = false;
-      setSaving(false);
-      if (savePending.current) {
-        savePending.current = false;
-        void saveOnBlurRef.current();
-      }
-    }
+    const parked = writeDraft(nestId, nodeId, {
+      title,
+      content,
+      tags: [...tags],
+      schedule: schedule.trim(),
+      baseVersion,
+    });
+    // Couldn't back the edits up locally — the leave dialog still guards
+    // navigation, but a reload would lose them. Say so rather than pretend.
+    setDraftUnbacked(!parked);
   };
   const saveOnBlur = useCallback(() => {
-    void saveOnBlurRef.current();
+    saveOnBlurRef.current();
   }, []);
 
   // Confirm before unmount when dirty; read-only sessions skip the prompt.
@@ -979,6 +982,15 @@ export function DocumentEditor({
   const handleLeaveDiscard = () => {
     if (!leaveIntent) return;
     const intent = leaveIntent.run;
+    // Drop the parked draft AND revert the fields — the intent may navigate
+    // within this component (wiki link, breadcrumb) instead of unmounting it.
+    if (!isNew) clearDraft(nestId, nodeId);
+    const snap = initialSnapshotRef.current;
+    setTitle(snap.title);
+    setContent(snap.content);
+    setTags([...snap.tags]);
+    setSchedule(snap.schedule);
+    setTouched(false);
     setLeaveIntent(null);
     intent();
   };
@@ -1011,10 +1023,7 @@ export function DocumentEditor({
   //   bare owner                   -> ONLY when the nest allows self-approve
   // SoD: you can't approve a review YOU submitted — unless you're the owner
   // and the nest allows self-approve (the seeding switch).
-  const isOwnSubmission =
-    !!pendingReviewBy &&
-    !!currentEmail &&
-    pendingReviewBy.toLowerCase() === currentEmail;
+  const isOwnSubmission = isOwnPendingReview;
   const hasAdminApprove =
     isAdmin || permission === "admin" || myNodeRoles.includes("admin");
   const canApproveCapability =
@@ -1168,7 +1177,8 @@ export function DocumentEditor({
             ))}
             <span className="text-muted-foreground shrink-0">›</span>
             <h3
-              className="text-sm font-bold text-foreground truncate mb-0 leading-none"
+              className="text-sm font-bold text-foreground truncate max-w-[320px] mb-0 leading-none"
+              title={title || undefined}
               data-testid="document-editor-header-title"
             >
               {title || (isNew ? "New document" : "Untitled")}
@@ -1365,6 +1375,17 @@ export function DocumentEditor({
         </Alert>
       )}
 
+      {draftUnbacked && isDirty && (
+        <Alert className="mb-4 border-amber-300 bg-amber-50 text-amber-800">
+          <AlertCircle className="h-4 w-4 text-amber-600" />
+          <AlertDescription className="text-amber-800">
+            This browser couldn't store a local backup of your unsaved edits
+            (storage is full or blocked). Save the document — a page reload
+            would lose them.
+          </AlertDescription>
+        </Alert>
+      )}
+
       {loading ? (
         <div className="flex items-center justify-center py-20 text-muted-foreground">
           <Loader2 className="h-5 w-5 animate-spin mr-2" />
@@ -1394,6 +1415,17 @@ export function DocumentEditor({
             </Alert>
           )}
 
+          {isOwnPendingReview && (
+            <Alert>
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>
+                This is still under review. Your edits update the same pending
+                submission — no need to withdraw and resubmit — and the steward
+                reviews your latest version.
+              </AlertDescription>
+            </Alert>
+          )}
+
           {/* Notion-style h1 in view mode; Input in edit mode. */}
           <div>
             {mode === "view" && !isNew ? (
@@ -1415,6 +1447,11 @@ export function DocumentEditor({
                 }}
                 onBlur={saveOnBlur}
                 placeholder="Untitled"
+                // Mirrors MAX_TITLE_LENGTH in src/nodes/service.ts — a hard
+                // stop here so the server's 400 is unreachable from the UI.
+                // maxLength never truncates an existing longer value, so
+                // grandfathered titles still load and save.
+                maxLength={120}
                 disabled={fieldsDisabled}
                 data-testid="document-editor-title"
                 className="border-0 px-0 h-auto py-0 text-3xl font-bold leading-tight shadow-none focus-visible:ring-0 placeholder:text-muted-foreground/40"

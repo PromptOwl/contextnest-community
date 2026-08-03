@@ -244,6 +244,75 @@ describe("context_create — write gate per role", () => {
   });
 });
 
+describe("context_delete — write gate per role", () => {
+  // Denials first: they must not consume the node the allowed case deletes.
+  it.each([
+    ["read collaborator", () => reader],
+    ["reviewer steward (read collab)", () => reviewer],
+  ])("%s is denied with a clear message", async (_label, who) => {
+    const text = await callTool(who().apiKey, "context_delete", {
+      title: "By Owner",
+    });
+    expect(text).toMatch(/don't have permission to delete/i);
+  });
+
+  it("write collaborator can delete, and the node is gone", async () => {
+    const text = await callTool(writer.apiKey, "context_delete", {
+      title: "By Owner",
+    });
+    expect(text).toContain("Deleted node");
+    const gone = await callTool(writer.apiKey, "context_delete", {
+      title: "By Owner",
+    });
+    expect(gone).toMatch(/Node not found/i);
+  });
+
+  // The stewardship lock lives in shared service code that both REST and MCP
+  // call. REST's 423 is covered in review-lock.test.ts; this asserts the same
+  // refusal reaches an MCP caller as a readable reason rather than a bare 500.
+  // Must leave "Draft Doc" intact — the approve cases below still need it.
+  it("a node awaiting review cannot be deleted, permission notwithstanding", async () => {
+    const { body } = await mcpCall(
+      writer.apiKey,
+      "tools/call",
+      { name: "context_delete", arguments: { title: "Draft Doc" } },
+      42,
+    );
+    const text = body.error
+      ? body.error.message
+      : (body.result?.content || []).map((c: any) => c.text).join("");
+    expect(text).toMatch(/awaiting steward review|locked/i);
+  });
+});
+
+describe("context_move — write gate per role", () => {
+  it.each([
+    ["read collaborator", () => reader],
+    ["reviewer steward (read collab)", () => reviewer],
+  ])("%s is denied with a clear message", async (_label, who) => {
+    const text = await callTool(who().apiKey, "context_move", {
+      title: "By Admin",
+      folder: "archive",
+    });
+    expect(text).toMatch(/don't have permission to move/i);
+  });
+
+  it("write collaborator can move, and the node answers at its new id", async () => {
+    const text = await callTool(writer.apiKey, "context_move", {
+      title: "By Admin",
+      folder: "archive",
+    });
+    expect(text).toContain("Moved");
+    expect(text).toContain("nodes/archive/by-admin");
+
+    const again = await callTool(writer.apiKey, "context_move", {
+      id: "nodes/archive/by-admin",
+      folder: "archive",
+    });
+    expect(again).toMatch(/already at/i);
+  });
+});
+
 describe("context_approve — governance gate per role", () => {
   // Order matters: denied attempts run BEFORE the reviewer resolves the
   // single pending review.

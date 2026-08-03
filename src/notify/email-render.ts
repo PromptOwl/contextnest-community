@@ -41,7 +41,7 @@ export function renderText(message: string): string {
 /** Structured governance event — everything the email template needs. Built
  *  at the governance call sites (approve/reject/review/share). */
 export interface EmailEventDetails {
-  status: "approved" | "rejected" | "pending_review" | "shared";
+  status: "approved" | "rejected" | "pending_review" | "shared" | "invited" | "steward";
   /** Document title (or nest name for a share event). */
   docTitle: string;
   /** Location: "Nest name" or "Nest name / Subfolder". */
@@ -50,8 +50,13 @@ export interface EmailEventDetails {
   actor?: string;
   /** Share event: who granted access. */
   by?: string;
-  /** Share event: the permission level granted (e.g. "write"). */
+  /** Share event: the permission level granted (e.g. "write").
+   *  Steward event: the steward role (viewer/editor/reviewer). */
   permission?: string;
+  /** Steward event: the human scope the role covers (e.g. "#billing"). */
+  scopeLabel?: string;
+  /** Teammate-invite event: the one-time temporary password to sign in with. */
+  tempPassword?: string;
   version?: number | null;
   note?: string | null;
   /** Direct URL to open the document/nest ("" when no base URL is available). */
@@ -70,6 +75,144 @@ const STATUS_META: Record<
     color: "#d97706",
   },
   shared: { subjectWord: "shared with you", label: "Shared", color: "#2563eb" },
+  invited: { subjectWord: "invited you", label: "Invitation", color: "#2563eb" },
+  steward: { subjectWord: "steward", label: "Steward", color: "#7c3aed" },
+};
+
+/** First-letter capitalize for tidy detail values (role/scope). */
+const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
+
+/** One details-table row rendered to an HTML `<tr>` (label + value cell). */
+const detailRow = (label: string, valueHtml: string) =>
+  `<tr>
+      <td style="padding:5px 0;font-size:13px;color:#6b7280;width:90px;vertical-align:top;">${label}</td>
+      <td style="padding:5px 0;font-size:13px;color:#111827;vertical-align:top;">${valueHtml}</td>
+    </tr>`;
+
+/** Fragments precomputed once per render so the per-status templates below stay
+ *  declarative — no re-deriving the bold title / "by …" / note / version bits. */
+interface RenderCtx {
+  d: EmailEventDetails;
+  title: string; // plain, CR/LF-stripped
+  doc: string; // <strong>escaped title</strong>
+  byT: string;
+  byH: string;
+  noteT: string;
+  noteH: string;
+  vT: string;
+  vH: string;
+  meta: { subjectWord: string; label: string; color: string };
+  statusBadge: string;
+  codeValue: (v: string) => string;
+}
+
+/** A details row's value in both renderings: `text` (plain) + `html` (safe). */
+type RowSpec = { label: string; text: string; html: string };
+
+interface EmailTemplate {
+  heading: (x: RenderCtx) => string;
+  detailsHeader: string;
+  linkLabel: string;
+  lineT: (x: RenderCtx) => string; // plain-text sentence
+  lineH: (x: RenderCtx) => string; // HTML sentence
+  rows: (x: RenderCtx) => RowSpec[];
+}
+
+/** Plain value row → HTML-escaped for the value cell. */
+const plainRow = (label: string, value: string): RowSpec => ({
+  label,
+  text: value,
+  html: escapeHtml(value),
+});
+
+/** Governance events (approve/reject/review) share one details block. */
+const governanceRows = (x: RenderCtx): RowSpec[] => [
+  plainRow("Path", x.d.path),
+  { label: "Status", text: x.meta.label, html: x.statusBadge },
+  ...(x.d.version != null ? [plainRow("Version", `v${x.d.version}`)] : []),
+];
+
+/**
+ * One template per event type — the single place email copy lives. Each entry
+ * owns its heading, sentence (plain + HTML), details header, link label, and
+ * detail rows; renderEmail just looks one up by `status` and fills it. Adding a
+ * new email = adding one entry here, no scattered `status === …` branches.
+ */
+const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
+  approved: {
+    heading: (x) => `${x.title} is ${x.meta.subjectWord}`,
+    detailsHeader: "Document details",
+    linkLabel: "Open document",
+    lineT: (x) => `${x.title}${x.vT} has been approved${x.byT}${x.noteT}.`,
+    lineH: (x) => `${x.doc}${x.vH} has been approved${x.byH}${x.noteH}.`,
+    rows: governanceRows,
+  },
+  rejected: {
+    heading: (x) => `${x.title} is ${x.meta.subjectWord}`,
+    detailsHeader: "Document details",
+    linkLabel: "Open document",
+    lineT: (x) => `${x.title}${x.vT} has been rejected${x.byT}${x.noteT}.`,
+    lineH: (x) => `${x.doc}${x.vH} has been rejected${x.byH}${x.noteH}.`,
+    rows: governanceRows,
+  },
+  pending_review: {
+    heading: (x) => `${x.title} is ${x.meta.subjectWord}`,
+    detailsHeader: "Document details",
+    linkLabel: "Open document",
+    lineT: (x) =>
+      `A review has been requested for ${x.title}${x.vT}${x.byT}${x.noteT}.`,
+    lineH: (x) =>
+      `A review has been requested for ${x.doc}${x.vH}${x.byH}${x.noteH}.`,
+    rows: governanceRows,
+  },
+  shared: {
+    heading: (x) => `You've been added to ${x.title}`,
+    detailsHeader: "Details",
+    linkLabel: "Open nest",
+    lineT: (x) =>
+      `You've been given ${x.d.permission || "collaborator"} access to ${x.title}${x.d.by ? ` by ${x.d.by}` : ""}. Open it below to start collaborating.`,
+    lineH: (x) =>
+      `You've been given <strong>${escapeHtml(x.d.permission || "collaborator")}</strong> access to ${x.doc}${x.d.by ? ` by ${escapeHtml(x.d.by)}` : ""}. Open it below to start collaborating.`,
+    rows: (x) => [
+      plainRow("Nest", x.d.path),
+      ...(x.d.permission ? [plainRow("Role", cap(x.d.permission))] : []),
+    ],
+  },
+  invited: {
+    heading: (x) => `You've been invited to ${x.title}`,
+    detailsHeader: "Sign-in details",
+    linkLabel: "Sign in",
+    lineT: (x) =>
+      `You've been invited to ${x.title}${x.d.by ? ` by ${x.d.by}` : ""}. Sign in with your email and the temporary password below, then choose your own password.`,
+    lineH: (x) =>
+      `You've been invited to ${x.doc}${x.d.by ? ` by ${escapeHtml(x.d.by)}` : ""}. Sign in with your email and the temporary password below, then choose your own password.`,
+    rows: (x) => [
+      plainRow("Email", x.d.actor || ""),
+      ...(x.d.tempPassword
+        ? [
+            {
+              label: "Temporary password",
+              text: x.d.tempPassword,
+              html: x.codeValue(x.d.tempPassword),
+            },
+          ]
+        : []),
+    ],
+  },
+  steward: {
+    heading: (x) => `You're now a steward of ${x.title}`,
+    detailsHeader: "Details",
+    linkLabel: "Open nest",
+    lineT: (x) =>
+      `You've been assigned as a ${x.d.permission || "reviewer"} steward of ${x.d.scopeLabel || x.title}${x.d.by ? ` by ${x.d.by}` : ""}. Open the nest below to start reviewing.`,
+    lineH: (x) =>
+      `You've been assigned as a <strong>${escapeHtml(x.d.permission || "reviewer")}</strong> steward of ${x.d.scopeLabel ? escapeHtml(x.d.scopeLabel) : x.doc}${x.d.by ? ` by ${escapeHtml(x.d.by)}` : ""}. Open the nest below to start reviewing.`,
+    rows: (x) => [
+      plainRow("Nest", x.d.path),
+      ...(x.d.permission ? [plainRow("Role", cap(x.d.permission))] : []),
+      ...(x.d.scopeLabel ? [plainRow("Scope", cap(x.d.scopeLabel))] : []),
+    ],
+  },
 };
 
 /**
@@ -86,85 +229,44 @@ export function renderEmail(d: EmailEventDetails): {
   html: string;
 } {
   const meta = STATUS_META[d.status];
+  const t = TEMPLATES[d.status];
   const title = d.docTitle.replace(/[\r\n]+/g, " ").trim();
-  const heading =
-    d.status === "shared"
-      ? `New collaborator on ${title}`
-      : `${title} is ${meta.subjectWord}`;
-  const subject = heading.replace(/[\r\n]+/g, " ").trim();
   const vLabel = d.version != null ? `v${d.version}` : "";
-  const detailsHeader = d.status === "shared" ? "Details" : "Document details";
-  const linkLabel = d.status === "shared" ? "Open nest" : "Open document";
 
-  // ── plain-text sentence + body ──
-  const byT = d.actor ? ` by ${d.actor}` : "";
-  const noteT = d.note ? ` with the note: "${d.note}"` : "";
-  const vT = vLabel ? ` ${vLabel}` : "";
-  let lineT: string;
-  switch (d.status) {
-    case "approved":
-      lineT = `${title}${vT} has been approved${byT}${noteT}.`;
-      break;
-    case "rejected":
-      lineT = `${title}${vT} has been rejected${byT}${noteT}.`;
-      break;
-    case "pending_review":
-      lineT = `A review has been requested for ${title}${vT}${byT}${noteT}.`;
-      break;
-    case "shared":
-      lineT = `${d.actor || "A user"} was added to ${title} as ${d.permission || "a collaborator"}${d.by ? ` by ${d.by}` : ""}.`;
-      break;
-  }
-  const text = [
-    "Hi,",
-    "",
-    lineT,
-    "",
-    "Document details:",
-    `  Path: ${d.path}`,
-    `  Status: ${meta.label}`,
-    ...(d.version != null ? [`  Version: v${d.version}`] : []),
-    ...(d.link ? [`  Open: ${d.link}`] : []),
-    "",
-    "Regards,",
-    "ContextNest",
-  ].join("\n");
+  const ctx: RenderCtx = {
+    d,
+    title,
+    doc: `<strong>${escapeHtml(title)}</strong>`,
+    byT: d.actor ? ` by ${d.actor}` : "",
+    byH: d.actor ? ` by ${escapeHtml(d.actor)}` : "",
+    noteT: d.note ? ` with the note: "${d.note}"` : "",
+    noteH: d.note ? ` with the note: &ldquo;${escapeHtml(d.note)}&rdquo;` : "",
+    vT: vLabel ? ` ${vLabel}` : "",
+    vH: vLabel ? ` ${vLabel}` : "",
+    meta,
+    statusBadge: `<span style="display:inline-block;padding:2px 9px;border-radius:9999px;background:#f3f4f6;color:${meta.color};font-size:12px;font-weight:600;">${meta.label}</span>`,
+    codeValue: (v: string) =>
+      `<span style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;font-weight:600;color:#111827;background:#f3f4f6;padding:2px 8px;border-radius:6px;">${escapeHtml(v)}</span>`,
+  };
 
-  // ── HTML sentence ──
-  const doc = `<strong>${escapeHtml(title)}</strong>`;
-  const byH = d.actor ? ` by ${escapeHtml(d.actor)}` : "";
-  const noteH = d.note
-    ? ` with the note: &ldquo;${escapeHtml(d.note)}&rdquo;`
-    : "";
-  const vH = vLabel ? ` ${vLabel}` : "";
-  let lineH: string;
-  switch (d.status) {
-    case "approved":
-      lineH = `${doc}${vH} has been approved${byH}${noteH}.`;
-      break;
-    case "rejected":
-      lineH = `${doc}${vH} has been rejected${byH}${noteH}.`;
-      break;
-    case "pending_review":
-      lineH = `A review has been requested for ${doc}${vH}${byH}${noteH}.`;
-      break;
-    case "shared":
-      lineH = `${escapeHtml(d.actor || "A user")} was added to ${doc} as <strong>${escapeHtml(d.permission || "a collaborator")}</strong>${d.by ? ` by ${escapeHtml(d.by)}` : ""}.`;
-      break;
-  }
+  const heading = t.heading(ctx).replace(/[\r\n]+/g, " ").trim();
+  const subject = heading;
+  const detailsHeader = t.detailsHeader;
+  const linkLabel = t.linkLabel;
+  const lineH = t.lineH(ctx);
+  const rows = t.rows(ctx);
 
-  const detailRow = (label: string, valueHtml: string) =>
-    `<tr>
-      <td style="padding:5px 0;font-size:13px;color:#6b7280;width:90px;vertical-align:top;">${label}</td>
-      <td style="padding:5px 0;font-size:13px;color:#111827;vertical-align:top;">${valueHtml}</td>
-    </tr>`;
-  const detailRows =
-    detailRow("Path", escapeHtml(d.path)) +
-    detailRow(
-      "Status",
-      `<span style="display:inline-block;padding:2px 9px;border-radius:9999px;background:#f3f4f6;color:${meta.color};font-size:12px;font-weight:600;">${meta.label}</span>`,
-    ) +
-    (d.version != null ? detailRow("Version", `v${d.version}`) : "");
+  // Plain-text body: the details header, one "  Label: value" line per row, and
+  // a trailing link line.
+  const detailLines = [
+    `${detailsHeader}:`,
+    ...rows.map((r) => `  ${r.label}: ${r.text}`),
+    ...(d.link ? [`  ${linkLabel}: ${d.link}`] : []),
+  ];
+  const text = ["Hi,", "", t.lineT(ctx), "", ...detailLines, "", "Regards,", "Community Nest"].join("\n");
+
+  // HTML detail rows from the same row specs (the value cell is pre-rendered).
+  const detailRows = rows.map((r) => detailRow(r.label, r.html)).join("");
 
   const buttonRow = d.link
     ? `<tr><td style="padding:20px 24px 0;">
@@ -197,10 +299,7 @@ export function renderEmail(d: EmailEventDetails): {
     </td></tr>
     ${buttonRow}
     <tr><td style="padding:22px 24px 24px;font-size:14px;line-height:1.6;color:#374151;">
-      Regards,<br>ContextNest
-    </td></tr>
-    <tr><td style="padding:14px 24px;border-top:1px solid #f0f0f0;font-size:11px;line-height:1.5;color:#9ca3af;">
-      Automated governance notification from ContextNest. You received this because email notifications are enabled on this server.
+      Regards,<br>Community Nest
     </td></tr>
   </table>
 </div>`;
@@ -231,9 +330,6 @@ export function renderHtml(message: string, nestName: string): string {
         <td valign="top" style="font-size:22px;line-height:1;padding-right:14px;">${meta.icon}</td>
         <td valign="top" style="font-size:15px;line-height:1.55;color:#111827;border-left:3px solid ${meta.color};padding-left:14px;">${body}</td>
       </tr></table>
-    </td></tr>
-    <tr><td style="padding:14px 24px;border-top:1px solid #f0f0f0;font-size:11px;line-height:1.5;color:#9ca3af;">
-      Automated governance notification from ContextNest. You received this because email notifications are enabled on this server.
     </td></tr>
   </table>
 </div>`;

@@ -173,6 +173,36 @@ export async function notifyReviewResolved(params: {
   }
 }
 
+/**
+ * Drop a Hootie inbox row for a fresh nest invite, so being added to a nest
+ * shows up in /me/work alongside review requests — the same human-in-the-loop
+ * surface. Best-effort by contract: a failure here must never fail the invite.
+ */
+export async function notifyNestInvite(params: {
+  nestId: string;
+  inviteeEmail: string;
+  permission: string;
+  nestName: string;
+}): Promise<void> {
+  const { nestId, inviteeEmail, permission, nestName } = params;
+  try {
+    await getDb().run(
+      `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
+       VALUES (?, ?, ?, 'nest_invite', ?, ?, ?)`,
+      [
+        uuid(),
+        nestId,
+        inviteeEmail.toLowerCase(),
+        nestId,
+        `You were added to "${nestName}" as ${permission}`,
+        new Date().toISOString(),
+      ],
+    );
+  } catch (err) {
+    console.error("[notify] invite inbox insert failed", nestId, inviteeEmail, err);
+  }
+}
+
 export interface Notification {
   id: string;
   nest_id: string;

@@ -25,9 +25,12 @@ import { config } from "../config.js";
 import {
   createNode,
   updateNode,
+  deleteNode,
+  moveNode,
   listNodesForCallerByEmail,
 } from "../nodes/service.js";
 import { listThreads } from "../annotations/service.js";
+import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 
@@ -196,7 +199,8 @@ export const TOOL_DEFINITIONS = [
   },
   {
     name: "context_create",
-    description: "Create a new knowledge node in the vault.",
+    description:
+      "Create a new knowledge node in the vault. The title must not already be in use — these tools resolve documents by title, so a duplicate is refused rather than filed as an unreachable twin. To change an existing document use context_update; to refile it use context_move.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -219,7 +223,7 @@ export const TOOL_DEFINITIONS = [
         folder: {
           type: "string",
           description:
-            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified',
+            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified. A leading "nodes/" is accepted and not doubled, so "nodes/gtm/deals" and "gtm/deals" mean the same folder.',
         },
       },
       required: ["title", "content"],
@@ -249,6 +253,54 @@ export const TOOL_DEFINITIONS = [
         scope: { type: "string", description: "New scope" },
       },
       required: ["title"],
+    },
+  },
+  {
+    name: "context_delete",
+    // Mirrors the engine's canonical `context_delete` operation (core
+    // namespace, alias delete_document): same name, same {id, title} input,
+    // same "deleted" semantics. The engine's `uri` field is omitted — this
+    // repo has no contextnest:// resolver on any surface, so accepting one
+    // would promise a resolution it can't do.
+    description:
+      "Delete a node from the vault by title or id. Removes everything keyed to it: version history, review state, annotations, comments, watchers, schedules, trigger hooks, workflow edges, document grants, and any steward assignments scoped to it. Irreversible — the node must be recreated to come back, and it comes back clean: no history, no stewards, no shares. A node under open review is frozen unless you can approve it (owner, admin, or its reviewer).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of node to delete" },
+        id: {
+          type: "string",
+          description:
+            'Node id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two nodes share a title or the title is unknown.',
+        },
+      },
+    },
+  },
+  {
+    name: "context_move",
+    // NOT in the engine's operation catalog — `move` is a community-edition
+    // concern (the id rewrite spans governance tables the engine doesn't own).
+    // This mirrors the existing REST POST /nodes/:id/move rather than adding a
+    // new concept, so the surfaces agree. If move is ever promoted to a core
+    // operation upstream, adopt that descriptor and drop this schema.
+    description:
+      "Move a node to a different folder. The id changes; version history, review state, annotations, comments, watchers, schedules, links, and document grants all follow. The title and its [[wiki-link]] stay valid. A node under open review is frozen unless you can approve it (owner, admin, or its reviewer).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of node to move" },
+        id: {
+          type: "string",
+          description:
+            'Node id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two nodes share a title or the title is unknown.',
+        },
+        folder: {
+          type: "string",
+          description:
+            'Destination folder under nodes/ (e.g. "gtm/deals"); segments are slugified. Use "" to move to the nest root.',
+        },
+      },
+      required: ["folder"],
     },
   },
 
@@ -472,6 +524,50 @@ export async function handleToolCall(
       durationMs: Date.now() - started,
     });
   }
+}
+
+/**
+ * Resolve the node a title-or-id tool is aimed at. Returns the node, or the
+ * message to hand back to the caller when it can't be resolved — the tools
+ * here answer in prose, not exceptions, so a miss reads as an answer rather
+ * than a JSON-RPC error. Shared by the id-rewriting tools (delete, move) so
+ * both accept the same two ways of naming a document.
+ *
+ * An ambiguous title REFUSES rather than picking one. Titles are not unique —
+ * the same title in two folders is two different documents — and these tools
+ * delete or relocate what they resolve. Guessing would mean an agent silently
+ * destroying the wrong document with no error to notice and no way back.
+ * context_update guesses because a wrong edit is recoverable from history;
+ * a wrong delete is not.
+ */
+async function resolveTargetNode(
+  storage: NestStorage,
+  args: Record<string, any>,
+): Promise<ContextNode | string> {
+  if (!args.id && !args.title) return "Provide a title or an id.";
+
+  // An id IS the storage key, so read it directly. Ambiguity is impossible
+  // here and a discoverDocuments() scan would parse every document in the
+  // vault to find one the caller already named.
+  if (args.id) {
+    try {
+      return await storage.readDocument(args.id);
+    } catch {
+      return `Node not found: ${args.id}`;
+    }
+  }
+
+  // Titles have no index, so this branch has to scan.
+  const docs = await storage.discoverDocuments();
+  const matches = docs.filter(
+    (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+  );
+  if (matches.length > 1) {
+    return `${matches.length} nodes share the title "${args.title}". Re-run with one of these ids instead: ${matches
+      .map((n) => n.id)
+      .join(", ")}`;
+  }
+  return matches[0] ?? `Node not found: ${args.title}`;
 }
 
 /**
@@ -736,9 +832,8 @@ async function runTool(
           const quote = t.anchor?.quote
             ? `> ${t.anchor.quote.replace(/\n/g, " ")}\n\n`
             : "";
-          const head = `### ${i + 1}. [${t.status}]${
-            t.anchor?.quote ? "" : " (whole-document)"
-          }`;
+          const head = `### ${i + 1}. [${t.status}]${t.anchor?.quote ? "" : " (whole-document)"
+            }`;
           const comments = t.comments
             .map((c) => `- **${c.author}** (${c.createdAt}): ${c.body}`)
             .join("\n");
@@ -755,19 +850,35 @@ async function runTool(
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
         return "You don't have permission to create documents in this nest.";
       }
-      const { node } = await createNode(
-        nestId,
-        {
-          title: args.title,
-          content: args.content,
-          type: args.type,
-          tags: args.tags,
-          scope: args.scope,
-          folder: args.folder,
-        },
-        userEmail,
-      );
-      return `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`;
+      // Refuse a title already used ANYWHERE in the vault, not just in the
+      // requested folder: every title-addressed tool here resolves by title, so
+      // a twin filed elsewhere is unreachable for all of them (CU-wdqcpzxcg8).
+      // Scan and create under one nest-wide key — createNode's own lock is per
+      // id, and two twins land on DIFFERENT ids, so only a shared key stops
+      // both from passing the scan before either writes.
+      const wanted = String(args.title ?? "").toLowerCase();
+      return withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
+        const existingDocs = await storage.discoverDocuments();
+        const twin = existingDocs.find(
+          (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
+        );
+        if (twin) {
+          return `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`;
+        }
+        const { node } = await createNode(
+          nestId,
+          {
+            title: args.title,
+            content: args.content,
+            type: args.type,
+            tags: args.tags,
+            scope: args.scope,
+            folder: args.folder,
+          },
+          userEmail,
+        );
+        return `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`;
+      });
     }
 
     case "context_update": {
@@ -794,6 +905,46 @@ async function runTool(
         userEmail,
       );
       return `Updated node: **${updated.frontmatter.title}**`;
+    }
+
+    case "context_delete": {
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return node;
+      // PRIMARY write gate — the /mcp transport admits read-tier callers, so
+      // this per-tool check is the only thing standing between a viewer and a
+      // deleted document. Delete is at least as privileged as edit, so it
+      // takes the same per-node check context_update does.
+      const deleteCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
+      if (!deleteCheck.allowed) {
+        return `You don't have permission to delete "${node.frontmatter.title}": ${deleteCheck.reason}`;
+      }
+      await deleteNode(nestId, node.id, userEmail);
+      return `Deleted node: **${node.frontmatter.title}** (${node.id})`;
+    }
+
+    case "context_move": {
+      if (typeof args.folder !== "string") {
+        return 'folder is required — a path like "gtm/deals", or "" for the nest root.';
+      }
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return node;
+      // PRIMARY write gate, same reasoning as context_delete: a move rewrites
+      // the node's id across every governance table, so it is at least as
+      // privileged as an edit.
+      const moveCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
+      if (!moveCheck.allowed) {
+        return `You don't have permission to move "${node.frontmatter.title}": ${moveCheck.reason}`;
+      }
+      const { node: moved, previousId } = await moveNode(
+        nestId,
+        node.id,
+        args.folder,
+        userEmail,
+      );
+      if (previousId === moved.id) {
+        return `**${moved.frontmatter.title}** is already at \`${moved.id}\` — nothing to move.`;
+      }
+      return `Moved **${moved.frontmatter.title}**: \`${previousId}\` → \`${moved.id}\``;
     }
 
     // ─── Governance Tool Handlers ──────────────────────────────────────
@@ -927,19 +1078,19 @@ async function runTool(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
-
       try {
+        // Report the version the resolution actually landed on (request.version),
+        // not a pre-read — an author revising their pending submission can bump
+        // it between here and the lock-protected approve.
         const request = await reviews.approve({
           nestId: ctx.nestId,
           nodeId: node.id,
-          version: currentVersion,
           approvedBy: ctx.userEmail,
           note: args.note,
           baseUrl: ctx.baseUrl,
         });
 
-        return `Approved "${args.title}" v${currentVersion}. This version is now live for AI queries.${args.note ? `\nNote: ${args.note}` : ""}`;
+        return `Approved "${args.title}" v${request.version}. This version is now live for AI queries.${args.note ? `\nNote: ${args.note}` : ""}`;
       } catch (err: any) {
         return `Cannot approve: ${err.message}`;
       }
@@ -952,19 +1103,16 @@ async function runTool(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
-
       try {
         const request = await reviews.reject({
           nestId: ctx.nestId,
           nodeId: node.id,
-          version: currentVersion,
           rejectedBy: ctx.userEmail,
           note: args.note,
           baseUrl: ctx.baseUrl,
         });
 
-        return `Rejected "${args.title}" v${currentVersion}.\nReason: ${args.note}`;
+        return `Rejected "${args.title}" v${request.version}.\nReason: ${args.note}`;
       } catch (err: any) {
         return `Cannot reject: ${err.message}`;
       }
