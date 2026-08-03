@@ -376,6 +376,14 @@ describe("context_delete / context_move — ambiguous title refuses", () => {
     expect(text).not.toContain("Moved");
   });
 
+  it.each(["context_delete", "context_move"])(
+    "%s with neither title nor id asks for one instead of acting",
+    async (tool) => {
+      const text = await callTool(tool, tool === "context_move" ? { folder: "x" } : {});
+      expect(text).toMatch(/provide a title or an id/i);
+    },
+  );
+
   it("an explicit id disambiguates and still acts", async () => {
     const text = await callTool("context_delete", {
       id: "nodes/alpha/shared-title",

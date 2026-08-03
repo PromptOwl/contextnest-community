@@ -266,6 +266,23 @@ describe("context_delete — write gate per role", () => {
     });
     expect(gone).toMatch(/Node not found/i);
   });
+
+  // The stewardship lock lives in shared service code that both REST and MCP
+  // call. REST's 423 is covered in review-lock.test.ts; this asserts the same
+  // refusal reaches an MCP caller as a readable reason rather than a bare 500.
+  // Must leave "Draft Doc" intact — the approve cases below still need it.
+  it("a node awaiting review cannot be deleted, permission notwithstanding", async () => {
+    const { body } = await mcpCall(
+      writer.apiKey,
+      "tools/call",
+      { name: "context_delete", arguments: { title: "Draft Doc" } },
+      42,
+    );
+    const text = body.error
+      ? body.error.message
+      : (body.result?.content || []).map((c: any) => c.text).join("");
+    expect(text).toMatch(/awaiting steward review|locked/i);
+  });
 });
 
 describe("context_move — write gate per role", () => {

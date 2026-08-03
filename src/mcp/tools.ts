@@ -261,7 +261,7 @@ export const TOOL_DEFINITIONS = [
     // repo has no contextnest:// resolver on any surface, so accepting one
     // would promise a resolution it can't do.
     description:
-      "Delete a node from the vault by title or id. Removes its version history, review state, and annotations. Irreversible — the node must be recreated to come back.",
+      "Delete a node from the vault by title or id. Removes its version history, review state, annotations, and any steward assignments scoped to it. Irreversible — the node must be recreated to come back, and it comes back with no history and no stewards.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -543,18 +543,29 @@ async function resolveTargetNode(
   args: Record<string, any>,
 ): Promise<ContextNode | string> {
   if (!args.id && !args.title) return "Provide a title or an id.";
+
+  // An id IS the storage key, so read it directly. Ambiguity is impossible
+  // here and a discoverDocuments() scan would parse every document in the
+  // vault to find one the caller already named.
+  if (args.id) {
+    try {
+      return await storage.readDocument(args.id);
+    } catch {
+      return `Node not found: ${args.id}`;
+    }
+  }
+
+  // Titles have no index, so this branch has to scan.
   const docs = await storage.discoverDocuments();
-  const matches = args.id
-    ? docs.filter((n) => n.id === args.id)
-    : docs.filter(
-        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
-      );
+  const matches = docs.filter(
+    (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+  );
   if (matches.length > 1) {
     return `${matches.length} nodes share the title "${args.title}". Re-run with one of these ids instead: ${matches
       .map((n) => n.id)
       .join(", ")}`;
   }
-  return matches[0] ?? `Node not found: ${args.id || args.title}`;
+  return matches[0] ?? `Node not found: ${args.title}`;
 }
 
 /**
