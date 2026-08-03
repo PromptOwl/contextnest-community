@@ -344,6 +344,50 @@ describe("MCP tools/call — context_comments", () => {
   });
 });
 
+describe("context_delete / context_move — ambiguous title refuses", () => {
+  // Titles are not unique: the same title in two folders is two documents.
+  // Resolving one arbitrarily would let an agent delete the wrong document
+  // with no error and no way back, so an ambiguous title must refuse.
+  beforeAll(async () => {
+    for (const folder of ["alpha", "beta"]) {
+      const res = await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+        title: "Shared Title",
+        content: `# In ${folder}`,
+        folder,
+      });
+      expect(res.status).toBe(201);
+    }
+  });
+
+  it("context_delete refuses and lists the candidate ids", async () => {
+    const text = await callTool("context_delete", { title: "Shared Title" });
+    expect(text).toMatch(/2 nodes share the title/i);
+    expect(text).toContain("nodes/alpha/shared-title");
+    expect(text).toContain("nodes/beta/shared-title");
+    expect(text).not.toContain("Deleted node");
+  });
+
+  it("context_move refuses the same way", async () => {
+    const text = await callTool("context_move", {
+      title: "Shared Title",
+      folder: "gamma",
+    });
+    expect(text).toMatch(/2 nodes share the title/i);
+    expect(text).not.toContain("Moved");
+  });
+
+  it("an explicit id disambiguates and still acts", async () => {
+    const text = await callTool("context_delete", {
+      id: "nodes/alpha/shared-title",
+    });
+    expect(text).toContain("Deleted node");
+    // The sibling survives — only the named id went.
+    const left = await callTool("context_delete", { title: "Shared Title" });
+    expect(left).toContain("Deleted node");
+    expect(left).toContain("nodes/beta/shared-title");
+  });
+});
+
 describe("MCP tools/call — error handling", () => {
   it("returns a JSON-RPC error for an unknown tool", async () => {
     const res = await mcpCall(

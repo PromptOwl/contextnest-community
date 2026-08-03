@@ -530,6 +530,13 @@ export async function handleToolCall(
  * here answer in prose, not exceptions, so a miss reads as an answer rather
  * than a JSON-RPC error. Shared by the id-rewriting tools (delete, move) so
  * both accept the same two ways of naming a document.
+ *
+ * An ambiguous title REFUSES rather than picking one. Titles are not unique —
+ * the same title in two folders is two different documents — and these tools
+ * delete or relocate what they resolve. Guessing would mean an agent silently
+ * destroying the wrong document with no error to notice and no way back.
+ * context_update guesses because a wrong edit is recoverable from history;
+ * a wrong delete is not.
  */
 async function resolveTargetNode(
   storage: NestStorage,
@@ -537,12 +544,17 @@ async function resolveTargetNode(
 ): Promise<ContextNode | string> {
   if (!args.id && !args.title) return "Provide a title or an id.";
   const docs = await storage.discoverDocuments();
-  const node = args.id
-    ? docs.find((n) => n.id === args.id)
-    : docs.find(
+  const matches = args.id
+    ? docs.filter((n) => n.id === args.id)
+    : docs.filter(
         (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
       );
-  return node ?? `Node not found: ${args.id || args.title}`;
+  if (matches.length > 1) {
+    return `${matches.length} nodes share the title "${args.title}". Re-run with one of these ids instead: ${matches
+      .map((n) => n.id)
+      .join(", ")}`;
+  }
+  return matches[0] ?? `Node not found: ${args.id || args.title}`;
 }
 
 /**
