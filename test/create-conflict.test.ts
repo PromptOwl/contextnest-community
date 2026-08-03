@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
+import * as versions from "../src/governance/version-service.js";
 
 let env: ReturnType<typeof setupTestEnv>;
 
@@ -110,6 +111,45 @@ describe("REST create — occupied id", () => {
       alice.apiKey,
     );
     expect(res.status).toBe(409);
+  });
+
+  it("creates over orphaned version history instead of a duplicate-key error", async () => {
+    // Version rows can outlive their document (file removed outside the app,
+    // vault re-sync), and deleteNode's purge never ran because the delete
+    // 404'd. The create used to reach the version insert and fail with a raw
+    // UNIQUE violation on node_versions(nest_id, node_id, version).
+    for (const version of [1, 2, 3]) {
+      await versions.createVersion({
+        nestId,
+        nodeId: "nodes/ghost/stale-brief",
+        version,
+        content: `orphan v${version}`,
+        author: "ghost@acme.com",
+        status: "approved",
+      });
+    }
+
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Stale Brief", content: "fresh start", folder: "ghost" },
+      alice.apiKey,
+    );
+    expect(res.status).toBe(201);
+    expect(res.data.node.id).toBe("nodes/ghost/stale-brief");
+
+    // The dead history is gone — the new document owns the sequence.
+    const history = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/ghost/stale-brief/versions`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(history.status).toBe(200);
+    expect(history.data.versions).toHaveLength(1);
+    expect(history.data.versions[0].version).toBe(1);
   });
 
   it("still allows the same title in a different folder", async () => {

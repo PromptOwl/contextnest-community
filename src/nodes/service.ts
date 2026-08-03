@@ -41,6 +41,7 @@ import {
 } from "../governance/grants-service.js";
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
+import type { Querier } from "../db/adapter.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { config } from "../config.js";
@@ -553,6 +554,31 @@ export async function createNode(
     throw new ConflictError(
       `A document already exists at ${id}. Update it, or create this one under a different folder or title.`,
     );
+  }
+
+  // The id is free on disk, but rows can outlive their document: a file
+  // removed outside the app (manual delete, vault re-sync, restore from an
+  // older copy) leaves node_versions behind, because deleteNode's purge never
+  // runs — storage.deleteDocument 404s first and throws. Creating at such an
+  // id then failed deep inside the version insert with a raw `duplicate key
+  // value violates unique constraint
+  // "node_versions_nest_id_node_id_version_key"`, which no caller can act on
+  // and no steward can clear without DB access. No document at the id means
+  // every row keyed to it is dead, so clear them all — not just the version
+  // rows that crash — and let the new document start clean instead of
+  // inheriting a stranger's comments, watchers or readers.
+  const db = getDb();
+  const orphan = await db.get(
+    "SELECT 1 AS present FROM node_versions WHERE nest_id = ? AND node_id = ? LIMIT 1",
+    [nestId, id],
+  );
+  if (orphan) {
+    console.warn(
+      `[nodes] clearing orphaned rows for ${id} — version history exists but no document does`,
+    );
+    await db.transaction(async (tx) => {
+      await purgeNodeKeyedRows(tx, nestId, id);
+    });
   }
 
   // Optional dept:<slug> auto-tag — after the validations above so a request
@@ -1100,6 +1126,94 @@ function derivedIdOf(sourceNodeId: string): string {
   return `nodes/${sourceNodeId.replace(/^nodes\//, "")}--annotations`;
 }
 
+/**
+ * Every nest-scoped table that keys rows to a node id, as [table, column].
+ * ONE list, because delete and move must agree on it: move used to rewrite
+ * `comments`, `edges` and `grants` that delete never purged, and neither
+ * touched `watchers` or `schedules` at all. Rows left behind don't just leak —
+ * a node id is derived from its title, so recreating a document at a purged
+ * id inherited the dead one's review comments, watchers and (via grants) its
+ * readers, while a stale version row made the create fail outright on the
+ * node_versions unique constraint.
+ *
+ * Add a node-keyed table here and both operations pick it up. Predicated
+ * references (document-scoped stewards and grants) can't be expressed as a
+ * plain column match and are handled beside the loop in both helpers.
+ *
+ * `runs` / `run_steps` are deliberately absent: a run trace records what
+ * happened at the time, so move retargets it (below) but delete keeps it as
+ * history rather than rewriting the past.
+ */
+export const NODE_KEYED_TABLES = [
+  ["node_versions", "node_id"],
+  ["review_requests", "node_id"],
+  ["approved_versions", "node_id"],
+  ["annotation_threads", "node_id"],
+  ["comments", "node_id"],
+  ["node_tag_index", "node_id"],
+  ["watchers", "node_id"],
+  ["schedules", "agent_node"],
+  // A trigger hook is a live capability token bound to one agent node.
+  // Deleting the agent must revoke it, or the token outlives its target and
+  // a later node recreated at that id answers a webhook issued for a
+  // document its author never saw.
+  ["trigger_hooks", "agent_node"],
+  ["edges", "from_node"],
+  ["edges", "to_node"],
+] as const;
+
+/** Drop every row keyed to a node id. Caller supplies the transaction. */
+async function purgeNodeKeyedRows(
+  tx: Querier,
+  nestId: string,
+  nodeId: string,
+): Promise<void> {
+  for (const [table, column] of NODE_KEYED_TABLES) {
+    await tx.run(`DELETE FROM ${table} WHERE nest_id = ? AND ${column} = ?`, [
+      nestId,
+      nodeId,
+    ]);
+  }
+  // Document-scoped stewards and grants pin to this exact id. Tag- and
+  // nest-scoped stewards, and folder grants, govern more than this document
+  // and stay.
+  await tx.run(
+    `DELETE FROM stewards
+     WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
+    [nestId, nodeId],
+  );
+  await tx.run(
+    `DELETE FROM grants
+     WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
+    [nestId, nodeId],
+  );
+}
+
+/** Repoint every row keyed to `oldId` at `newId`. Caller supplies the transaction. */
+async function rewriteNodeKeyedRows(
+  tx: Querier,
+  nestId: string,
+  oldId: string,
+  newId: string,
+): Promise<void> {
+  for (const [table, column] of NODE_KEYED_TABLES) {
+    await tx.run(
+      `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
+      [newId, nestId, oldId],
+    );
+  }
+  await tx.run(
+    `UPDATE stewards SET node_pattern = ?
+     WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
+    [newId, nestId, oldId],
+  );
+  await tx.run(
+    `UPDATE grants SET target = ?
+     WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
+    [newId, nestId, oldId],
+  );
+}
+
 export interface MoveNodeResult {
   node: ContextNode;
   previousId: string;
@@ -1185,48 +1299,16 @@ export async function moveNode(
 
   await storage.deleteDocument(nodeId);
 
-  // Rewrite every table that keys on the node id — the same reference set
-  // DELETE purges, plus workflow edges, grants, and run traces. One
-  // transaction: a half-moved node would be worse than a failed move.
+  // Repoint every table that keys on the node id, the source doc and its
+  // derived annotations node alike, plus the run traces delete keeps as
+  // history. One transaction: a half-moved node would be worse than a failed
+  // move.
   const oldDerived = derivedIdOf(nodeId);
   const newDerived = derivedIdOf(newId);
   const db = getDb();
   await db.transaction(async (tx) => {
-    for (const [table, column] of [
-      ["node_versions", "node_id"],
-      ["review_requests", "node_id"],
-      ["approved_versions", "node_id"],
-      ["annotation_threads", "node_id"],
-      ["comments", "node_id"],
-      ["node_tag_index", "node_id"],
-    ] as const) {
-      await tx.run(
-        `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
-        [newId, nestId, nodeId],
-      );
-      await tx.run(
-        `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
-        [newDerived, nestId, oldDerived],
-      );
-    }
-    await tx.run(
-      `UPDATE stewards SET node_pattern = ?
-       WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      `UPDATE grants SET target = ?
-       WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      "UPDATE edges SET from_node = ? WHERE nest_id = ? AND from_node = ?",
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      "UPDATE edges SET to_node = ? WHERE nest_id = ? AND to_node = ?",
-      [newId, nestId, nodeId],
-    );
+    await rewriteNodeKeyedRows(tx, nestId, nodeId, newId);
+    await rewriteNodeKeyedRows(tx, nestId, oldDerived, newDerived);
     await tx.run(
       "UPDATE runs SET agent_node = ? WHERE nest_id = ? AND agent_node = ?",
       [newId, nestId, nodeId],
@@ -1300,58 +1382,16 @@ export async function deleteNode(
     /* no derived annotations node — nothing to remove */
   }
 
-  // Purge governance rows tied to this node id. Without this, recreating
-  // a doc with the same title (→ same slug → same node id) hits a UNIQUE
-  // constraint on node_versions(nest_id, node_id, version) because the
-  // old version rows still exist. We also drop pending/historic review
-  // requests and the approved-version pin so the recreated doc starts
-  // from a clean slate.
+  // Purge every row tied to this node id — the source doc and its derived
+  // annotations node — so nothing outlives the document. A node id is derived
+  // from its title, so a later doc can land on this exact id: leftovers would
+  // have made the recreate fail on the node_versions unique constraint, and
+  // handed it the dead doc's reviewers, readers, watchers and review comments.
+  // Annotation comments cascade via their thread FK.
   const db = getDb();
   await db.transaction(async (tx) => {
-    await tx.run(
-      "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    await tx.run(
-      "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    await tx.run(
-      "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    // Document-scoped steward rows pin to this exact node_pattern. Tag
-    // and nest-scoped stewards stay — they govern the whole nest, not
-    // this single doc. Without this purge, recreating a doc with the
-    // same slug silently inherits the prior doc's reviewer assignments.
-    await tx.run(
-      `DELETE FROM stewards
-       WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
-      [nestId, nodeId],
-    );
-    // Annotation threads for this node — comments cascade via the thread FK.
-    await tx.run(
-      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    // The derived annotations node's own rows (version history it accrued, plus
-    // any stray threads if someone commented on it before this cleanup existed).
-    await tx.run(
-      "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
-    await tx.run(
-      "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
-    await tx.run(
-      "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
-    await tx.run(
-      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
+    await purgeNodeKeyedRows(tx, nestId, nodeId);
+    await purgeNodeKeyedRows(tx, nestId, derivedId);
     // Deletion tombstone — the one record that survives the purge above, so
     // GET /changes can tell external mirrors a doc was removed. Upsert:
     // delete → recreate → delete again just refreshes the timestamp.

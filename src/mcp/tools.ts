@@ -262,7 +262,7 @@ export const TOOL_DEFINITIONS = [
     // repo has no contextnest:// resolver on any surface, so accepting one
     // would promise a resolution it can't do.
     description:
-      "Delete a node from the vault by title or id. Removes its version history, review state, annotations, and any steward assignments scoped to it. Irreversible — the node must be recreated to come back, and it comes back with no history and no stewards.",
+      "Delete a node from the vault by title or id. Removes everything keyed to it: version history, review state, annotations, comments, watchers, schedules, trigger hooks, workflow edges, document grants, and any steward assignments scoped to it. Irreversible — the node must be recreated to come back, and it comes back clean: no history, no stewards, no shares.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -283,7 +283,7 @@ export const TOOL_DEFINITIONS = [
     // new concept, so the surfaces agree. If move is ever promoted to a core
     // operation upstream, adopt that descriptor and drop this schema.
     description:
-      "Move a node to a different folder. The id changes; version history, review state, annotations, comments, links, and grants all follow. The title and its [[wiki-link]] stay valid.",
+      "Move a node to a different folder. The id changes; version history, review state, annotations, comments, watchers, schedules, links, and document grants all follow. The title and its [[wiki-link]] stay valid.",
     inputSchema: {
       type: "object" as const,
       properties: {
