@@ -22,6 +22,7 @@ import {
   Save,
   AlertCircle,
   Send,
+  Trash2,
   X,
   FolderOpen,
   FolderPlus,
@@ -63,7 +64,7 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
-import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
+import { SubmitForReviewModal, ReasonDialog, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
 import { unifiedDiff } from "./governance/diff-util";
 import {
   DropdownMenu,
@@ -236,7 +237,18 @@ export function DocumentEditor({
   const isViewOnly = isNew
     ? !canAuthorNew
     : isReadOnly && myNodeRoles.length === 0;
+  // Nest admin/owner — the tier that deletes documents outright. Everyone else
+  // (editors and write collaborators included) gets the request path instead.
+  const canDeleteDirectly =
+    isOwner || isAdmin || permission === "owner" || permission === "admin";
   const [showSubmitModal, setShowSubmitModal] = useState(false);
+  const [showDeletionModal, setShowDeletionModal] = useState(false);
+  // Latest deletion flag on this doc. Pending hides the request button (a
+  // second one would 409); declined stays visible with the note so the person
+  // who asked sees the verdict instead of the flag just vanishing.
+  const [deletionRequest, setDeletionRequest] =
+    useState<api.DeletionRequest | null>(null);
+  const deletionRequested = deletionRequest?.status === "pending";
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
   const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : "view");
@@ -733,6 +745,7 @@ export function DocumentEditor({
       setPendingReviewBy(
         ((node as any)?.pendingReviewBy as string | null | undefined) ?? null,
       );
+      setDeletionRequest(((node as any)?.deletionRequest ?? null) as api.DeletionRequest | null);
       initialSnapshotRef.current = {
         title: loadedTitle,
         content: loadedContent,
@@ -1014,6 +1027,15 @@ export function DocumentEditor({
     await api.rejectNode(nestId, nodeId, note);
     await loadNode();
   };
+  // Flag this doc for deletion — for callers without delete permission. Errors
+  // stay inside the dialog (it keeps the typed reason); success closes it.
+  const handleRequestDeletion = async (reason: string) => {
+    if (isNew) return;
+    const { request } = await api.requestNodeDeletion(nestId, nodeId, reason);
+    setDeletionRequest(request);
+    toast.success("Deletion requested — a nest admin will review it");
+  };
+
   const hasReviewerRole = myNodeRoles.includes("reviewer");
   const hasEditorRole = myNodeRoles.includes("editor");
 
@@ -1184,6 +1206,24 @@ export function DocumentEditor({
               {title || (isNew ? "New document" : "Untitled")}
             </h3>
             {!isNew && status && <StatusBadge status={status} />}
+            {!isNew && deletionRequest && (
+              <span
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border ${
+                  deletionRequested
+                    ? "bg-red-50 text-red-700 border-red-200"
+                    : "bg-amber-50 text-amber-700 border-amber-200"
+                }`}
+                title={
+                  deletionRequested
+                    ? `${deletionRequest.requestedBy} asked for this to be deleted: "${deletionRequest.reason}". A nest admin decides.`
+                    : `Deletion declined by ${deletionRequest.resolvedBy}: "${deletionRequest.resolutionNote}"`
+                }
+                data-testid="deletion-requested-badge"
+              >
+                <Trash2 className="h-3 w-3" />
+                {deletionRequested ? "Deletion requested" : "Deletion declined"}
+              </span>
+            )}
             {!isNew && !stewardshipEnabled && status === "published" && (
               <span
                 className="px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700 border border-green-200"
@@ -1356,6 +1396,17 @@ export function DocumentEditor({
                 separatorBefore: !isNew ? false : true,
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
+              });
+            // Below admin only: this opens the REQUEST dialog, not a delete.
+            // Admins delete from the nest list — this page has never carried a
+            // real delete. Hidden once a flag is already pending.
+            if (!isNew && !canDeleteDirectly && !deletionRequested)
+              moreActions.push({
+                label: "Delete",
+                icon: Trash2,
+                separatorBefore: true,
+                testId: "document-editor-request-deletion",
+                onSelect: () => setShowDeletionModal(true),
               });
             return moreActions.length ? (
               <OverflowMenu
@@ -2335,6 +2386,22 @@ export function DocumentEditor({
           documentTitle={title}
           currentVersion={baseVersion ?? 1}
           onSubmit={handleSubmitForReview}
+        />
+      )}
+
+      {!isNew && (
+        <ReasonDialog
+          open={showDeletionModal}
+          onOpenChange={setShowDeletionModal}
+          title={`Request deletion of "${title || nodeId}"`}
+          description="A nest admin reviews this and either deletes the document or declines with a note. Nothing is removed yet."
+          label="Why should it be deleted?"
+          placeholder="e.g. superseded by the new runbook"
+          confirmLabel="Request deletion"
+          priorDecline={
+            deletionRequest?.status === "declined" ? deletionRequest : null
+          }
+          onConfirm={handleRequestDeletion}
         />
       )}
 

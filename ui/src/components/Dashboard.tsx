@@ -25,6 +25,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ReasonDialog } from "./governance";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
@@ -62,6 +63,9 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   }>({ items: [], waiting: [] });
   const [loadingMoreWork, setLoadingMoreWork] = useState(false);
   const [acting, setActing] = useState<Record<string, boolean>>({});
+  // Deletion flag being resolved from the inbox, and which dialog it opens.
+  const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
+  const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
   const [nests, setNests] = useState<any[]>([]);
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
@@ -220,6 +224,30 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     }
   };
 
+  // Resolve a deletion flag straight from the inbox. Delete needs a confirm and
+  // decline needs a note, so both go through ReasonDialog; the handlers throw
+  // on failure so the error lands in the dialog, not a swallowed console line.
+  const handleInboxDelete = async () => {
+    const w = deletionTarget!;
+    await api.approveDeletionRequest(w.nest_id, w.request_id!);
+    dropWorkItem(w);
+  };
+  const handleInboxDecline = async (note: string) => {
+    const w = deletionTarget!;
+    await api.declineDeletionRequest(w.nest_id, w.request_id!, note);
+    dropWorkItem(w);
+  };
+  // Optimistic drop + reconcile, same as actOnReview.
+  const dropWorkItem = (w: api.WorkItem) => {
+    setWork((prev) => ({
+      ...prev,
+      items: prev.items.filter(
+        (i) => !(i.nest_id === w.nest_id && i.node_id === w.node_id),
+      ),
+    }));
+    void goToWorkPage(work.pagination?.offset ?? 0);
+  };
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
@@ -372,37 +400,74 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                     key={key}
                     className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
                   >
-                    <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0">
-                      Review
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${
+                        w.type === "deletion"
+                          ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
+                          : "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                      }`}
+                    >
+                      {w.type === "deletion" ? "Deletion" : "Review"}
                     </span>
                     <button
                       onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}
                       className="flex items-center gap-2 min-w-0 flex-1 text-left"
                     >
                       <span className="font-medium truncate">{w.title}</span>
-                      <span className="text-xs text-muted-foreground shrink-0">
+                      <span className="text-xs text-muted-foreground truncate">
                         in {w.nest_name} · {w.requested_by} · {relTime(w.requested_at)}
+                        {w.reason ? ` · "${w.reason}"` : ""}
                       </span>
                     </button>
                     <div className="flex items-center gap-1 shrink-0">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busy}
-                        onClick={() => actOnReview(w, "approve")}
-                      >
-                        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
-                        Approve
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busy}
-                        className="text-muted-foreground hover:text-destructive"
-                        onClick={() => actOnReview(w, "reject")}
-                      >
-                        Reject
-                      </Button>
+                      {w.type === "deletion" ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => {
+                              setDeletionAction("delete");
+                              setDeletionTarget(w);
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5 mr-1" />
+                            Delete
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-muted-foreground"
+                            onClick={() => {
+                              setDeletionAction("decline");
+                              setDeletionTarget(w);
+                            }}
+                          >
+                            Decline
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={busy}
+                            onClick={() => actOnReview(w, "approve")}
+                          >
+                            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
+                            Approve
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={busy}
+                            className="text-muted-foreground hover:text-destructive"
+                            onClick={() => actOnReview(w, "reject")}
+                          >
+                            Reject
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </div>
                 );
@@ -430,10 +495,16 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                 >
                   <span className="font-medium truncate">{w.title}</span>
                   <span className="text-xs text-muted-foreground shrink-0">
-                    in {w.nest_name} · submitted {relTime(w.requested_at)}
+                    in {w.nest_name} ·{" "}
+                    {w.type === "deletion" ? "requested" : "submitted"}{" "}
+                    {relTime(w.requested_at)}
                   </span>
                   <span className="flex-1" />
-                  <span className="text-xs text-muted-foreground">pending review</span>
+                  <span className="text-xs text-muted-foreground">
+                    {w.type === "deletion"
+                      ? "Deletion Requested"
+                      : "Pending Review"}
+                  </span>
                   <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-0.5 transition-transform shrink-0" />
                 </button>
               ))}
@@ -962,6 +1033,34 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
             );
             setRenameTarget(null);
           }}
+        />
+      )}
+
+      {deletionTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setDeletionTarget(null)}
+          title={
+            deletionAction === "delete"
+              ? `Delete "${deletionTarget.title}"?`
+              : "Decline this deletion request"
+          }
+          description={`${deletionTarget.requested_by} asked for this: "${deletionTarget.reason ?? ""}". ${
+            deletionAction === "delete"
+              ? "Deleting removes the document, its history, comments and annotations. It cannot be undone."
+              : "The document stays; your note is the record, and the requester is notified."
+          }`}
+          label={
+            deletionAction === "decline" ? "Why are you declining?" : undefined
+          }
+          placeholder="e.g. still referenced by onboarding"
+          confirmLabel={
+            deletionAction === "delete" ? "Delete document" : "Decline"
+          }
+          destructive={deletionAction === "delete"}
+          onConfirm={
+            deletionAction === "delete" ? handleInboxDelete : handleInboxDecline
+          }
         />
       )}
 

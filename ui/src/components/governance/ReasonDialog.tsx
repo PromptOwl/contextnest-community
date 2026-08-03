@@ -1,0 +1,167 @@
+/**
+ * ReasonDialog — one dialog for "confirm this, and say why".
+ *
+ * Covers the deletion-request flows (flag a doc, decline a request) and the
+ * plain confirm that honours one: omit `label` and the textarea disappears,
+ * leaving a confirm dialog. Replaces the window.prompt/confirm those started as.
+ */
+import { useState } from "react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { AlertCircle, Loader2 } from "lucide-react";
+
+interface ReasonDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  description?: string;
+  /** Textarea label. Omit for a confirm-only dialog (no reason collected). */
+  label?: string;
+  placeholder?: string;
+  confirmLabel: string;
+  destructive?: boolean;
+  /** A previous decline on the same subject — shown above the input so nobody
+   *  re-raises a request that was already answered, without knowing why. */
+  priorDecline?: {
+    reason?: string;
+    resolutionNote?: string;
+    resolvedBy?: string;
+    resolvedAt?: string;
+  } | null;
+  /** Rejecting surfaces the message inline and keeps the dialog open. */
+  onConfirm: (reason: string) => Promise<void>;
+}
+
+/** SQLite stamps "YYYY-MM-DD HH:MM:SS" in UTC, which browsers otherwise parse
+ *  as local time — an hours-off timestamp. Postgres/ISO strings pass through. */
+function formatWhen(raw?: string): string | null {
+  if (!raw) return null;
+  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)
+    ? `${raw.replace(" ", "T")}Z`
+    : raw;
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? raw : d.toLocaleString();
+}
+
+export function ReasonDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  label,
+  placeholder,
+  confirmLabel,
+  destructive,
+  priorDecline,
+  onConfirm,
+}: ReasonDialogProps) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const close = (next: boolean) => {
+    if (busy) return;
+    if (!next) {
+      setReason("");
+      setError(null);
+    }
+    onOpenChange(next);
+  };
+
+  const confirm = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm(reason.trim());
+      setReason("");
+      onOpenChange(false);
+    } catch (err: any) {
+      setError(err?.message || "Something went wrong");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={close}>
+      <DialogContent className="sm:max-w-[440px]">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          {description && <DialogDescription>{description}</DialogDescription>}
+        </DialogHeader>
+
+        {priorDecline && (
+          <div
+            className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 space-y-1"
+            data-testid="reason-dialog-prior-decline"
+          >
+            <p className="font-medium">
+              Declined
+              {priorDecline.resolvedBy ? ` by ${priorDecline.resolvedBy}` : ""}
+              {formatWhen(priorDecline.resolvedAt)
+                ? ` · ${formatWhen(priorDecline.resolvedAt)}`
+                : ""}
+            </p>
+            {priorDecline.resolutionNote && (
+              <p>&ldquo;{priorDecline.resolutionNote}&rdquo;</p>
+            )}
+            {priorDecline.reason && (
+              <p className="text-amber-800/80">
+                Asked before: &ldquo;{priorDecline.reason}&rdquo;
+              </p>
+            )}
+          </div>
+        )}
+
+        {label && (
+          <div className="space-y-2">
+            <Label htmlFor="reason-dialog-input">{label}</Label>
+            <Textarea
+              id="reason-dialog-input"
+              autoFocus
+              rows={3}
+              value={reason}
+              placeholder={placeholder}
+              onChange={(e) => setReason(e.target.value)}
+              data-testid="reason-dialog-input"
+            />
+          </div>
+        )}
+
+        {error && (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => close(false)} disabled={busy}>
+            Cancel
+          </Button>
+          <Button
+            onClick={confirm}
+            // A required reason is the whole point of the flow — no empty flags,
+            // no unexplained declines.
+            disabled={busy || (!!label && !reason.trim())}
+            variant={destructive ? "destructive" : "default"}
+            data-testid="reason-dialog-confirm"
+          >
+            {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            {confirmLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
