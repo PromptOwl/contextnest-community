@@ -22,7 +22,7 @@ import {
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
-import { syncNodeTags } from "../governance/tag-index-service.js";
+import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
 import {
   isStewardshipEnabled,
   resolveNestPath,
@@ -86,6 +86,13 @@ const slugify = (s: string) =>
  */
 function folderToSegments(folder: string): string[] {
   const segments = folder.split("/").map(slugify).filter(Boolean);
+  // Callers think in node ids, and every node id starts with "nodes/" — so
+  // `folder: "nodes/signals"` is the natural thing to write. Both call sites
+  // below prefix "nodes/" themselves, so an unstripped leading segment lands
+  // the doc at nodes/nodes/signals/<slug>. Strip it here, once, rather than
+  // in create and move separately. Cost: a folder literally named "nodes"
+  // under the root is unaddressable — nobody wants nodes/nodes/.
+  if (segments[0] === "nodes") segments.shift();
   if (segments.length > 8) {
     throw new ValidationError("folder may nest at most 8 levels deep");
   }
@@ -1227,4 +1234,116 @@ export async function moveNode(
 
   await trackEvent("node.move", { nestId, nodeId, newId });
   return { node: moved, previousId: nodeId };
+}
+
+/**
+ * Delete a node and every row keyed to its id. Lives here rather than in the
+ * DELETE handler because MCP's context_delete needs the identical purge — a
+ * second copy would drift the moment a new node-scoped table lands.
+ *
+ * Permission is the CALLER's job (REST: the nest permission middleware in
+ * app.ts; MCP: the per-tool canUserEdit check). This function enforces only
+ * the stewardship lock and does the cleanup.
+ */
+export async function deleteNode(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+): Promise<void> {
+  const { storage } = await engineCache.get(nestId);
+
+  // Stewardship lock: a node under open review can't be deleted out from
+  // under the reviewer (423). Mirrors the edit lock in updateNode.
+  if ((await isStewardshipEnabled(nestId)) && (await getPendingReview(nestId, nodeId))) {
+    throw new LockedError(
+      "This document is awaiting steward review and is locked. Approve or reject the pending review before deleting.",
+    );
+  }
+
+  try {
+    await storage.deleteDocument(nodeId);
+  } catch {
+    throw new NotFoundError(`Node not found: ${nodeId}`);
+  }
+
+  await removeNodeFromTagIndex(nestId, nodeId);
+
+  // A node's review comments and its derived annotations node are tied to the
+  // node id, not FK'd to it — so deleting the node would otherwise orphan both.
+  // Remove the derived `— Annotations` node's storage doc (best-effort: plain
+  // documents and never-commented artifacts have none) here; its DB rows and
+  // the annotation threads themselves are purged in the transaction below.
+  const derivedId = derivedIdOf(nodeId);
+  try {
+    await storage.deleteDocument(derivedId);
+    await removeNodeFromTagIndex(nestId, derivedId);
+  } catch {
+    /* no derived annotations node — nothing to remove */
+  }
+
+  // Purge governance rows tied to this node id. Without this, recreating
+  // a doc with the same title (→ same slug → same node id) hits a UNIQUE
+  // constraint on node_versions(nest_id, node_id, version) because the
+  // old version rows still exist. We also drop pending/historic review
+  // requests and the approved-version pin so the recreated doc starts
+  // from a clean slate.
+  const db = getDb();
+  await db.transaction(async (tx) => {
+    await tx.run(
+      "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
+      [nestId, nodeId],
+    );
+    await tx.run(
+      "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
+      [nestId, nodeId],
+    );
+    await tx.run(
+      "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
+      [nestId, nodeId],
+    );
+    // Document-scoped steward rows pin to this exact node_pattern. Tag
+    // and nest-scoped stewards stay — they govern the whole nest, not
+    // this single doc. Without this purge, recreating a doc with the
+    // same slug silently inherits the prior doc's reviewer assignments.
+    await tx.run(
+      `DELETE FROM stewards
+       WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
+      [nestId, nodeId],
+    );
+    // Annotation threads for this node — comments cascade via the thread FK.
+    await tx.run(
+      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
+      [nestId, nodeId],
+    );
+    // The derived annotations node's own rows (version history it accrued, plus
+    // any stray threads if someone commented on it before this cleanup existed).
+    await tx.run(
+      "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
+    );
+    await tx.run(
+      "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
+    );
+    await tx.run(
+      "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
+    );
+    await tx.run(
+      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
+      [nestId, derivedId],
+    );
+    // Deletion tombstone — the one record that survives the purge above, so
+    // GET /changes can tell external mirrors a doc was removed. Upsert:
+    // delete → recreate → delete again just refreshes the timestamp.
+    await tx.run(
+      `INSERT INTO node_deletions (nest_id, node_id, deleted_by, deleted_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(nest_id, node_id) DO UPDATE
+         SET deleted_by = excluded.deleted_by, deleted_at = excluded.deleted_at`,
+      [nestId, nodeId, userEmail, new Date().toISOString()],
+    );
+  });
+
+  await trackEvent("node.delete", { nestId, nodeId });
 }

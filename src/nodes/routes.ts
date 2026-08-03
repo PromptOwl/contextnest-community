@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
-import { ValidationError, NotFoundError, LockedError } from "../shared/errors.js";
+import { ValidationError, NotFoundError } from "../shared/errors.js";
 // SECURITY: `:nodeId` params on these routes become filesystem paths in the
 // engine's storage layer (join(nestRoot, id + ".md"), no containment). A `../`
 // id is rejected up front by the assertSafeNodeId chokepoint mounted on
@@ -12,12 +12,10 @@ import { getDb } from "../db/client.js";
 import * as versions from "../governance/version-service.js";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
-import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
 import {
   resolveCallerEmail,
   canReadNode,
 } from "../governance/access-guard.js";
-import { isStewardshipEnabled } from "../nests/service.js";
 import { isPublicReader } from "../shared/access.js";
 import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
 import {
@@ -32,7 +30,6 @@ import {
   getPendingChange,
   loadLatestApprovedNode,
 } from "../governance/external-edit-service.js";
-import { derivedAnnotationsId } from "../annotations/service.js";
 import {
   listWatchers,
   addWatcher,
@@ -42,6 +39,7 @@ import {
   createNode,
   updateNode,
   moveNode,
+  deleteNode,
   listNodesForCaller,
   resolveAuthorship,
   toNodeResponse,
@@ -543,103 +541,9 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
 nodeRoutes.delete("/:nodeId{.+}", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
-  const { storage } = await engineCache.get(nestId);
-
-  // Stewardship lock: a node under open review can't be deleted out from
-  // under the reviewer (423). Mirrors the edit lock in updateNode.
-  if ((await isStewardshipEnabled(nestId)) && (await reviews.getPendingReview(nestId, nodeId))) {
-    throw new LockedError(
-      "This document is awaiting steward review and is locked. Approve or reject the pending review before deleting.",
-    );
-  }
-
-  try {
-    await storage.deleteDocument(nodeId);
-  } catch {
-    throw new NotFoundError(`Node not found: ${nodeId}`);
-  }
-
-  await removeNodeFromTagIndex(nestId, nodeId);
-
-  // A node's review comments and its derived annotations node are tied to the
-  // node id, not FK'd to it — so deleting the node would otherwise orphan both.
-  // Remove the derived `— Annotations` node's storage doc (best-effort: plain
-  // documents and never-commented artifacts have none) here; its DB rows and
-  // the annotation threads themselves are purged in the transaction below.
-  const derivedId = derivedAnnotationsId(nodeId);
-  try {
-    await storage.deleteDocument(derivedId);
-    await removeNodeFromTagIndex(nestId, derivedId);
-  } catch {
-    /* no derived annotations node — nothing to remove */
-  }
-
-  // Purge governance rows tied to this node id. Without this, recreating
-  // a doc with the same title (→ same slug → same node id) hits a UNIQUE
-  // constraint on node_versions(nest_id, node_id, version) because the
-  // old version rows still exist. We also drop pending/historic review
-  // requests and the approved-version pin so the recreated doc starts
-  // from a clean slate.
-  const db = getDb();
-  await db.transaction(async (tx) => {
-    await tx.run(
-      "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    await tx.run(
-      "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    await tx.run(
-      "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    // Document-scoped steward rows pin to this exact node_pattern. Tag
-    // and nest-scoped stewards stay — they govern the whole nest, not
-    // this single doc. Without this purge, recreating a doc with the
-    // same slug silently inherits the prior doc's reviewer assignments.
-    await tx.run(
-      `DELETE FROM stewards
-       WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
-      [nestId, nodeId],
-    );
-    // Annotation threads for this node — comments cascade via the thread FK.
-    await tx.run(
-      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    );
-    // The derived annotations node's own rows (version history it accrued, plus
-    // any stray threads if someone commented on it before this cleanup existed).
-    await tx.run(
-      "DELETE FROM node_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
-    await tx.run(
-      "DELETE FROM review_requests WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
-    await tx.run(
-      "DELETE FROM approved_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
-    await tx.run(
-      "DELETE FROM annotation_threads WHERE nest_id = ? AND node_id = ?",
-      [nestId, derivedId],
-    );
-    // Deletion tombstone — the one record that survives the purge above, so
-    // GET /changes can tell external mirrors a doc was removed. Upsert:
-    // delete → recreate → delete again just refreshes the timestamp.
-    await tx.run(
-      `INSERT INTO node_deletions (nest_id, node_id, deleted_by, deleted_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(nest_id, node_id) DO UPDATE
-         SET deleted_by = excluded.deleted_by, deleted_at = excluded.deleted_at`,
-      [nestId, nodeId, await getUserEmail(c), new Date().toISOString()],
-    );
-  });
-
-  await trackEvent("node.delete", { nestId, nodeId });
-
+  // The purge (storage docs, derived annotations node, governance rows,
+  // tombstone) lives in the service so MCP's context_delete runs the same one.
+  await deleteNode(nestId, nodeId, await getUserEmail(c));
   return c.json({ deleted: true });
 });
 
