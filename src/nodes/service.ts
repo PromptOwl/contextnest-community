@@ -7,6 +7,7 @@ import {
   serializeDocument,
   parseDocument,
   normalizeStatus,
+  DocumentNotFoundError,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm } from "node:fs/promises";
@@ -537,128 +538,94 @@ export async function createNode(
     );
   }
 
-  // A create must never land on an id that is already taken. writeDocument
-  // overwrites, so a second create at the same folder+title silently replaced
-  // the first document's body and restarted its version history — the caller
-  // got a 201 and no hint anything was lost (CU-wdqcpzxcg8). moveNode already
-  // refuses an occupied destination; create now agrees. Reading the id
-  // directly costs one file read, not a vault scan.
-  let occupied = false;
-  try {
-    await storage.readDocument(id);
-    occupied = true;
-  } catch {
-    // Nothing there — the id is free.
-  }
-  if (occupied) {
-    throw new ConflictError(
-      `A document already exists at ${id}. Update it, or create this one under a different folder or title.`,
-    );
-  }
-
-  // The id is free on disk, but rows can outlive their document: a file
-  // removed outside the app (manual delete, vault re-sync, restore from an
-  // older copy) leaves node_versions behind, because deleteNode's purge never
-  // runs — storage.deleteDocument 404s first and throws. Creating at such an
-  // id then failed deep inside the version insert with a raw `duplicate key
-  // value violates unique constraint
-  // "node_versions_nest_id_node_id_version_key"`, which no caller can act on
-  // and no steward can clear without DB access. No document at the id means
-  // every row keyed to it is dead, so clear them all — not just the version
-  // rows that crash — and let the new document start clean instead of
-  // inheriting a stranger's comments, watchers or readers.
-  const db = getDb();
-  const orphan = await db.get(
-    "SELECT 1 AS present FROM node_versions WHERE nest_id = ? AND node_id = ? LIMIT 1",
-    [nestId, id],
-  );
-  if (orphan) {
-    console.warn(
-      `[nodes] clearing orphaned rows for ${id} — version history exists but no document does`,
-    );
-    await db.transaction(async (tx) => {
-      await purgeNodeKeyedRows(tx, nestId, id);
-    });
-  }
-
-  // Optional dept:<slug> auto-tag — after the validations above so a request
-  // that fails them never pays the DB lookup. Deduped case-insensitively
-  // against the user-supplied tags (normalizeTag keeps the user's casing, so
-  // "#Dept:Engineering" must still match the all-lowercase auto tag).
-  const deptTag = await departmentTagFor(userEmail);
-  if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
-    tags.push(deptTag);
-  }
-
-  const hasStewards = await isStewardshipEnabled(nestId);
-  // Ungoverned always publishes; a governed nest publishes too when an
-  // owner/admin creates it under self-approve (their work bypasses review).
-  const autoPublish = !hasStewards || (await actorAutoPublishes(nestId, userEmail));
-  const initialStatus = autoPublish ? "published" : "draft";
-  // Publish path starts at v=0 so the engine publish bump lands at v=1.
-  const initialVersion = autoPublish ? 0 : 1;
-
-  let node: ContextNode = {
-    id,
-    filePath: "",
-    frontmatter: {
-      title: input.title,
-      type: requestedType as any,
-      tags,
-      status: (input.status as any) || (initialStatus as any),
-      version: initialVersion,
-      created_at: now,
-      updated_at: now,
-      metadata: {
-        owners: ["*"],
-        scope: input.scope || "team",
-        ...(input.schedule ? { schedule: input.schedule } : {}),
-      } as any,
-    },
-    body: input.content,
-    rawContent: "",
-  };
-  await storage.writeDocument(id, serializeDocument(node));
-  await syncNodeTags(nestId, id, tags);
-
-  let savedVersion = 1;
-  if (!autoPublish) {
+  // Check-then-write must be atomic per node id, or two concurrent creates
+  // (two tabs, REST + MCP, an agent retry) both see a free id and the second
+  // overwrites the first. Same lock updateNode and the governance writes take.
+  return withNodeWriteLock(nodeWriteKey(nestId, id), async () => {
+    // writeDocument overwrites, so a create onto an occupied id silently
+    // replaced that document and restarted its history (CU-wdqcpzxcg8).
+    // moveNode already refuses an occupied destination; create now agrees.
+    let occupied = false;
     try {
-      await versionManager.createVersion(node, userEmail);
+      await storage.readDocument(id);
+      occupied = true;
     } catch (err) {
-      console.error("VersionManager.createVersion failed (node create)", err);
+      // Fail closed: only a missing document means the id is free. Any other
+      // failure could be hiding a real one, so rethrow rather than overwrite.
+      if (!(err instanceof DocumentNotFoundError)) throw err;
     }
-    await versions.createVersion({
-      nestId,
-      nodeId: id,
-      version: 1,
-      content: input.content,
-      author: userEmail,
-      status: "draft",
-      tags,
-    });
-  } else {
-    try {
-      const result = await safePublishDocument(storage, id, {
-        editedBy: userEmail,
-        note: hasStewards
-          ? "Auto-published on create (owner/admin self-approve)"
-          : "Auto-published on create (no stewards configured)",
+    if (occupied) {
+      throw new ConflictError(
+        `A document already exists at ${id}. Update it, or create this one under a different folder or title.`,
+      );
+    }
+
+    // Rows can outlive their document when a file goes missing outside the app
+    // — deleteNode's purge never runs because the delete 404s first. Those rows
+    // crashed the create on node_versions' unique constraint; clear them all so
+    // the new document starts clean instead of inheriting a stranger's history.
+    const db = getDb();
+    const orphan = await db.get(
+      "SELECT 1 AS present FROM node_versions WHERE nest_id = ? AND node_id = ? LIMIT 1",
+      [nestId, id],
+    );
+    if (orphan) {
+      console.warn(
+        `[nodes] clearing orphaned rows for ${id} — version history exists but no document does`,
+      );
+      await db.transaction(async (tx) => {
+        await purgeNodeKeyedRows(tx, nestId, id);
       });
-      savedVersion = result.node.frontmatter.version || 1;
-      await versions.createVersion({
-        nestId,
-        nodeId: id,
-        version: savedVersion,
-        content: result.node.body || "",
-        author: userEmail,
-        status: "published",
+    }
+
+    // Optional dept:<slug> auto-tag — after the validations above so a request
+    // that fails them never pays the DB lookup. Deduped case-insensitively
+    // against the user-supplied tags (normalizeTag keeps the user's casing, so
+    // "#Dept:Engineering" must still match the all-lowercase auto tag).
+    const deptTag = await departmentTagFor(userEmail);
+    if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
+      tags.push(deptTag);
+    }
+
+    const hasStewards = await isStewardshipEnabled(nestId);
+    // Ungoverned always publishes; a governed nest publishes too when an
+    // owner/admin creates it under self-approve (their work bypasses review).
+    const autoPublish =
+      !hasStewards || (await actorAutoPublishes(nestId, userEmail));
+    const initialStatus = autoPublish ? "published" : "draft";
+    // Publish path starts at v=0 so the engine publish bump lands at v=1.
+    const initialVersion = autoPublish ? 0 : 1;
+
+    let node: ContextNode = {
+      id,
+      filePath: "",
+      frontmatter: {
+        title: input.title,
+        type: requestedType as any,
         tags,
-      });
-      await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
-      node = result.node;
-    } catch (err) {
-      console.error("publishDocument failed (node create auto-publish)", err);
+        status: (input.status as any) || (initialStatus as any),
+        version: initialVersion,
+        created_at: now,
+        updated_at: now,
+        metadata: {
+          owners: ["*"],
+          scope: input.scope || "team",
+          ...(input.schedule ? { schedule: input.schedule } : {}),
+        } as any,
+      },
+      body: input.content,
+      rawContent: "",
+    };
+    await storage.writeDocument(id, serializeDocument(node));
+    await syncNodeTags(nestId, id, tags);
+
+    let savedVersion = 1;
+    if (!autoPublish) {
+      try {
+        await versionManager.createVersion(node, userEmail);
+      } catch (err) {
+        console.error("VersionManager.createVersion failed (node create)", err);
+      }
       await versions.createVersion({
         nestId,
         nodeId: id,
@@ -668,11 +635,43 @@ export async function createNode(
         status: "draft",
         tags,
       });
+    } else {
+      try {
+        const result = await safePublishDocument(storage, id, {
+          editedBy: userEmail,
+          note: hasStewards
+            ? "Auto-published on create (owner/admin self-approve)"
+            : "Auto-published on create (no stewards configured)",
+        });
+        savedVersion = result.node.frontmatter.version || 1;
+        await versions.createVersion({
+          nestId,
+          nodeId: id,
+          version: savedVersion,
+          content: result.node.body || "",
+          author: userEmail,
+          status: "published",
+          tags,
+        });
+        await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
+        node = result.node;
+      } catch (err) {
+        console.error("publishDocument failed (node create auto-publish)", err);
+        await versions.createVersion({
+          nestId,
+          nodeId: id,
+          version: 1,
+          content: input.content,
+          author: userEmail,
+          status: "draft",
+          tags,
+        });
+      }
     }
-  }
 
-  await trackEvent("node.create", { nestId, nodeId: id });
-  return { node, version: savedVersion };
+    await trackEvent("node.create", { nestId, nodeId: id });
+    return { node, version: savedVersion };
+  });
 }
 
 /**
@@ -1127,22 +1126,13 @@ function derivedIdOf(sourceNodeId: string): string {
 }
 
 /**
- * Every nest-scoped table that keys rows to a node id, as [table, column].
- * ONE list, because delete and move must agree on it: move used to rewrite
- * `comments`, `edges` and `grants` that delete never purged, and neither
- * touched `watchers` or `schedules` at all. Rows left behind don't just leak —
- * a node id is derived from its title, so recreating a document at a purged
- * id inherited the dead one's review comments, watchers and (via grants) its
- * readers, while a stale version row made the create fail outright on the
- * node_versions unique constraint.
+ * Every nest-scoped table keying rows to a node id, as [table, column]. ONE
+ * list so delete (purge) and move (repoint) can't drift — a node id derives
+ * from its title, so leftovers get inherited by the next doc to take that id.
  *
- * Add a node-keyed table here and both operations pick it up. Predicated
- * references (document-scoped stewards and grants) can't be expressed as a
- * plain column match and are handled beside the loop in both helpers.
- *
- * `runs` / `run_steps` are deliberately absent: a run trace records what
- * happened at the time, so move retargets it (below) but delete keeps it as
- * history rather than rewriting the past.
+ * Predicated references (document-scoped stewards, document grants) sit beside
+ * the loop in both helpers. `runs`/`run_steps` are absent deliberately: a trace
+ * records what happened, so move retargets it but delete keeps it.
  */
 export const NODE_KEYED_TABLES = [
   ["node_versions", "node_id"],
@@ -1153,10 +1143,8 @@ export const NODE_KEYED_TABLES = [
   ["node_tag_index", "node_id"],
   ["watchers", "node_id"],
   ["schedules", "agent_node"],
-  // A trigger hook is a live capability token bound to one agent node.
-  // Deleting the agent must revoke it, or the token outlives its target and
-  // a later node recreated at that id answers a webhook issued for a
-  // document its author never saw.
+  // A live capability token bound to one agent node — deleting the agent must
+  // revoke it, or a later node at that id answers the old webhook.
   ["trigger_hooks", "agent_node"],
   ["edges", "from_node"],
   ["edges", "to_node"],
@@ -1299,10 +1287,9 @@ export async function moveNode(
 
   await storage.deleteDocument(nodeId);
 
-  // Repoint every table that keys on the node id, the source doc and its
-  // derived annotations node alike, plus the run traces delete keeps as
-  // history. One transaction: a half-moved node would be worse than a failed
-  // move.
+  // Repoint every node-keyed table for the source doc and its derived
+  // annotations node, plus the run traces delete keeps. One transaction: a
+  // half-moved node would be worse than a failed move.
   const oldDerived = derivedIdOf(nodeId);
   const newDerived = derivedIdOf(newId);
   const db = getDb();
@@ -1382,12 +1369,9 @@ export async function deleteNode(
     /* no derived annotations node — nothing to remove */
   }
 
-  // Purge every row tied to this node id — the source doc and its derived
-  // annotations node — so nothing outlives the document. A node id is derived
-  // from its title, so a later doc can land on this exact id: leftovers would
-  // have made the recreate fail on the node_versions unique constraint, and
-  // handed it the dead doc's reviewers, readers, watchers and review comments.
-  // Annotation comments cascade via their thread FK.
+  // Purge every row tied to this node id and its derived annotations node, so
+  // a later doc landing on the same id inherits no history, readers, watchers
+  // or comments. Annotation comments cascade via their thread FK.
   const db = getDb();
   await db.transaction(async (tx) => {
     await purgeNodeKeyedRows(tx, nestId, nodeId);

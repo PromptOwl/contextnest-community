@@ -113,6 +113,47 @@ describe("REST create — occupied id", () => {
     expect(res.status).toBe(409);
   });
 
+  it("lets exactly one of two concurrent creates win", async () => {
+    // Invariant guard, not a repro: on the synchronous SQLite adapter these
+    // requests don't actually interleave inside the check→write window, so
+    // this passes with or without the per-node lock. Real async I/O
+    // (Postgres) does interleave, which is why createNode takes the lock.
+    const post = (content: string) =>
+      jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title: "Race Brief", content, folder: "briefs" },
+        alice.apiKey,
+      );
+    const results = await Promise.all(
+      ["A", "B", "C", "D", "E", "F"].map((tag) => post(`RACER-${tag}`)),
+    );
+
+    expect(results.filter((r) => r.status === 201)).toHaveLength(1);
+    expect(results.filter((r) => r.status === 409)).toHaveLength(5);
+
+    const winner = results.find((r) => r.status === 201)!;
+    const read = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/briefs/race-brief`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(read.status).toBe(200);
+    expect(read.data.node.content).toContain(winner.data.node.content.trim());
+    // One document, one version — the loser wrote nothing at all.
+    const history = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/briefs/race-brief/versions`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(history.data.versions).toHaveLength(1);
+  });
+
   it("creates over orphaned version history instead of a duplicate-key error", async () => {
     // Version rows can outlive their document (file removed outside the app,
     // vault re-sync), and deleteNode's purge never ran because the delete
