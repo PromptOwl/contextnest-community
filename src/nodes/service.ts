@@ -31,6 +31,7 @@ import {
 } from "../nests/service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { resolveUserRoles } from "../governance/stewardship-service.js";
+import { canApproveWith } from "../governance/roles.js";
 import {
   resolveCallerEmail,
   filterAccessible,
@@ -1119,6 +1120,26 @@ export async function updateNode(
   });
 }
 
+/**
+ * A node under open review is frozen so it can't move or vanish while a
+ * reviewer is looking at it. Approvers (owner/admin/reviewer) are exempt —
+ * they can reject the review and then act, so the lock only cost them a round
+ * trip and left admins unable to clean up superseded docs at all.
+ */
+async function assertNotReviewLocked(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+  action: "moving" | "deleting",
+): Promise<void> {
+  if (!(await isStewardshipEnabled(nestId))) return;
+  if (!(await getPendingReview(nestId, nodeId))) return;
+  if (canApproveWith(await resolveUserRoles(nestId, userEmail, { nodeId }))) return;
+  throw new LockedError(
+    `This document is awaiting steward review and is locked. Approve or reject the pending review before ${action}, or ask a reviewer to.`,
+  );
+}
+
 /** Mirror of annotations/service.ts derivedAnnotationsId — duplicated here
  *  because importing it would close the annotations→nodes import cycle. */
 function derivedIdOf(sourceNodeId: string): string {
@@ -1236,11 +1257,7 @@ export async function moveNode(
 
   // Same freeze as edit/delete: a node under open review is what the
   // reviewer is looking at — its identity can't change mid-review.
-  if ((await isStewardshipEnabled(nestId)) && (await getPendingReview(nestId, nodeId))) {
-    throw new LockedError(
-      "This document is awaiting steward review and is locked. Approve or reject the pending review before moving.",
-    );
-  }
+  await assertNotReviewLocked(nestId, nodeId, userEmail, "moving");
 
   const leaf = nodeId.split("/").pop()!;
   const segments = folderToSegments(folder);
@@ -1342,11 +1359,7 @@ export async function deleteNode(
 
   // Stewardship lock: a node under open review can't be deleted out from
   // under the reviewer (423). Mirrors the edit lock in updateNode.
-  if ((await isStewardshipEnabled(nestId)) && (await getPendingReview(nestId, nodeId))) {
-    throw new LockedError(
-      "This document is awaiting steward review and is locked. Approve or reject the pending review before deleting.",
-    );
-  }
+  await assertNotReviewLocked(nestId, nodeId, userEmail, "deleting");
 
   try {
     await storage.deleteDocument(nodeId);

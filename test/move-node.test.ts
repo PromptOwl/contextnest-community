@@ -156,7 +156,7 @@ describe("node move", () => {
     expect(res.data.node.id).toBe("nodes/archive/prefixed-destination");
   });
 
-  it("locks (423) a move while a review is pending", async () => {
+  it("lets an approver move a node while a review is pending", async () => {
     // Enable stewardship so submit-review works. The reviewer must not be
     // the nest owner (self-stewarding is rejected), so bring in bob.
     const bob = await registerUser(app, "bob@acme.com", "Bob");
@@ -174,7 +174,10 @@ describe("node move", () => {
     );
     expect([200, 201]).toContain(submit.status);
 
+    // alice owns the nest, so she can reject the review and then move — the
+    // lock only stops people who can't clear it (see admin-review-lock.test.ts).
     const res = await move("nodes/under-review", "elsewhere");
-    expect(res.status).toBe(423);
+    expect(res.status).toBe(200);
+    expect(res.data.node.id).toBe("nodes/elsewhere/under-review");
   });
 });
