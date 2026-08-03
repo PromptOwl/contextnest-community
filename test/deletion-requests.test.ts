@@ -1,0 +1,485 @@
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import {
+  setupTestEnv,
+  createTestApp,
+  registerUser,
+  jsonRequest,
+} from "./helpers.js";
+
+// Request-deletion workflow (CU-wdqcpzxqcm): a read-only user flags a stale
+// node with a reason, a writer deletes it or declines with a note.
+describe("deletion requests", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let reader: { apiKey: string };
+  let nestId: string;
+  let staleNode: string;
+  let keeperNode: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key", { superAdmins: ["owner@acme.com"] });
+    owner = await registerUser(app, "owner@acme.com", "Owner");
+    reader = await registerUser(app, "reader@acme.com", "Reader");
+
+    const { data: nestData } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Deletion Vault" },
+      owner.apiKey,
+    );
+    nestId = nestData.nest.id;
+
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "reader@acme.com", permission: "read" },
+      owner.apiKey,
+    );
+
+    const { data: a } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Stale Doc", content: "# Stale" },
+      owner.apiKey,
+    );
+    staleNode = a.node.id;
+    const { data: b } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Keeper Doc", content: "# Keeper" },
+      owner.apiKey,
+    );
+    keeperNode = b.node.id;
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("a read-only user can flag a node, and can't delete it directly", async () => {
+    const direct = await jsonRequest(
+      app,
+      "DELETE",
+      `/nests/${nestId}/nodes/${staleNode}`,
+      undefined,
+      reader.apiKey,
+    );
+    expect(direct.status).toBe(403);
+
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${staleNode}/request-deletion`,
+      { reason: "superseded by the new runbook" },
+      reader.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.request.status).toBe("pending");
+    expect(data.request.requestedBy).toBe("reader@acme.com");
+
+    // The node read carries the flag, so the UI can badge the doc and drop
+    // its "Request deletion" affordance instead of 409ing on a second click.
+    const { data: node } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${staleNode}`,
+      undefined,
+      reader.apiKey,
+    );
+    expect(node.node.deletionRequest.status).toBe("pending");
+    expect(node.node.deletionRequest.reason).toBe(
+      "superseded by the new runbook",
+    );
+  });
+
+  it("rejects an empty reason and a second pending flag on the same node", async () => {
+    const empty = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${keeperNode}/request-deletion`,
+      { reason: "   " },
+      reader.apiKey,
+    );
+    expect(empty.status).toBe(400);
+
+    const dup = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${staleNode}/request-deletion`,
+      { reason: "again" },
+      reader.apiKey,
+    );
+    expect(dup.status).toBe(409);
+  });
+
+  it("404s a flag on a node that doesn't exist", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/ghost/request-deletion`,
+      { reason: "gone" },
+      reader.apiKey,
+    );
+    expect(status).toBe(404);
+  });
+
+  it("puts the flag in the admin's /me/work inbox and notifications", async () => {
+    // Owner can action it → waiting-on-me bucket, with the reason to judge by.
+    const { data: ownerWork } = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      owner.apiKey,
+    );
+    const item = ownerWork.items.find((i: any) => i.type === "deletion");
+    expect(item).toBeTruthy();
+    expect(item.title).toBe("Stale Doc");
+    expect(item.reason).toBe("superseded by the new runbook");
+    expect(item.request_id).toBeTruthy();
+    // And an inbox notification, so it's visible without opening the nest.
+    expect(
+      ownerWork.notifications.some((n: any) => n.kind === "deletion_requested"),
+    ).toBe(true);
+
+    // The requester sees their own flag as waiting-on-others, never as work
+    // for them — they can't delete, that's the whole point.
+    const { data: readerWork } = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      reader.apiKey,
+    );
+    expect(readerWork.items.some((i: any) => i.type === "deletion")).toBe(false);
+    expect(readerWork.waiting.some((i: any) => i.type === "deletion")).toBe(true);
+  });
+
+  it("declining keeps the node and records the note", async () => {
+    const { data: queue } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/deletion-requests`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(queue.requests).toHaveLength(1);
+    const req = queue.requests[0];
+    expect(req.title).toBe("Stale Doc");
+
+    const noNote = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${req.id}/decline`,
+      {},
+      owner.apiKey,
+    );
+    expect(noNote.status).toBe(400);
+
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${req.id}/decline`,
+      { note: "still referenced by onboarding" },
+      owner.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.request.status).toBe("declined");
+    expect(data.request.resolvedBy).toBe("owner@acme.com");
+
+    // Node survives; the queue is empty again; declining twice 404s.
+    const node = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${staleNode}`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(node.status).toBe(200);
+    // The verdict rides along on the node read — how the person who asked
+    // learns it was declined, and why. The doc can be flagged again.
+    expect(node.data.node.deletionRequest.status).toBe("declined");
+    expect(node.data.node.deletionRequest.resolutionNote).toBe(
+      "still referenced by onboarding",
+    );
+
+    const { data: after } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/deletion-requests`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(after.requests).toHaveLength(0);
+
+    // ?status=all keeps the declined row visible so the list view can badge
+    // the node with the verdict, not just drop the flag silently.
+    const { data: all } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/deletion-requests?status=all`,
+      undefined,
+      reader.apiKey,
+    );
+    expect(all.requests).toHaveLength(1);
+    expect(all.requests[0].status).toBe("declined");
+
+    const again = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${req.id}/decline`,
+      { note: "again" },
+      owner.apiKey,
+    );
+    expect(again.status).toBe(404);
+
+    // The requester is told the verdict — otherwise the flag just vanishes.
+    const { data: readerWork } = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      reader.apiKey,
+    );
+    const verdict = readerWork.notifications.find(
+      (n: any) => n.kind === "deletion_declined",
+    );
+    expect(verdict).toBeTruthy();
+    expect(verdict.message).toContain("still referenced by onboarding");
+  });
+
+  it("flags a folder, and honouring it deletes every document under it", async () => {
+    // Two docs in the folder, one outside it that must survive.
+    for (const title of ["Folder Doc A", "Folder Doc B"]) {
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title, content: "# x", folder: "legacy/api" },
+        owner.apiKey,
+      );
+    }
+    const { data: outside } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Untouched Doc", content: "# keep", folder: "legacy" },
+      owner.apiKey,
+    );
+
+    const missing = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "folder", target: "no/such/folder", reason: "stale" },
+      reader.apiKey,
+    );
+    expect(missing.status).toBe(404);
+
+    // The admin's direct folder delete is owner/admin-only — a reader gets
+    // the request path instead, never the bulk delete.
+    const readerDirect = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/delete-folder`,
+      { folder: "legacy/api" },
+      reader.apiKey,
+    );
+    expect(readerDirect.status).toBe(403);
+
+    // Leading slash / "nodes/" prefix normalize to the same target.
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "folder", target: "/nodes/legacy/api/", reason: "dead api docs" },
+      reader.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.request.targetType).toBe("folder");
+    expect(data.request.nodeId).toBe("legacy/api");
+
+    const dup = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "folder", target: "legacy/api", reason: "again" },
+      reader.apiKey,
+    );
+    expect(dup.status).toBe(409);
+
+    const { data: queue } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/deletion-requests`,
+      undefined,
+      owner.apiKey,
+    );
+    const folderReq = queue.requests.find((r: any) => r.targetType === "folder");
+    // Human folder name in the queue, not the slug path on disk.
+    expect(folderReq.title).toBe("Legacy / Api");
+    expect(folderReq.nodeId).toBe("legacy/api");
+
+    const honoured = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${folderReq.id}/delete`,
+      {},
+      owner.apiKey,
+    );
+    expect(honoured.status).toBe(200);
+    expect(honoured.data.deleted).toBe(true);
+
+    // Both docs under the folder are gone; the sibling outside it survives.
+    const { data: nodes } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      owner.apiKey,
+    );
+    const ids = nodes.nodes.map((n: any) => n.id);
+    expect(ids.some((id: string) => id.startsWith("nodes/legacy/api/"))).toBe(false);
+    expect(ids).toContain(outside.node.id);
+
+    // Honoured → leaves the queue, like a document request does.
+    const { data: after } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/deletion-requests?status=all`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(after.requests.some((r: any) => r.id === folderReq.id)).toBe(false);
+  });
+
+  it("a reader can't resolve a request; a writer's delete removes the node", async () => {
+    const { data: flagged } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${keeperNode}/request-deletion`,
+      { reason: "duplicate" },
+      reader.apiKey,
+    );
+    const id = flagged.request.id;
+
+    const denied = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${id}/delete`,
+      {},
+      reader.apiKey,
+    );
+    expect(denied.status).toBe(403);
+
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${id}/delete`,
+      {},
+      owner.apiKey,
+    );
+    expect(status).toBe(200);
+
+    const gone = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${keeperNode}`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(gone.status).toBe(404);
+
+    // The honoured request is purged with the node's other rows, so a doc
+    // later recreated at that id doesn't inherit a stale flag.
+    const { data: queue2 } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/deletion-requests`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(queue2.requests).toHaveLength(0);
+
+    // The document is gone, so the notification is the ONLY way the requester
+    // learns their flag was honoured — it must carry the title, not the id.
+    const { data: readerWork } = await jsonRequest(
+      app,
+      "GET",
+      "/me/work",
+      undefined,
+      reader.apiKey,
+    );
+    const verdict = readerWork.notifications.find(
+      (n: any) => n.kind === "deletion_deleted",
+    );
+    expect(verdict).toBeTruthy();
+    expect(verdict.message).toContain("Keeper Doc");
+  });
+
+  it("a nest flag is owner/admin-only to honour, and takes the nest with it", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "nest", reason: "project wound down" },
+      reader.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.request.targetType).toBe("nest");
+    // The label is the nest's name, not its uuid.
+    expect(data.request.title ?? "").not.toBe(nestId);
+
+    // A write collaborator clears the middleware's 'write' bar but must NOT be
+    // able to delete a whole nest through the queue — DELETE /nests/:id is
+    // owner-only, and this path can't be a way around it.
+    const writer = await registerUser(app, "writer@acme.com", "Writer");
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "writer@acme.com", permission: "write" },
+      owner.apiKey,
+    );
+    const escalation = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${data.request.id}/delete`,
+      {},
+      writer.apiKey,
+    );
+    expect(escalation.status).toBe(403);
+
+    // The nest still exists after the refused attempt.
+    const alive = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(alive.status).toBe(200);
+
+    const honoured = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${data.request.id}/delete`,
+      {},
+      owner.apiKey,
+    );
+    expect(honoured.status).toBe(200);
+
+    const gone = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(gone.status).toBe(404);
+  });
+});

@@ -45,10 +45,56 @@ export async function describeNode(
   nestId: string,
   nodeId: string,
 ): Promise<string> {
-  const titles = await buildTitleMap(nestId);
-  const title = titles.get(nodeId) || nodeId;
+  const title = await titleForNode(nestId, nodeId);
   const folder = folderForNode(nodeId);
   return folder ? `${title} (in ${folder})` : title;
+}
+
+/** The document's title alone — for anywhere the folder suffix would read
+ *  oddly (email subjects, verdict messages). Never returns a storage path. */
+export async function titleForNode(
+  nestId: string,
+  nodeId: string,
+): Promise<string> {
+  const titles = await buildTitleMap(nestId);
+  return titles.get(nodeId) || titleFallback(titles, nodeId);
+}
+
+/**
+ * Best-effort title for an id the map doesn't hold verbatim. Callers have been
+ * seen passing ids carrying a leading nest prefix ("<nestId>/nodes/foo/bar"),
+ * which misses the map and used to leak the whole storage path into a
+ * notification. Retry from the "nodes/" segment, then fall back to the slug —
+ * never the raw path.
+ */
+function titleFallback(titles: Map<string, string>, nodeId: string): string {
+  const at = nodeId.indexOf("nodes/");
+  if (at > 0) {
+    const normalized = nodeId.slice(at);
+    const hit = titles.get(normalized);
+    if (hit) return hit;
+  }
+  return nodeId.split("/").pop() || nodeId;
+}
+
+/**
+ * "gtm-deals/api" → "Gtm Deals / Api" — a folder path in human form.
+ * Folder names are slugs on disk, so a queue row or email that prints the raw
+ * path reads like storage. Mirrors the UI's prettyFolderPath (FolderTree.tsx);
+ * keep the two in step.
+ */
+export function prettyFolderPath(path: string): string {
+  return path
+    .replace(/^nodes\//, "")
+    .split("/")
+    .filter(Boolean)
+    .map((seg) =>
+      seg
+        .split(/[-_]/)
+        .map((s) => (s ? s[0].toUpperCase() + s.slice(1) : s))
+        .join(" "),
+    )
+    .join(" / ");
 }
 
 /** The nest's human name (best-effort; falls back to the id). */

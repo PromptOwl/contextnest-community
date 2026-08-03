@@ -9,7 +9,10 @@ import { grantRoutes } from "./nests/grant-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
 import { listVisibleNests, nestAllowsSelfApprove } from "./nests/service.js";
-import { getReviewQueue } from "./governance/review-service.js";
+import {
+  getReviewQueue,
+  listDeletionRequests,
+} from "./governance/review-service.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import {
@@ -1100,6 +1103,27 @@ export function createApp(): Hono<AuthEnv> {
       requested_at: r.requestedAt,
       priority: r.priority,
     });
+    // Deletion flags ride the same inbox, as a second item type: `reason` and
+    // `request_id` are the extra fields resolving one needs.
+    const deletions = await listDeletionRequests({
+      nestIds: [...nestName.keys()],
+      status: "pending",
+    });
+    const toDeletionItem = (r: (typeof deletions)[number]) => ({
+      type: "deletion" as const,
+      nest_id: r.nestId,
+      nest_name: nestName.get(r.nestId)!,
+      node_id: r.nodeId,
+      title: r.title || r.nodeId,
+      requested_by: r.requestedBy,
+      requested_at: r.createdAt,
+      priority: "normal" as const,
+      reason: r.reason,
+      request_id: r.id,
+    });
+    type WorkItem =
+      | ReturnType<typeof toItem>
+      | ReturnType<typeof toDeletionItem>;
     const byNewest = (a: { requested_at: string }, b: { requested_at: string }) =>
       a.requested_at < b.requested_at ? 1 : -1;
     // items = waiting on ME (someone else asked); waiting = I asked, waiting on them.
@@ -1124,11 +1148,40 @@ export function createApp(): Hono<AuthEnv> {
         ),
       ),
     );
-    const items = others
+    const items: WorkItem[] = others
       .filter((r) => nestApprove.get(r.nestId))
-      .map(toItem)
-      .sort(byNewest);
-    const waiting = requests.filter((r) => r.requestedBy === me).map(toItem).sort(byNewest);
+      .map(toItem);
+    const waiting: WorkItem[] = requests
+      .filter((r) => r.requestedBy === me)
+      .map(toItem);
+
+    // Waiting-on-me for the nest admins/owners who can action a flag,
+    // waiting-on-others for whoever asked. Deliberately NOT folded into the
+    // review queue's pagination — the flag set is small, and merging two
+    // offsets into one cursor buys nothing.
+    const othersDeletions = deletions.filter((r) => r.requestedBy !== me);
+    // Deleting is an owner/admin call (the same tier the UI shows Delete to),
+    // NOT the approve capability reviews use — resolved once per nest.
+    const nestManage = new Map<string, boolean>(
+      await Promise.all(
+        [...new Set(othersDeletions.map((r) => r.nestId))].map(
+          async (nestId): Promise<[string, boolean]> => {
+            const roles = await resolveUserRoles(nestId, me);
+            return [nestId, roles.includes("owner") || roles.includes("admin")];
+          },
+        ),
+      ),
+    );
+    items.push(
+      ...othersDeletions
+        .filter((r) => nestManage.get(r.nestId))
+        .map(toDeletionItem),
+    );
+    items.sort(byNewest);
+    waiting.push(
+      ...deletions.filter((r) => r.requestedBy === me).map(toDeletionItem),
+    );
+    waiting.sort(byNewest);
     // Watcher notifications (HITL tags) ride along so the inbox is one call.
     const notifications = await listNotifications(me, { unreadOnly: true, limit: 50 });
     return c.json({
@@ -1303,6 +1356,11 @@ export function createApp(): Hono<AuthEnv> {
       // which a node slug like nodes/product-feed would false-positive
       // (parts = [nestId, "feed"] only for the real feed route).
       const isFeedPath = parts.length === 2 && parts[1] === "feed";
+      // The deletion-request queue is a governance view like /review-queue.
+      // Exact segment match (not includes) so a node slugged
+      // "deletion-requests" can't drag plain node reads behind the gate.
+      const isDeletionQueuePath =
+        parts.length === 2 && parts[1] === "deletion-requests";
       const isGovernance =
         path.includes("/stewards") ||
         path.includes("/review-queue") ||
@@ -1317,7 +1375,8 @@ export function createApp(): Hono<AuthEnv> {
         path.includes("/can-edit") ||
         isCommentPath ||
         isActivityPath ||
-        isFeedPath;
+        isFeedPath ||
+        isDeletionQueuePath;
       const needsLicense = c.req.method !== "GET" || isGovernance;
       if (needsLicense) {
         const lic = getCurrentLicense();
@@ -1436,6 +1495,12 @@ export function createApp(): Hono<AuthEnv> {
     const isCommentAction =
       /\/comments$/.test(path) ||
       /\/comments\/[^/]+\/resolve$/.test(path);
+    // Flagging a node for deletion is read-tier for the same reason commenting
+    // is: the people who notice stale content are usually below write. The
+    // handler re-checks node read-access. Resolving the flag
+    // (/deletion-requests/:id/{delete,decline}) is NOT here — it stays at
+    // 'write', the same tier DELETE /nodes/:id requires.
+    const isDeletionRequestAction = /\/request-deletion$/.test(path);
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin plus the nest owner/admin collaborators, so an
     // owner can delegate vault people-management by granting admin. All
@@ -1490,6 +1555,7 @@ export function createApp(): Hono<AuthEnv> {
       c.req.method !== "GET" &&
       !isStewardActionPath &&
       !isCommentAction &&
+      !isDeletionRequestAction &&
       !isAnnotationAction &&
       !isReadQuery &&
       !isMcpTransport

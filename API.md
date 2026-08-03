@@ -692,6 +692,55 @@ So Postman will see more rows than the UI; that's expected.
 ### GET `/nests/:nestId/nodes/:nodeId/reviews`
 Full review history for a node.
 
+### POST `/nests/:nestId/nodes/:nodeId/request-deletion`
+Body: `{ "reason": "superseded by the new runbook" }` (required).
+
+Read permission — anyone who can see the node may flag it as stale, which is the point: deleting is write-tier, so the people who notice dead content usually can't act on it. A flagged node is **not** locked or under review; it stays editable and never appears in the review queue. One pending flag per node (`409` on a second), `404` for a node the caller can't read or that doesn't exist. Returns `201 { request }`.
+
+`GET /nests/:nestId/nodes/:nodeId` carries `deletionRequest` — the node's latest flag (`{ status, requestedBy, reason, resolvedBy?, resolutionNote?, resolvedAt? }`) or `null`. `pending` lets a client badge the document and drop its request affordance rather than discovering the `409`; `declined` carries the resolver's note, which is how the person who asked learns the verdict.
+
+### POST `/nests/:nestId/request-deletion`
+Body: `{ "targetType": "folder" | "nest", "target": "api/limits", "reason": "..." }` (`target` ignored for `nest`).
+
+Read permission, same as the per-document route. A folder target is normalized (`/nodes/api/limits/` → `api/limits`) so two people flagging the same folder collide on one pending request rather than raising two; `404` if no documents live under it. One pending flag per (nest, target type, target).
+
+### POST `/nests/:nestId/delete-folder`
+Body: `{ "folder": "api/limits" }`. **Owner/admin only** — a folder delete is many document deletes at once, so it sits at the nest-management tier, not `write`. Deletes every document under the prefix (sub-folders included) through the normal per-node path, so each gets its review-lock check, row purge and tombstone. Returns `{ deleted, nodeIds }`. Non-admins use the request flow above.
+
+Folders are not stored objects — they exist only as segments of the node ids beneath them, so deleting a folder *is* deleting its documents.
+
+### GET `/nests/:nestId/deletion-requests`
+Query: `?status=pending|declined|all` (defaults to `pending`). `all` returns both states newest-first — one call for a client that shows the queue and badges declined nodes.
+
+```json
+{
+  "requests": [{
+    "id": "...",
+    "nodeId": "nodes/foo",
+    "title": "Foo",
+    "requestedBy": "reader@x.com",
+    "reason": "superseded",
+    "status": "pending",
+    "createdAt": "..."
+  }],
+  "total": 1
+}
+```
+
+### POST `/nests/:nestId/deletion-requests/:id/delete`
+Honours the request — write permission, the same tier `DELETE /nodes/:nodeId` requires (including its `423` review lock). Branches on the request's `targetType`: a document goes through `deleteNode`, a folder through the bulk delete above, a nest through `deleteNest`.
+
+A **nest** target additionally requires owner/admin: deleting a whole nest is the owner's call (`DELETE /nests/:id` enforces that), and honouring a request must not be a way around it — a write-tier collaborator gets `403`.
+
+An honoured request always leaves the queue: a document's row is purged with its other node-keyed rows, a nest's cascades with the nest, and a folder's — which is neither — is dropped explicitly.
+
+Raising a request notifies the nest owner + owner/admin collaborators: a `/me/work` inbox row, the `deletion_requested` connector event (Slack/Teams/webhook), and a direct email. Resolving it — either way — notifies the requester the same way (`deletion_deleted` / `deletion_declined`). All delivery is best-effort; a notification failure never fails the action.
+
+`GET /me/work` returns these alongside reviews as items with `type: "deletion"`, carrying `reason` and `request_id`. They land in `items` only for nest owners/admins (the tier that can delete) and in `waiting` for whoever raised them.
+
+### POST `/nests/:nestId/deletion-requests/:id/decline`
+Body: `{ "note": "still referenced by onboarding" }` (required). Write permission. Keeps the node and the row, recording who declined and why. `404` once the request is no longer pending.
+
 ### GET `/nests/:nestId/feed`
 Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
 

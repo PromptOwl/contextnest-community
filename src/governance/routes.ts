@@ -20,7 +20,9 @@ import * as externalEdits from "./external-edit-service.js";
 import { loadStewardsConfig } from "./stewards-parser.js";
 import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
-import { bodyOnly } from "../nodes/service.js";
+import { bodyOnly, deleteNode, deleteFolder } from "../nodes/service.js";
+import { deleteNest } from "../nests/service.js";
+import { canReadNode } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -195,6 +197,170 @@ governanceRoutes.get("/review-queue", async (c) => {
   }
 
   return c.json({ ...result, requests });
+});
+
+// ─── Deletion requests ──────────────────────────────────────────────────
+// Anyone who can read a node may flag it for deletion (POST on the node route
+// below); resolving is write-tier — the middleware already requires 'write' for
+// these paths, the same gate DELETE /nodes/:id passes, so no extra check here.
+
+// POST /nests/:nestId/delete-folder — delete a folder and every document
+// under it. Owner/admin only: a folder delete is many document deletes at
+// once, so it sits at the same tier as deleting the nest, not at 'write'.
+governanceRoutes.post("/delete-folder", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const permission = c.get("nestPermission");
+  if (permission !== "owner" && permission !== "admin") {
+    return c.json(
+      {
+        error:
+          "Only the nest owner or an admin can delete a folder. Request its deletion instead.",
+      },
+      403,
+    );
+  }
+  const body = await c.req.json<{ folder?: string }>().catch(() => ({}) as any);
+  if (!body.folder?.trim()) {
+    throw new ValidationError("folder is required");
+  }
+  const deleted = await deleteFolder(
+    nestId,
+    body.folder.trim(),
+    await getUserEmail(c),
+  );
+  return c.json({ deleted: deleted.length, nodeIds: deleted });
+});
+
+// POST /nests/:nestId/request-deletion — flag a whole FOLDER or the NEST.
+// Read-tier for the same reason the per-node route is (see there); the path
+// suffix matches the middleware's request-deletion exception, so no new gate.
+// Per-document flags keep their own route under /nodes/:nodeId.
+governanceRoutes.post("/request-deletion", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const body = await c.req
+    .json<{ targetType?: string; target?: string; reason?: string }>()
+    .catch(() => ({}) as any);
+  const reason = body.reason?.trim();
+  if (!reason) {
+    throw new ValidationError("A reason for the deletion request is required");
+  }
+  if (body.targetType !== "folder" && body.targetType !== "nest") {
+    throw new ValidationError(
+      'targetType must be "folder" or "nest" — flag a single document via POST /nests/:nestId/nodes/:nodeId/request-deletion',
+    );
+  }
+
+  // Normalize the target so two people flagging "api/limits" and "/api/limits/"
+  // collide on the pending index instead of raising two requests.
+  const target =
+    body.targetType === "nest"
+      ? nestId
+      : (body.target || "").trim().replace(/^\/+|\/+$/g, "").replace(/^nodes\//, "");
+  if (body.targetType === "folder" && !target) {
+    throw new ValidationError("target (the folder path) is required");
+  }
+
+  // A folder only exists while documents sit under it — refuse a flag on one
+  // that isn't there, or the queue fills with requests that delete nothing.
+  if (body.targetType === "folder") {
+    const { storage } = await engineCache.get(nestId);
+    const docs = await storage.discoverDocuments();
+    if (!docs.some((d) => d.id.startsWith(`nodes/${target}/`))) {
+      return c.json({ error: `Folder not found: ${target}` }, 404);
+    }
+  }
+
+  const request = await reviews.requestDeletion({
+    nestId,
+    nodeId: target,
+    targetType: body.targetType,
+    requestedBy: await getUserEmail(c),
+    reason,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
+  return c.json({ request }, 201);
+});
+
+// GET /nests/:nestId/deletion-requests?status=pending|declined
+governanceRoutes.get("/deletion-requests", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const raw = c.req.query("status");
+  const status =
+    raw === "declined" || raw === "all" ? raw : "pending";
+  const requests = await reviews.listDeletionRequests({ nestId, status });
+  return c.json({ requests, total: requests.length });
+});
+
+// POST /nests/:nestId/deletion-requests/:id/delete — honour the request.
+governanceRoutes.post("/deletion-requests/:id/delete", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const request = await reviews.getDeletionRequest(c.req.param("id")!);
+  if (!request || request.nestId !== nestId || request.status !== "pending") {
+    return c.json({ error: "Deletion request not found" }, 404);
+  }
+  // Resolve the label BEFORE the delete — afterwards there's no document (or
+  // nest) left to read one from, and the verdict notification needs it.
+  const actor = await getUserEmail(c);
+  const docTitle = await reviews.deletionTargetTitle(request);
+
+  if (request.targetType === "nest") {
+    // The middleware only requires 'write' on this path (it's the delete tier
+    // for documents). Deleting a whole NEST is the owner's call — DELETE
+    // /nests/:id enforces that, and honouring a request must not be a way
+    // around it. Nest rows cascade with the nest, so the row goes with it.
+    const permission = c.get("nestPermission");
+    if (permission !== "owner" && permission !== "admin") {
+      return c.json(
+        {
+          error:
+            "Only the nest owner or an admin can delete a nest. Decline the request, or ask the owner to action it.",
+        },
+        403,
+      );
+    }
+    await deleteNest(nestId);
+  } else if (request.targetType === "folder") {
+    await deleteFolder(nestId, request.nodeId, actor);
+    // A folder isn't node-keyed, so no purge took this row — drop it here so
+    // an honoured request leaves the queue like the other two kinds.
+    await reviews.dropDeletionRequest(request.id);
+  } else {
+    // deleteNode owns the review lock + tombstone, and its purge takes this row
+    // with the node's other rows — so an honoured request leaves the queue.
+    await deleteNode(nestId, request.nodeId, actor);
+  }
+  // Only the requester can learn the outcome from a notification — the
+  // document (and its request row) are gone from every other surface.
+  await reviews.notifyDeletionResolved({
+    nestId,
+    nodeId: request.nodeId,
+    docTitle,
+    outcome: "deleted",
+    requestedBy: request.requestedBy,
+    resolvedBy: actor,
+    requestId: request.id,
+    targetType: request.targetType,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
+  return c.json({ deleted: true, nodeId: request.nodeId });
+});
+
+// POST /nests/:nestId/deletion-requests/:id/decline
+governanceRoutes.post("/deletion-requests/:id/decline", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const body = await c.req.json<{ note?: string }>().catch(() => ({}) as any);
+  if (!body.note?.trim()) {
+    throw new ValidationError("A note is required when declining");
+  }
+  const request = await reviews.declineDeletion({
+    nestId,
+    id: c.req.param("id")!,
+    declinedBy: await getUserEmail(c),
+    note: body.note.trim(),
+    baseUrl: requestBaseUrl(c.req.url),
+  });
+  if (!request) return c.json({ error: "Deletion request not found" }, 404);
+  return c.json({ request });
 });
 
 // GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=
@@ -468,6 +634,41 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
     },
     201,
   );
+});
+
+// POST /nests/:nestId/nodes/:nodeId/request-deletion
+// Read-tier: anyone who can see the node may flag it (that's the point — the
+// people who spot stale content are usually below delete permission).
+governanceNodeRoutes.post("/:nodeId{.+}/request-deletion", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const body = await c.req.json<{ reason?: string }>().catch(() => ({}) as any);
+  const reason = body.reason?.trim();
+  if (!reason) {
+    throw new ValidationError("A reason for the deletion request is required");
+  }
+
+  const userEmail = await getUserEmail(c);
+  if (!(await canReadNode(nestId, nodeId, c.get("userId"), userEmail))) {
+    // Same message for "gone" and "no access" — no existence oracle.
+    return c.json({ error: `Node not found: ${nodeId}` }, 404);
+  }
+  // Existence check so a typo'd id can't park a row nobody can ever resolve.
+  const { storage } = await engineCache.get(nestId);
+  try {
+    await storage.readDocument(nodeId);
+  } catch {
+    return c.json({ error: `Node not found: ${nodeId}` }, 404);
+  }
+
+  const request = await reviews.requestDeletion({
+    nestId,
+    nodeId,
+    requestedBy: userEmail,
+    reason,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
+  return c.json({ request }, 201);
 });
 
 // External-edit approve/reject MUST be registered before the generic
