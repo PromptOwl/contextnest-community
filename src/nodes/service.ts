@@ -1265,80 +1265,86 @@ export async function moveNode(
     segments.length > 0 ? `nodes/${segments.join("/")}/${leaf}` : `nodes/${leaf}`;
   if (newId === nodeId) return { node, previousId: nodeId };
 
-  try {
-    await storage.readDocument(newId);
-    throw new ConflictError(
-      `A document already exists at that location: ${newId}`,
-    );
-  } catch (err) {
-    if (err instanceof ConflictError) throw err;
-    /* target free — proceed */
-  }
-
-  const moved: ContextNode = {
-    ...node,
-    id: newId,
-    frontmatter: {
-      ...node.frontmatter,
-      updated_at: new Date().toISOString(),
-    },
-  };
-  await storage.writeDocument(newId, serializeDocument(moved));
-
-  // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
-  // doc) so reconstructVersion keeps working for pre-move versions. Layout is
-  // engine-owned, so this is best-effort: if the chain isn't where the
-  // structured layout puts it (e.g. flat imported nests), history still
-  // serves from the governance DB rows migrated below.
-  try {
-    const nestPath = resolveNestPath(nestId);
-    const oldChain = join(nestPath, dirname(nodeId), ".versions", leaf);
-    const newChain = join(nestPath, dirname(newId), ".versions", leaf);
-    if (oldChain !== newChain) {
-      await mkdir(dirname(newChain), { recursive: true });
-      await rename(oldChain, newChain);
+  // Destination check through write under the destination's lock — same
+  // check-then-write race create takes it for, and the same key, so a
+  // concurrent create at that id can't slip in between either.
+  return withNodeWriteLock(nodeWriteKey(nestId, newId), async () => {
+    try {
+      await storage.readDocument(newId);
+      throw new ConflictError(
+        `A document already exists at that location: ${newId}`,
+      );
+    } catch (err) {
+      if (err instanceof ConflictError) throw err;
+      // Fail closed: only a missing document leaves the destination free.
+      if (!(err instanceof DocumentNotFoundError)) throw err;
     }
-  } catch {
-    /* no on-disk chain to carry */
-  }
 
-  await storage.deleteDocument(nodeId);
+    const moved: ContextNode = {
+      ...node,
+      id: newId,
+      frontmatter: {
+        ...node.frontmatter,
+        updated_at: new Date().toISOString(),
+      },
+    };
+    await storage.writeDocument(newId, serializeDocument(moved));
 
-  // Repoint every node-keyed table for the source doc and its derived
-  // annotations node, plus the run traces delete keeps. One transaction: a
-  // half-moved node would be worse than a failed move.
-  const oldDerived = derivedIdOf(nodeId);
-  const newDerived = derivedIdOf(newId);
-  const db = getDb();
-  await db.transaction(async (tx) => {
-    await rewriteNodeKeyedRows(tx, nestId, nodeId, newId);
-    await rewriteNodeKeyedRows(tx, nestId, oldDerived, newDerived);
-    await tx.run(
-      "UPDATE runs SET agent_node = ? WHERE nest_id = ? AND agent_node = ?",
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      `UPDATE run_steps SET node_id = ?
-       WHERE node_id = ? AND run_id IN (SELECT id FROM runs WHERE nest_id = ?)`,
-      [newId, nodeId, nestId],
-    );
+    // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
+    // doc) so reconstructVersion keeps working for pre-move versions. Layout is
+    // engine-owned, so this is best-effort: if the chain isn't where the
+    // structured layout puts it (e.g. flat imported nests), history still
+    // serves from the governance DB rows migrated below.
+    try {
+      const nestPath = resolveNestPath(nestId);
+      const oldChain = join(nestPath, dirname(nodeId), ".versions", leaf);
+      const newChain = join(nestPath, dirname(newId), ".versions", leaf);
+      if (oldChain !== newChain) {
+        await mkdir(dirname(newChain), { recursive: true });
+        await rename(oldChain, newChain);
+      }
+    } catch {
+      /* no on-disk chain to carry */
+    }
+
+    await storage.deleteDocument(nodeId);
+
+    // Repoint every node-keyed table for the source doc and its derived
+    // annotations node, plus the run traces delete keeps. One transaction: a
+    // half-moved node would be worse than a failed move.
+    const oldDerived = derivedIdOf(nodeId);
+    const newDerived = derivedIdOf(newId);
+    const db = getDb();
+    await db.transaction(async (tx) => {
+      await rewriteNodeKeyedRows(tx, nestId, nodeId, newId);
+      await rewriteNodeKeyedRows(tx, nestId, oldDerived, newDerived);
+      await tx.run(
+        "UPDATE runs SET agent_node = ? WHERE nest_id = ? AND agent_node = ?",
+        [newId, nestId, nodeId],
+      );
+      await tx.run(
+        `UPDATE run_steps SET node_id = ?
+         WHERE node_id = ? AND run_id IN (SELECT id FROM runs WHERE nest_id = ?)`,
+        [newId, nodeId, nestId],
+      );
+    });
+
+    // The derived annotations node (if any) lives beside its source — move its
+    // storage doc too. Best-effort, same as delete's handling of it.
+    try {
+      const derivedDoc = await storage.readDocument(oldDerived);
+      await storage.writeDocument(
+        newDerived,
+        serializeDocument({ ...derivedDoc, id: newDerived }),
+      );
+      await storage.deleteDocument(oldDerived);
+    } catch {
+      /* no derived annotations node */
+    }
+
+    await trackEvent("node.move", { nestId, nodeId, newId });
+    return { node: moved, previousId: nodeId };
   });
-
-  // The derived annotations node (if any) lives beside its source — move its
-  // storage doc too. Best-effort, same as delete's handling of it.
-  try {
-    const derivedDoc = await storage.readDocument(oldDerived);
-    await storage.writeDocument(
-      newDerived,
-      serializeDocument({ ...derivedDoc, id: newDerived }),
-    );
-    await storage.deleteDocument(oldDerived);
-  } catch {
-    /* no derived annotations node */
-  }
-
-  await trackEvent("node.move", { nestId, nodeId, newId });
-  return { node: moved, previousId: nodeId };
 }
 
 /**

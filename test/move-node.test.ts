@@ -106,6 +106,25 @@ describe("node move", () => {
     expect(still.status).toBe(200);
   });
 
+  it("lets only one of two concurrent moves take the same destination", async () => {
+    // Both sources share a leaf slug, so both moves derive the SAME
+    // destination id — unlocked, both pass the free-destination check and one
+    // silently overwrites the other.
+    await create("Rival", "x");
+    await create("Rival", "y");
+    const [first, second] = await Promise.all([
+      move("nodes/x/rival", "dest"),
+      move("nodes/y/rival", "dest"),
+    ]);
+
+    expect([first.status, second.status].sort()).toEqual([200, 409]);
+    const loser = first.status === 409 ? "nodes/x/rival" : "nodes/y/rival";
+    const stillThere = await jsonRequest(
+      app, "GET", `/nests/${nestId}/nodes/${loser}`, undefined, alice.apiKey,
+    );
+    expect(stillThere.status).toBe(200);
+  });
+
   it("slugifies traversal segments instead of escaping the vault", async () => {
     await create("Traveler");
     const res = await move("nodes/traveler", "../../etc//passwd");

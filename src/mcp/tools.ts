@@ -30,6 +30,7 @@ import {
   listNodesForCallerByEmail,
 } from "../nodes/service.js";
 import { listThreads } from "../annotations/service.js";
+import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 
@@ -849,36 +850,35 @@ async function runTool(
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
         return "You don't have permission to create documents in this nest.";
       }
-      // Refuse a title that already exists ANYWHERE in the vault, not just in
-      // the requested folder. Every title-addressed tool here (context_get,
-      // context_update, context_delete, context_move) resolves by title, so a
-      // second node sharing a title makes all of them ambiguous — the caller
-      // ends up with an unreachable twin it can't edit or clean up
-      // (CU-wdqcpzxcg8). The service's id-conflict guard only catches the
-      // same-folder case; this catches the same title filed elsewhere. Costs
-      // the same vault scan context_update already pays.
-      const existingDocs = await storage.discoverDocuments();
-      const twin = existingDocs.find(
-        (n) =>
-          n.frontmatter.title.toLowerCase() ===
-          String(args.title ?? "").toLowerCase(),
-      );
-      if (twin) {
-        return `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`;
-      }
-      const { node } = await createNode(
-        nestId,
-        {
-          title: args.title,
-          content: args.content,
-          type: args.type,
-          tags: args.tags,
-          scope: args.scope,
-          folder: args.folder,
-        },
-        userEmail,
-      );
-      return `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`;
+      // Refuse a title already used ANYWHERE in the vault, not just in the
+      // requested folder: every title-addressed tool here resolves by title, so
+      // a twin filed elsewhere is unreachable for all of them (CU-wdqcpzxcg8).
+      // Scan and create under one nest-wide key — createNode's own lock is per
+      // id, and two twins land on DIFFERENT ids, so only a shared key stops
+      // both from passing the scan before either writes.
+      const wanted = String(args.title ?? "").toLowerCase();
+      return withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
+        const existingDocs = await storage.discoverDocuments();
+        const twin = existingDocs.find(
+          (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
+        );
+        if (twin) {
+          return `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`;
+        }
+        const { node } = await createNode(
+          nestId,
+          {
+            title: args.title,
+            content: args.content,
+            type: args.type,
+            tags: args.tags,
+            scope: args.scope,
+            folder: args.folder,
+          },
+          userEmail,
+        );
+        return `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`;
+      });
     }
 
     case "context_update": {

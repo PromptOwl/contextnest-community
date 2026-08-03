@@ -241,4 +241,25 @@ describe("MCP context_create — duplicate title", () => {
     const ids = (list.data.nodes ?? []).map((n: any) => n.id);
     expect(ids.filter((id: string) => id.endsWith("micromanager-ai-call-brief"))).toHaveLength(1);
   });
+
+  it("refuses the twin even when both creates target different folders at once", async () => {
+    // Two twins land on DIFFERENT ids, so createNode's per-id lock can't see
+    // the collision — the scan and the create share one nest-wide key instead.
+    const texts = await Promise.all(
+      ["one", "two", "three"].map((folder) =>
+        callTool(app, nestId, "context_create", {
+          title: "Concurrent Brief",
+          content: `# From ${folder}`,
+          folder,
+        }),
+      ),
+    );
+
+    expect(texts.filter((t) => t.startsWith("Created node:"))).toHaveLength(1);
+    expect(texts.filter((t) => t.includes("already exists"))).toHaveLength(2);
+
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`);
+    const ids = (list.data.nodes ?? []).map((n: any) => n.id);
+    expect(ids.filter((id: string) => id.endsWith("concurrent-brief"))).toHaveLength(1);
+  });
 });
