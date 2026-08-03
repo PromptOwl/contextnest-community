@@ -13,11 +13,12 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, LayoutGrid } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
 import { DefinitionsPage } from "./components/DefinitionsPage";
+import { MaturityBoard } from "./components/MaturityBoard";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -103,6 +104,13 @@ type View =
     }
   | {
       page: "definitions";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    }
+  | {
+      page: "board";
       nestId: string;
       nestName: string;
       isOwner: boolean;
@@ -282,6 +290,7 @@ export default function App() {
           sub === "graph" ? "ontology-graph"
           : sub === "workflows" && workflowPlaneEnabled ? "workflows"
           : sub === "definitions" ? "definitions"
+          : sub === "board" ? "board"
           : sub === "trace" ? "nest-trace"
           : null;
         if (subPage) {
@@ -339,6 +348,7 @@ export default function App() {
       view.page === "ontology-graph" ||
       view.page === "workflows" ||
       view.page === "definitions" ||
+      view.page === "board" ||
       view.page === "nest-trace"
     ) {
       params.set("nest", view.nestId);
@@ -352,7 +362,9 @@ export default function App() {
             ? "workflows"
             : view.page === "definitions"
               ? "definitions"
-              : "trace",
+              : view.page === "board"
+                ? "board"
+                : "trace",
       );
     } else {
       params.delete("nest");
@@ -650,6 +662,25 @@ export default function App() {
               </Button>
             )}
 
+            {view.page === "nest" && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setView({
+                    page: "board",
+                    nestId: view.nestId,
+                    nestName: view.nestName,
+                    isOwner: view.isOwner,
+                    isAnonOwned: view.isAnonOwned,
+                  })
+                }
+              >
+                <LayoutGrid className="h-3.5 w-3.5 mr-1" />
+                Board
+              </Button>
+            )}
+
             {view.page === "nest" && workflowPlaneEnabled && (
               <Button
                 variant="outline"
@@ -917,6 +948,31 @@ export default function App() {
                 page: "nest",
                 nestId: view.nestId,
                 nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+          />
+        )}
+        {view.page === "board" && (
+          <MaturityBoard
+            nestId={view.nestId}
+            nestName={view.nestName}
+            onBack={() =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
+            onOpenDocument={(nodeId) =>
+              setView({
+                page: "document",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                nodeId,
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
               })
