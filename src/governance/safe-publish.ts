@@ -32,6 +32,21 @@ export async function safePublishDocument(
   return publishDocument(storage, docId, options);
 }
 
+/**
+ * serializeDocument with the same undefined-frontmatter pre-clean. Any write
+ * of a node that came from readDocument must go through this — a doc with
+ * `tags: []` on disk parses back with `tags: undefined` and blows up the
+ * YAML dumper.
+ */
+export function serializeNodeSafe(
+  node: Parameters<typeof serializeDocument>[0],
+): string {
+  return serializeDocument({
+    ...node,
+    frontmatter: stripUndefinedDeep(node.frontmatter) as typeof node.frontmatter,
+  });
+}
+
 export function stripUndefinedDeep(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value

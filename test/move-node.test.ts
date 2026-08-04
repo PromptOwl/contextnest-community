@@ -79,6 +79,16 @@ describe("node move", () => {
     expect(count).toBeGreaterThanOrEqual(2);
   });
 
+  it("moves an untagged document (empty tags round-trip as undefined)", async () => {
+    await jsonRequest(
+      app, "POST", `/nests/${nestId}/nodes`,
+      { title: "Untagged", content: "# Untagged" }, alice.apiKey,
+    );
+    const res = await move("nodes/untagged", "loose");
+    expect(res.status).toBe(200);
+    expect(res.data.node.id).toBe("nodes/loose/untagged");
+  });
+
   it("moving to the folder it is already in is a no-op", async () => {
     await create("Stay Put", "keep");
     const res = await move("nodes/keep/stay-put", "keep");

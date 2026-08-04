@@ -2395,10 +2395,18 @@ export function NestView({
                   const showDeleteAction = canDelete || !flagPending;
                   const openDeleteFlow = () =>
                     canDelete ? setDeleteNodeTarget(node) : setDeletionTarget(node);
-                  // Move (drag OR menu) mirrors the edit gate exactly: same
-                  // stewardship scope, and the server locks moves while a
-                  // review is pending, so don't offer either path then.
-                  const canMove = canEdit;
+                  // Move (drag OR menu) mirrors the edit gate's stewardship
+                  // scope. The pending-review freeze is NOT absolute: the
+                  // server's move guard lets anyone approve-capable through
+                  // (owner/admin/reviewer on the node, no self-approve check),
+                  // so reorganizing an under-review doc stays possible.
+                  const canMove =
+                    canEditNode(node) &&
+                    (node.status !== "pending_review" ||
+                      isOwner ||
+                      isAdmin ||
+                      roles.includes("admin") ||
+                      hasRoleOnNode(node, "reviewer"));
                   const openMoveDialog = () => {
                     setMoveDest(folderOfNode(node.id));
                     setMoveTarget(node);

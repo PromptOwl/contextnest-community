@@ -115,6 +115,38 @@ describe("review lock: who can still move or delete", () => {
     expect(gone.status).toBe(404);
   });
 
+  // A draft in a governed nest is never rewritten by the publish path, so it
+  // still carries the frontmatter shape that used to break serialization on
+  // move. The row offers Move — it has to actually work.
+  it("moves a draft and keeps it a draft", async () => {
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Still Draft", content: "# Still Draft" },
+      owner.apiKey,
+    );
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/still-draft/move`,
+      { folder: "drafts" },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.node.id).toBe("nodes/drafts/still-draft");
+
+    const moved = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/drafts/still-draft`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(moved.status).toBe(200);
+    expect(moved.data.node.status).toBe("draft");
+  });
+
   it("lets an admin move a node under review, review state included", async () => {
     await submitForReview("Admin Moves", "admin-moves");
     const res = await jsonRequest(
