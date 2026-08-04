@@ -1775,6 +1775,9 @@ export interface WorkItem {
   /** Deletion items only: why it was flagged, and the row to resolve. */
   reason?: string;
   request_id?: string;
+  /** Deletion items only. For "folder"/"nest", node_id is a folder path or the
+   *  nest id — NOT a document id, so don't open the editor on it. */
+  target_type?: "document" | "folder" | "nest";
 }
 
 export interface WatcherNotification {

@@ -200,6 +200,27 @@ governanceRoutes.get("/review-queue", async (c) => {
 });
 
 // ─── Deletion requests ──────────────────────────────────────────────────
+
+/**
+ * Owner/admin gate for the bulk deletions the middleware only holds at
+ * 'write' — that tier is calibrated for ONE document (DELETE /nodes/:id).
+ * Deleting a folder or a nest destroys many at once, so it sits with nest
+ * management instead.
+ *
+ * One helper, not a check per branch: the direct route and the honour path
+ * must assert the same policy, or honouring a request becomes the way around
+ * the direct route. Returns an error response, or null to proceed.
+ */
+function denyUnlessNestManager(c: any, what: string) {
+  const permission = c.get("nestPermission");
+  if (permission === "owner" || permission === "admin") return null;
+  return c.json(
+    {
+      error: `Only the nest owner or an admin can delete ${what}. Request its deletion instead, or ask an admin to action it.`,
+    },
+    403,
+  );
+}
 // Anyone who can read a node may flag it for deletion (POST on the node route
 // below); resolving is write-tier — the middleware already requires 'write' for
 // these paths, the same gate DELETE /nodes/:id passes, so no extra check here.
@@ -209,16 +230,8 @@ governanceRoutes.get("/review-queue", async (c) => {
 // once, so it sits at the same tier as deleting the nest, not at 'write'.
 governanceRoutes.post("/delete-folder", async (c) => {
   const nestId = c.req.param("nestId")!;
-  const permission = c.get("nestPermission");
-  if (permission !== "owner" && permission !== "admin") {
-    return c.json(
-      {
-        error:
-          "Only the nest owner or an admin can delete a folder. Request its deletion instead.",
-      },
-      403,
-    );
-  }
+  const denied = denyUnlessNestManager(c, "a folder");
+  if (denied) return denied;
   const body = await c.req.json<{ folder?: string }>().catch(() => ({}) as any);
   if (!body.folder?.trim()) {
     throw new ValidationError("folder is required");
@@ -303,21 +316,18 @@ governanceRoutes.post("/deletion-requests/:id/delete", async (c) => {
   const actor = await getUserEmail(c);
   const docTitle = await reviews.deletionTargetTitle(request);
 
+  // Honouring must clear the SAME bar as deleting the thing directly — a
+  // request is not a side door around /delete-folder or DELETE /nests/:id.
+  if (request.targetType === "nest" || request.targetType === "folder") {
+    const denied = denyUnlessNestManager(
+      c,
+      request.targetType === "nest" ? "a nest" : "a folder",
+    );
+    if (denied) return denied;
+  }
+
   if (request.targetType === "nest") {
-    // The middleware only requires 'write' on this path (it's the delete tier
-    // for documents). Deleting a whole NEST is the owner's call — DELETE
-    // /nests/:id enforces that, and honouring a request must not be a way
-    // around it. Nest rows cascade with the nest, so the row goes with it.
-    const permission = c.get("nestPermission");
-    if (permission !== "owner" && permission !== "admin") {
-      return c.json(
-        {
-          error:
-            "Only the nest owner or an admin can delete a nest. Decline the request, or ask the owner to action it.",
-        },
-        403,
-      );
-    }
+    // Nest rows cascade with the nest, so the request row goes with it.
     await deleteNest(nestId);
   } else if (request.targetType === "folder") {
     await deleteFolder(nestId, request.nodeId, actor);

@@ -229,6 +229,17 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     await api.declineDeletionRequest(w.nest_id, w.request_id!, note);
     dropWorkItem(w);
   };
+  // A folder or nest deletion item carries a folder path / nest id in node_id,
+  // not a document id — opening the editor on it lands on a page for a node
+  // that was never there. Send those to the nest instead.
+  const openWorkItem = (w: api.WorkItem) => {
+    if (w.type === "deletion" && w.target_type && w.target_type !== "document") {
+      onSelectNest(w.nest_id, w.nest_name, false, false);
+      return;
+    }
+    onOpenReview(w.nest_id, w.nest_name, w.node_id);
+  };
+
   // Optimistic drop + reconcile, same as actOnReview.
   const dropWorkItem = (w: api.WorkItem) => {
     setWork((prev) => ({
@@ -402,7 +413,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                       {w.type === "deletion" ? "Deletion" : "Review"}
                     </span>
                     <button
-                      onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}
+                      onClick={() => openWorkItem(w)}
                       className="flex items-center gap-2 min-w-0 flex-1 text-left"
                     >
                       <span className="font-medium truncate">{w.title}</span>
@@ -482,7 +493,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
               {work.waiting.map((w) => (
                 <button
                   key={`${w.nest_id}:${w.node_id}`}
-                  onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}
+                  onClick={() => openWorkItem(w)}
                   className="w-full flex items-center gap-3 px-4 py-2 text-left hover:bg-muted/40 group text-sm"
                 >
                   <span className="font-medium truncate">{w.title}</span>

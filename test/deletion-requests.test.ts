@@ -4,6 +4,7 @@ import {
   createTestApp,
   registerUser,
   jsonRequest,
+  resetAuthRateLimit,
 } from "./helpers.js";
 
 // Request-deletion workflow (CU-wdqcpzxqcm): a read-only user flags a stale
@@ -324,6 +325,40 @@ describe("deletion requests", () => {
     expect(folderReq.title).toBe("Legacy / Api");
     expect(folderReq.nodeId).toBe("legacy/api");
 
+    // A write collaborator clears the middleware's 'write' bar, but honouring
+    // a FOLDER request is a bulk delete — same tier as /delete-folder, which
+    // 403s them. Otherwise flag-then-honour is a side door around that route.
+    await resetAuthRateLimit();
+    const writer2 = await registerUser(app, "writer2@acme.com", "Writer2");
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "writer2@acme.com", permission: "write" },
+      owner.apiKey,
+    );
+    const escalation = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${folderReq.id}/delete`,
+      {},
+      writer2.apiKey,
+    );
+    expect(escalation.status).toBe(403);
+    // Refused means nothing was deleted.
+    const stillThere = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(
+      stillThere.data.nodes.filter((n: any) =>
+        n.id.startsWith("nodes/legacy/api/"),
+      ),
+    ).toHaveLength(2);
+
     const honoured = await jsonRequest(
       app,
       "POST",
@@ -437,6 +472,7 @@ describe("deletion requests", () => {
     // A write collaborator clears the middleware's 'write' bar but must NOT be
     // able to delete a whole nest through the queue — DELETE /nests/:id is
     // owner-only, and this path can't be a way around it.
+    await resetAuthRateLimit();
     const writer = await registerUser(app, "writer@acme.com", "Writer");
     await jsonRequest(
       app,

@@ -913,9 +913,17 @@ export async function requestDeletion(params: {
         params.reason,
       ],
     );
-  } catch {
+  } catch (err) {
     // The partial unique index is the backstop for two concurrent flags racing
-    // past the check above — same answer as the check, not a 500.
+    // past the check above — same answer as the check, not a 500. Log first:
+    // any OTHER insert failure (FK, connection drop) would otherwise be
+    // reported to the user as a misleading "already pending".
+    console.error(
+      "[deletion] request insert failed",
+      params.nestId,
+      params.nodeId,
+      err,
+    );
     throw new ConflictError(`A deletion request is already pending for this ${noun}`);
   }
   const request = (await getDeletionRequest(id))!;
@@ -1027,13 +1035,18 @@ export async function declineDeletion(params: {
   if (!pending || pending.nestId !== params.nestId || pending.status !== "pending") {
     return null;
   }
-  await db.run(
+  // The read above and this write aren't atomic, so two declines can both pass
+  // it — the `status = 'pending'` predicate lets exactly one through. Without
+  // checking `changes`, the loser would also notify, telling the requester it
+  // was declined by the wrong admin with the wrong note.
+  const { changes } = await db.run(
     `UPDATE deletion_requests
        SET status = 'declined', resolved_by = ?, resolved_at = ${nowExpr(db)},
            resolution_note = ?
      WHERE id = ? AND status = 'pending'`,
     [params.declinedBy, params.note, params.id],
   );
+  if (changes === 0) return null;
   const declined = await getDeletionRequest(params.id);
   if (declined) {
     await notifyDeletionResolved({

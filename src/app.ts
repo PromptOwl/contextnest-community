@@ -1120,6 +1120,9 @@ export function createApp(): Hono<AuthEnv> {
       priority: "normal" as const,
       reason: r.reason,
       request_id: r.id,
+      // node_id holds a folder path / nest id for those targets, so a client
+      // must not treat it as a document to open.
+      target_type: r.targetType,
     });
     type WorkItem =
       | ReturnType<typeof toItem>
