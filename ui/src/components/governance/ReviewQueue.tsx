@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/card";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
+import { parseServerDate } from "@/lib/dates";
 
 export type ReviewRequestPriority = "low" | "normal" | "high" | "urgent";
 
@@ -83,7 +84,10 @@ const priorityConfig: Record<
 };
 
 function formatDate(dateStr: string) {
-  const date = new Date(dateStr);
+  // parseServerDate, not new Date: review_requests.requested_at is a SQL
+  // default (UTC, no zone) that new Date() would read as local time.
+  const date = parseServerDate(dateStr);
+  if (!date) return "";
   const now = new Date();
   const diff = now.getTime() - date.getTime();
   if (diff < 60000) return "Just now";

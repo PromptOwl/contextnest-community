@@ -19,6 +19,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AlertCircle, Loader2 } from "lucide-react";
+import { formatServerDate } from "@/lib/dates";
 
 interface ReasonDialogProps {
   open: boolean;
@@ -40,17 +41,6 @@ interface ReasonDialogProps {
   } | null;
   /** Rejecting surfaces the message inline and keeps the dialog open. */
   onConfirm: (reason: string) => Promise<void>;
-}
-
-/** SQLite stamps "YYYY-MM-DD HH:MM:SS" in UTC, which browsers otherwise parse
- *  as local time — an hours-off timestamp. Postgres/ISO strings pass through. */
-function formatWhen(raw?: string): string | null {
-  if (!raw) return null;
-  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)
-    ? `${raw.replace(" ", "T")}Z`
-    : raw;
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? raw : d.toLocaleString();
 }
 
 export function ReasonDialog({
@@ -108,8 +98,8 @@ export function ReasonDialog({
             <p className="font-medium">
               Declined
               {priorDecline.resolvedBy ? ` by ${priorDecline.resolvedBy}` : ""}
-              {formatWhen(priorDecline.resolvedAt)
-                ? ` · ${formatWhen(priorDecline.resolvedAt)}`
+              {formatServerDate(priorDecline.resolvedAt)
+                ? ` · ${formatServerDate(priorDecline.resolvedAt)}`
                 : ""}
             </p>
             {priorDecline.resolutionNote && (

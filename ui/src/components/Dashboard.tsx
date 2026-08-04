@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
+import { relTime, formatServerDate } from "../lib/dates";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -30,17 +31,8 @@ import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
 
-function relTime(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "";
-  const secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
-  if (secs < 60) return "just now";
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
-}
+// relTime / formatServerDate live in lib/dates: SQL-default timestamps arrive
+// as UTC with no zone, which new Date() would read as local time.
 
 interface DashboardProps {
   onSelectNest: (
@@ -370,7 +362,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                   <div key={n.id} className="px-4 py-2 text-xs flex items-center gap-2">
                     <span className="flex-1">{n.message}</span>
                     <span className="text-muted-foreground shrink-0">
-                      {new Date(n.created_at).toLocaleString()}
+                      {formatServerDate(n.created_at)}
                     </span>
                   </div>
                 ))}
@@ -894,7 +886,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                       {nest.is_imported ? (
                         <p
                           className="flex items-center gap-1 mt-1 text-xs text-muted-foreground truncate"
-                          title={`Imported ${new Date(nest.created_at).toLocaleString()}`}
+                          title={`Imported ${formatServerDate(nest.created_at)}`}
                         >
                           <FolderInput className="h-3 w-3 shrink-0" />
                           <span className="truncate">
@@ -902,7 +894,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                             <span className="font-medium">
                               {nest.is_owner ? "you" : nest.owner_email || "unknown user"}
                             </span>{" "}
-                            · {new Date(nest.created_at).toLocaleDateString()}
+                            · {formatServerDate(nest.created_at)}
                           </span>
                         </p>
                       ) : null}
@@ -994,7 +986,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                             Imported
                           </span>
                         ) : null}
-                        <span>{new Date(nest.created_at).toLocaleDateString()}</span>
+                        <span>{formatServerDate(nest.created_at)}</span>
                       </div>
                     </div>
                   </div>
