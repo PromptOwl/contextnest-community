@@ -269,6 +269,8 @@ export function NestView({
   const [externalEditsLoading, setExternalEditsLoading] = useState(false);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
+  const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
+  const [primeTags, setPrimeTags] = useState<string[]>([]);
   const [visibility, setVisibility] = useState<"private" | "public">("private");
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [isImported, setIsImported] = useState(false);
@@ -604,7 +606,12 @@ export function NestView({
         }),
         api.getNestSettings(nestId).catch((e) => {
           console.error("[NestView] getNestSettings failed", nestId, e);
-          return { stewardship_enabled: false, allow_self_approve: false };
+          return {
+            stewardship_enabled: false,
+            allow_self_approve: false,
+            prime_only_review: false,
+            prime_tags: [] as string[],
+          };
         }),
         api.listExternalEdits(nestId).catch((e) => {
           console.error("[NestView] listExternalEdits failed", nestId, e);
@@ -650,6 +657,8 @@ export function NestView({
     setFeedCommentsTotal(feedData.counts?.comments ?? commentItems.length);
     setStewardshipEnabled(settingsData.stewardship_enabled);
     setAllowSelfApprove(settingsData.allow_self_approve);
+    setPrimeOnlyReview(!!settingsData.prime_only_review);
+    setPrimeTags(settingsData.prime_tags ?? []);
     setExternalEdits(externalData.entries);
     if (nestMeta?.nest?.visibility) {
       setVisibility(nestMeta.nest.visibility);
@@ -2548,6 +2557,23 @@ export function NestView({
                               declined flag is history, and history belongs in
                               the notification (dismissible), not a permanent
                               badge on a document that was kept. */}
+                          {/* Prime — the doc always needs approval, whoever
+                              edits it. Only meaningful in a governed nest. */}
+                          {stewardshipEnabled &&
+                            api.isPrimeNode(node, primeTags) && (
+                            <span
+                              className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/30"
+                              title={
+                                typeof node.prime === "boolean"
+                                  ? "Prime: flagged on this document. Always requires steward approval."
+                                  : "Prime: inherited from a prime tag. Always requires steward approval."
+                              }
+                              data-testid={`prime-badge-${node.id}`}
+                            >
+                              <Star className="h-3 w-3" />
+                              Prime
+                            </span>
+                          )}
                           {flagPending && (
                             <span
                               className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-red-50 text-red-700 border-red-200"
@@ -3423,6 +3449,8 @@ export function NestView({
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
           allowSelfApprove={allowSelfApprove}
+          primeOnlyReview={primeOnlyReview}
+          primeTags={primeTags}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
           onChanged={(next) => {
@@ -3432,6 +3460,8 @@ export function NestView({
             // refetch to land — then reconcile counts in the background.
             setStewardshipEnabled(next.stewardshipEnabled);
             setAllowSelfApprove(next.allowSelfApprove);
+            setPrimeOnlyReview(next.primeOnlyReview);
+            setPrimeTags(next.primeTags);
             fetchData();
           }}
         />
