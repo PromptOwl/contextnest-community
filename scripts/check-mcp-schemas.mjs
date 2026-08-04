@@ -41,6 +41,7 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // at all (the id rewrite spans governance tables the engine doesn't own), so there is no
 // upstream descriptor to import. The tool mirrors the existing REST POST /nodes/:id/move.
 // If move is ever promoted to a core engine operation, adopt its descriptor here.
+//
 // Raised 43 -> 46 for the deletion-request trio (`context_request_deletion`,
 // `context_deletion_queue`, `context_resolve_deletion`). Same reason as move: deletion
 // REQUESTS are not in the engine catalog at all — they live in this repo's governance
@@ -53,7 +54,11 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // no notion of a review request, so there is no upstream descriptor to import. It mirrors
 // the REST GET /me/drafts 1:1, nest-scoped. Promote it upstream only if review workflow ever
 // moves into the engine catalog.
-const BASELINE = 47;
+//
+// Raised 47 -> 49 in 1.12.0 for the server-level `nest_create` / `context_create` bootstrap
+// writes — same exception as `context_table_query`: no importable engine module yet, and the
+// tools follow the existing pattern rather than introducing drift.
+const BASELINE = 49;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

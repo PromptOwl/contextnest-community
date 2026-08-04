@@ -59,6 +59,11 @@ import {
 } from "./mcp/server-routes.js";
 import { governanceRoutes, governanceNodeRoutes } from "./governance/routes.js";
 import { authMiddleware, type AuthEnv } from "./auth/middleware.js";
+import {
+  verifySsoTicket,
+  isValidTicketSub,
+  type SsoTicketClaims,
+} from "./auth/sso-token.js";
 import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
@@ -159,6 +164,82 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
 
   return c.json({ error: "Missing or invalid credentials" }, 401);
 });
+
+// PromptOwl native integration — /index and /mcp additionally accept a
+// short-lived HS256 service ticket minted by the official PromptOwl
+// deployment (the same shared OFFICIAL_COMMUNITY_SSO_SECRET the /auth/sso
+// login flow trusts). Distinctions from a login ticket: `scope: "mcp"` is
+// REQUIRED here (a leaked one-time SSO login ticket can't double as a bearer
+// credential) and there's no jti (this ticket can't be redeemed for a login
+// session). The user is resolved by email and must ALREADY exist — native
+// access never auto-provisions; PromptOwl relies on that to only auto-connect
+// users who hold accounts on both sides. Non-JWT bearers (cnst_ keys),
+// cookies, and open mode fall through to flexAuthMiddleware unchanged.
+/** Path segments under /nests, e.g. "/nests/abc/mcp" → ["abc", "mcp"]. Shared
+ *  by the ticket-eligibility gate and the access-control gate so their view of
+ *  the route can't silently drift (the ticket allowlist must always describe
+ *  the same paths the access boundary enforces). */
+function nestPathParts(path: string): string[] {
+  return path.replace(/^\/nests\//, "").split("/").filter(Boolean);
+}
+
+const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
+  async (c, next) => {
+    const header = c.req.header("Authorization") || "";
+    const token = header.startsWith("Bearer ")
+      ? header.slice("Bearer ".length)
+      : "";
+    const secret = config.OFFICIAL_COMMUNITY_SSO_SECRET;
+    const looksLikeJwt =
+      !!token && !token.startsWith("cnst_") && token.split(".").length === 3;
+    if (!looksLikeJwt || !secret) return flexAuthMiddleware(c, next);
+
+    let claims: SsoTicketClaims;
+    try {
+      claims = verifySsoTicket(token, secret);
+    } catch {
+      return c.json({ error: "Invalid service ticket" }, 401);
+    }
+    // Require the MCP scope AND reject a present jti. A one-time-use jti is the
+    // mark of an SSO *login* ticket (redeemable at GET /auth/sso for a browser
+    // session); an MCP bearer must carry neither, so we don't rely on the
+    // issuer keeping scope and jti mutually exclusive — this side enforces it,
+    // and /auth/sso rejects scope "mcp" for the symmetric guarantee.
+    if (claims.scope !== "mcp" || claims.jti) {
+      return c.json({ error: "Invalid service ticket" }, 401);
+    }
+    // Audience binding — same policy as GET /auth/sso: enforced when
+    // PUBLIC_BASE_URL is set (official deployments), so a ticket minted for
+    // another server can't be replayed against this one.
+    const expectedAud = config.PUBLIC_BASE_URL;
+    if (expectedAud && (claims.aud || "").replace(/\/$/, "") !== expectedAud) {
+      return c.json({ error: "Invalid service ticket" }, 401);
+    }
+
+    // Same sub-shape guard as GET /auth/sso (shared helper so the two
+    // ticket-consuming paths can't drift): a whitespace/garbage sub must never
+    // resolve a user here either.
+    const sub = claims.sub.trim();
+    if (!isValidTicketSub(sub)) {
+      return c.json({ error: "Invalid service ticket" }, 401);
+    }
+    const db = getDb();
+    const user = (await db.get(
+      "SELECT id FROM users WHERE LOWER(email) = LOWER(?)",
+      [sub],
+    )) as { id: string } | undefined;
+    if (!user) {
+      return c.json(
+        { error: "No ContextNest account exists for this PromptOwl user" },
+        404,
+      );
+    }
+
+    c.set("userId", user.id);
+    c.set("nestScope", null);
+    return next();
+  },
+);
 
 // Short-TTL cache for the /me/work approve-capability check. The dashboard
 // polls this inbox, and a caller's nest roles change rarely — so caching the
@@ -1296,21 +1377,39 @@ export function createApp(): Hono<AuthEnv> {
   // === Agent entry point: /llms.txt (public manual), /index (person nest
   // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
   app.route("/llms.txt", llmsTxtRoutes);
-  app.use("/index", flexAuthMiddleware);
+  app.use("/index", flexAuthWithPromptowlTicket);
   app.route("/index", nestIndexRoutes);
-  app.use("/mcp", flexAuthMiddleware);
+  app.use("/mcp", flexAuthWithPromptowlTicket);
   app.route("/mcp", serverMcpRoutes);
 
   // === All /nests routes ===
   const nestsApp = new Hono<AuthEnv>();
 
-  // Use flexible auth: open mode = no key needed, key mode = key required
-  nestsApp.use("*", flexAuthMiddleware);
+  // Use flexible auth: open mode = no key needed, key mode = key required.
+  // Three per-nest paths additionally honor PromptOwl service tickets —
+  // POST :id/context (deterministic retrieval for prompt data sources),
+  // GET :id/nodes (doc listing for the source picker), and :id/mcp (the
+  // per-nest MCP transport, so a PromptOwl block granted read & write on
+  // one nest can reach the write tools that deliberately don't exist on
+  // the server-level /mcp). Safe for the same reason cnst_ keys are: the
+  // permission gate below applies to tickets too, and every mutating tool
+  // re-checks its own permission inside runTool. Everything else under
+  // /nests still requires real credentials.
+  nestsApp.use("*", async (c, next) => {
+    const parts = nestPathParts(c.req.path);
+    const ticketEligible =
+      parts.length === 2 &&
+      ((c.req.method === "POST" && parts[1] === "context") ||
+        (c.req.method === "GET" && parts[1] === "nodes") ||
+        parts[1] === "mcp");
+    return ticketEligible
+      ? flexAuthWithPromptowlTicket(c, next)
+      : flexAuthMiddleware(c, next);
+  });
 
   // Access control for nest-scoped routes
   nestsApp.use("*", async (c, next) => {
-    const localPath = c.req.path.replace(/^\/nests\//, "");
-    const parts = localPath.split("/").filter(Boolean);
+    const parts = nestPathParts(c.req.path);
     if (parts.length < 2) return next();
 
     // "unsynced" is a server-admin namespace under /nests, not a nest id.

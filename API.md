@@ -1301,6 +1301,34 @@ Execute (the runner contract — the agent IS the runner):
 - `workflow_run_close` — close with a terminal status (`409`-equivalent conflict on a second close).
 - `workflow_run_get` / `workflow_runs_list` — read traces/history (freeform payloads redacted below write tier).
 
+### PromptOwl native connection (service-ticket auth)
+
+The official PromptOwl deployment connects on its users' behalf without storing
+a `cnst_` key: it mints a short-lived HS256 **service ticket** signed with the
+shared `OFFICIAL_COMMUNITY_SSO_SECRET` (see `CONFIGURATION.md`). The ticket
+carries `scope: "mcp"`, an `aud` bound to this server's `PUBLIC_BASE_URL`, a
+~5-minute `exp`, and **no `jti`**. It resolves to an already-existing account by
+email — native access never auto-provisions.
+
+Accepted as a `Bearer` on exactly these paths (everything else still requires a
+real credential):
+- `GET /index` and the server-level `ALL /mcp` — cross-nest index + read tools.
+- `POST /nests/:id/context` and `GET /nests/:id/nodes` — retrieval + doc listing.
+- `ALL /nests/:id/mcp` — the per-nest MCP transport, so a block granted read &
+  write on one nest reaches that nest's write tools. Per-nest permission,
+  suspend, and license gates all apply exactly as for a `cnst_` key.
+
+Two **server-level bootstrap writes** on `ALL /mcp` let a single-connection
+client create content (everything else on server-level `/mcp` is read-only):
+- `nest_create` — new nest owned by the caller (refused for a nest-scoped key).
+- `context_create` — new document in a nest the caller can write to
+  (`canCreateInNest`). Both honor the suspend kill-switch and license gate.
+
+**Ticket kinds don't cross over.** An `mcp`-scoped ticket is refused at
+`GET /auth/sso` (it can't become a login session), and the MCP middleware
+refuses any ticket carrying a `jti` (the mark of a one-time SSO login ticket) —
+enforced on both sides, not by trusting the issuer.
+
 ---
 
 ## 10. Admin / operator

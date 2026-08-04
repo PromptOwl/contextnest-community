@@ -19,12 +19,27 @@ export interface SsoTicketClaims {
   name?: string;
   /** intended audience — this server's canonical base URL */
   aud?: string;
+  /** ticket purpose. "mcp" = server-to-server MCP bearer (no jti, not
+   *  redeemable for a login session); absent/other = one-click SSO login
+   *  ticket. Load-bearing for auth: the MCP middleware requires "mcp" and
+   *  GET /auth/sso rejects it, so the two ticket kinds can't cross over. */
+  scope?: string;
   /** unique ticket id, for one-time-use enforcement */
   jti?: string;
   /** issued-at (seconds) */
   iat?: number;
   /** expiry (seconds) */
   exp?: number;
+}
+
+/**
+ * True if a ticket `sub` is a usable email. The SAME shape check GET /auth/sso
+ * and the MCP ticket middleware (flexAuthWithPromptowlTicket) both apply, so a
+ * whitespace/garbage sub can't create a degenerate empty-email user row on one
+ * path while the other rejects it. Caller trims first.
+ */
+export function isValidTicketSub(sub: string): boolean {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(sub) && sub.length <= 254;
 }
 
 function b64urlToBuffer(input: string): Buffer {
