@@ -41,7 +41,16 @@ export function renderText(message: string): string {
 /** Structured governance event — everything the email template needs. Built
  *  at the governance call sites (approve/reject/review/share). */
 export interface EmailEventDetails {
-  status: "approved" | "rejected" | "pending_review" | "shared" | "invited" | "steward";
+  status:
+    | "approved"
+    | "rejected"
+    | "pending_review"
+    | "shared"
+    | "invited"
+    | "steward"
+    | "deletion_requested"
+    | "deletion_declined"
+    | "deletion_deleted";
   /** Document title (or nest name for a share event). */
   docTitle: string;
   /** Location: "Nest name" or "Nest name / Subfolder". */
@@ -77,6 +86,21 @@ const STATUS_META: Record<
   shared: { subjectWord: "shared with you", label: "Shared", color: "#2563eb" },
   invited: { subjectWord: "invited you", label: "Invitation", color: "#2563eb" },
   steward: { subjectWord: "steward", label: "Steward", color: "#7c3aed" },
+  deletion_requested: {
+    subjectWord: "flagged for deletion",
+    label: "Deletion requested",
+    color: "#d97706",
+  },
+  deletion_declined: {
+    subjectWord: "kept",
+    label: "Deletion declined",
+    color: "#d97706",
+  },
+  deletion_deleted: {
+    subjectWord: "deleted",
+    label: "Deleted",
+    color: "#dc2626",
+  },
 };
 
 /** First-letter capitalize for tidy detail values (role/scope). */
@@ -198,6 +222,38 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
           ]
         : []),
     ],
+  },
+  // Deletion requests reuse the governance details block — same "what/where/
+  // status" shape, and the reason/note rides in `note` like a review note.
+  deletion_requested: {
+    heading: (x) => `${x.title} is ${x.meta.subjectWord}`,
+    detailsHeader: "Document details",
+    linkLabel: "Review the request",
+    lineT: (x) =>
+      `${x.title} has been flagged for deletion${x.byT}${x.noteT}. Delete it or decline the request from the nest.`,
+    lineH: (x) =>
+      `${x.doc} has been flagged for deletion${x.byH}${x.noteH}. Delete it or decline the request from the nest.`,
+    rows: governanceRows,
+  },
+  deletion_declined: {
+    heading: (x) => `Your deletion request for ${x.title} was declined`,
+    detailsHeader: "Document details",
+    linkLabel: "Open document",
+    lineT: (x) =>
+      `Your request to delete ${x.title} was declined${x.byT}${x.noteT}. The document stays.`,
+    lineH: (x) =>
+      `Your request to delete ${x.doc} was declined${x.byH}${x.noteH}. The document stays.`,
+    rows: governanceRows,
+  },
+  deletion_deleted: {
+    heading: (x) => `${x.title} was ${x.meta.subjectWord}`,
+    detailsHeader: "Document details",
+    linkLabel: "Open nest",
+    lineT: (x) =>
+      `${x.title} has been deleted${x.byT}${x.noteT} — your deletion request was accepted.`,
+    lineH: (x) =>
+      `${x.doc} has been deleted${x.byH}${x.noteH} — your deletion request was accepted.`,
+    rows: governanceRows,
   },
   steward: {
     heading: (x) => `You're now a steward of ${x.title}`,

@@ -99,10 +99,13 @@ describe("watchers → notifications", () => {
     const inbox = await jsonRequest(app, "GET", "/me/notifications?unread=true",
       undefined, bob.apiKey);
     expect(inbox.status).toBe(200);
+    // Titles, not storage ids — an inbox row must never read
+    // "nodes/content/some-slug" at the user.
     const mine = inbox.data.notifications.filter((n: any) =>
-      n.message.includes("poster-agent"));
+      n.message.includes("Poster Agent"));
     expect(mine.length).toBe(1);
-    expect(mine[0].message).toContain("digest-output");
+    expect(mine[0].message).toContain("Digest Output");
+    expect(mine[0].message).not.toContain("nodes/");
 
     // /me/work carries them too, and mark-read clears them.
     const work = await jsonRequest(app, "GET", "/me/work", undefined, bob.apiKey);
@@ -135,6 +138,9 @@ describe("watchers → notifications", () => {
       (n: any) => n.kind === "review_approved");
     expect(verdicts.length).toBe(1);
     expect(verdicts[0].message).toContain("approved by");
+    // Verdict rows name the document too, never its id.
+    expect(verdicts[0].message).toContain("Digest Output");
+    expect(verdicts[0].message).not.toContain("nodes/");
     // The approver themself hears nothing.
     const bobInbox = await jsonRequest(app, "GET", "/me/notifications?unread=true",
       undefined, bob.apiKey);

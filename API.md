@@ -692,6 +692,55 @@ So Postman will see more rows than the UI; that's expected.
 ### GET `/nests/:nestId/nodes/:nodeId/reviews`
 Full review history for a node.
 
+### POST `/nests/:nestId/nodes/:nodeId/request-deletion`
+Body: `{ "reason": "superseded by the new runbook" }` (required).
+
+Read permission — anyone who can see the node may flag it as stale, which is the point: deleting is write-tier, so the people who notice dead content usually can't act on it. A flagged node is **not** locked or under review; it stays editable and never appears in the review queue. One pending flag per node (`409` on a second), `404` for a node the caller can't read or that doesn't exist. Returns `201 { request }`.
+
+`GET /nests/:nestId/nodes/:nodeId` carries `deletionRequest` — the node's latest flag (`{ status, requestedBy, reason, resolvedBy?, resolutionNote?, resolvedAt? }`) or `null`. `pending` lets a client badge the document and drop its request affordance rather than discovering the `409`; `declined` carries the resolver's note, which is how the person who asked learns the verdict.
+
+### POST `/nests/:nestId/request-deletion`
+Body: `{ "targetType": "folder" | "nest", "target": "api/limits", "reason": "..." }` (`target` ignored for `nest`).
+
+Read permission, same as the per-document route. A folder target is normalized (`/nodes/api/limits/` → `api/limits`) so two people flagging the same folder collide on one pending request rather than raising two; `404` if no documents live under it. One pending flag per (nest, target type, target).
+
+### POST `/nests/:nestId/delete-folder`
+Body: `{ "folder": "api/limits" }`. **Owner/admin only** — a folder delete is many document deletes at once, so it sits at the nest-management tier, not `write`. Deletes every document under the prefix (sub-folders included) through the normal per-node path, so each gets its review-lock check, row purge and tombstone. Returns `{ deleted, nodeIds }`. Non-admins use the request flow above.
+
+Folders are not stored objects — they exist only as segments of the node ids beneath them, so deleting a folder *is* deleting its documents.
+
+### GET `/nests/:nestId/deletion-requests`
+Query: `?status=pending|declined|all` (defaults to `pending`). `all` returns both states newest-first — one call for a client that shows the queue and badges declined nodes.
+
+```json
+{
+  "requests": [{
+    "id": "...",
+    "nodeId": "nodes/foo",
+    "title": "Foo",
+    "requestedBy": "reader@x.com",
+    "reason": "superseded",
+    "status": "pending",
+    "createdAt": "..."
+  }],
+  "total": 1
+}
+```
+
+### POST `/nests/:nestId/deletion-requests/:id/delete`
+Honours the request — write permission, the same tier `DELETE /nodes/:nodeId` requires (including its `423` review lock). Branches on the request's `targetType`: a document goes through `deleteNode`, a folder through the bulk delete above, a nest through `deleteNest`.
+
+A **nest** target additionally requires owner/admin: deleting a whole nest is the owner's call (`DELETE /nests/:id` enforces that), and honouring a request must not be a way around it — a write-tier collaborator gets `403`.
+
+An honoured request always leaves the queue: a document's row is purged with its other node-keyed rows, a nest's cascades with the nest, and a folder's — which is neither — is dropped explicitly.
+
+Raising a request notifies the nest owner + owner/admin collaborators: a `/me/work` inbox row, the `deletion_requested` connector event (Slack/Teams/webhook), and a direct email. Resolving it — either way — notifies the requester the same way (`deletion_deleted` / `deletion_declined`). All delivery is best-effort; a notification failure never fails the action.
+
+`GET /me/work` returns these alongside reviews as items with `type: "deletion"`, carrying `reason` and `request_id`. They land in `items` only for nest owners/admins (the tier that can delete) and in `waiting` for whoever raised them.
+
+### POST `/nests/:nestId/deletion-requests/:id/decline`
+Body: `{ "note": "still referenced by onboarding" }` (required). Write permission. Keeps the node and the row, recording who declined and why. `404` once the request is no longer pending.
+
 ### GET `/nests/:nestId/feed`
 Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
 
@@ -748,6 +797,47 @@ steward scope honored). Change items mirror the queue (not access-filtered).
 tab badge binds to `counts.changes` (actionable items), not the feed length.
 The UI deep-links a comment item to its document with the thread focused via
 `?nest=<id>&doc=<nodeId>&thread=<threadId>`.
+
+### GET `/me/drafts`
+
+Query: `?limit=25&offset=0` (limit clamps to 1–100, offset to ≥ 0)
+
+Every document **you** left unsubmitted, across every nest you can see. A draft
+that was never submitted has no `review_requests` row, so it appears in no
+review queue and no `/me/work` bucket — this is the only surface that finds it
+again. Backs the dashboard's "My Drafts" tab.
+
+Included: nodes whose **latest** version row is authored by the caller with
+status `draft` or `rejected`, and that have no pending review request (those
+are already in `/me/work` under `waiting`). Approved/published documents are
+deliberately excluded — they are not stranded work. Rows for deleted documents
+are filtered out.
+
+```json
+{
+  "drafts": [
+    {
+      "nest_id": "<nestId>",
+      "nest_name": "GTM",
+      "node_id": "nodes/gtm/cohere",
+      "title": "Cohere Kill Sheet",
+      "folder": "gtm",
+      "status": "draft",
+      "version": 3,
+      "updated_at": "2026-07-23 09:12:00"
+    }
+  ],
+  "pagination": { "total": 137, "limit": 25, "offset": 0, "has_more": true }
+}
+```
+
+`total` is counted in SQL, before the existence filter that drops orphaned
+version rows (a document deleted outside the app), so it can run one high and
+leave a page one row short. `has_more` is derived from the **requested** page
+size for that reason, not from the number of rows returned.
+
+Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review`
+— it then leaves this list and appears in `/me/work`.
 
 ---
 
@@ -1183,6 +1273,13 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 **Denials are JSON-RPC.** Gate rejections on the MCP transport path return a JSON-RPC error envelope — `{ "jsonrpc": "2.0", "id": <echoed>, "error": { "code": -32000, "message": "<what failed — actionable reason>" } }` — instead of plain `{error}` JSON, so external clients (PromptOwl, Claude Desktop, Cursor) surface *why* a connection failed: key scoped to a different nest, server suspended, license required, or nest not found / no access.
 
 **Titles are unique on this surface.** `context_get`, `context_update`, `context_delete`, and `context_move` all resolve a document by title, so `context_create` refuses a title already used anywhere in the nest — including in another folder — and answers with the existing node's id plus what to do instead (`context_update` to change it, `context_move` to refile it). A duplicate would otherwise be unreachable by every tool here. REST `POST /nodes` keeps the looser rule (same title in a different folder is fine); both surfaces refuse a create whose id is already taken.
+
+**Deletion requests** mirror the REST + UI flow, so an agent isn't left at a dead end when `context_delete` refuses:
+- `context_request_deletion` — flag a document (by title/id), a `folder`, or the whole `nest` with a required `reason`. Read-tier: anyone who can see a thing may ask for its deletion. Nothing is removed; a refused `context_delete` now names this tool.
+- `context_deletion_queue` — pending (or `declined`) requests with their reasons and request ids.
+- `context_resolve_deletion` — `delete` or `decline` (note required) by request id. **Owner/admin only** — the transport is read-tier, so this per-tool check is the only thing between a viewer and a deleted nest.
+
+**`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
 
 Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same as their REST counterparts):
 - `context_unsynced_list` — mirrors `GET /nests/unsynced`.

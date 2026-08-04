@@ -1158,6 +1158,7 @@ function derivedIdOf(sourceNodeId: string): string {
 export const NODE_KEYED_TABLES = [
   ["node_versions", "node_id"],
   ["review_requests", "node_id"],
+  ["deletion_requests", "node_id"],
   ["approved_versions", "node_id"],
   ["annotation_threads", "node_id"],
   ["comments", "node_id"],
@@ -1408,4 +1409,52 @@ export async function deleteNode(
   });
 
   await trackEvent("node.delete", { nestId, nodeId });
+}
+
+/**
+ * Delete every document under a folder prefix, sub-folders included.
+ *
+ * A folder isn't a stored thing — it exists only as a segment of the node ids
+ * beneath it (`nodes/<folder>/<slug>`), so deleting one IS deleting its
+ * documents. Each goes through deleteNode, which keeps the per-node contract
+ * intact: review lock, purge of node-keyed rows, and a tombstone for external
+ * mirrors. Returns the ids removed.
+ */
+export async function deleteFolder(
+  nestId: string,
+  folder: string,
+  userEmail: string,
+): Promise<string[]> {
+  const segments = folderToSegments(folder);
+  if (segments.length === 0) {
+    throw new ValidationError("folder is required");
+  }
+  const prefix = `nodes/${segments.join("/")}/`;
+
+  const { storage } = await engineCache.get(nestId);
+  const docs = await storage.discoverDocuments();
+  const targets = docs.map((d) => d.id).filter((id) => id.startsWith(prefix));
+  if (targets.length === 0) {
+    throw new NotFoundError(`No documents found under folder: ${folder}`);
+  }
+
+  // Sequential, not Promise.all: deleteNode takes a per-node write lock and
+  // writes the shared tag index, and a partial failure must leave a coherent
+  // vault — the error names how far it got.
+  const deleted: string[] = [];
+  for (const id of targets) {
+    try {
+      await deleteNode(nestId, id, userEmail);
+      deleted.push(id);
+    } catch (err) {
+      const detail =
+        deleted.length > 0
+          ? ` (${deleted.length} of ${targets.length} already deleted)`
+          : "";
+      throw new Error(
+        `Failed to delete "${id}"${detail}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return deleted;
 }

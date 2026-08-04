@@ -1210,6 +1210,76 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("031_team_source");
   }
+
+  // 032: deletion requests (CU-wdqcpzxqcm). Deleting a node is a write-tier
+  //   action, so everyone below it needs a way to flag stale content instead of
+  //   asking in Slack. Deliberately NOT a row in review_requests: a flagged node
+  //   is not under review, and reusing that table would trip the pending-review
+  //   edit lock and the content-review feed. One pending row per (nest, node);
+  //   an honoured request is purged with the node's other rows (see
+  //   NODE_KEYED_TABLES), a declined one keeps the reviewer's note.
+  if (!hasMigration("032_deletion_requests")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS deletion_requests (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          requested_by TEXT NOT NULL,      -- email
+          reason TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'declined')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_by TEXT,                -- email
+          resolved_at TEXT,
+          resolution_note TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_deletion_requests_pending
+          ON deletion_requests(nest_id, node_id) WHERE status = 'pending';
+        CREATE INDEX IF NOT EXISTS idx_deletion_requests_nest
+          ON deletion_requests(nest_id, status);
+      `);
+    })();
+    recordMigration("032_deletion_requests");
+  }
+
+  // 033: a deletion request can target a whole folder or the nest, not just one
+  //   document (CU-wdqcpzxqcm follow-up). `node_id` carries the target for all
+  //   three — a node id, a folder path ("api/limits"), or the nest id — so the
+  //   queue, notifications and resolve path stay one code path. The pending
+  //   index gains target_type: a folder and a document can share a string.
+  if (!hasMigration("033_deletion_request_targets")) {
+    db.transaction(() => {
+      const cols = (
+        db
+          .prepare("PRAGMA table_info(deletion_requests)")
+          .all() as Array<{ name: string }>
+      ).map((c) => c.name);
+      if (!cols.includes("target_type")) {
+        db.exec(
+          "ALTER TABLE deletion_requests ADD COLUMN target_type TEXT NOT NULL DEFAULT 'document'",
+        );
+      }
+      db.exec(`
+        DROP INDEX IF EXISTS idx_deletion_requests_pending;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_deletion_requests_pending
+          ON deletion_requests(nest_id, target_type, node_id) WHERE status = 'pending';
+      `);
+    })();
+    recordMigration("033_deletion_request_targets");
+  }
+
+  // 034: index behind /me/drafts. That query scans node_versions by author +
+  //   status ('draft'/'rejected'); without this it's a full table scan on every
+  //   dashboard load. Not in the base DDL because migration 006 rebuilds the
+  //   table and would drop it on a fresh database.
+  if (!hasMigration("034_versions_author_status_index")) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_versions_author_status
+        ON node_versions(author, status);
+    `);
+    recordMigration("034_versions_author_status_index");
+  }
 }
 
 /**

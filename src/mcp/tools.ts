@@ -26,9 +26,11 @@ import {
   createNode,
   updateNode,
   deleteNode,
+  deleteFolder,
   moveNode,
   listNodesForCallerByEmail,
 } from "../nodes/service.js";
+import { deleteNest } from "../nests/service.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
@@ -321,6 +323,81 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    // Deletion requests, mirroring the REST + UI flow: anyone who can READ a
+    // thing may ask for it to be deleted; only an owner/admin resolves it.
+    // Not in the engine catalog (1.2.1) — deletion requests live in this
+    // repo's governance tables, which the engine doesn't own. Adopt an engine
+    // descriptor here if the operation is ever promoted upstream.
+    name: "context_request_deletion",
+    description:
+      "Ask for something to be deleted when you can't delete it yourself. Flags a document, a folder (with everything in it), or the whole nest for a nest owner/admin to action. Nothing is removed by this call — it opens a request, and the person who resolves it either deletes the target or declines with a note. Use this instead of context_delete when that returns a permission error, or when the document belongs to someone else.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the document to flag" },
+        id: {
+          type: "string",
+          description:
+            'Document id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two documents share a title.',
+        },
+        folder: {
+          type: "string",
+          description:
+            'Flag a whole folder instead of a document — the path, e.g. "gtm/deals". Every document under it goes if the request is honoured.',
+        },
+        nest: {
+          type: "boolean",
+          description:
+            "Flag the ENTIRE nest for deletion. Only an owner/admin can honour it.",
+        },
+        reason: {
+          type: "string",
+          description:
+            "Why it should be deleted. Required — this is what the admin judges.",
+        },
+      },
+      required: ["reason"],
+    },
+  },
+  {
+    name: "context_deletion_queue",
+    description:
+      "Show deletion requests waiting on a nest owner/admin: what was flagged, who asked, and why. Use the request id with context_resolve_deletion to action one.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        status: {
+          type: "string",
+          description:
+            "pending (default) or declined — declined shows past verdicts and their notes.",
+        },
+      },
+    },
+  },
+  {
+    name: "context_resolve_deletion",
+    description:
+      "Action a deletion request: delete the flagged document/folder/nest, or decline it with a note explaining why it stays. Owner/admin only. Declining tells the requester the verdict; deleting is irreversible.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        request_id: {
+          type: "string",
+          description: "Request id from context_deletion_queue",
+        },
+        action: {
+          type: "string",
+          description: '"delete" to honour it, "decline" to keep the target',
+        },
+        note: {
+          type: "string",
+          description: "Why you declined. Required when action is decline.",
+        },
+      },
+      required: ["request_id", "action"],
+    },
+  },
+  {
     name: "context_review_queue",
     description:
       "Show documents pending review. These need a steward to approve or reject them before they become available to AI.",
@@ -332,6 +409,15 @@ export const TOOL_DEFINITIONS = [
           description: "Filter by status: pending (default), approved, rejected, cancelled",
         },
       },
+    },
+  },
+  {
+    name: "context_my_drafts",
+    description:
+      "List YOUR unsubmitted drafts in this nest — documents you wrote that were never submitted for review (plus any that came back rejected). These are invisible to the review queue and unreadable by AI queries until submitted and approved. Use context_submit_review to hand one to a steward.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
     },
   },
   {
@@ -916,7 +1002,8 @@ async function runTool(
       // takes the same per-node check context_update does.
       const deleteCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
       if (!deleteCheck.allowed) {
-        return `You don't have permission to delete "${node.frontmatter.title}": ${deleteCheck.reason}`;
+        // Dead end otherwise — point at the request path the UI offers here.
+        return `You don't have permission to delete "${node.frontmatter.title}": ${deleteCheck.reason}\n\nUse context_request_deletion to ask a nest owner/admin to delete it, with a reason.`;
       }
       await deleteNode(nestId, node.id, userEmail);
       return `Deleted node: **${node.frontmatter.title}** (${node.id})`;
@@ -1005,6 +1092,145 @@ async function runTool(
       return `# Data Stewards\n\n${sections}`;
     }
 
+    case "context_request_deletion": {
+      const reason = typeof args.reason === "string" ? args.reason.trim() : "";
+      if (!reason) {
+        return "reason is required — say why it should be deleted; that is what the admin judges.";
+      }
+
+      // Whole nest.
+      if (args.nest === true) {
+        const request = await reviews.requestDeletion({
+          nestId,
+          nodeId: nestId,
+          targetType: "nest",
+          requestedBy: userEmail,
+          reason,
+          baseUrl: ctx.baseUrl,
+        });
+        return `Requested deletion of the **entire nest**. A nest owner or admin will delete it or decline.\nRequest id: \`${request.id}\``;
+      }
+
+      // Folder — normalized the same way the REST route does, so two people
+      // flagging "gtm/deals" and "/nodes/gtm/deals/" collide on one request.
+      if (typeof args.folder === "string" && args.folder.trim()) {
+        const folder = args.folder
+          .trim()
+          .replace(/^\/+|\/+$/g, "")
+          .replace(/^nodes\//, "");
+        const docs = await storage.discoverDocuments();
+        const inside = docs.filter((d) => d.id.startsWith(`nodes/${folder}/`));
+        if (inside.length === 0) {
+          return `No folder "${folder}" — nothing is filed under it. Use context_list to see what exists.`;
+        }
+        const request = await reviews.requestDeletion({
+          nestId,
+          nodeId: folder,
+          targetType: "folder",
+          requestedBy: userEmail,
+          reason,
+          baseUrl: ctx.baseUrl,
+        });
+        return `Requested deletion of folder **${folder}** (${inside.length} document(s) inside). A nest owner or admin will delete it or decline.\nRequest id: \`${request.id}\``;
+      }
+
+      // Document — resolved by title or id like every other node tool.
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return node;
+      // Read gate: you may flag anything you can see. That is the point —
+      // whoever notices dead content usually can't delete it.
+      if (!(await canReadNode(nestId, node.id, userId, userEmail))) {
+        return `Node not found: ${node.id}`;
+      }
+      const request = await reviews.requestDeletion({
+        nestId,
+        nodeId: node.id,
+        targetType: "document",
+        requestedBy: userEmail,
+        reason,
+        baseUrl: ctx.baseUrl,
+      });
+      return `Requested deletion of **${node.frontmatter.title}**. A nest owner or admin will delete it or decline — nothing is removed yet.\nRequest id: \`${request.id}\``;
+    }
+
+    case "context_deletion_queue": {
+      const status = args.status === "declined" ? "declined" : "pending";
+      const requests = await reviews.listDeletionRequests({ nestId, status });
+      if (requests.length === 0) {
+        return status === "pending"
+          ? "No deletion requests waiting. All caught up!"
+          : "No declined deletion requests.";
+      }
+      const list = requests
+        .map((r, i) => {
+          const kind = r.targetType === "document" ? "" : `${r.targetType}: `;
+          const verdict =
+            r.status === "declined"
+              ? `\n   Declined by ${r.resolvedBy}: "${r.resolutionNote}"`
+              : "";
+          return `${i + 1}. **${kind}${r.title || r.nodeId}**\n   Asked by ${r.requestedBy}: "${r.reason}"\n   Request id: \`${r.id}\`${verdict}`;
+        })
+        .join("\n\n");
+      return `# Deletion requests (${status})\n**${requests.length} item(s)**\n\n${list}`;
+    }
+
+    case "context_resolve_deletion": {
+      const requestId = typeof args.request_id === "string" ? args.request_id : "";
+      const action = args.action === "delete" ? "delete" : args.action === "decline" ? "decline" : null;
+      if (!requestId || !action) {
+        return 'request_id and action are required — action is "delete" or "decline". Use context_deletion_queue to list request ids.';
+      }
+      const request = await reviews.getDeletionRequest(requestId);
+      if (!request || request.nestId !== nestId || request.status !== "pending") {
+        return `No pending deletion request with id ${requestId}.`;
+      }
+
+      // Resolving is the owner/admin call the UI and REST both gate on — the
+      // /mcp transport admits read-tier callers, so this per-tool check is the
+      // only thing between a viewer and a deleted nest.
+      const roles = await stewardship.resolveUserRoles(nestId, userEmail);
+      if (!roles.includes("owner") && !roles.includes("admin")) {
+        return `You don't have permission to resolve deletion requests in this nest — only a nest owner or admin can. You can add to the discussion, but the verdict is theirs.`;
+      }
+
+      const label = await reviews.deletionTargetTitle(request);
+      if (action === "decline") {
+        const note = typeof args.note === "string" ? args.note.trim() : "";
+        if (!note) {
+          return "note is required when declining — the requester is told why it stays.";
+        }
+        await reviews.declineDeletion({
+          nestId,
+          id: requestId,
+          declinedBy: userEmail,
+          note,
+          baseUrl: ctx.baseUrl,
+        });
+        return `Declined the deletion request for **${label}**. It stays, and ${request.requestedBy} has been told why.`;
+      }
+
+      if (request.targetType === "nest") {
+        await deleteNest(nestId);
+      } else if (request.targetType === "folder") {
+        await deleteFolder(nestId, request.nodeId, userEmail);
+        await reviews.dropDeletionRequest(request.id);
+      } else {
+        await deleteNode(nestId, request.nodeId, userEmail);
+      }
+      await reviews.notifyDeletionResolved({
+        nestId,
+        nodeId: request.nodeId,
+        docTitle: label,
+        outcome: "deleted",
+        requestedBy: request.requestedBy,
+        resolvedBy: userEmail,
+        requestId: request.id,
+        targetType: request.targetType,
+        baseUrl: ctx.baseUrl,
+      });
+      return `Deleted **${label}** — ${request.requestedBy}'s request was honoured. Irreversible.`;
+    }
+
     case "context_review_queue": {
       const status = args.status || "pending";
       const result = await reviews.getReviewQueue({
@@ -1026,6 +1252,32 @@ async function runTool(
         .join("\n\n");
 
       return `# Review Queue (${status})\n**${result.total} item(s)**\n\n${list}`;
+    }
+
+    case "context_my_drafts": {
+      // Self-scoped by construction — only rows this caller authored, in a nest
+      // they already hold read on, so no extra permission gate.
+      const { drafts, total } = await versions.listMyDrafts({
+        authorEmail: userEmail,
+        nestIds: [ctx.nestId],
+        limit: 100,
+      });
+      if (total === 0) {
+        return "No unsubmitted drafts — everything you've written here is in review or approved.";
+      }
+      const list = drafts
+        .map(
+          (d, i) =>
+            `${i + 1}. **${d.title}** v${d.version} — ${d.status}\n   Path: ${d.nodeId}\n   Last edited: ${d.updatedAt}`,
+        )
+        .join("\n\n");
+      // Say when the list is cut off rather than letting an agent read a capped
+      // page as the whole set.
+      const more =
+        total > drafts.length
+          ? `\n\n_Showing the ${drafts.length} most recent of ${total}._`
+          : "";
+      return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nSubmit one with \`context_submit_review\`.`;
     }
 
     case "context_submit_review": {

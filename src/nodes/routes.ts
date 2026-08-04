@@ -468,6 +468,13 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
     const pending = await reviews.getPendingReview(nestId, nodeId);
     (response as any).pendingReviewBy = pending?.requestedBy ?? null;
   }
+  // Latest deletion flag, pending or declined. Pending hides the doc view's
+  // "Request deletion" button; declined carries the resolver's note, which is
+  // the only way the person who asked learns the answer.
+  (response as any).deletionRequest = await reviews.getLatestDeletionRequest(
+    nestId,
+    nodeId,
+  );
   if (isRawFormat(c)) {
     // node.rawContent is the exact stored bytes (readDocument and the
     // drift-path loadLatestApprovedNode both come through parseDocument),
