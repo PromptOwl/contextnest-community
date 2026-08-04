@@ -237,10 +237,21 @@ export function DocumentEditor({
   const isViewOnly = isNew
     ? !canAuthorNew
     : isReadOnly && myNodeRoles.length === 0;
-  // Nest admin/owner — the tier that deletes documents outright. Everyone else
-  // (editors and write collaborators included) gets the request path instead.
+  // Who deletes outright: the nest admin/owner tier, plus the person who wrote
+  // the document — asking permission to delete your own work is the wrong
+  // default. Everyone else goes through the request path. The server still
+  // gates on write permission, so an author downgraded to read-only since gets
+  // a 403 rather than a silent delete.
+  const authoredByMe =
+    !!author &&
+    !!adminStatus?.me?.email &&
+    author.toLowerCase() === adminStatus.me.email.toLowerCase();
   const canDeleteDirectly =
-    isOwner || isAdmin || permission === "owner" || permission === "admin";
+    isOwner ||
+    isAdmin ||
+    permission === "owner" ||
+    permission === "admin" ||
+    authoredByMe;
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDeletionModal, setShowDeletionModal] = useState(false);
   // Latest deletion flag on this doc. Pending hides the request button (a
@@ -1036,6 +1047,15 @@ export function DocumentEditor({
     toast.success("Deletion requested — a nest admin will review it");
   };
 
+  // Delete outright (author / admin / owner). Leaves the page afterwards —
+  // staying on a document that no longer exists just 404s the next fetch.
+  const handleDeleteDocument = async () => {
+    if (isNew) return;
+    await api.deleteNode(nestId, nodeId);
+    toast.success(`Deleted "${title || nodeId}"`);
+    onBack();
+  };
+
   const hasReviewerRole = myNodeRoles.includes("reviewer");
   const hasEditorRole = myNodeRoles.includes("editor");
 
@@ -1206,22 +1226,19 @@ export function DocumentEditor({
               {title || (isNew ? "New document" : "Untitled")}
             </h3>
             {!isNew && status && <StatusBadge status={status} />}
-            {!isNew && deletionRequest && (
+            {/* Pending only. A DECLINED flag is a past event, not a state of
+                the document — badging it forever nags everyone who opens a doc
+                that is very much alive, with no way to dismiss it. The verdict
+                reaches the requester as a notification (which has read state),
+                and anyone re-flagging sees it in the request dialog. */}
+            {!isNew && deletionRequested && (
               <span
-                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border ${
-                  deletionRequested
-                    ? "bg-red-50 text-red-700 border-red-200"
-                    : "bg-amber-50 text-amber-700 border-amber-200"
-                }`}
-                title={
-                  deletionRequested
-                    ? `${deletionRequest.requestedBy} asked for this to be deleted: "${deletionRequest.reason}". A nest admin decides.`
-                    : `Deletion declined by ${deletionRequest.resolvedBy}: "${deletionRequest.resolutionNote}"`
-                }
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-red-50 text-red-700 border-red-200"
+                title={`${deletionRequest!.requestedBy} asked for this to be deleted: "${deletionRequest!.reason}". A nest admin decides.`}
                 data-testid="deletion-requested-badge"
               >
                 <Trash2 className="h-3 w-3" />
-                {deletionRequested ? "Deletion requested" : "Deletion declined"}
+                Deletion requested
               </span>
             )}
             {!isNew && !stewardshipEnabled && status === "published" && (
@@ -1400,12 +1417,18 @@ export function DocumentEditor({
             // Below admin only: this opens the REQUEST dialog, not a delete.
             // Admins delete from the nest list — this page has never carried a
             // real delete. Hidden once a flag is already pending.
-            if (!isNew && !canDeleteDirectly && !deletionRequested)
+            // One Delete entry: the author (and the admin/owner tier) deletes
+            // outright, everyone else raises a request. Hidden below that tier
+            // once a flag is already open.
+            if (!isNew && (canDeleteDirectly || !deletionRequested))
               moreActions.push({
                 label: "Delete",
                 icon: Trash2,
                 separatorBefore: true,
-                testId: "document-editor-request-deletion",
+                destructive: canDeleteDirectly,
+                testId: canDeleteDirectly
+                  ? "document-editor-delete"
+                  : "document-editor-request-deletion",
                 onSelect: () => setShowDeletionModal(true),
               });
             return moreActions.length ? (
@@ -2393,15 +2416,30 @@ export function DocumentEditor({
         <ReasonDialog
           open={showDeletionModal}
           onOpenChange={setShowDeletionModal}
-          title={`Request deletion of "${title || nodeId}"`}
-          description="A nest admin reviews this and either deletes the document or declines with a note. Nothing is removed yet."
-          label="Why should it be deleted?"
-          placeholder="e.g. superseded by the new runbook"
-          confirmLabel="Request deletion"
-          priorDecline={
-            deletionRequest?.status === "declined" ? deletionRequest : null
+          title={
+            canDeleteDirectly
+              ? `Delete "${title || nodeId}"?`
+              : `Request deletion of "${title || nodeId}"`
           }
-          onConfirm={handleRequestDeletion}
+          description={
+            canDeleteDirectly
+              ? "This removes the document, its version history, comments and annotations. It cannot be undone."
+              : "A nest admin reviews this and either deletes the document or declines with a note. Nothing is removed yet."
+          }
+          // Deleting your own work needs no justification; asking for someone
+          // else's does.
+          label={canDeleteDirectly ? undefined : "Why should it be deleted?"}
+          placeholder="e.g. superseded by the new runbook"
+          confirmLabel={canDeleteDirectly ? "Delete document" : "Request deletion"}
+          destructive={canDeleteDirectly}
+          priorDecline={
+            !canDeleteDirectly && deletionRequest?.status === "declined"
+              ? deletionRequest
+              : null
+          }
+          onConfirm={
+            canDeleteDirectly ? handleDeleteDocument : handleRequestDeletion
+          }
         />
       )}
 

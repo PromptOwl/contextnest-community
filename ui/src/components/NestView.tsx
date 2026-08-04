@@ -6,6 +6,7 @@ import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "rea
 import * as api from "../lib/api";
 import { matchesFilters } from "../lib/node-filter";
 import { linkHealth } from "../lib/link-health";
+import { parseServerDate, formatServerDate } from "../lib/dates";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
   parseSavedFilters, serializeSavedFilters,
@@ -92,7 +93,9 @@ import { CollaboratorManager } from "./CollaboratorManager";
 import { toast } from "sonner";
 
 function timeAgo(dateStr: string) {
-  const date = new Date(dateStr);
+  // See lib/dates — SQL-default timestamps carry no zone.
+  const date = parseServerDate(dateStr);
+  if (!date) return "";
   const diff = Date.now() - date.getTime();
   if (diff < 60_000) return "just now";
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
@@ -2375,7 +2378,14 @@ export function NestView({
                   // Deleting is a nest admin/owner call — an editor who can
                   // write this doc still goes through the request queue. Same
                   // tier the document view uses for its Delete/Request split.
-                  const canDelete = canManage;
+                  // Exception: your own document. Asking permission to delete
+                  // work you wrote is the wrong default; the queue is for
+                  // someone else's content.
+                  const authoredByMe =
+                    !!node.author &&
+                    !!currentEmail &&
+                    node.author.toLowerCase() === currentEmail;
+                  const canDelete = canManage || authoredByMe;
                   const flag = flagByNode.get(node.id);
                   const flagPending = flag?.status === "pending";
                   // ONE Delete action for everyone. Admins get the delete
@@ -2526,22 +2536,18 @@ export function NestView({
                             size="sm"
                             className="shrink-0 whitespace-nowrap"
                           />
-                          {flag && (
+                          {/* Pending only — see the note in DocumentEditor: a
+                              declined flag is history, and history belongs in
+                              the notification (dismissible), not a permanent
+                              badge on a document that was kept. */}
+                          {flagPending && (
                             <span
-                              className={`shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border ${
-                                flagPending
-                                  ? "bg-red-50 text-red-700 border-red-200"
-                                  : "bg-amber-50 text-amber-700 border-amber-200"
-                              }`}
-                              title={
-                                flagPending
-                                  ? `${flag.requestedBy} asked for this to be deleted: "${flag.reason}". A nest admin decides.`
-                                  : `Deletion declined by ${flag.resolvedBy}: "${flag.resolutionNote}"`
-                              }
+                              className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-red-50 text-red-700 border-red-200"
+                              title={`${flag!.requestedBy} asked for this to be deleted: "${flag!.reason}". A nest admin decides.`}
                               data-testid={`deletion-flag-${node.id}`}
                             >
                               <Trash2 className="h-3 w-3" />
-                              {flagPending ? "Deletion requested" : "Deletion declined"}
+                              Deletion requested
                             </span>
                           )}
                           {cards && <div className="ml-auto">{actionMenu}</div>}
@@ -3173,7 +3179,7 @@ export function NestView({
                           <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
                             <Clock className="h-3 w-3" />
                             <span>
-                              {new Date(entry.detected_at).toLocaleString()}
+                              {formatServerDate(entry.detected_at)}
                             </span>
                             <span>•</span>
                             <span>by {entry.actor}</span>
