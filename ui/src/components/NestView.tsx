@@ -5,6 +5,7 @@
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
 import { matchesFilters } from "../lib/node-filter";
+import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
 import { parseServerDate, formatServerDate } from "../lib/dates";
 import {
@@ -318,10 +319,11 @@ export function NestView({
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [authorFilter, setAuthorFilter] = useState<string>("all");
   const [dateFilter, setDateFilter] = useState<DatePreset>("any");
-  // Document list sort: by title, last edited, or comment (annotation) count.
-  const [sortMode, setSortMode] = useState<"name" | "edited" | "comments">(
-    "name",
-  );
+  // Document list sort. Defaults to "activity" (most-recently-touched first) so
+  // the list opens on what changed, not an alphabetical wall.
+  const [sortMode, setSortMode] = useState<
+    "activity" | "name" | "edited" | "comments"
+  >("activity");
   // Per-node comment (annotation thread) counts, for the "Most comments" sort.
   const [commentCounts, setCommentCounts] = useState<
     Record<string, { count: number; lastAt: string | null }>
@@ -778,7 +780,14 @@ export function NestView({
   // edited first (updated_at already on each node); "comments" = most comment
   // threads first, tie-broken by most recent comment then title.
   const sorted = [...filtered];
-  if (sortMode === "edited") {
+  if (sortMode === "activity") {
+    // Recent activity = the later of last edit and last comment, newest first.
+    sorted.sort((a, b) =>
+      activityTimestamp(b.updated_at, commentCounts[b.id]?.lastAt).localeCompare(
+        activityTimestamp(a.updated_at, commentCounts[a.id]?.lastAt),
+      ),
+    );
+  } else if (sortMode === "edited") {
     sorted.sort((a, b) =>
       String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
     );
@@ -2082,13 +2091,14 @@ export function NestView({
                   <Select
                     value={sortMode}
                     onValueChange={(v) =>
-                      setSortMode(v as "name" | "edited" | "comments")
+                      setSortMode(v as "activity" | "name" | "edited" | "comments")
                     }
                   >
                     <SelectTrigger className="w-[150px] h-8" title="Sort documents">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="activity">Recent activity</SelectItem>
                       <SelectItem value="name">Name (A–Z)</SelectItem>
                       <SelectItem value="edited">Recently edited</SelectItem>
                       <SelectItem value="comments">Most comments</SelectItem>
