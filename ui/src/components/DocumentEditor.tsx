@@ -1819,6 +1819,14 @@ export function DocumentEditor({
                     Exempted from its prime tag.
                   </p>
                 )}
+                {/* The one case people get wrong: an owner with auto-publish on
+                    expects their edit to go live, and on a prime doc it won't. */}
+                {effectivePrime && allowSelfApprove && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    Overrides auto-publish — your edits here queue for review
+                    like everyone else&rsquo;s.
+                  </p>
+                )}
               </div>
               <Switch
                 checked={effectivePrime}

@@ -66,6 +66,11 @@ export function NestSettingsModal({
   const [disableAcknowledged, setDisableAcknowledged] = useState(false);
   const turningStewardshipOff = stewardshipEnabled && !enabled;
 
+  // The owner/admin bypass is unreachable while prime-only review is on: the
+  // gate self-publishes every non-prime doc before it ever consults
+  // allow_self_approve, and prime docs ignore the bypass by design.
+  const selfApproveMoot = enabled && primeOnly;
+
   // Normalized the same way the server does, so the dirty check below doesn't
   // fire on cosmetic differences ("#Prime, " vs "prime").
   const nextPrimeTags = [
@@ -130,7 +135,10 @@ export function NestSettingsModal({
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[500px]">
+      {/* Capped height + scrolling body: the prime section pushed this dialog
+          past the viewport on short screens, taking the header and the
+          Save/Cancel footer off-screen with it. */}
+      <DialogContent className="sm:max-w-[500px] flex flex-col max-h-[85vh]">
         <DialogHeader>
           <DialogTitle>Settings: {nestName}</DialogTitle>
           <DialogDescription>
@@ -138,7 +146,7 @@ export function NestSettingsModal({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
+        <div className="space-y-4 py-2 flex-1 min-h-0 overflow-y-auto pr-1">
           {error && (
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
@@ -237,8 +245,39 @@ export function NestSettingsModal({
                   Audit logs still record every actor.
                 </p>
               </div>
-              <Switch checked={selfApprove} onCheckedChange={setSelfApprove} />
+              <Switch
+                checked={selfApprove}
+                onCheckedChange={setSelfApprove}
+                disabled={selfApproveMoot}
+              />
             </div>
+
+            {/* Prime-only review self-publishes for EVERYONE, so the
+                owner/admin bypass never gets consulted — say so rather than
+                leaving a live switch that changes nothing. */}
+            {selfApproveMoot && (
+              <div className="flex items-start gap-2 text-xs text-muted-foreground pt-2 border-t">
+                <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                <div>
+                  <strong className="text-foreground">No effect right now.</strong>{" "}
+                  &ldquo;Review prime documents only&rdquo; is on, so every
+                  non-prime document already self-publishes for everyone — and
+                  prime documents always need approval, including from owners
+                  and admins. Turn prime-only review off to use this bypass.
+                </div>
+              </div>
+            )}
+
+            {enabled && !selfApproveMoot && (
+              <div className="flex items-start gap-2 text-xs text-muted-foreground pt-2 border-t">
+                <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                <div>
+                  <strong className="text-foreground">Prime wins.</strong> A
+                  document flagged prime (or carrying a prime tag) always goes
+                  through review, even for an owner or admin with this on.
+                </div>
+              </div>
+            )}
           </div>
           )}
 
@@ -256,7 +295,8 @@ export function NestSettingsModal({
                   and only <strong>prime</strong> documents go through
                   draft &rarr; pending &rarr; approved. Prime always wins: a
                   prime document needs approval even from an owner or admin with
-                  auto-publish on.
+                  auto-publish on, and turning this on makes the auto-publish
+                  bypass above redundant.
                 </p>
               </div>
               <Switch checked={primeOnly} onCheckedChange={setPrimeOnly} />

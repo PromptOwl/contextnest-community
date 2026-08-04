@@ -80,6 +80,8 @@ A per-nest flag (**off** by default; nest Settings → "Review prime documents o
 
 That's the "most content self-publishes, high-stakes content is gated" posture. Leaving it off preserves the original behaviour, so turning stewardship on doesn't silently change meaning for an existing nest.
 
+While `prime_only_review` is on, `allow_self_approve` has no effect at all — non-prime documents already publish for everyone, and prime documents ignore the bypass. Settings disables that switch and says so rather than leaving a live control that changes nothing.
+
 Prime only applies to **governed** nests. With stewardship off there are no stewards to approve anything, so a prime tag is inert until you turn stewardship on.
 
 ### At a glance
