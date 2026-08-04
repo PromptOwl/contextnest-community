@@ -62,6 +62,10 @@ type View =
       /** Seed the nest list's search filter when arriving via a tag
        *  click on a document detail page. */
       initialSearch?: string;
+      /** Pre-scope the nest list when arriving from a tag chip or a folder
+       *  breadcrumb segment on a document/graph page. */
+      initialTags?: string[];
+      initialFolder?: string;
     }
   | {
       page: "document";
@@ -728,6 +732,8 @@ export default function App() {
             isOwner={view.isOwner}
             isAnonOwned={view.isAnonOwned}
             initialSearch={view.initialSearch}
+            initialTags={view.initialTags}
+            initialFolder={view.initialFolder}
             onBack={() => {
               // Drop ?nest from URL so refresh doesn't re-enter the nest.
               if (typeof window !== "undefined") {
@@ -797,14 +803,18 @@ export default function App() {
             initialTitle?: string;
             breadcrumb?: BreadcrumbEntry[];
           }) => setView({ page: "document", ...target });
-          const openNest = (initialSearch?: string) =>
+          const openNest = (opts?: {
+            initialSearch?: string;
+            initialTags?: string[];
+            initialFolder?: string;
+          }) =>
             setView({
               page: "nest",
               nestId: doc.nestId,
               nestName: doc.nestName,
               isOwner: doc.isOwner,
               isAnonOwned: doc.isAnonOwned,
-              initialSearch,
+              ...opts,
             });
           return (
             <DocumentEditor
@@ -890,9 +900,12 @@ export default function App() {
                 });
               }}
               onTagClick={(tag) =>
-                // Tag chip → nest list filtered by tag.
-                openNest(tag)
+                // Tag chip → nest list filtered by that tag (same tagFilters
+                // mechanism the list rows use, not a text search).
+                openNest({ initialTags: [tag] })
               }
+              onOpenNest={() => openNest()}
+              onOpenFolder={(folder) => openNest({ initialFolder: folder })}
               onCreateDocument={(linkNestId, initialTitle) =>
                 // Broken `[[Title]]` → new-doc page with title pre-filled.
                 openDocument({
@@ -947,6 +960,16 @@ export default function App() {
           <OntologyGraphView
             nestId={view.nestId}
             nestName={view.nestName}
+            onOpenTag={(tag) =>
+              setView({
+                page: "nest",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+                initialTags: [tag],
+              })
+            }
             onBack={() =>
               setView({
                 page: "nest",

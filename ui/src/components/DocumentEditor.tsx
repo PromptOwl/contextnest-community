@@ -123,6 +123,10 @@ interface DocumentEditorProps {
   ) => void;
   /** Tag chip click → filter nest list by tag. */
   onTagClick?: (tag: string) => void;
+  /** Open this nest's document list (breadcrumb nest-name click). */
+  onOpenNest?: () => void;
+  /** Open the nest list scoped to a folder (breadcrumb folder-segment click). */
+  onOpenFolder?: (folder: string) => void;
   /** Broken `[[Title]]` click → create-with-title. */
   onCreateDocument?: (nestId: string, title: string) => void;
   /** Pre-fill title when nodeId === "new" (wiki-create flow). */
@@ -150,6 +154,8 @@ export function DocumentEditor({
   onSaved,
   onNavigateDocument,
   onTagClick,
+  onOpenNest,
+  onOpenFolder,
   onCreateDocument,
   initialTitle,
   breadcrumb,
@@ -623,15 +629,15 @@ export function DocumentEditor({
   const folderSegments = useMemo(() => {
     if (isNew || !nodeId) return [];
     const rel = nodeId.startsWith("nodes/") ? nodeId.slice(6) : nodeId;
-    return rel
-      .split("/")
-      .slice(0, -1)
-      .map((seg) =>
-        seg
-          .split("-")
-          .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
-          .join(" "),
-      );
+    const raw = rel.split("/").slice(0, -1);
+    return raw.map((seg, i) => ({
+      // Raw cumulative path (matches NestView's folderFilter) + prettified label.
+      path: raw.slice(0, i + 1).join("/"),
+      label: seg
+        .split("-")
+        .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+        .join(" "),
+    }));
   }, [isNew, nodeId]);
 
   // Docs in this nest that wiki-link to this one ("what links here").
@@ -1219,9 +1225,17 @@ export function DocumentEditor({
           </Button>
           {/* Chain: nest > ancestors… > doc. Chip click truncates chain. */}
           <div className="flex items-center gap-2 min-w-0 flex-wrap">
-            <span className="text-sm text-muted-foreground truncate">
+            <button
+              type="button"
+              onClick={() =>
+                onOpenNest && confirmLeave("go to the nest", onOpenNest)
+              }
+              disabled={!onOpenNest}
+              className="text-sm text-muted-foreground truncate hover:text-foreground hover:underline underline-offset-2 disabled:no-underline disabled:hover:text-muted-foreground disabled:cursor-default"
+              title={onOpenNest ? `Open ${nestName}` : nestName}
+            >
               {nestName}
-            </span>
+            </button>
             {breadcrumb?.map((entry, i) => (
               <Fragment key={`${entry.nestId}/${entry.nodeId}/${i}`}>
                 <span className="text-muted-foreground shrink-0">›</span>
@@ -1244,12 +1258,20 @@ export function DocumentEditor({
             {folderSegments.map((seg, i) => (
               <Fragment key={`folder-${i}`}>
                 <span className="text-muted-foreground shrink-0">›</span>
-                <span
-                  className="text-sm text-muted-foreground truncate max-w-[160px]"
-                  title={seg}
+                <button
+                  type="button"
+                  onClick={() =>
+                    onOpenFolder &&
+                    confirmLeave(`open "${seg.label}"`, () =>
+                      onOpenFolder(seg.path),
+                    )
+                  }
+                  disabled={!onOpenFolder}
+                  className="text-sm text-muted-foreground truncate max-w-[160px] hover:text-foreground hover:underline underline-offset-2 disabled:no-underline disabled:hover:text-muted-foreground disabled:cursor-default"
+                  title={seg.path}
                 >
-                  {seg}
-                </span>
+                  {seg.label}
+                </button>
               </Fragment>
             ))}
             <span className="text-muted-foreground shrink-0">›</span>

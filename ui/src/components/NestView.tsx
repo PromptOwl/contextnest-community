@@ -136,6 +136,10 @@ interface NestViewProps {
   /** Seed the search filter on mount. Used when arriving from a tag
    *  click on a document detail page. */
   initialSearch?: string;
+  /** Pre-seed the tag filter / folder scope when arriving from a tag chip or
+   *  a folder breadcrumb segment elsewhere in the app. */
+  initialTags?: string[];
+  initialFolder?: string;
 }
 
 export function NestView({
@@ -147,6 +151,8 @@ export function NestView({
   onOpenDocument,
   onOpenTrace,
   initialSearch,
+  initialTags,
+  initialFolder,
 }: NestViewProps) {
   const { isAdmin, adminStatus, authMode } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
@@ -309,7 +315,7 @@ export function NestView({
   const [initialLoad, setInitialLoad] = useState(true);
   const [search, setSearch] = useState(initialSearch ?? "");
   // Multi-tag AND filter; toggled by clicking tag chips on list rows.
-  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [tagFilters, setTagFilters] = useState<string[]>(initialTags ?? []);
   const toggleTagFilter = (tag: string) =>
     setTagFilters((prev) =>
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
@@ -451,7 +457,9 @@ export function NestView({
   // mean root-only but we scope by subtree), collapsed folder paths, and
   // drag-and-drop bookkeeping for moving docs between folders.
   const [activeTab, setActiveTab] = useState("overview");
-  const [folderFilter, setFolderFilter] = useState<string | null>(null);
+  const [folderFilter, setFolderFilter] = useState<string | null>(
+    initialFolder ?? null,
+  );
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const [dropFolder, setDropFolder] = useState<string | null>(null);
