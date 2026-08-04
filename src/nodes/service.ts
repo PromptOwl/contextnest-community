@@ -12,7 +12,7 @@ import {
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm } from "node:fs/promises";
 import { dirname, join, basename } from "node:path";
-import { safePublishDocument } from "../governance/safe-publish.js";
+import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache } from "./engine.js";
 import {
   AppError,
@@ -1289,7 +1289,12 @@ export async function moveNode(
         updated_at: new Date().toISOString(),
       },
     };
-    await storage.writeDocument(newId, serializeDocument(moved));
+    // serializeNodeSafe, not serializeDocument: `moved` came from
+    // readDocument, so an empty `tags: []` on disk is back as
+    // `tags: undefined` and the YAML dumper throws on it. Only published docs
+    // are already clean (approve rewrites them through safePublishDocument),
+    // which is why drafts and pending-review docs were the ones failing.
+    await storage.writeDocument(newId, serializeNodeSafe(moved));
 
     // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
     // doc) so reconstructVersion keeps working for pre-move versions. Layout is
@@ -1336,7 +1341,7 @@ export async function moveNode(
       const derivedDoc = await storage.readDocument(oldDerived);
       await storage.writeDocument(
         newDerived,
-        serializeDocument({ ...derivedDoc, id: newDerived }),
+        serializeNodeSafe({ ...derivedDoc, id: newDerived }),
       );
       await storage.deleteDocument(oldDerived);
     } catch {
