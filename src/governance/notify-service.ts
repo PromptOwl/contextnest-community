@@ -12,6 +12,7 @@
  */
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { describeNode } from "./title-resolver.js";
 
 export interface Watcher {
   id: string;
@@ -89,6 +90,9 @@ export async function notifyReviewRequested(params: {
     )) as Array<{ user_email: string; via: string }>;
 
     const now = new Date().toISOString();
+    // Human title, not the storage id — an inbox row reading
+    // "nodes/content/blog-viewable-second-brain" leaks the path at the user.
+    const label = await describeNode(nestId, nodeId);
     let created = 0;
     for (const r of rows) {
       // Don't notify someone about their own submission.
@@ -102,8 +106,8 @@ export async function notifyReviewRequested(params: {
           r.user_email.toLowerCase(),
           reviewId,
           r.via === nodeId
-            ? `"${nodeId}" has a new version awaiting review (submitted by ${requestedBy})`
-            : `Agent "${r.via}" produced output on "${nodeId}" — awaiting review`,
+            ? `"${label}" has a new version awaiting review (submitted by ${requestedBy})`
+            : `Agent "${await describeNode(nestId, r.via)}" produced output on "${label}" — awaiting review`,
           now,
         ],
       );
@@ -149,6 +153,7 @@ export async function notifyReviewResolved(params: {
     recipients.delete(resolvedBy.toLowerCase()); // not the person who clicked
 
     const now = new Date().toISOString();
+    const label = await describeNode(nestId, nodeId);
     let created = 0;
     for (const email of recipients) {
       await db.run(
@@ -160,7 +165,7 @@ export async function notifyReviewResolved(params: {
           email,
           `review_${status}`,
           reviewId,
-          `"${nodeId}" was ${status} by ${resolvedBy}`,
+          `"${label}" was ${status} by ${resolvedBy}`,
           now,
         ],
       );

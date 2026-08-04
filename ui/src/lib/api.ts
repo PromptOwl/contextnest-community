@@ -983,6 +983,84 @@ export async function getNodeStewards(nestId: string, nodeId: string) {
   );
 }
 
+// ── Deletion requests ─────────────────────────────────────────────────────
+// Flagging is open to anyone who can read the node; resolving needs the same
+// write permission a direct delete does (server-enforced).
+
+export interface DeletionRequest {
+  id: string;
+  /** Node id, folder path, or nest id — see targetType. */
+  nodeId: string;
+  targetType?: "document" | "folder" | "nest";
+  title?: string;
+  requestedBy: string;
+  reason: string;
+  status: "pending" | "declined";
+  createdAt: string;
+  resolvedBy?: string;
+  resolutionNote?: string;
+}
+
+export async function requestNodeDeletion(
+  nestId: string,
+  nodeId: string,
+  reason: string,
+) {
+  return request<{ request: DeletionRequest }>(
+    `/nests/${nestId}/nodes/${nodeId}/request-deletion`,
+    { method: "POST", body: JSON.stringify({ reason }) },
+  );
+}
+
+/** Delete a folder and every document under it. Owner/admin only. */
+export async function deleteFolder(nestId: string, folder: string) {
+  return request<{ deleted: number; nodeIds: string[] }>(
+    `/nests/${nestId}/delete-folder`,
+    { method: "POST", body: JSON.stringify({ folder }) },
+  );
+}
+
+/** Flag a whole folder ("api/limits") or the nest itself for deletion. */
+export async function requestTargetDeletion(
+  nestId: string,
+  targetType: "folder" | "nest",
+  target: string,
+  reason: string,
+) {
+  return request<{ request: DeletionRequest }>(
+    `/nests/${nestId}/request-deletion`,
+    {
+      method: "POST",
+      body: JSON.stringify({ targetType, target, reason }),
+    },
+  );
+}
+
+/** status: "pending" | "declined" | "all" */
+export async function getDeletionRequests(nestId: string, status = "pending") {
+  return request<{ requests: DeletionRequest[]; total: number }>(
+    `/nests/${nestId}/deletion-requests?status=${encodeURIComponent(status)}`,
+  );
+}
+
+export async function approveDeletionRequest(nestId: string, id: string) {
+  return request<{ deleted: boolean; nodeId: string }>(
+    `/nests/${nestId}/deletion-requests/${id}/delete`,
+    { method: "POST" },
+  );
+}
+
+export async function declineDeletionRequest(
+  nestId: string,
+  id: string,
+  note: string,
+) {
+  return request<{ request: DeletionRequest }>(
+    `/nests/${nestId}/deletion-requests/${id}/decline`,
+    { method: "POST", body: JSON.stringify({ note }) },
+  );
+}
+
 export async function getReviewQueue(nestId: string, status = "pending") {
   return request<{ requests: any[]; total: number }>(
     `/nests/${nestId}/review-queue?status=${encodeURIComponent(status)}`,
@@ -1684,7 +1762,9 @@ export async function getNestGraph(nestId: string) {
 // ─── My Work — cross-nest inbox ──────────────────────────────────────────
 
 export interface WorkItem {
-  type: "review";
+  /** "deletion" = someone asked for the document to be deleted; only nest
+   *  owners/admins get those in the waiting-on-me bucket. */
+  type: "review" | "deletion";
   nest_id: string;
   nest_name: string;
   node_id: string;
@@ -1692,6 +1772,12 @@ export interface WorkItem {
   requested_by: string;
   requested_at: string;
   priority?: string;
+  /** Deletion items only: why it was flagged, and the row to resolve. */
+  reason?: string;
+  request_id?: string;
+  /** Deletion items only. For "folder"/"nest", node_id is a folder path or the
+   *  nest id — NOT a document id, so don't open the editor on it. */
+  target_type?: "document" | "folder" | "nest";
 }
 
 export interface WatcherNotification {

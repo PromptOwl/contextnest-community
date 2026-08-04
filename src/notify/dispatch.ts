@@ -44,6 +44,9 @@ const EVENT_EMOJI: Record<string, string> = {
   review_approved: ":white_check_mark:",
   review_rejected: ":x:",
   run_failed: ":rotating_light:",
+  deletion_requested: ":wastebasket:",
+  deletion_deleted: ":wastebasket:",
+  deletion_declined: ":no_entry_sign:",
 };
 
 /** Event kinds review-service ALSO sends through notify.ts's debounced
@@ -53,6 +56,9 @@ const DIGEST_DELIVERED_KINDS = new Set([
   "review_requested",
   "review_approved",
   "review_rejected",
+  "deletion_requested",
+  "deletion_deleted",
+  "deletion_declined",
 ]);
 
 /** Channel presets: same event, three wire formats. */

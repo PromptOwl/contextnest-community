@@ -41,7 +41,13 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // at all (the id rewrite spans governance tables the engine doesn't own), so there is no
 // upstream descriptor to import. The tool mirrors the existing REST POST /nodes/:id/move.
 // If move is ever promoted to a core engine operation, adopt its descriptor here.
-const BASELINE = 43;
+// Raised 43 -> 46 for the deletion-request trio (`context_request_deletion`,
+// `context_deletion_queue`, `context_resolve_deletion`). Same reason as move: deletion
+// REQUESTS are not in the engine catalog at all — they live in this repo's governance
+// tables (a flag is not a document operation), so there is no upstream descriptor to
+// import. They mirror the REST surface 1:1. Mirror the names upstream if the operation is
+// ever promoted, then adopt its descriptor here.
+const BASELINE = 46;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 
