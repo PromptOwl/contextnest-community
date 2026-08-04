@@ -20,6 +20,7 @@ import {
   LockedError,
   ValidationError,
   ConflictError,
+  ForbiddenError,
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
@@ -28,7 +29,9 @@ import {
   isStewardshipEnabled,
   resolveNestPath,
   nestAllowsSelfApprove,
+  nestReviewsPrimeOnly,
 } from "../nests/service.js";
+import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { resolveUserRoles } from "../governance/stewardship-service.js";
 import { canApproveWith } from "../governance/roles.js";
@@ -178,6 +181,10 @@ export interface NodeResponse {
   /** Orchestrator hint for runnable nodes (type agent/skill) — free-form
    *  cron/interval string, opaque to the server. */
   schedule?: string;
+  /** Document-scope prime flag, undefined when the doc inherits from tag/nest
+   *  scope. Clients resolve the inherited case from `tags` + the nest's
+   *  `prime_tags` setting; the server gate is authoritative either way. */
+  prime?: boolean;
 }
 
 /** Node types an orchestrator can fetch and run; only these carry schedule. */
@@ -214,6 +221,7 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
       (fm.metadata as any)?.schedule != null
         ? String((fm.metadata as any).schedule)
         : undefined,
+    prime: documentPrimeFlag(fm.metadata),
   };
 }
 
@@ -452,6 +460,10 @@ export interface CreateNodeInput {
    *  storage and read/update/delete already handle nested ids, only creation
    *  was flat. Ignored when an explicit id is given. */
   folder?: string;
+  /** Document-scope prime flag — see `isPrimeDocument`. Omit to inherit from
+   *  the nest's prime tags; `false` exempts this doc from an otherwise-prime
+   *  tag. */
+  prime?: boolean;
 }
 
 export interface UpdateNodePatch {
@@ -463,6 +475,8 @@ export interface UpdateNodePatch {
   changeNote?: string;
   /** Orchestrator schedule — runnable types only; empty string clears it. */
   schedule?: string;
+  /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
+  prime?: boolean | null;
 }
 
 export interface NodeMutationResult {
@@ -485,6 +499,45 @@ async function actorAutoPublishes(
   if (!(await nestAllowsSelfApprove(nestId))) return false;
   const roles = await resolveUserRoles(nestId, userEmail);
   return roles.includes("owner") || roles.includes("admin");
+}
+
+/**
+ * Single decision point for "does this write publish immediately, or land as a
+ * draft?" — both createNode and updateNode route through here so the gate can
+ * never disagree between the two paths.
+ *
+ * Order matters: prime is checked BEFORE any bypass, because a prime document
+ * always requires approval — that is the whole point of flagging it. An owner
+ * with self-approve on still drafts when the doc is prime.
+ */
+/**
+ * Flagging a document prime (or un-flagging it) is a governance action, not an
+ * authoring one — otherwise any editor could set `prime: false` on the sales
+ * playbook and walk their own edit straight past the review gate.
+ */
+async function assertMayFlagPrime(
+  nestId: string,
+  userEmail: string
+): Promise<void> {
+  const roles = await resolveUserRoles(nestId, userEmail);
+  if (!roles.includes("owner") && !roles.includes("admin")) {
+    throw new ForbiddenError(
+      "Only the nest owner or an admin can change a document's prime flag."
+    );
+  }
+}
+
+async function autoPublishes(
+  nestId: string,
+  userEmail: string,
+  doc: { tags?: readonly unknown[]; metadata?: unknown }
+): Promise<boolean> {
+  // Ungoverned nest: nothing to review, nobody to review it.
+  if (!(await isStewardshipEnabled(nestId))) return true;
+  if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return false;
+  // Prime-only posture: everything that isn't prime self-publishes.
+  if (await nestReviewsPrimeOnly(nestId)) return true;
+  return actorAutoPublishes(nestId, userEmail);
 }
 
 export async function createNode(
@@ -589,10 +642,17 @@ export async function createNode(
     }
 
     const hasStewards = await isStewardshipEnabled(nestId);
-    // Ungoverned always publishes; a governed nest publishes too when an
-    // owner/admin creates it under self-approve (their work bypasses review).
-    const autoPublish =
-      !hasStewards || (await actorAutoPublishes(nestId, userEmail));
+    if (input.prime !== undefined) await assertMayFlagPrime(nestId, userEmail);
+    const metadata = {
+      owners: ["*"],
+      scope: input.scope || "team",
+      ...(input.schedule ? { schedule: input.schedule } : {}),
+      ...(input.prime === undefined ? {} : { prime: input.prime }),
+    };
+    const autoPublish = await autoPublishes(nestId, userEmail, {
+      tags,
+      metadata,
+    });
     const initialStatus = autoPublish ? "published" : "draft";
     // Publish path starts at v=0 so the engine publish bump lands at v=1.
     const initialVersion = autoPublish ? 0 : 1;
@@ -608,11 +668,7 @@ export async function createNode(
         version: initialVersion,
         created_at: now,
         updated_at: now,
-        metadata: {
-          owners: ["*"],
-          scope: input.scope || "team",
-          ...(input.schedule ? { schedule: input.schedule } : {}),
-        } as any,
+        metadata: metadata as any,
       },
       body: input.content,
       rawContent: "",
@@ -967,13 +1023,23 @@ export async function updateNode(
         else metadata.schedule = patch.schedule;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
       }
+      if (patch.prime !== undefined) {
+        await assertMayFlagPrime(nestId, userEmail);
+        const metadata = { ...(node.frontmatter.metadata as any) };
+        if (patch.prime === null) delete metadata.prime;
+        else metadata.prime = patch.prime;
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+      }
 
       const hasStewards = await isStewardshipEnabled(nestId);
-      // Owner/admin edits publish straight through when the nest opts into
-      // self-approve; editors/reviewers still draft → review → approve.
-      const autoPublish =
-        !hasStewards || (await actorAutoPublishes(nestId, userEmail));
       const currentTags = (node.frontmatter.tags || []) as string[];
+      // Resolved from the POST-patch tags and metadata, which patch.tags has
+      // already merged into — so an edit that adds a prime tag gates itself,
+      // and one that clears the doc flag can't un-gate a prime-tagged doc.
+      const autoPublish = await autoPublishes(nestId, userEmail, {
+        tags: currentTags,
+        metadata: node.frontmatter.metadata,
+      });
 
       // Stewardship lock: a node with an open review request is frozen for
       // everyone EXCEPT its own author. A teammate's pending review is what

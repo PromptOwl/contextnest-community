@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
@@ -21,6 +22,7 @@ import {
   Loader2,
   Info,
   UserCheck,
+  Star,
 } from "lucide-react";
 import * as api from "../lib/api";
 
@@ -29,10 +31,17 @@ interface NestSettingsModalProps {
   nestName: string;
   stewardshipEnabled: boolean;
   allowSelfApprove: boolean;
+  primeOnlyReview: boolean;
+  primeTags: string[];
   /** False hides the stewardship section. Server still enforces. */
   canManageStewardship: boolean;
   onClose: () => void;
-  onChanged: (next: { stewardshipEnabled: boolean; allowSelfApprove: boolean }) => void;
+  onChanged: (next: {
+    stewardshipEnabled: boolean;
+    allowSelfApprove: boolean;
+    primeOnlyReview: boolean;
+    primeTags: string[];
+  }) => void;
 }
 
 export function NestSettingsModal({
@@ -40,12 +49,16 @@ export function NestSettingsModal({
   nestName,
   stewardshipEnabled,
   allowSelfApprove,
+  primeOnlyReview,
+  primeTags,
   canManageStewardship,
   onClose,
   onChanged,
 }: NestSettingsModalProps) {
   const [enabled, setEnabled] = useState(stewardshipEnabled);
   const [selfApprove, setSelfApprove] = useState(allowSelfApprove);
+  const [primeOnly, setPrimeOnly] = useState(primeOnlyReview);
+  const [primeTagText, setPrimeTagText] = useState(primeTags.join(", "));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Acknowledgement required only when the caller is turning stewardship
@@ -53,10 +66,29 @@ export function NestSettingsModal({
   const [disableAcknowledged, setDisableAcknowledged] = useState(false);
   const turningStewardshipOff = stewardshipEnabled && !enabled;
 
+  // Normalized the same way the server does, so the dirty check below doesn't
+  // fire on cosmetic differences ("#Prime, " vs "prime").
+  const nextPrimeTags = [
+    ...new Set(
+      primeTagText
+        .split(",")
+        .map((t) => t.trim().replace(/^#+/, "").toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+
   const handleSave = async () => {
     const stewardshipChanged = enabled !== stewardshipEnabled;
     const selfApproveChanged = selfApprove !== allowSelfApprove;
-    if (!stewardshipChanged && !selfApproveChanged) {
+    const primeOnlyChanged = primeOnly !== primeOnlyReview;
+    const primeTagsChanged =
+      nextPrimeTags.join(",") !== primeTags.join(",");
+    if (
+      !stewardshipChanged &&
+      !selfApproveChanged &&
+      !primeOnlyChanged &&
+      !primeTagsChanged
+    ) {
       onClose();
       return;
     }
@@ -66,12 +98,15 @@ export function NestSettingsModal({
       const result = await api.updateNestSettings(nestId, {
         ...(stewardshipChanged ? { stewardship_enabled: enabled } : {}),
         ...(selfApproveChanged ? { allow_self_approve: selfApprove } : {}),
+        ...(primeOnlyChanged ? { prime_only_review: primeOnly } : {}),
+        ...(primeTagsChanged ? { prime_tags: nextPrimeTags } : {}),
       });
       // Trust the server's response, not our optimistic local state, in
       // case the permission check rejected silently or the DB rejected.
       if (
         result.stewardship_enabled !== enabled ||
-        result.allow_self_approve !== selfApprove
+        result.allow_self_approve !== selfApprove ||
+        result.prime_only_review !== primeOnly
       ) {
         setError(
           "Server did not accept the change. You may not have permission to change these settings.",
@@ -84,6 +119,8 @@ export function NestSettingsModal({
       onChanged({
         stewardshipEnabled: result.stewardship_enabled,
         allowSelfApprove: result.allow_self_approve,
+        primeOnlyReview: result.prime_only_review,
+        primeTags: result.prime_tags,
       });
     } catch (err: any) {
       setError(err.message);
@@ -201,6 +238,42 @@ export function NestSettingsModal({
                 </p>
               </div>
               <Switch checked={selfApprove} onCheckedChange={setSelfApprove} />
+            </div>
+          </div>
+          )}
+
+          {/* Prime documents — only meaningful once stewardship is on. */}
+          {canManageStewardship && enabled && (
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <Star className="h-4 w-4" />
+                  Review prime documents only
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Default off. When enabled, day-to-day content self-publishes
+                  and only <strong>prime</strong> documents go through
+                  draft &rarr; pending &rarr; approved. Prime always wins: a
+                  prime document needs approval even from an owner or admin with
+                  auto-publish on.
+                </p>
+              </div>
+              <Switch checked={primeOnly} onCheckedChange={setPrimeOnly} />
+            </div>
+
+            <div className="space-y-1 pt-2 border-t">
+              <Label className="text-xs font-medium">Prime tags</Label>
+              <Input
+                value={primeTagText}
+                onChange={(e) => setPrimeTagText(e.target.value)}
+                placeholder="prime-document, messaging-architecture"
+              />
+              <p className="text-xs text-muted-foreground">
+                Comma-separated. Any document carrying one of these tags is
+                prime. A single document can also be flagged directly from its
+                editor, which overrides its tags.
+              </p>
             </div>
           </div>
           )}

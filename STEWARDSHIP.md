@@ -51,6 +51,43 @@ If nothing matches and no steward resolves, the **nest owner** is the implicit s
 
 A per-nest flag (**off** by default; nest Settings → "Auto-publish owner & admin edits"). When it's **on**, a create or edit by the nest **owner** or an **admin** publishes immediately — it skips steps 2–4 entirely instead of landing as a draft. This is a governance *bypass* for the two roles that already hold approval authority, not a separation-of-duties exception. **Editor and reviewer flows are unchanged**: their edits still save as drafts and go through Submit → Review → Approve regardless of the flag. The pending-review edit lock still applies, so an owner/admin can't overwrite a doc a teammate has in review. Turning the flag back off doesn't unpublish anything; it only affects future edits.
 
+## Prime documents
+
+Most content in a nest doesn't need a review gate — call notes, social drafts, scratch research. A small set does: messaging architecture, the sales playbook, pricing policy. **Prime** marks that second set.
+
+A prime document **always** goes through draft → pending → approved, no matter who writes it. It is the one thing `allow_self_approve` does not bypass: an owner editing a prime document still lands a draft.
+
+### How a document becomes prime
+
+Resolution mirrors the steward scope order — **document → tag → nest**, first match wins:
+
+| Priority | Scope | How it's set |
+|---|---|---|
+| 1 | **Document** | The Prime switch in the document editor (owner/admin only). `true` forces prime; `false` **exempts** this one doc from an otherwise-prime tag. |
+| 2 | **Tag** | The doc carries one of the nest's **prime tags** (Settings → Prime tags; `prime-document` out of the box). |
+| 3 | **Nest** | Nothing matched → not prime. |
+
+Only the nest owner or an admin can set or clear the document flag — it's a governance decision, not an authoring one. Otherwise any editor could un-flag the playbook and walk their own edit past the gate.
+
+### Reviewing prime documents only (`prime_only_review`)
+
+A per-nest flag (**off** by default; nest Settings → "Review prime documents only"). It changes what a governed nest's *default* is:
+
+| | `prime_only_review` off (default) | on |
+|---|---|---|
+| Ordinary document, any author | Draft → review → approve (unless the author has a self-approve bypass) | **Publishes immediately** |
+| Prime document, any author | Draft → review → approve | Draft → review → approve |
+
+That's the "most content self-publishes, high-stakes content is gated" posture. Leaving it off preserves the original behaviour, so turning stewardship on doesn't silently change meaning for an existing nest.
+
+Prime only applies to **governed** nests. With stewardship off there are no stewards to approve anything, so a prime tag is inert until you turn stewardship on.
+
+### At a glance
+
+Prime documents carry a **Prime** badge in the nest's document list, with a tooltip saying whether it came from the document flag or an inherited tag. To see every document a given prime tag covers, filter the list by that tag.
+
+Flipping any of this only affects **future** writes. Marking a published document prime doesn't unpublish it; the next edit is what needs approval.
+
 ## Who sees what
 
 Governance gates two things: who can **approve**, and who can **read**.

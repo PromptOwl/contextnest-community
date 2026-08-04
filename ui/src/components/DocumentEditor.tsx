@@ -42,7 +42,9 @@ import {
   ChevronDown,
   Check,
   Copy,
+  Star,
 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { toast } from "sonner";
 import {
@@ -182,6 +184,12 @@ export function DocumentEditor({
   // Orchestrator schedule (free-form cron/interval). Only meaningful for
   // runnable node types (agent/skill); ignored/hidden otherwise. "" = none.
   const [schedule, setSchedule] = useState("");
+  // Document-scope prime flag: true/false override the nest's prime tags,
+  // null means "inherit". Governance, not authoring — owner/admin only, and
+  // the server re-checks (assertMayFlagPrime).
+  const [prime, setPrime] = useState<boolean | null>(null);
+  const loadedPrimeRef = useRef<boolean | null>(null);
+  const [primeTags, setPrimeTags] = useState<string[]>([]);
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
   // as markdown — once loaded we hand off to ArtifactViewer (see below).
   const [nodeType, setNodeType] = useState<string | null>(null);
@@ -681,12 +689,18 @@ export function DocumentEditor({
     (async () => {
       try {
         const [settings, meta] = await Promise.all([
-          api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false, allow_self_approve: false })),
+          api.getNestSettings(nestId).catch(() => ({
+            stewardship_enabled: false,
+            allow_self_approve: false,
+            prime_only_review: false,
+            prime_tags: [] as string[],
+          })),
           api.getNest(nestId).catch(() => null),
         ]);
         if (cancelled) return;
         setStewardshipEnabled(!!settings.stewardship_enabled);
         setAllowSelfApprove(!!settings.allow_self_approve);
+        setPrimeTags(((settings as any).prime_tags ?? []) as string[]);
         setPermission(meta?.permission ?? null);
         setMyStewards(((meta as any)?.myStewards ?? []) as Array<{
           role: string;
@@ -744,6 +758,9 @@ export function DocumentEditor({
       const loadedSchedule =
         node?.schedule == null ? "" : String(node.schedule);
       setSchedule(loadedSchedule);
+      const loadedPrime = typeof node?.prime === "boolean" ? node.prime : null;
+      setPrime(loadedPrime);
+      loadedPrimeRef.current = loadedPrime;
       setBaseVersion(node?.version);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
@@ -860,8 +877,9 @@ export function DocumentEditor({
       if (tags[i] !== snap.tags[i]) return true;
     }
     if (schedule.trim() !== snap.schedule.trim()) return true;
+    if (prime !== loadedPrimeRef.current) return true;
     return false;
-  }, [touched, title, content, tags, schedule]);
+  }, [touched, title, content, tags, schedule, prime]);
 
   const addTag = useCallback(() => {
     // Split on whitespace/comma; strip leading "#" (stored bare).
@@ -898,16 +916,24 @@ export function DocumentEditor({
         // schedule is server-rejected on non-runnable types, so only send it
         // for agent/skill drafts.
         ...(isRunnable ? { schedule: schedule.trim() } : {}),
+        // Only sent when explicitly flagged — the server 403s a non-admin who
+        // sends `prime` at all, so an inherited (null) flag stays off the wire.
+        ...(prime === null ? {} : { prime }),
       });
       savedId = (res as any)?.node?.id;
     } else {
+      const primePatch =
+        prime === loadedPrimeRef.current ? {} : { prime };
       const res = await api.updateNode(
         nestId,
         nodeId,
         // Only runnable nodes accept schedule; "" clears it server-side.
-        isRunnable ? { ...payload, schedule: schedule.trim() } : payload,
+        isRunnable
+          ? { ...payload, ...primePatch, schedule: schedule.trim() }
+          : { ...payload, ...primePatch },
         baseVersion,
       );
+      loadedPrimeRef.current = prime;
       // Engine bumps version on publish; pick it up so next save's X-Base-Version matches.
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
@@ -1068,6 +1094,15 @@ export function DocumentEditor({
   const isOwnSubmission = isOwnPendingReview;
   const hasAdminApprove =
     isAdmin || permission === "admin" || myNodeRoles.includes("admin");
+
+  // Prime resolution mirrors the server (document → tag → nest). `primeByTag`
+  // is what the doc would be WITHOUT its own flag, so the switch can tell an
+  // override from an inherited value and clear the override when they agree.
+  const primeByTag =
+    primeTags.length > 0 &&
+    tags.some((t) => primeTags.includes(t.trim().replace(/^#+/, "").toLowerCase()));
+  const effectivePrime = prime === null ? primeByTag : prime;
+  const canFlagPrime = isOwner || hasAdminApprove;
   const canApproveCapability =
     hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
   const canReviewHere =
@@ -1764,6 +1799,41 @@ export function DocumentEditor({
               </div>
             )}
           </div>
+
+          {/* Prime — governed nests only, and only for the roles allowed to
+              set it. Everyone else just sees the badge next to the title. */}
+          {stewardshipEnabled && canFlagPrime && (
+            <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <span className="flex items-center gap-1.5 text-sm font-medium">
+                  <Star className="h-4 w-4" />
+                  Prime document
+                </span>
+                <p className="text-xs text-muted-foreground">
+                  {primeByTag && prime === null
+                    ? "Inherited from a prime tag on this document — it always needs steward approval."
+                    : "Always require steward approval for this document, even from an owner or admin with auto-publish on."}
+                </p>
+                {primeByTag && prime === false && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    Exempted from its prime tag.
+                  </p>
+                )}
+              </div>
+              <Switch
+                checked={effectivePrime}
+                disabled={fieldsDisabled}
+                onCheckedChange={(next) => {
+                  // Turning the switch back to whatever the tags already imply
+                  // clears the override rather than pinning a redundant flag.
+                  setPrime(next === primeByTag ? null : next);
+                  setTouched(true);
+                }}
+                aria-label="Prime document"
+                data-testid="document-editor-prime"
+              />
+            </div>
+          )}
 
           {/* People — "Created by" + collaborator chips (version authors ∪
               document grantees, server-resolved). Hidden entirely for docs
