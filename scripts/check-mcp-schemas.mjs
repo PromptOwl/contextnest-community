@@ -47,7 +47,13 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // tables (a flag is not a document operation), so there is no upstream descriptor to
 // import. They mirror the REST surface 1:1. Mirror the names upstream if the operation is
 // ever promoted, then adopt its descriptor here.
-const BASELINE = 46;
+// Raised 46 -> 47 for `context_my_drafts`. Same reason as move and the deletion trio: it is
+// not an engine operation at all. "Drafts I never submitted" is derived from this repo's
+// governance tables (node_versions cross-checked against review_requests) — the engine has
+// no notion of a review request, so there is no upstream descriptor to import. It mirrors
+// the REST GET /me/drafts 1:1, nest-scoped. Promote it upstream only if review workflow ever
+// moves into the engine catalog.
+const BASELINE = 47;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

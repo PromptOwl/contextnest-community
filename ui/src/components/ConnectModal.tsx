@@ -561,9 +561,10 @@ export function ConnectModal({
                     <span>context_get</span>
                     <span>context_comments</span>
                     <span>context_list</span>
-                    {/* governance (10) */}
+                    {/* governance (11) */}
                     <span>context_stewards</span>
                     <span>context_review_queue</span>
+                    <span>context_my_drafts</span>
                     <span>context_submit_review</span>
                     <span>context_approve</span>
                     <span>context_reject</span>

@@ -1810,6 +1810,30 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
   }>(`/me/work${qs ? `?${qs}` : ""}`);
 }
 
+/** A document you left unsubmitted (or that came back rejected). */
+export interface MyDraft {
+  nest_id: string;
+  nest_name: string;
+  node_id: string;
+  title: string;
+  /** Folder path inside the nest ("" for a root-level doc). */
+  folder: string;
+  status: "draft" | "rejected";
+  /** Version that would go to review — shown in the submit dialog. */
+  version: number;
+  updated_at: string;
+}
+
+export async function getMyDrafts(opts?: { limit?: number; offset?: number }) {
+  const q = new URLSearchParams();
+  if (opts?.limit != null) q.set("limit", String(opts.limit));
+  if (opts?.offset != null) q.set("offset", String(opts.offset));
+  const qs = q.toString();
+  return request<{ drafts: MyDraft[]; pagination: WorkPagination }>(
+    `/me/drafts${qs ? `?${qs}` : ""}`,
+  );
+}
+
 export async function approveReview(nestId: string, nodeId: string, note?: string) {
   return request(`/nests/${nestId}/nodes/${nodeId}/approve`, {
     method: "POST",

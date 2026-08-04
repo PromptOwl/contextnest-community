@@ -26,10 +26,14 @@ export async function buildTitleMap(
  * The folder a node lives in, derived from its id. Node ids are
  * "nodes/<folder segments…>/<slug>" (see nodes/service.ts). Returns the
  * folder path ("Marketing/API"), or "" for a root-level document.
+ *
+ * An imported vault's ids carry a prefix before that — "<nestId>/nodes/…" —
+ * so everything up to and INCLUDING the first "nodes/" is dropped, not just a
+ * leading one. Without this the folder rendered as a raw uuid path.
  */
 export function folderForNode(nodeId: string): string {
   return nodeId
-    .replace(/^nodes\//, "")
+    .replace(/^.*?nodes\//, "")
     .split("/")
     .slice(0, -1)
     .join("/");

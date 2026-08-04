@@ -26,7 +26,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { ReasonDialog } from "./governance";
+import { ReasonDialog, SubmitForReviewModal } from "./governance";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
@@ -54,6 +54,13 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     pagination?: api.WorkPagination;
   }>({ items: [], waiting: [] });
   const [loadingMoreWork, setLoadingMoreWork] = useState(false);
+  // Drafts you never submitted — their own tab, not folded into My Work.
+  const [drafts, setDrafts] = useState<api.MyDraft[]>([]);
+  const [draftsPage, setDraftsPage] = useState<api.WorkPagination | null>(null);
+  const [draftsLoading, setDraftsLoading] = useState(true);
+  // Draft awaiting the submit dialog (priority + note) — same modal the editor
+  // uses, so submitting from here isn't a second, weaker path.
+  const [submitTarget, setSubmitTarget] = useState<api.MyDraft | null>(null);
   const [acting, setActing] = useState<Record<string, boolean>>({});
   // Deletion flag being resolved from the inbox, and which dialog it opens.
   const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
@@ -99,6 +106,9 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
       .getMyWork()
       .then(setWork)
       .catch(() => setWork({ items: [], waiting: [], notifications: [] }));
+    // Streams into its own tab like the other extras — never gated behind
+    // setLoading, so it can't add to the dashboard's time-to-first-paint.
+    void goToDraftsPage(0);
     try {
       const nestsData = await api.listNests();
       setNests(nestsData.nests);
@@ -106,6 +116,22 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
       console.error("[Dashboard] fetchNests failed", e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Jump to a page of drafts. Same replace-the-page contract as the work
+  // inbox below, so submitting one can reload the page the user is standing on.
+  const goToDraftsPage = async (offset: number) => {
+    setDraftsLoading(true);
+    try {
+      const next = await api.getMyDrafts({ offset });
+      setDrafts(next.drafts);
+      setDraftsPage(next.pagination);
+    } catch (e) {
+      console.error("[Dashboard] goToDraftsPage failed", e);
+      setDrafts([]);
+    } finally {
+      setDraftsLoading(false);
     }
   };
 
@@ -240,6 +266,27 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     onOpenReview(w.nest_id, w.nest_name, w.node_id);
   };
 
+  // Submit a draft straight from the list — the whole point of the tab is that
+  // the doc was stranded, so the fix (hand it to a reviewer) is one click away.
+  // It leaves the drafts list and shows up under "Waiting on others". Throws on
+  // failure so the error surfaces in the dialog instead of a swallowed console
+  // line; the dialog also owns the busy state.
+  const submitDraft = async (
+    d: api.MyDraft,
+    note: string,
+    priority: string,
+  ) => {
+    await api.submitForReview(d.nest_id, d.node_id, note, priority);
+    // Optimistic drop, then reload the page the user is on — a row leaving
+    // pulls one up from the next page, and the total shifts.
+    setDrafts((prev) =>
+      prev.filter((x) => !(x.nest_id === d.nest_id && x.node_id === d.node_id)),
+    );
+    setSubmitTarget(null);
+    void goToDraftsPage(draftsPage?.offset ?? 0);
+    void goToWorkPage(work.pagination?.offset ?? 0);
+  };
+
   // Optimistic drop + reconcile, same as actOnReview.
   const dropWorkItem = (w: api.WorkItem) => {
     setWork((prev) => ({
@@ -338,6 +385,15 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
             {work.items.length > 0 && (
               <span className="rounded-full bg-primary text-primary-foreground text-xs font-semibold px-1.5 py-0.5">
                 {work.items.length}
+              </span>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="drafts" className="px-6 py-2 text-sm gap-1.5">
+            <Pencil className="h-4 w-4" />
+            My Drafts
+            {(draftsPage?.total ?? 0) > 0 && (
+              <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-1.5 py-0.5">
+                {draftsPage!.total}
               </span>
             )}
           </TabsTrigger>
@@ -545,6 +601,116 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           </div>
         )}
       </div>
+        </TabsContent>
+
+        {/* My Drafts — everything you started and never handed off. A draft
+            that was never submitted has no review request, so before this it
+            appeared in no queue at all and was only findable by search. */}
+        <TabsContent value="drafts">
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <Pencil className="h-5 w-5 text-muted-foreground" />
+              <h2 className="text-xl font-semibold">My Drafts</h2>
+              {(draftsPage?.total ?? 0) > 0 && (
+                <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-2 py-0.5">
+                  {draftsPage!.total}
+                </span>
+              )}
+            </div>
+            {draftsLoading ? (
+              // Loader, not the empty state: "nothing here" while the request is
+              // still in flight reads as an answer, and this list existing at
+              // all is the fix for a draft nobody knew about.
+              <div className="rounded-lg border bg-muted/20 px-4 py-6 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading your drafts…
+              </div>
+            ) : drafts.length === 0 ? (
+              <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
+                No unsubmitted drafts — everything you've written is in review or approved.
+              </div>
+            ) : (
+              <div className="rounded-lg border divide-y overflow-hidden">
+                {drafts.map((d) => {
+                  const key = `${d.nest_id}:${d.node_id}`;
+                  return (
+                    <div
+                      key={key}
+                      className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
+                    >
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${
+                          d.status === "rejected"
+                            ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
+                            : "bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        {d.status === "rejected" ? "Rejected" : "Draft"}
+                      </span>
+                      {/* Two lines: the title gets the full width (these run
+                          long), its location sits under it. Inline, both
+                          competed for the same row and each truncated the
+                          other — the location being readable is the point. */}
+                      <button
+                        onClick={() => onOpenReview(d.nest_id, d.nest_name, d.node_id)}
+                        className="flex flex-col min-w-0 flex-1 text-left gap-0.5"
+                      >
+                        <span className="font-medium truncate">{d.title}</span>
+                        <span
+                          className="text-xs text-muted-foreground truncate"
+                          title={`${d.nest_name} / ${d.node_id}`}
+                        >
+                          <Folder className="h-3 w-3 inline mr-1 -mt-0.5" />
+                          {d.nest_name}
+                          {d.folder ? ` / ${d.folder}` : ""} · edited{" "}
+                          {relTime(d.updated_at)}
+                        </span>
+                      </button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0"
+                        onClick={() => setSubmitTarget(d)}
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+                        Submit for review
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {draftsPage && draftsPage.total > draftsPage.limit && (
+              <div className="flex items-center justify-center gap-3 pt-3 text-sm text-muted-foreground">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={draftsLoading || draftsPage.offset === 0}
+                  onClick={() =>
+                    goToDraftsPage(Math.max(0, draftsPage.offset - draftsPage.limit))
+                  }
+                >
+                  <ChevronLeft className="h-3.5 w-3.5 mr-1" />
+                  Prev
+                </Button>
+                <span>
+                  Page {Math.floor(draftsPage.offset / draftsPage.limit) + 1} of{" "}
+                  {Math.max(1, Math.ceil(draftsPage.total / draftsPage.limit))}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={draftsLoading || !draftsPage.has_more}
+                  onClick={() =>
+                    goToDraftsPage(draftsPage.offset + draftsPage.limit)
+                  }
+                >
+                  Next
+                  <ChevronRight className="h-3.5 w-3.5 ml-1" />
+                </Button>
+              </div>
+            )}
+          </div>
         </TabsContent>
 
         <TabsContent value="nests" className="space-y-6">
@@ -1064,6 +1230,16 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           onConfirm={
             deletionAction === "delete" ? handleInboxDelete : handleInboxDecline
           }
+        />
+      )}
+
+      {submitTarget && (
+        <SubmitForReviewModal
+          isOpen
+          onClose={() => setSubmitTarget(null)}
+          documentTitle={submitTarget.title}
+          currentVersion={submitTarget.version}
+          onSubmit={(note, priority) => submitDraft(submitTarget, note, priority)}
         />
       )}
 

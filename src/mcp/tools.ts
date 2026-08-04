@@ -412,6 +412,15 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "context_my_drafts",
+    description:
+      "List YOUR unsubmitted drafts in this nest — documents you wrote that were never submitted for review (plus any that came back rejected). These are invisible to the review queue and unreadable by AI queries until submitted and approved. Use context_submit_review to hand one to a steward.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+    },
+  },
+  {
     name: "context_submit_review",
     description:
       "Submit a node for steward review. The node will be marked as pending review and stewards will be notified.",
@@ -1243,6 +1252,32 @@ async function runTool(
         .join("\n\n");
 
       return `# Review Queue (${status})\n**${result.total} item(s)**\n\n${list}`;
+    }
+
+    case "context_my_drafts": {
+      // Self-scoped by construction — only rows this caller authored, in a nest
+      // they already hold read on, so no extra permission gate.
+      const { drafts, total } = await versions.listMyDrafts({
+        authorEmail: userEmail,
+        nestIds: [ctx.nestId],
+        limit: 100,
+      });
+      if (total === 0) {
+        return "No unsubmitted drafts — everything you've written here is in review or approved.";
+      }
+      const list = drafts
+        .map(
+          (d, i) =>
+            `${i + 1}. **${d.title}** v${d.version} — ${d.status}\n   Path: ${d.nodeId}\n   Last edited: ${d.updatedAt}`,
+        )
+        .join("\n\n");
+      // Say when the list is cut off rather than letting an agent read a capped
+      // page as the whole set.
+      const more =
+        total > drafts.length
+          ? `\n\n_Showing the ${drafts.length} most recent of ${total}._`
+          : "";
+      return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nSubmit one with \`context_submit_review\`.`;
     }
 
     case "context_submit_review": {

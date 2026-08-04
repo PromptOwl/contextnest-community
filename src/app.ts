@@ -13,6 +13,8 @@ import {
   getReviewQueue,
   listDeletionRequests,
 } from "./governance/review-service.js";
+import { listMyDrafts } from "./governance/version-service.js";
+import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import {
@@ -1194,6 +1196,42 @@ export function createApp(): Hono<AuthEnv> {
       // total = all pending across visible nests (both buckets); has_more drives
       // the "Load more" control on the client.
       pagination: { total, limit, offset, has_more: offset + requests.length < total },
+    });
+  });
+
+  // GET /me/drafts — the documents YOU left unsubmitted, across every nest you
+  // can see. Its own endpoint (and its own dashboard tab) rather than a third
+  // bucket in /me/work: that inbox is already dense with reviews, deletions and
+  // notifications, and drafts are a browse-and-manage list, not a queue.
+  app.get("/me/drafts", async (c) => {
+    const userId = c.get("userId");
+    const me = await resolveCallerEmail(userId);
+    const nestName = new Map<string, string>();
+    for (const n of await listVisibleNests(userId))
+      nestName.set(n.id, n.name ?? n.id);
+    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 25, 1), 100);
+    const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+    const { drafts, total } = await listMyDrafts({
+      authorEmail: me,
+      nestIds: [...nestName.keys()],
+      limit,
+      offset,
+    });
+    return c.json({
+      drafts: drafts.map((d) => ({
+        nest_id: d.nestId,
+        nest_name: nestName.get(d.nestId)!,
+        node_id: d.nodeId,
+        title: d.title,
+        // Where it actually lives — the thing that was impossible to find.
+        folder: folderForNode(d.nodeId),
+        status: d.status,
+        version: d.version,
+        updated_at: d.updatedAt,
+      })),
+      // has_more off the REQUESTED page size, not the returned row count: the
+      // existence filter can shorten a page, and that must not read as "last".
+      pagination: { total, limit, offset, has_more: offset + limit < total },
     });
   });
 
