@@ -171,6 +171,55 @@ it("strips an imported vault's id prefix from the folder path", () => {
   expect(folderForNode("b006e456-15de/nodes/partners/tsd-outreach")).toBe("partners");
   expect(folderForNode("nodes/gtm/cohere")).toBe("gtm");
   expect(folderForNode("nodes/cohere")).toBe("");
+  // Segment-aware: a prefix that merely CONTAINS "nodes" is not the root.
+  expect(folderForNode("my-nodes-vault/nodes/gtm/cohere")).toBe("gtm");
+  expect(folderForNode("nodes/subnodes/cohere")).toBe("subnodes");
+});
+
+it("shows a rejected submission as rejected, back in your court", async () => {
+  // Needs a second person to reject: separation of duties stops an author
+  // resolving their own request. Bob reviews in a nest Alice owns.
+  const { data } = await jsonRequest(app, "POST", "/nests", { name: "Reject Nest" }, alice.apiKey);
+  const nestId = data.nest.id;
+  await jsonRequest(
+    app,
+    "PATCH",
+    `/nests/${nestId}/settings`,
+    { stewardship_enabled: true },
+    alice.apiKey,
+  );
+  const nestPath = join(env.dataDir, "nests", nestId);
+  mkdirSync(nestPath, { recursive: true });
+  writeFileSync(
+    join(nestPath, "stewards.yaml"),
+    `version: 1\nnest:\n  - email: ${alice.email}, role: editor\n` +
+      `  - email: ${bob.email}, role: reviewer, can_approve: true\n`,
+  );
+  await jsonRequest(app, "POST", `/nests/${nestId}/stewards/sync`, {}, alice.apiKey);
+
+  const nodeId = await createDoc(alice, nestId, "Sent Back");
+  await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes/${nodeId}/submit-review`,
+    { note: "ready" },
+    alice.apiKey,
+  );
+  // Pending — belongs to the work inbox, not the drafts list.
+  expect((await drafts(alice)).some((d: any) => d.node_id === nodeId)).toBe(false);
+
+  const rejected = await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes/${nodeId}/reject`,
+    { note: "needs numbers" },
+    bob.apiKey,
+  );
+  expect(rejected.status).toBe(200);
+
+  const row = (await drafts(alice)).find((d: any) => d.node_id === nodeId);
+  expect(row).toBeTruthy();
+  expect(row.status).toBe("rejected");
 });
 
 it("leaves no ghost behind when the draft is deleted", async () => {
