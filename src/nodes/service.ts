@@ -729,7 +729,7 @@ async function resetImportedDocForPublish(
   const fm = { ...node.frontmatter };
   delete (fm as Record<string, unknown>).version;
   delete (fm as Record<string, unknown>).checksum;
-  await storage.writeDocument(nodeId, serializeDocument({ ...node, frontmatter: fm }));
+  await storage.writeDocument(nodeId, serializeNodeSafe({ ...node, frontmatter: fm }));
 }
 
 /**
@@ -800,7 +800,7 @@ export async function registerImportedDocuments(
     const title = doc.frontmatter?.title ?? (nodeId.split("/").pop() || nodeId);
     doc = { ...doc, frontmatter: { ...doc.frontmatter, title, author: userEmail } };
     try {
-      await storage.writeDocument(nodeId, serializeDocument(doc));
+      await storage.writeDocument(nodeId, serializeNodeSafe(doc));
     } catch (err) {
       console.error("import: failed to persist import metadata", nodeId, err);
     }
