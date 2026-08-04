@@ -166,6 +166,40 @@ describe("prime tag set is configurable", () => {
 
     await setSettings({ prime_tags: ["prime-document"] });
   });
+
+  it("accepts a comma-separated string, not just an array", async () => {
+    const { data } = await setSettings({
+      prime_tags: "#Prime-Document, high-stakes,, prime-document",
+    });
+    // Split, normalized, deduped — and the blank entry dropped.
+    expect(data.prime_tags).toEqual(["prime-document", "high-stakes"]);
+    await setSettings({ prime_tags: ["prime-document"] });
+  });
+});
+
+describe("audit note records WHY review was skipped", () => {
+  it("an editor's prime-only publish is not labelled owner/admin self-approve", async () => {
+    await setSettings({ prime_only_review: true });
+    try {
+      await createDoc(editor, { title: "audit-note", content: "body" });
+      const { data } = await jsonRequest(
+        app,
+        "GET",
+        `/nests/${nestId}/nodes/nodes/audit-note/versions`,
+        undefined,
+        owner.apiKey,
+      );
+      const notes = (data.versions ?? [])
+        .map((v: any) => v.changeNote ?? "")
+        .join(" ");
+      expect(notes).toContain("prime-only review");
+      // The actor is an editor with no bypass — the old note said otherwise.
+      expect(notes).not.toContain("self-approve");
+    } finally {
+      // Reset even on failure, or every later test inherits the posture.
+      await setSettings({ prime_only_review: false });
+    }
+  });
 });
 
 describe("prime_only_review posture", () => {

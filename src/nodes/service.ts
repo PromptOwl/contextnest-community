@@ -502,15 +502,6 @@ async function actorAutoPublishes(
 }
 
 /**
- * Single decision point for "does this write publish immediately, or land as a
- * draft?" — both createNode and updateNode route through here so the gate can
- * never disagree between the two paths.
- *
- * Order matters: prime is checked BEFORE any bypass, because a prime document
- * always requires approval — that is the whole point of flagging it. An owner
- * with self-approve on still drafts when the doc is prime.
- */
-/**
  * Flagging a document prime (or un-flagging it) is a governance action, not an
  * authoring one — otherwise any editor could set `prime: false` on the sales
  * playbook and walk their own edit straight past the review gate.
@@ -527,17 +518,36 @@ async function assertMayFlagPrime(
   }
 }
 
-async function autoPublishes(
+/**
+ * Single decision point for "does this write publish immediately, or land as a
+ * draft?" — both createNode and updateNode route through here so the gate can
+ * never disagree between the two paths.
+ *
+ * Order matters: prime is checked BEFORE any bypass, because a prime document
+ * always requires approval — that is the whole point of flagging it. An owner
+ * with self-approve on still drafts when the doc is prime.
+ *
+ * Returns WHY the write publishes, or null when it must land as a draft. The
+ * reason is not decoration: it goes into the published version's audit note,
+ * and there are now three distinct ways to skip review — inferring which one
+ * applied after the fact would mislabel an editor's prime-only publish as an
+ * "owner/admin self-approve" they never had.
+ */
+async function autoPublishReason(
   nestId: string,
   userEmail: string,
   doc: { tags?: readonly unknown[]; metadata?: unknown }
-): Promise<boolean> {
+): Promise<string | null> {
   // Ungoverned nest: nothing to review, nobody to review it.
-  if (!(await isStewardshipEnabled(nestId))) return true;
-  if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return false;
+  if (!(await isStewardshipEnabled(nestId))) return "no stewards configured";
+  if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
   // Prime-only posture: everything that isn't prime self-publishes.
-  if (await nestReviewsPrimeOnly(nestId)) return true;
-  return actorAutoPublishes(nestId, userEmail);
+  if (await nestReviewsPrimeOnly(nestId)) {
+    return "prime-only review, document is not prime";
+  }
+  return (await actorAutoPublishes(nestId, userEmail))
+    ? "owner/admin self-approve"
+    : null;
 }
 
 export async function createNode(
@@ -641,7 +651,6 @@ export async function createNode(
       tags.push(deptTag);
     }
 
-    const hasStewards = await isStewardshipEnabled(nestId);
     if (input.prime !== undefined) await assertMayFlagPrime(nestId, userEmail);
     const metadata = {
       owners: ["*"],
@@ -649,10 +658,11 @@ export async function createNode(
       ...(input.schedule ? { schedule: input.schedule } : {}),
       ...(input.prime === undefined ? {} : { prime: input.prime }),
     };
-    const autoPublish = await autoPublishes(nestId, userEmail, {
+    const publishReason = await autoPublishReason(nestId, userEmail, {
       tags,
       metadata,
     });
+    const autoPublish = publishReason !== null;
     const initialStatus = autoPublish ? "published" : "draft";
     // Publish path starts at v=0 so the engine publish bump lands at v=1.
     const initialVersion = autoPublish ? 0 : 1;
@@ -677,7 +687,7 @@ export async function createNode(
     await syncNodeTags(nestId, id, tags);
 
     let savedVersion = 1;
-    if (!autoPublish) {
+    if (publishReason === null) {
       try {
         await versionManager.createVersion(node, userEmail);
       } catch (err) {
@@ -693,12 +703,14 @@ export async function createNode(
         tags,
       });
     } else {
+      // Same note in the engine history and the governance row: the version
+      // history an admin reads in the UI comes from node_versions, so leaving
+      // the reason only in history.yaml hides it from the audit that matters.
+      const publishNote = `Auto-published on create (${publishReason})`;
       try {
         const result = await safePublishDocument(storage, id, {
           editedBy: userEmail,
-          note: hasStewards
-            ? "Auto-published on create (owner/admin self-approve)"
-            : "Auto-published on create (no stewards configured)",
+          note: publishNote,
         });
         savedVersion = result.node.frontmatter.version || 1;
         await versions.createVersion({
@@ -709,6 +721,7 @@ export async function createNode(
           author: userEmail,
           status: "published",
           tags,
+          changeNote: publishNote,
         });
         await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
         node = result.node;
@@ -1036,7 +1049,7 @@ export async function updateNode(
       // Resolved from the POST-patch tags and metadata, which patch.tags has
       // already merged into — so an edit that adds a prime tag gates itself,
       // and one that clears the doc flag can't un-gate a prime-tagged doc.
-      const autoPublish = await autoPublishes(nestId, userEmail, {
+      const publishReason = await autoPublishReason(nestId, userEmail, {
         tags: currentTags,
         metadata: node.frontmatter.metadata,
       });
@@ -1063,7 +1076,7 @@ export async function updateNode(
       let responseVersion: number;
       // Author editing their own pending review always drafts a new version
       // (never auto-publishes past the reviewer), then repoints the review.
-      if (!autoPublish || isAuthorEditingOwnReview) {
+      if (publishReason === null || isAuthorEditingOwnReview) {
         const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
         const newVersion = currentVersion + 1;
         node = {
@@ -1129,14 +1142,12 @@ export async function updateNode(
         // Publish through the engine FIRST; only mirror into the DB once it
         // actually landed. Rethrow on failure — swallowing here is what let
         // node_versions climb past what history.yaml stored (DB v19 vs v15).
+        const publishNote =
+          patch.changeNote || `Auto-published on edit (${publishReason})`;
         try {
           const result = await safePublishDocument(storage, nodeId, {
             editedBy: userEmail,
-            note:
-              patch.changeNote ||
-              (hasStewards
-                ? "Auto-published on edit (owner/admin self-approve)"
-                : "Auto-published on edit (no stewards)"),
+            note: publishNote,
           });
           publishedVersion =
             result.node.frontmatter.version || publishedVersion;
@@ -1160,7 +1171,7 @@ export async function updateNode(
           author: userEmail,
           status: "published",
           tags: currentTags,
-          changeNote: patch.changeNote,
+          changeNote: publishNote,
         });
         await versions.setApprovedVersion(
           nestId,

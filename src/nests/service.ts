@@ -160,7 +160,13 @@ export async function nestPrimeTags(nestId: string): Promise<string[]> {
   return parsePrimeTags(row?.prime_tags);
 }
 
-/** Replace the nest's prime tag set (admin-only). */
+/**
+ * Replace the nest's prime tag set (admin-only).
+ *
+ * Round-tripping through a comma string is deliberate: a comma is the
+ * separator, so it cannot be part of a tag. `normalizeTag` already keeps tags
+ * to bare words, and a caller sending "a,b" as one entry means two tags.
+ */
 export async function setPrimeTags(
   nestId: string,
   tags: string[],
