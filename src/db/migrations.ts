@@ -1268,6 +1268,18 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("033_deletion_request_targets");
   }
+
+  // 034: index behind /me/drafts. That query scans node_versions by author +
+  //   status ('draft'/'rejected'); without this it's a full table scan on every
+  //   dashboard load. Not in the base DDL because migration 006 rebuilds the
+  //   table and would drop it on a fresh database.
+  if (!hasMigration("034_versions_author_status_index")) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_versions_author_status
+        ON node_versions(author, status);
+    `);
+    recordMigration("034_versions_author_status_index");
+  }
 }
 
 /**

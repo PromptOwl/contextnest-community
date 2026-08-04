@@ -26,13 +26,19 @@ export async function buildTitleMap(
  * The folder a node lives in, derived from its id. Node ids are
  * "nodes/<folder segments…>/<slug>" (see nodes/service.ts). Returns the
  * folder path ("Marketing/API"), or "" for a root-level document.
+ *
+ * An imported vault's ids carry a prefix before that — "<nestId>/nodes/…" —
+ * so everything up to and INCLUDING the first "nodes" SEGMENT is dropped, not
+ * just a leading one. Without this the folder rendered as a raw uuid path.
+ *
+ * Segment-aware on purpose: a substring match would also fire inside a segment
+ * that merely contains "nodes/", and this is shared with the notification and
+ * email labels, so a wrong answer here travels further than one list.
  */
 export function folderForNode(nodeId: string): string {
-  return nodeId
-    .replace(/^nodes\//, "")
-    .split("/")
-    .slice(0, -1)
-    .join("/");
+  const segments = nodeId.split("/");
+  const root = segments.indexOf("nodes");
+  return segments.slice(root + 1, -1).join("/");
 }
 
 /**

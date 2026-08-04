@@ -67,6 +67,7 @@ const HISTORICAL_MIGRATIONS = [
   "031_team_source",
   "032_deletion_requests",
   "033_deletion_request_targets",
+  "034_versions_author_status_index",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -244,6 +245,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       UNIQUE(nest_id, node_id, version)
     );
     CREATE INDEX IF NOT EXISTS idx_versions_node ON node_versions(nest_id, node_id);
+    -- Migration 034 (SQLite): the /me/drafts lookup — author + status.
+    CREATE INDEX IF NOT EXISTS idx_versions_author_status
+      ON node_versions(author, status);
 
     CREATE TABLE IF NOT EXISTS approved_versions (
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,

@@ -798,6 +798,47 @@ tab badge binds to `counts.changes` (actionable items), not the feed length.
 The UI deep-links a comment item to its document with the thread focused via
 `?nest=<id>&doc=<nodeId>&thread=<threadId>`.
 
+### GET `/me/drafts`
+
+Query: `?limit=25&offset=0` (limit clamps to 1–100, offset to ≥ 0)
+
+Every document **you** left unsubmitted, across every nest you can see. A draft
+that was never submitted has no `review_requests` row, so it appears in no
+review queue and no `/me/work` bucket — this is the only surface that finds it
+again. Backs the dashboard's "My Drafts" tab.
+
+Included: nodes whose **latest** version row is authored by the caller with
+status `draft` or `rejected`, and that have no pending review request (those
+are already in `/me/work` under `waiting`). Approved/published documents are
+deliberately excluded — they are not stranded work. Rows for deleted documents
+are filtered out.
+
+```json
+{
+  "drafts": [
+    {
+      "nest_id": "<nestId>",
+      "nest_name": "GTM",
+      "node_id": "nodes/gtm/cohere",
+      "title": "Cohere Kill Sheet",
+      "folder": "gtm",
+      "status": "draft",
+      "version": 3,
+      "updated_at": "2026-07-23 09:12:00"
+    }
+  ],
+  "pagination": { "total": 137, "limit": 25, "offset": 0, "has_more": true }
+}
+```
+
+`total` is counted in SQL, before the existence filter that drops orphaned
+version rows (a document deleted outside the app), so it can run one high and
+leave a page one row short. `has_more` is derived from the **requested** page
+size for that reason, not from the number of rows returned.
+
+Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review`
+— it then leaves this list and appears in `/me/work`.
+
 ---
 
 ## 7. Versions
@@ -1237,6 +1278,8 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 - `context_request_deletion` — flag a document (by title/id), a `folder`, or the whole `nest` with a required `reason`. Read-tier: anyone who can see a thing may ask for its deletion. Nothing is removed; a refused `context_delete` now names this tool.
 - `context_deletion_queue` — pending (or `declined`) requests with their reasons and request ids.
 - `context_resolve_deletion` — `delete` or `decline` (note required) by request id. **Owner/admin only** — the transport is read-tier, so this per-tool check is the only thing between a viewer and a deleted nest.
+
+**`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
 
 Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same as their REST counterparts):
 - `context_unsynced_list` — mirrors `GET /nests/unsynced`.
