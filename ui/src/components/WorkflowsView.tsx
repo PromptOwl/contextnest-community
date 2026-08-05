@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import type React from "react";
+import { formatServerDate } from "../lib/dates";
 import {
   ArrowLeft,
   ArrowRight,
@@ -97,13 +98,7 @@ const stepIcon = (action: string) => {
   return <span className="h-3.5 w-3.5" />;
 };
 
-const timeOf = (iso: string) => {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
-};
+const timeOf = (iso: string) => formatServerDate(iso) || iso;
 
 export function WorkflowsView({ nestId, nestName, onBack }: Props) {
   const [tab, setTab] = useState("canvas");

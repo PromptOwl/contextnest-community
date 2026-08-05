@@ -12,6 +12,13 @@
  * mutation through one socket makes authz mistakes easy; reads are gated
  * per call via resolveNestPermission. Nest-scoped API keys are honored:
  * the index and every cross-nest call are restricted to the scoped nest.
+ *
+ * Two narrow exceptions to read-only, so single-connection clients (the
+ * PromptOwl native tool) can bootstrap content: `nest_create` (caller owns
+ * the new nest — no cross-nest authz to get wrong) and `context_create`
+ * (gated by handleToolCall's own stewardship.canCreateInNest check, the
+ * same PRIMARY write gate the per-nest endpoint uses). Everything else —
+ * updates, governance, sharing — still requires the per-nest endpoint.
  */
 import { Hono } from "hono";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -31,9 +38,23 @@ import {
   listNests,
   listSharedNests,
   listPublicNests,
+  createNest,
 } from "../nests/service.js";
+import { ValidationError } from "../shared/errors.js";
+import {
+  isSuspended,
+  getSuspensionReason,
+  getCurrentLicense,
+} from "../auth/license.js";
 import { handleToolCall } from "./tools.js";
 import type { Nest } from "../shared/types.js";
+
+// Server-level tools that mutate. The top-level /mcp route carries no
+// suspend/license middleware (unlike the per-nest access guard), so the
+// kill-switch + license gates that every per-nest write honors must be
+// enforced here or these two writes would bypass both. Reads stay open when
+// suspended/unlicensed, matching the REST policy.
+const SERVER_WRITE_TOOLS = new Set(["nest_create", "context_create"]);
 
 async function getUserEmail(userId: string): Promise<string> {
   const db = getDb();
@@ -182,9 +203,10 @@ const NEST_ARG = {
 } as const;
 
 /**
- * Read-only, nest-parameterized mirrors of the per-nest tools, plus
- * nest_index. Same names as the per-nest tools so agent muscle memory
- * transfers; the extra `nest` argument is the only difference.
+ * Nest-parameterized mirrors of the per-nest tools, plus nest_index and the
+ * two bootstrap writes (nest_create, context_create). Same names as the
+ * per-nest tools so agent muscle memory transfers; the extra `nest` argument
+ * is the only difference.
  */
 export const SERVER_TOOL_DEFINITIONS = [
   {
@@ -281,6 +303,41 @@ export const SERVER_TOOL_DEFINITIONS = [
       required: ["nest", "selector"],
     },
   },
+  {
+    name: "nest_create",
+    description:
+      "Create a new nest owned by the caller. Returns the new nest's id — target it with the other tools afterwards.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: { type: "string", description: "Nest name" },
+        description: { type: "string", description: "Optional description" },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "context_create",
+    description:
+      "Create a new knowledge node (document) in a nest. Needs write permission on that nest. A `folder` path creates the folder implicitly — folders exist through the nodes placed in them.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        ...NEST_ARG,
+        title: { type: "string", description: "Descriptive title" },
+        content: { type: "string", description: "Markdown content body" },
+        type: { type: "string", description: "Node type (default: document)" },
+        tags: { type: "array", items: { type: "string" }, description: "Tags" },
+        scope: { type: "string", description: "Visibility scope" },
+        folder: {
+          type: "string",
+          description:
+            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified',
+        },
+      },
+      required: ["nest", "title", "content"],
+    },
+  },
 ];
 
 async function handleServerToolCall(
@@ -297,6 +354,40 @@ async function handleServerToolCall(
     return renderNestIndexMarkdown(nests, baseUrl);
   }
 
+  // Kill-switch + license gate for the bootstrap writes — parity with the
+  // per-nest write path (app.ts nest access guard). Without this, a suspended
+  // or unlicensed server would still accept nest_create / context_create here.
+  if (SERVER_WRITE_TOOLS.has(toolName)) {
+    if (isSuspended()) {
+      const reason = getSuspensionReason();
+      return `This server is suspended by PromptOwl; writes are blocked${
+        reason ? ` — ${reason}` : ""
+      }. Contact support@promptowl.ai.`;
+    }
+    if (!getCurrentLicense()?.valid) {
+      return "This server has no valid PromptOwl license installed, so writes are disabled. Ask the server admin to install one (POST /license/install).";
+    }
+  }
+
+  if (toolName === "nest_create") {
+    // A nest-scoped key is confined to its one nest — minting new nests
+    // would exceed the scope the key was issued for.
+    if (nestScope) {
+      return "This credential is scoped to a single nest and cannot create new ones.";
+    }
+    try {
+      const nest = await createNest(
+        userId,
+        String(args.name ?? ""),
+        args.description ? String(args.description) : undefined,
+      );
+      return `Created nest "${nest.name}" (id: ${nest.id}). Add documents with context_create, retrieve with the other tools.`;
+    } catch (err) {
+      if (err instanceof ValidationError) return err.message;
+      throw err;
+    }
+  }
+
   // One indistinguishable message for "doesn't exist", "out of key scope",
   // and "no read grant" — otherwise the tool becomes an existence oracle
   // for other users' private nests (probe by name, compare messages).
@@ -305,6 +396,9 @@ async function handleServerToolCall(
   if (!nest) return inaccessible;
   if (nestScope && nest.id !== nestScope) return inaccessible;
   if (!(await canRead(nest.id, userId))) return inaccessible;
+  // context_create needs no extra gate here: handleToolCall's own
+  // stewardship.canCreateInNest check is the canonical write gate (the
+  // per-nest endpoint relies on the same one).
 
   const engine = await engineCache.get(nest.id);
   return handleToolCall(toolName, args, {
@@ -483,7 +577,9 @@ Streamable HTTP, stateless. Two endpoints:
   Tools: \`nest_index\` (call first), then \`context_query\`, \`context_search\`,
   \`context_get\`, \`context_list\`, \`context_overview\`, \`context_resolve\` —
   each takes a \`nest\` argument (id or exact name) plus the same
-  selector/hops/max_tokens parameters as the REST API. Read-only.
+  selector/hops/max_tokens parameters as the REST API. Two bootstrap writes:
+  \`nest_create\` (new nest owned by the caller) and \`context_create\`
+  (new document in a writable nest; a \`folder\` path creates the folder).
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, full toolset including writes and
   governance (create/update, submit/approve/reject, stewards, sharing).
 

@@ -65,6 +65,9 @@ const HISTORICAL_MIGRATIONS = [
   "028_user_department",
   "029_super_admins",
   "031_team_source",
+  "032_deletion_requests",
+  "033_deletion_request_targets",
+  "034_versions_author_status_index",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -97,6 +100,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       stewardship_enabled INTEGER NOT NULL DEFAULT 0,
       is_imported INTEGER NOT NULL DEFAULT 0,
       allow_self_approve INTEGER NOT NULL DEFAULT 0,
+      prime_only_review INTEGER NOT NULL DEFAULT 0,
+      prime_tags TEXT NOT NULL DEFAULT 'prime-document',
       shared_teams TEXT NOT NULL DEFAULT '[]',
       UNIQUE(user_id, slug)
     );
@@ -242,6 +247,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       UNIQUE(nest_id, node_id, version)
     );
     CREATE INDEX IF NOT EXISTS idx_versions_node ON node_versions(nest_id, node_id);
+    -- Migration 034 (SQLite): the /me/drafts lookup — author + status.
+    CREATE INDEX IF NOT EXISTS idx_versions_author_status
+      ON node_versions(author, status);
 
     CREATE TABLE IF NOT EXISTS approved_versions (
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
@@ -351,6 +359,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- permission check reads this column, so without the explicit ALTER an
     -- existing deployment breaks on upgrade, not just the Teams feature.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS shared_teams TEXT NOT NULL DEFAULT '[]';
+
+    -- Prime documents: same inline-plus-explicit-ALTER pattern, so a database
+    -- created before prime shipped still gets the columns on upgrade.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_only_review INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_tags TEXT NOT NULL DEFAULT 'prime-document';
 
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,
@@ -567,6 +580,33 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       granted_by TEXT NOT NULL,
       granted_at TEXT NOT NULL DEFAULT ${NOW}
     );
+
+    -- deletion requests (migration 032). A user below write tier flags a stale
+    -- node with a reason; a writer either deletes it (which purges this row with
+    -- the node's others) or declines with a note. Separate from review_requests
+    -- on purpose — a flagged node is not under review.
+    CREATE TABLE IF NOT EXISTS deletion_requests (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      -- target: a node id, a folder path ("api/limits"), or the nest id —
+      -- which one is told by target_type (migration 033).
+      node_id TEXT NOT NULL,
+      target_type TEXT NOT NULL DEFAULT 'document',
+      requested_by TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'declined')),
+      created_at TEXT NOT NULL DEFAULT ${NOW},
+      resolved_by TEXT,
+      resolved_at TEXT,
+      resolution_note TEXT
+    );
+    ALTER TABLE deletion_requests
+      ADD COLUMN IF NOT EXISTS target_type TEXT NOT NULL DEFAULT 'document';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_deletion_requests_pending
+      ON deletion_requests(nest_id, target_type, node_id) WHERE status = 'pending';
+    CREATE INDEX IF NOT EXISTS idx_deletion_requests_nest
+      ON deletion_requests(nest_id, status);
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

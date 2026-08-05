@@ -101,16 +101,8 @@ describe("governance: review lock (423)", () => {
       reviewer.apiKey,
     );
     expect(edit.status).toBe(423);
-
-    // Delete stays frozen for everyone, including the author.
-    const del = await jsonRequest(
-      app,
-      "DELETE",
-      `/nests/${nestId}/nodes/nodes/locked-doc`,
-      undefined,
-      dev.apiKey,
-    );
-    expect(del.status).toBe(423);
+    // Delete under review is covered in admin-review-lock.test.ts: frozen for
+    // an editor, allowed for approvers (who can reject and then delete).
   });
 
   it("author can revise their own pending review without withdrawing", async () => {

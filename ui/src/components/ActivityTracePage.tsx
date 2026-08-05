@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import * as api from "../lib/api";
+import { formatServerDate } from "../lib/dates";
 
 interface TraceRow {
   id: number;
@@ -178,7 +179,7 @@ export function ActivityTracePage({
             {rows.map((r) => (
               <tr key={r.id} className="border-t border-border [&>td]:px-3 [&>td]:py-1.5">
                 <td className="whitespace-nowrap text-muted-foreground">
-                  {new Date(r.ts).toLocaleString()}
+                  {formatServerDate(r.ts)}
                 </td>
                 <td>
                   <span

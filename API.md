@@ -177,13 +177,26 @@ Owner only.
 
 ### GET `/nests/:nestId/settings`
 ```json
-{ "stewardship_enabled": false }
+{
+  "stewardship_enabled": false,
+  "allow_self_approve": false,
+  "prime_only_review": false,
+  "prime_tags": ["prime-document"]
+}
 ```
 
 ### PATCH `/nests/:nestId/settings` (admin/owner)
 ```json
-{ "stewardship_enabled": true }
+{ "stewardship_enabled": true, "prime_only_review": true, "prime_tags": ["prime-document"] }
 ```
+
+Every field is optional; only the ones present are changed.
+
+- `allow_self_approve` — owner/admin writes publish immediately instead of drafting.
+- `prime_only_review` — in a governed nest, only **prime** documents need approval; everything else self-publishes. Off by default.
+- `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
+
+Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
 
 ### PATCH `/nests/:nestId/visibility` (admin)
 ```json
@@ -464,8 +477,10 @@ Lists all readable docs.
 }
 ```
 - Slug derived from title → `nodes/<slug>`.
-- Optional `folder` (string) nests the doc → `nodes/<folder>/<slug>`. Each `/`-separated segment is slugified independently (so `../` or absolute paths can't escape the vault); empty segments drop. Max 8 levels deep; each segment (and the title slug) max 100 chars — otherwise `400`.
+- Optional `folder` (string) nests the doc → `nodes/<folder>/<slug>`. Each `/`-separated segment is slugified independently (so `../` or absolute paths can't escape the vault); empty segments drop. A leading `nodes/` segment is stripped, so `nodes/gtm/deals` and `gtm/deals` mean the same folder. Max 8 levels deep; each segment (and the title slug) max 100 chars — otherwise `400`.
+- `409` when the derived id is already taken (same folder + same title). The existing document is left untouched — update it, or pick another folder or title. The same title in a *different* folder is still allowed here; MCP `context_create` is stricter and refuses it (see [§9 MCP](#9-mcp)).
 - Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
+- Optional `prime` (boolean) flags the document as **prime** — it then always requires steward approval, whoever writes it. Owner/admin only; any other caller sending the field gets `403`. Omit to inherit from the nest's `prime_tags`; `false` exempts this document from an otherwise-prime tag. Echoed back on every node response as `prime` (absent when inherited). See `STEWARDSHIP.md → Prime documents`.
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Auto-syncs tag index for steward resolution.
 
@@ -519,9 +534,14 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 ```
 Requires nest write permission.
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
+- `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
+
+A node with a pending review is frozen — `423` — for callers who can't clear that review. Approvers (nest owner, admin, assigned reviewer) go through: they can reject and then delete, so the lock only cost them a round trip. Same rule on `POST /nodes/:nodeId/move`; editing under review is unchanged (still author-only).
+
+Purges everything keyed to the node id — version history, review requests, the approved-version pin, tag index, annotations and their comments, review comments, watchers, schedules, trigger hooks, workflow edges, document-scoped stewards and document grants — and leaves a deletion tombstone for `GET /changes`. Node ids derive from titles, so a later document can land on the same id; it must inherit none of the old one's readers, reviewers or history. Run traces are kept: they record what happened, not what exists. `POST /nests/:nestId/nodes/:nodeId/move` carries that same set to the new id instead of dropping it (folder grants excepted — they cover a path prefix, so a moved doc leaves one share and joins another).
 
 ### POST `/nests/:nestId/assets`
 Multipart upload (field `file`) of an image or video referenced from documents. Write permission.
@@ -687,6 +707,55 @@ So Postman will see more rows than the UI; that's expected.
 ### GET `/nests/:nestId/nodes/:nodeId/reviews`
 Full review history for a node.
 
+### POST `/nests/:nestId/nodes/:nodeId/request-deletion`
+Body: `{ "reason": "superseded by the new runbook" }` (required).
+
+Read permission — anyone who can see the node may flag it as stale, which is the point: deleting is write-tier, so the people who notice dead content usually can't act on it. A flagged node is **not** locked or under review; it stays editable and never appears in the review queue. One pending flag per node (`409` on a second), `404` for a node the caller can't read or that doesn't exist. Returns `201 { request }`.
+
+`GET /nests/:nestId/nodes/:nodeId` carries `deletionRequest` — the node's latest flag (`{ status, requestedBy, reason, resolvedBy?, resolutionNote?, resolvedAt? }`) or `null`. `pending` lets a client badge the document and drop its request affordance rather than discovering the `409`; `declined` carries the resolver's note, which is how the person who asked learns the verdict.
+
+### POST `/nests/:nestId/request-deletion`
+Body: `{ "targetType": "folder" | "nest", "target": "api/limits", "reason": "..." }` (`target` ignored for `nest`).
+
+Read permission, same as the per-document route. A folder target is normalized (`/nodes/api/limits/` → `api/limits`) so two people flagging the same folder collide on one pending request rather than raising two; `404` if no documents live under it. One pending flag per (nest, target type, target).
+
+### POST `/nests/:nestId/delete-folder`
+Body: `{ "folder": "api/limits" }`. **Owner/admin only** — a folder delete is many document deletes at once, so it sits at the nest-management tier, not `write`. Deletes every document under the prefix (sub-folders included) through the normal per-node path, so each gets its review-lock check, row purge and tombstone. Returns `{ deleted, nodeIds }`. Non-admins use the request flow above.
+
+Folders are not stored objects — they exist only as segments of the node ids beneath them, so deleting a folder *is* deleting its documents.
+
+### GET `/nests/:nestId/deletion-requests`
+Query: `?status=pending|declined|all` (defaults to `pending`). `all` returns both states newest-first — one call for a client that shows the queue and badges declined nodes.
+
+```json
+{
+  "requests": [{
+    "id": "...",
+    "nodeId": "nodes/foo",
+    "title": "Foo",
+    "requestedBy": "reader@x.com",
+    "reason": "superseded",
+    "status": "pending",
+    "createdAt": "..."
+  }],
+  "total": 1
+}
+```
+
+### POST `/nests/:nestId/deletion-requests/:id/delete`
+Honours the request — write permission, the same tier `DELETE /nodes/:nodeId` requires (including its `423` review lock). Branches on the request's `targetType`: a document goes through `deleteNode`, a folder through the bulk delete above, a nest through `deleteNest`.
+
+A **nest** target additionally requires owner/admin: deleting a whole nest is the owner's call (`DELETE /nests/:id` enforces that), and honouring a request must not be a way around it — a write-tier collaborator gets `403`.
+
+An honoured request always leaves the queue: a document's row is purged with its other node-keyed rows, a nest's cascades with the nest, and a folder's — which is neither — is dropped explicitly.
+
+Raising a request notifies the nest owner + owner/admin collaborators: a `/me/work` inbox row, the `deletion_requested` connector event (Slack/Teams/webhook), and a direct email. Resolving it — either way — notifies the requester the same way (`deletion_deleted` / `deletion_declined`). All delivery is best-effort; a notification failure never fails the action.
+
+`GET /me/work` returns these alongside reviews as items with `type: "deletion"`, carrying `reason` and `request_id`. They land in `items` only for nest owners/admins (the tier that can delete) and in `waiting` for whoever raised them.
+
+### POST `/nests/:nestId/deletion-requests/:id/decline`
+Body: `{ "note": "still referenced by onboarding" }` (required). Write permission. Keeps the node and the row, recording who declined and why. `404` once the request is no longer pending.
+
 ### GET `/nests/:nestId/feed`
 Query: `?filter=all|changes|comments&limit=50&offset=0` (filter defaults to `all`, limit caps at 200, offset caps at 10 000)
 
@@ -743,6 +812,47 @@ steward scope honored). Change items mirror the queue (not access-filtered).
 tab badge binds to `counts.changes` (actionable items), not the feed length.
 The UI deep-links a comment item to its document with the thread focused via
 `?nest=<id>&doc=<nodeId>&thread=<threadId>`.
+
+### GET `/me/drafts`
+
+Query: `?limit=25&offset=0` (limit clamps to 1–100, offset to ≥ 0)
+
+Every document **you** left unsubmitted, across every nest you can see. A draft
+that was never submitted has no `review_requests` row, so it appears in no
+review queue and no `/me/work` bucket — this is the only surface that finds it
+again. Backs the dashboard's "My Drafts" tab.
+
+Included: nodes whose **latest** version row is authored by the caller with
+status `draft` or `rejected`, and that have no pending review request (those
+are already in `/me/work` under `waiting`). Approved/published documents are
+deliberately excluded — they are not stranded work. Rows for deleted documents
+are filtered out.
+
+```json
+{
+  "drafts": [
+    {
+      "nest_id": "<nestId>",
+      "nest_name": "GTM",
+      "node_id": "nodes/gtm/cohere",
+      "title": "Cohere Kill Sheet",
+      "folder": "gtm",
+      "status": "draft",
+      "version": 3,
+      "updated_at": "2026-07-23 09:12:00"
+    }
+  ],
+  "pagination": { "total": 137, "limit": 25, "offset": 0, "has_more": true }
+}
+```
+
+`total` is counted in SQL, before the existence filter that drops orphaned
+version rows (a document deleted outside the app), so it can run one high and
+leave a page one row short. `has_more` is derived from the **requested** page
+size for that reason, not from the number of rows returned.
+
+Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review`
+— it then leaves this list and appears in `/me/work`.
 
 ---
 
@@ -1206,6 +1316,15 @@ Model Context Protocol endpoints — JSON-RPC over HTTP. Not exercised manually;
 
 **Denials are JSON-RPC.** Gate rejections on the MCP transport path return a JSON-RPC error envelope — `{ "jsonrpc": "2.0", "id": <echoed>, "error": { "code": -32000, "message": "<what failed — actionable reason>" } }` — instead of plain `{error}` JSON, so external clients (PromptOwl, Claude Desktop, Cursor) surface *why* a connection failed: key scoped to a different nest, server suspended, license required, or nest not found / no access.
 
+**Titles are unique on this surface.** `context_get`, `context_update`, `context_delete`, and `context_move` all resolve a document by title, so `context_create` refuses a title already used anywhere in the nest — including in another folder — and answers with the existing node's id plus what to do instead (`context_update` to change it, `context_move` to refile it). A duplicate would otherwise be unreachable by every tool here. REST `POST /nodes` keeps the looser rule (same title in a different folder is fine); both surfaces refuse a create whose id is already taken.
+
+**Deletion requests** mirror the REST + UI flow, so an agent isn't left at a dead end when `context_delete` refuses:
+- `context_request_deletion` — flag a document (by title/id), a `folder`, or the whole `nest` with a required `reason`. Read-tier: anyone who can see a thing may ask for its deletion. Nothing is removed; a refused `context_delete` now names this tool.
+- `context_deletion_queue` — pending (or `declined`) requests with their reasons and request ids.
+- `context_resolve_deletion` — `delete` or `decline` (note required) by request id. **Owner/admin only** — the transport is read-tier, so this per-tool check is the only thing between a viewer and a deleted nest.
+
+**`context_my_drafts`** mirrors `GET /me/drafts`, nest-scoped: the caller's own unsubmitted (or rejected) documents in this nest, with their path and version. Capped at the 100 most recent; the reply says so explicitly when there are more, so an agent can't read a capped page as the whole set. Self-scoped by construction — it only ever returns rows the caller authored, in a nest they already hold read on, so it needs no permission check of its own. It exists because an agent otherwise cannot see its own unsubmitted work: a draft has no review request, so `context_review_queue` never lists it, and `context_query` skips it (only approved versions are AI-readable). The response names `context_submit_review` as the next step.
+
 Server-admin-only tools (gated by `isLicenseAdminUserId` in non-open mode, same as their REST counterparts):
 - `context_unsynced_list` — mirrors `GET /nests/unsynced`.
 - `context_sync_folder` — mirrors `POST /nests/unsynced/sync`. Args: `name` (folder path relative to `DATA_ROOT`).
@@ -1225,6 +1344,34 @@ Execute (the runner contract — the agent IS the runner):
 - `workflow_run_step` — append a step (server-assigned `seq`).
 - `workflow_run_close` — close with a terminal status (`409`-equivalent conflict on a second close).
 - `workflow_run_get` / `workflow_runs_list` — read traces/history (freeform payloads redacted below write tier).
+
+### PromptOwl native connection (service-ticket auth)
+
+The official PromptOwl deployment connects on its users' behalf without storing
+a `cnst_` key: it mints a short-lived HS256 **service ticket** signed with the
+shared `OFFICIAL_COMMUNITY_SSO_SECRET` (see `CONFIGURATION.md`). The ticket
+carries `scope: "mcp"`, an `aud` bound to this server's `PUBLIC_BASE_URL`, a
+~5-minute `exp`, and **no `jti`**. It resolves to an already-existing account by
+email — native access never auto-provisions.
+
+Accepted as a `Bearer` on exactly these paths (everything else still requires a
+real credential):
+- `GET /index` and the server-level `ALL /mcp` — cross-nest index + read tools.
+- `POST /nests/:id/context` and `GET /nests/:id/nodes` — retrieval + doc listing.
+- `ALL /nests/:id/mcp` — the per-nest MCP transport, so a block granted read &
+  write on one nest reaches that nest's write tools. Per-nest permission,
+  suspend, and license gates all apply exactly as for a `cnst_` key.
+
+Two **server-level bootstrap writes** on `ALL /mcp` let a single-connection
+client create content (everything else on server-level `/mcp` is read-only):
+- `nest_create` — new nest owned by the caller (refused for a nest-scoped key).
+- `context_create` — new document in a nest the caller can write to
+  (`canCreateInNest`). Both honor the suspend kill-switch and license gate.
+
+**Ticket kinds don't cross over.** An `mcp`-scoped ticket is refused at
+`GET /auth/sso` (it can't become a login session), and the MCP middleware
+refuses any ticket carrying a `jti` (the mark of a one-time SSO login ticket) —
+enforced on both sides, not by trusting the issuer.
 
 ---
 

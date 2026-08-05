@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
 import * as api from "../lib/api";
+import { formatServerDate } from "../lib/dates";
 
 interface Props {
   nestId: string;
@@ -35,8 +36,7 @@ interface Props {
 }
 
 function when(ts: string): string {
-  const d = new Date(ts.includes("T") ? ts : ts.replace(" ", "T") + "Z");
-  return isNaN(d.getTime()) ? ts : d.toLocaleString();
+  return formatServerDate(ts) || ts;
 }
 
 /** Trim a quote for compact display in the rail. */

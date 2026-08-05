@@ -332,7 +332,12 @@ export async function syncAnnotationsNode(
     if (type !== null && type !== "artifact") return;
 
     const threads = await listThreads(nestId, nodeId);
-    const derivedTitle = `${title} — Annotations`;
+    // Bound the source title so the suffix can't push this past the node
+    // service's title cap. createNode would throw into the outer best-effort
+    // catch and the projection would silently stop being created — and source
+    // titles predating the cap are arbitrarily long. Cosmetic only: the
+    // derived id keys off the source node id, not this string.
+    const derivedTitle = `${title.slice(0, 100)} — Annotations`;
     const markdown = projectThreadsToMarkdown(title, threads);
     const derivedId = derivedAnnotationsId(nodeId);
 

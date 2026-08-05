@@ -4,7 +4,10 @@ import { config } from "./config.js";
 import { createApp } from "./app.js";
 import { initDb } from "./db/client.js";
 import { loadServerSettings } from "./db/settings.js";
-import { backfillNodeVersionsFromHistory } from "./db/backfill.js";
+import {
+  backfillNodeVersionsFromHistory,
+  backfillNotificationTitles,
+} from "./db/backfill.js";
 import { repairGraftedVersionChains } from "./db/repair-version-chains.js";
 import {
   validateLicense,
@@ -54,6 +57,14 @@ async function main() {
     await repairGraftedVersionChains(db);
   } catch (err) {
     console.error("[repair] version chain repair failed:", err);
+  }
+
+  // One-shot: rewrite historic inbox messages that embed a raw node id
+  // (pre-fix notify-service composed them from the storage path).
+  try {
+    await backfillNotificationTitles(db);
+  } catch (err) {
+    console.error("[backfill] notification title backfill failed:", err);
   }
 
   // Load access control config (if present)

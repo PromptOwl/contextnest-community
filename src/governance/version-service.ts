@@ -8,6 +8,7 @@
 import { createHash } from "crypto";
 import { getDb } from "../db/client.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
+import { buildTitleMap } from "./title-resolver.js";
 import type { DocumentVersion, DocumentLifecycleStatus } from "./types.js";
 
 export function hashContent(content: string): string {
@@ -316,6 +317,122 @@ export async function getDisplayStatus(
   }
   if (current.status === "rejected") return "rejected";
   return "draft";
+}
+
+// ─── My Drafts ──────────────────────────────────────────────────────────
+
+export interface MyDraft {
+  nestId: string;
+  nodeId: string;
+  title: string;
+  status: "draft" | "rejected";
+  /** The version that would go to review — what the submit dialog names. */
+  version: number;
+  updatedAt: string;
+}
+
+/**
+ * Every unsubmitted (or rejected) document this person left behind, across
+ * the nests they can see.
+ *
+ * The gap this closes: a draft that was never submitted has no
+ * review_requests row, so it shows up in no queue and no inbox — the author
+ * had no way to find it again short of remembering its title.
+ *
+ * Mirrors getDisplayStatus: the LATEST version row decides, and an open
+ * review request means pending (that belongs in /me/work), not a draft.
+ *
+ * Paginated at the SQL level — `total` counts every matching row, the returned
+ * page is `limit`/`offset` of them.
+ */
+export async function listMyDrafts(params: {
+  authorEmail: string;
+  nestIds: string[];
+  limit?: number;
+  offset?: number;
+}): Promise<{ drafts: MyDraft[]; total: number }> {
+  if (params.nestIds.length === 0) return { drafts: [], total: 0 };
+  const db = getDb();
+  const nestPlaceholders = params.nestIds.map(() => "?").join(",");
+  // author + status leads the WHERE so idx_versions_author_status (migration
+  // 034) carries it — that pair is far more selective than nest_id, and it
+  // keeps this off a full scan of every version row on the server. Compared
+  // with plain `=`: every email-storing column is written lowercased
+  // (normalizeEmail on registration, migration 009 for legacy rows), and
+  // LOWER() on the column would defeat the index.
+  const where = `
+      WHERE v.author = ?
+        AND v.status IN ('draft', 'rejected')
+        AND v.nest_id IN (${nestPlaceholders})
+        AND v.version = (
+          SELECT MAX(v2.version) FROM node_versions v2
+           WHERE v2.nest_id = v.nest_id AND v2.node_id = v.node_id)
+        AND NOT EXISTS (
+          SELECT 1 FROM review_requests r
+           WHERE r.nest_id = v.nest_id AND r.node_id = v.node_id
+             AND r.status = 'pending')`;
+  const args = [params.authorEmail.toLowerCase(), ...params.nestIds];
+
+  // Number(): Postgres returns COUNT(*) as a bigint string.
+  // Counted before the existence filter below, so a draft deleted outside the
+  // app (leaving orphan version rows) can inflate this by a row — the page it
+  // sits on is simply one shorter. Not worth a second pass over every row.
+  const total = Number(
+    (
+      (await db.get(
+        `SELECT COUNT(*) as c FROM node_versions v ${where}`,
+        args,
+      )) as { c: number }
+    ).c,
+  );
+
+  const limit = Math.min(Math.max(params.limit ?? 25, 1), 100);
+  const offset = Math.max(params.offset ?? 0, 0);
+  const rows = (await db.all(
+    `SELECT v.nest_id, v.node_id, v.status, v.version, v.created_at
+       FROM node_versions v ${where}
+      ORDER BY v.created_at DESC
+      LIMIT ? OFFSET ?`,
+    [...args, limit, offset],
+  )) as Array<{
+    nest_id: string;
+    node_id: string;
+    status: "draft" | "rejected";
+    version: number;
+    created_at: string;
+  }>;
+
+  // One title map per nest that actually has draft rows — never per node, and
+  // never for a nest with nothing in the list (buildTitleMap scans the vault
+  // directory). In parallel: the scans are independent I/O.
+  const titlesByNest = new Map(
+    await Promise.all(
+      [...new Set(rows.map((r) => r.nest_id))].map(
+        async (nestId): Promise<[string, Map<string, string>]> => [
+          nestId,
+          await buildTitleMap(nestId),
+        ],
+      ),
+    ),
+  );
+
+  const drafts = rows
+    // Deleting a document leaves its version rows behind (only nest deletion
+    // clears the table), so the title map doubles as the existence check —
+    // without it the list fills with ghosts of deleted drafts.
+    .filter((r) => titlesByNest.get(r.nest_id)?.has(r.node_id))
+    .map((r) => ({
+      nestId: r.nest_id,
+      nodeId: r.node_id,
+      title: titlesByNest.get(r.nest_id)!.get(r.node_id) || r.node_id,
+      status: r.status,
+      // Number(): Postgres returns INTEGER columns fine, but stay explicit —
+      // the modal renders this straight into copy.
+      version: Number(r.version),
+      updatedAt: r.created_at,
+    }));
+
+  return { drafts, total };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────

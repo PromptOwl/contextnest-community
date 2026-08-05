@@ -19,6 +19,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { DiffViewer } from "./DiffViewer";
 import { unifiedDiff } from "./diff-util";
 import { DocumentViewer } from "../DocumentViewer";
+import { parseServerDate } from "@/lib/dates";
 
 export interface Version {
   version: number;
@@ -72,7 +73,8 @@ interface VersionHistoryProps {
 type PreviewMode = "changes" | "content" | "vs-current";
 
 function formatDate(dateStr: string) {
-  const date = new Date(dateStr);
+  const date = parseServerDate(dateStr);
+  if (!date) return "";
   return date.toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
