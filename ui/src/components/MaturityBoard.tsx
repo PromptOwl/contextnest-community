@@ -30,6 +30,7 @@ import { deriveNestCaps } from "../lib/nest-caps";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  STATUS_ORDER,
   UNCATEGORIZED,
   groupByColumn,
   planMove,
@@ -45,16 +46,6 @@ interface Props {
   onBack: () => void;
   onOpenDocument: (nodeId: string) => void;
 }
-
-// Sensible left→right lifecycle ordering when grouping by governance status.
-const STATUS_ORDER = [
-  "draft",
-  "in_review",
-  "approved",
-  "published",
-  "superseded",
-  "deprecated",
-];
 
 const CONFIG_PREFIX = "cn.board.";
 

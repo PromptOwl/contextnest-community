@@ -26,6 +26,33 @@ export interface BoardNode {
 
 export type DimensionKind = "folder" | "status" | "tag";
 
+/**
+ * The lifecycle states the server actually produces, in left→right order.
+ * Mirrors DocumentLifecycleStatus in src/governance/types.ts.
+ *
+ * buildColumns renders every columnOrder key whether or not a node carries it,
+ * so anything invented here becomes a permanently empty column. An earlier
+ * list did exactly that with in_review / superseded / deprecated — none of
+ * which the system emits — while omitting the real pending_review and
+ * rejected, which then fell through to the auto-sorted tail.
+ */
+export const STATUS_ORDER = [
+  "draft",
+  "pending_review",
+  "approved",
+  "published",
+  "rejected",
+];
+
+/** Headings for STATUS_ORDER — the raw keys are snake_case. */
+const STATUS_LABELS: Record<string, string> = {
+  draft: "Draft",
+  pending_review: "Pending Review",
+  approved: "Approved",
+  published: "Published",
+  rejected: "Rejected",
+};
+
 export interface BoardConfig {
   dimension: DimensionKind;
   /** For the "tag" dimension: the namespace, e.g. "stage" groups by stage:* . */
@@ -148,6 +175,7 @@ function disambiguateFolderLabels(keys: string[]): Map<string, string> {
 function labelFor(key: string, config: BoardConfig): string {
   if (key === UNCATEGORIZED) return "Uncategorized";
   if (key === "" && config.dimension === "folder") return "(root)";
+  if (config.dimension === "status") return STATUS_LABELS[key] ?? key;
   return key;
 }
 

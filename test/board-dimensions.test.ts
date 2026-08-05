@@ -6,6 +6,7 @@ import {
   buildColumns,
   groupByColumn,
   planMove,
+  STATUS_ORDER,
   UNCATEGORIZED,
   type BoardNode,
   type BoardConfig,
@@ -148,6 +149,42 @@ describe("buildColumns", () => {
     const cols = buildColumns([node({ id: "gtm/deals/a" })], cfg);
     expect(cols.map((c) => c.label)).toEqual(["deals"]);
     expect(cols.map((c) => c.title)).toEqual(["gtm/deals"]);
+  });
+});
+
+describe("status columns", () => {
+  it("orders the real lifecycle states and labels them readably", () => {
+    const cfg: BoardConfig = { dimension: "status", columnOrder: STATUS_ORDER };
+    const cols = buildColumns(
+      [
+        node({ id: "a", status: "published" }),
+        node({ id: "b", status: "pending_review" }),
+      ],
+      cfg,
+    );
+    expect(cols.map((c) => c.key)).toEqual([
+      "draft",
+      "pending_review",
+      "approved",
+      "published",
+      "rejected",
+    ]);
+    expect(cols.map((c) => c.label)).toEqual([
+      "Draft",
+      "Pending Review",
+      "Approved",
+      "Published",
+      "Rejected",
+    ]);
+  });
+  it("carries no status the server cannot produce", () => {
+    // These three were columns that could never fill; pending_review and
+    // rejected were real states missing from the order.
+    for (const invented of ["in_review", "superseded", "deprecated"]) {
+      expect(STATUS_ORDER).not.toContain(invented);
+    }
+    expect(STATUS_ORDER).toContain("pending_review");
+    expect(STATUS_ORDER).toContain("rejected");
   });
 });
 
