@@ -22,7 +22,7 @@ import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
 import { bodyOnly, deleteNode, deleteFolder } from "../nodes/service.js";
 import { deleteNest } from "../nests/service.js";
-import { canReadNode } from "./access-guard.js";
+import { canReadNode, resolveCallerEmail } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -472,6 +472,19 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
+  // Same node-level gate the document read itself takes: the nest middleware
+  // only clears the nest, and this route hands out every version's change log.
+  // A public reader is limited to nodes with an approved version, so a doc that
+  // never cleared review must not leak its drafts through its history.
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
+
   const allVersions = await versions.getVersions(nestId, nodeId);
   const approved = await versions.getApprovedVersion(nestId, nodeId);
 
@@ -531,6 +544,17 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
   const version = Number(c.req.param("version"));
+
+  // Reconstructs a full historical body, so it takes the node read gate — a
+  // public reader must not pull an unapproved version out of the chain.
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
 
   const { versions: versionManager } = await engineCache.get(nestId);
   try {

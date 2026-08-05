@@ -21,4 +21,11 @@ moves inline patches out into standalone `v{N}.diff` files. A duplicate
 `resolvedBy` reaches the UI. And the diff viewer's line numbers no longer skip
 two, having learned to read the engine's `Index:` / `===` preamble as a header.
 
+Both version endpoints now take the same node-level read check as the document
+itself (`403` when the caller can't read the node). The list handler never had
+it, so on a public nest an anonymous reader could pull the change logs — and,
+through the new per-version endpoint, the reconstructed body — of a document
+that never cleared review, bypassing the approved-only rule public reads are
+otherwise held to.
+
 Requires `@promptowl/contextnest-engine` 1.3.0.

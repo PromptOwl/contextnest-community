@@ -873,6 +873,10 @@ Each version may also include `resolvedBy` + `resolutionStatus`, the steward who
 approved or rejected it, joined from `review_requests` (`node_versions` stores
 the status but not the resolver's email).
 
+Gated by the same node-level read check as the document itself — `403` when the
+caller can't read the node, which for a public reader means any node without an
+approved version.
+
 ```json
 {
   "currentVersion": 3,
@@ -909,6 +913,10 @@ the diffs after it.
 `content` is `null` — with HTTP 200, not an error — when that version's chain can
 no longer be replayed (e.g. history grafted by an older import). Callers render
 it as "no content" rather than failing the whole panel.
+
+Same node-level read check as the list above: `403` when the caller can't read
+the node. A public reader can only reach versions of a node that has an approved
+version, so drafts of an unapproved document are never reconstructable this way.
 
 ```json
 { "version": 2, "content": "# Heading\n\nbody as of v2\n" }

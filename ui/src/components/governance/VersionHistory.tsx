@@ -64,7 +64,8 @@ interface VersionHistoryProps {
    * Fetch one version's full body, on demand. The list ships change logs rather
    * than N full bodies, so a body is loaded only when the user asks for full
    * content or a comparison against current. Resolve null when that version's
-   * chain no longer reconstructs. Omit to disable those two modes.
+   * chain no longer reconstructs. Omit it and the full-content / vs-current
+   * buttons are hidden, unless the version carries its body inline.
    */
   onLoadContent?: (versionNumber: number) => Promise<string | null>;
   className?: string;
@@ -160,6 +161,11 @@ export function VersionHistory({
   // fetched body. See resolveBody.
   const bodyOf = (v: Version): string | null | undefined =>
     resolveBody(v.content, bodies[v.version]);
+
+  // Full content and vs-current both need a body. A caller that neither passes
+  // one inline nor supplies onLoadContent can never produce one, so those two
+  // views are hidden rather than left spinning.
+  const canLoadBody = !!onLoadContent || !!previewVersion?.content;
 
   const openPreview = (v: Version) => {
     setPreviewVersion(v);
@@ -285,15 +291,20 @@ export function VersionHistory({
                     Changes
                   </Button>
                 )}
-                <Button
-                  variant={mode === "content" ? "secondary" : "outline"}
-                  size="sm"
-                  className="h-7"
-                  onClick={() => showMode("content")}
-                >
-                  Full content
-                </Button>
-                {previewVersion.version !== currentVersion && (
+                {/* Both of these need a body. Without onLoadContent there is no
+                    way to get one, so offering the buttons would only strand
+                    the pane on a spinner. */}
+                {canLoadBody && (
+                  <Button
+                    variant={mode === "content" ? "secondary" : "outline"}
+                    size="sm"
+                    className="h-7"
+                    onClick={() => showMode("content")}
+                  >
+                    Full content
+                  </Button>
+                )}
+                {canLoadBody && previewVersion.version !== currentVersion && (
                   <Button
                     variant={mode === "vs-current" ? "secondary" : "outline"}
                     size="sm"
@@ -385,10 +396,16 @@ export function VersionHistory({
                   );
                 }
 
+                // Nothing fetched yet: a spinner only if something is actually
+                // coming. With no way to load a body it would spin forever.
                 if (waiting) {
-                  return (
+                  return canLoadBody ? (
                     <div className="flex items-center gap-2 text-sm text-muted-foreground p-4">
                       <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+                    </div>
+                  ) : (
+                    <div className="text-sm text-muted-foreground p-4">
+                      (no content)
                     </div>
                   );
                 }
