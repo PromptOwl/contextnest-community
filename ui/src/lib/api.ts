@@ -1214,6 +1214,24 @@ export async function getNodeVersions(nestId: string, nodeId: string) {
   }>(`/nests/${nestId}/nodes/${nodeId}/versions`);
 }
 
+/**
+ * One version's full body, reconstructed server-side on demand.
+ *
+ * The versions list ships each version's change log (a small diff) rather than
+ * every full body, so a body is fetched only for the version actually being
+ * previewed, compared, or restored. `content` is null when that version's chain
+ * no longer reconstructs.
+ */
+export async function getNodeVersionContent(
+  nestId: string,
+  nodeId: string,
+  version: number,
+) {
+  return request<{ version: number; content: string | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/versions/${version}`,
+  );
+}
+
 export async function getNodeReviews(nestId: string, nodeId: string) {
   return request<{ reviews: any[] }>(`/nests/${nestId}/nodes/${nodeId}/reviews`);
 }

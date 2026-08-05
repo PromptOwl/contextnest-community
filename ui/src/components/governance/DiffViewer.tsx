@@ -2,63 +2,15 @@
  * DiffViewer — renders a unified patch GitHub-style: per-line old/new line
  * numbers, a +/- sign gutter, and clear add/delete row backgrounds.
  *
- * Dependency-free; parses the unified hunk headers (@@ -a,b +c,d @@) to track
- * line numbers so additions/deletions read line-by-line like a code review.
+ * Dependency-free. Patch parsing (hunk headers, line numbering) lives in
+ * diff-rows.ts so it stays unit-testable without a DOM.
  */
 import { cn } from "@/lib/utils";
+import { toRows, type Row } from "./diff-rows";
 
 interface DiffViewerProps {
   patch: string;
   className?: string;
-}
-
-type Row = {
-  kind: "add" | "del" | "ctx" | "hunk" | "file";
-  oldNo: number | null;
-  newNo: number | null;
-  text: string;
-};
-
-function parseHunkHeader(line: string): { oldStart: number; newStart: number } | null {
-  // @@ -oldStart,oldLen +newStart,newLen @@
-  const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-  if (!m) return null;
-  return { oldStart: Number(m[1]), newStart: Number(m[2]) };
-}
-
-function toRows(patch: string): Row[] {
-  const lines = patch.split(/\r?\n/);
-  const rows: Row[] = [];
-  let oldNo = 0;
-  let newNo = 0;
-  for (const line of lines) {
-    if (
-      line.startsWith("+++") ||
-      line.startsWith("---") ||
-      line.startsWith("diff ") ||
-      line.startsWith("index ")
-    ) {
-      rows.push({ kind: "file", oldNo: null, newNo: null, text: line });
-      continue;
-    }
-    const hunk = parseHunkHeader(line);
-    if (hunk) {
-      oldNo = hunk.oldStart;
-      newNo = hunk.newStart;
-      rows.push({ kind: "hunk", oldNo: null, newNo: null, text: line });
-      continue;
-    }
-    if (line.startsWith("+")) {
-      rows.push({ kind: "add", oldNo: null, newNo: newNo++, text: line.slice(1) });
-    } else if (line.startsWith("-")) {
-      rows.push({ kind: "del", oldNo: oldNo++, newNo: null, text: line.slice(1) });
-    } else {
-      // context (leading space) or blank tail line
-      const text = line.startsWith(" ") ? line.slice(1) : line;
-      rows.push({ kind: "ctx", oldNo: oldNo++, newNo: newNo++, text });
-    }
-  }
-  return rows;
 }
 
 const ROW_BG: Record<Row["kind"], string> = {
@@ -86,7 +38,10 @@ export function DiffViewer({ patch, className }: DiffViewerProps) {
   return (
     <div
       className={cn(
-        "rounded-md border bg-background font-mono text-xs leading-relaxed overflow-x-auto max-h-96",
+        // Lines wrap instead of scrolling sideways: a horizontally scrolled row
+        // paints its add/delete background only as far as the visible box, so
+        // long lines showed a stripe that stopped mid-row.
+        "rounded-md border bg-background font-mono text-xs leading-relaxed overflow-y-auto max-h-96",
         className,
       )}
       data-testid="diff-viewer"
@@ -95,11 +50,19 @@ export function DiffViewer({ patch, className }: DiffViewerProps) {
         // Hunk + file headers span the full width without line-number gutters.
         if (r.kind === "hunk" || r.kind === "file") {
           return (
-            <div key={i} className={cn("px-3 whitespace-pre", ROW_BG[r.kind])}>
+            <div
+              key={i}
+              className={cn(
+                "px-3 whitespace-pre-wrap break-words",
+                ROW_BG[r.kind],
+              )}
+            >
               {r.text || " "}
             </div>
           );
         }
+        // items-stretch keeps the gutter rule running the full height of a
+        // wrapped row; the number itself still sits on the first line.
         return (
           <div key={i} className={cn("flex items-stretch", ROW_BG[r.kind])}>
             <span className={GUTTER_CELL}>{r.oldNo ?? ""}</span>
@@ -113,7 +76,9 @@ export function DiffViewer({ patch, className }: DiffViewerProps) {
             >
               {SIGN[r.kind]}
             </span>
-            <code className="block flex-1 pr-3 whitespace-pre">{r.text || " "}</code>
+            <code className="block flex-1 min-w-0 pr-3 whitespace-pre-wrap break-words">
+              {r.text || " "}
+            </code>
           </div>
         );
       })}

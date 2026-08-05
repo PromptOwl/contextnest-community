@@ -139,7 +139,7 @@ export function TeamsPage({ onBack }: TeamsPageProps) {
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="w-full mx-auto p-4 sm:p-6 space-y-4">
+      <div className="w-full mx-auto space-y-4">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="icon" onClick={onBack} aria-label="Back">
             <ArrowLeft className="h-4 w-4" />

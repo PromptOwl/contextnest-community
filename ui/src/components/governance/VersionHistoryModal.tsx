@@ -34,6 +34,9 @@ interface VersionHistoryModalProps {
   previewAs?: "markdown" | "source";
   /** "View rendered" hook — render a version in the caller's own surface. */
   onView?: (version: number) => void;
+  /** Fetch one version's full body on demand (the list carries change logs,
+   *  not N full bodies). Omit to disable full-content and vs-current views. */
+  onLoadContent?: (version: number) => Promise<string | null>;
 }
 
 export function VersionHistoryModal({
@@ -44,6 +47,7 @@ export function VersionHistoryModal({
   onRestore,
   previewAs,
   onView,
+  onLoadContent,
 }: VersionHistoryModalProps) {
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -60,6 +64,7 @@ export function VersionHistoryModal({
             onRestore={onRestore}
             previewAs={previewAs}
             onView={onView}
+            onLoadContent={onLoadContent}
           />
         ) : (
           <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">

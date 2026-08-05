@@ -18,12 +18,19 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { DiffViewer } from "./DiffViewer";
 import { unifiedDiff } from "./diff-util";
+import { resolveBody } from "./version-body";
 import { DocumentViewer } from "../DocumentViewer";
 import { parseServerDate } from "@/lib/dates";
 
 export interface Version {
   version: number;
   content?: string;
+  /**
+   * This version's change log — the unified diff taking the previous version to
+   * this one, as stored by the engine. Absent for a keyframe (a full snapshot,
+   * so there is no patch) and for v1.
+   */
+  diff?: string;
   editedBy: string;
   editedAt: string;
   changeNote?: string;
@@ -53,8 +60,19 @@ interface VersionHistoryProps {
    * pane for non-current versions.
    */
   onView?: (versionNumber: number) => void;
+  /**
+   * Fetch one version's full body, on demand. The list ships change logs rather
+   * than N full bodies, so a body is loaded only when the user asks for full
+   * content or a comparison against current. Resolve null when that version's
+   * chain no longer reconstructs. Omit it and the full-content / vs-current
+   * buttons are hidden, unless the version carries its body inline.
+   */
+  onLoadContent?: (versionNumber: number) => Promise<string | null>;
   className?: string;
 }
+
+/** What the preview pane shows for the selected version. */
+type PreviewMode = "changes" | "content" | "vs-current";
 
 function formatDate(dateStr: string) {
   const date = parseServerDate(dateStr);
@@ -109,13 +127,66 @@ export function VersionHistory({
   onRestore,
   previewAs = "markdown",
   onView,
+  onLoadContent,
   className,
 }: VersionHistoryProps) {
   const [previewVersion, setPreviewVersion] = useState<Version | null>(null);
   const [restoreVersion, setRestoreVersion] = useState<number | null>(null);
   const [restoring, setRestoring] = useState(false);
-  // Preview pane: show the full body, or a diff of this version vs current.
-  const [diffMode, setDiffMode] = useState(false);
+  // Default to this version's own change log — what changed in it, the way a
+  // commit reads. Full body and vs-current each cost a server reconstruction,
+  // so they load only when asked for.
+  const [mode, setMode] = useState<PreviewMode>("changes");
+  const [bodies, setBodies] = useState<Record<number, string | null>>({});
+  // Requests in flight, so a re-render or a second click can't double-fetch.
+  const inflight = React.useRef<Set<number>>(new Set());
+
+  const ensureBody = React.useCallback(
+    (versionNumber: number) => {
+      if (!onLoadContent) return;
+      if (versionNumber in bodies || inflight.current.has(versionNumber)) return;
+      inflight.current.add(versionNumber);
+      onLoadContent(versionNumber)
+        .then((content) =>
+          setBodies((b) => ({ ...b, [versionNumber]: content })),
+        )
+        .catch(() => setBodies((b) => ({ ...b, [versionNumber]: null })))
+        .finally(() => inflight.current.delete(versionNumber));
+    },
+    [onLoadContent, bodies],
+  );
+
+  // A version already carrying its body (older callers pass content inline)
+  // needs no fetch; the list endpoint's `content: ""` falls through to the
+  // fetched body. See resolveBody.
+  const bodyOf = (v: Version): string | null | undefined =>
+    resolveBody(v.content, bodies[v.version]);
+
+  // Full content and vs-current both need a body. A caller that neither passes
+  // one inline nor supplies onLoadContent can never produce one, so those two
+  // views are hidden rather than left spinning.
+  const canLoadBody = !!onLoadContent || !!previewVersion?.content;
+
+  const openPreview = (v: Version) => {
+    setPreviewVersion(v);
+    // No stored change log (v1, or a keyframe) — nothing to show but the body.
+    if (v.diff) {
+      setMode("changes");
+    } else {
+      setMode("content");
+      ensureBody(v.version);
+    }
+  };
+
+  const showMode = (next: PreviewMode) => {
+    setMode(next);
+    if (!previewVersion) return;
+    if (next === "content") ensureBody(previewVersion.version);
+    if (next === "vs-current") {
+      ensureBody(previewVersion.version);
+      ensureBody(currentVersion);
+    }
+  };
 
   const handleRestore = async () => {
     if (!restoreVersion || !onRestore) return;
@@ -149,9 +220,8 @@ export function VersionHistory({
   const currentVersionStatus = versions.find(
     (v) => v.version === currentVersion,
   )?.status;
-  const currentContent = versions.find(
-    (v) => v.version === currentVersion,
-  )?.content;
+  const currentEntry = versions.find((v) => v.version === currentVersion);
+  const currentContent = currentEntry ? bodyOf(currentEntry) : undefined;
   // Restore writes a new version, which the server rejects with 423 while a
   // review is open. Disable the restore affordances so the user never hits
   // that error — they must resolve the review first.
@@ -194,7 +264,7 @@ export function VersionHistory({
                 className="h-7 px-2"
                 onClick={() => {
                   setPreviewVersion(null);
-                  setDiffMode(false);
+                  setMode("changes");
                 }}
               >
                 <ArrowLeft className="h-4 w-4 mr-1" /> Back
@@ -211,18 +281,39 @@ export function VersionHistory({
                     <Eye className="h-4 w-4 mr-1" /> View rendered
                   </Button>
                 )}
-                {previewVersion.content &&
-                  currentContent !== undefined &&
-                  previewVersion.version !== currentVersion && (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7"
-                      onClick={() => setDiffMode((d) => !d)}
-                    >
-                      {diffMode ? "Full content" : "Diff vs current"}
-                    </Button>
-                  )}
+                {previewVersion.diff && (
+                  <Button
+                    variant={mode === "changes" ? "secondary" : "outline"}
+                    size="sm"
+                    className="h-7"
+                    onClick={() => showMode("changes")}
+                  >
+                    Changes
+                  </Button>
+                )}
+                {/* Both of these need a body. Without onLoadContent there is no
+                    way to get one, so offering the buttons would only strand
+                    the pane on a spinner. */}
+                {canLoadBody && (
+                  <Button
+                    variant={mode === "content" ? "secondary" : "outline"}
+                    size="sm"
+                    className="h-7"
+                    onClick={() => showMode("content")}
+                  >
+                    Full content
+                  </Button>
+                )}
+                {canLoadBody && previewVersion.version !== currentVersion && (
+                  <Button
+                    variant={mode === "vs-current" ? "secondary" : "outline"}
+                    size="sm"
+                    className="h-7"
+                    onClick={() => showMode("vs-current")}
+                  >
+                    vs current
+                  </Button>
+                )}
                 {onRestore && previewVersion.version !== currentVersion && (
                   <Button
                     size="sm"
@@ -259,30 +350,86 @@ export function VersionHistory({
               </div>
             </div>
             <ScrollArea className="h-[60vh] max-h-[440px] pr-2">
-              {diffMode && currentContent !== undefined ? (
-                <div className="space-y-1">
-                  <div className="text-xs text-muted-foreground px-1">
-                    Diff: v{previewVersion.version} → current (v{currentVersion})
+              {(() => {
+                const body = bodyOf(previewVersion);
+                const waiting = body === undefined;
+
+                // This version's own change log — stored by the engine, so it
+                // renders with no reconstruction and no client-side diffing.
+                if (mode === "changes" && previewVersion.diff) {
+                  return (
+                    <div className="space-y-1">
+                      <div className="text-xs text-muted-foreground px-1">
+                        Changes in v{previewVersion.version} (from v
+                        {previewVersion.version - 1})
+                      </div>
+                      <DiffViewer patch={previewVersion.diff} className="max-h-none" />
+                    </div>
+                  );
+                }
+
+                if (mode === "vs-current") {
+                  if (waiting || currentContent === undefined) {
+                    return (
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground p-4">
+                        <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+                      </div>
+                    );
+                  }
+                  if (body === null || currentContent === null) {
+                    return (
+                      <div className="text-sm text-muted-foreground p-4">
+                        (no content)
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="space-y-1">
+                      <div className="text-xs text-muted-foreground px-1">
+                        Diff: v{previewVersion.version} → current (v{currentVersion})
+                      </div>
+                      <DiffViewer
+                        patch={unifiedDiff(body, currentContent)}
+                        className="max-h-none"
+                      />
+                    </div>
+                  );
+                }
+
+                // Nothing fetched yet: a spinner only if something is actually
+                // coming. With no way to load a body it would spin forever.
+                if (waiting) {
+                  return canLoadBody ? (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground p-4">
+                      <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+                    </div>
+                  ) : (
+                    <div className="text-sm text-muted-foreground p-4">
+                      (no content)
+                    </div>
+                  );
+                }
+                if (body && previewAs === "source") {
+                  return (
+                    <pre className="whitespace-pre-wrap break-words bg-muted/30 rounded px-4 py-3 text-xs font-mono leading-relaxed">
+                      {body}
+                    </pre>
+                  );
+                }
+                if (body) {
+                  return (
+                    <DocumentViewer
+                      content={body}
+                      className="min-h-0 max-h-none overflow-visible bg-muted/30 rounded px-4 py-3"
+                    />
+                  );
+                }
+                return (
+                  <div className="text-sm text-muted-foreground p-4">
+                    (no content)
                   </div>
-                  <DiffViewer
-                    patch={unifiedDiff(previewVersion.content || "", currentContent)}
-                    className="max-h-none"
-                  />
-                </div>
-              ) : previewVersion.content && previewAs === "source" ? (
-                <pre className="whitespace-pre-wrap break-words bg-muted/30 rounded px-4 py-3 text-xs font-mono leading-relaxed">
-                  {previewVersion.content}
-                </pre>
-              ) : previewVersion.content ? (
-                <DocumentViewer
-                  content={previewVersion.content}
-                  className="min-h-0 max-h-none overflow-visible bg-muted/30 rounded px-4 py-3"
-                />
-              ) : (
-                <div className="text-sm text-muted-foreground p-4">
-                  (no content)
-                </div>
-              )}
+                );
+              })()}
             </ScrollArea>
           </div>
         ) : versions.length === 0 ? (
@@ -300,7 +447,7 @@ export function VersionHistory({
                     key={version.version}
                     role="button"
                     tabIndex={0}
-                    onClick={() => setPreviewVersion(version)}
+                    onClick={() => openPreview(version)}
                     className={`flex items-center justify-between p-2 rounded hover:bg-muted/50 cursor-pointer group ${
                       isApproved ? "bg-green-50 border border-green-200" : ""
                     }`}
