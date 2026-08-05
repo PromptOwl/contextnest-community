@@ -18,6 +18,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { DiffViewer } from "./DiffViewer";
 import { unifiedDiff } from "./diff-util";
+import { resolveBody } from "./version-body";
 import { DocumentViewer } from "../DocumentViewer";
 import { parseServerDate } from "@/lib/dates";
 
@@ -155,9 +156,10 @@ export function VersionHistory({
   );
 
   // A version already carrying its body (older callers pass content inline)
-  // needs no fetch.
+  // needs no fetch; the list endpoint's `content: ""` falls through to the
+  // fetched body. See resolveBody.
   const bodyOf = (v: Version): string | null | undefined =>
-    v.content ?? bodies[v.version];
+    resolveBody(v.content, bodies[v.version]);
 
   const openPreview = (v: Version) => {
     setPreviewVersion(v);
@@ -213,9 +215,7 @@ export function VersionHistory({
     (v) => v.version === currentVersion,
   )?.status;
   const currentEntry = versions.find((v) => v.version === currentVersion);
-  const currentContent = currentEntry
-    ? (currentEntry.content ?? bodies[currentVersion])
-    : undefined;
+  const currentContent = currentEntry ? bodyOf(currentEntry) : undefined;
   // Restore writes a new version, which the server rejects with 423 while a
   // review is open. Disable the restore affordances so the user never hits
   // that error — they must resolve the review first.

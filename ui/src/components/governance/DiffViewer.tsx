@@ -38,7 +38,10 @@ export function DiffViewer({ patch, className }: DiffViewerProps) {
   return (
     <div
       className={cn(
-        "rounded-md border bg-background font-mono text-xs leading-relaxed overflow-x-auto max-h-96",
+        // Lines wrap instead of scrolling sideways: a horizontally scrolled row
+        // paints its add/delete background only as far as the visible box, so
+        // long lines showed a stripe that stopped mid-row.
+        "rounded-md border bg-background font-mono text-xs leading-relaxed overflow-y-auto max-h-96",
         className,
       )}
       data-testid="diff-viewer"
@@ -47,11 +50,19 @@ export function DiffViewer({ patch, className }: DiffViewerProps) {
         // Hunk + file headers span the full width without line-number gutters.
         if (r.kind === "hunk" || r.kind === "file") {
           return (
-            <div key={i} className={cn("px-3 whitespace-pre", ROW_BG[r.kind])}>
+            <div
+              key={i}
+              className={cn(
+                "px-3 whitespace-pre-wrap break-words",
+                ROW_BG[r.kind],
+              )}
+            >
               {r.text || " "}
             </div>
           );
         }
+        // items-stretch keeps the gutter rule running the full height of a
+        // wrapped row; the number itself still sits on the first line.
         return (
           <div key={i} className={cn("flex items-stretch", ROW_BG[r.kind])}>
             <span className={GUTTER_CELL}>{r.oldNo ?? ""}</span>
@@ -65,7 +76,9 @@ export function DiffViewer({ patch, className }: DiffViewerProps) {
             >
               {SIGN[r.kind]}
             </span>
-            <code className="block flex-1 pr-3 whitespace-pre">{r.text || " "}</code>
+            <code className="block flex-1 min-w-0 pr-3 whitespace-pre-wrap break-words">
+              {r.text || " "}
+            </code>
           </div>
         );
       })}
