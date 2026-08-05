@@ -16,6 +16,10 @@ import {
   disableStewardshipAndWipeGovernance,
   nestAllowsSelfApprove,
   setAllowSelfApprove,
+  nestReviewsPrimeOnly,
+  setPrimeOnlyReview,
+  nestPrimeTags,
+  setPrimeTags,
 } from "./service.js";
 import { registerImportedDocuments } from "../nodes/service.js";
 import {
@@ -417,6 +421,8 @@ nestRoutes.get("/:nestId/settings", async (c) => {
   return c.json({
     stewardship_enabled: await isStewardshipEnabled(nestId),
     allow_self_approve: await nestAllowsSelfApprove(nestId),
+    prime_only_review: await nestReviewsPrimeOnly(nestId),
+    prime_tags: await nestPrimeTags(nestId),
   });
 });
 
@@ -444,6 +450,8 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
   const body = await c.req.json<{
     stewardship_enabled?: boolean;
     allow_self_approve?: boolean;
+    prime_only_review?: boolean;
+    prime_tags?: string[] | string;
   }>();
   let wiped: {
     stewards: number;
@@ -477,10 +485,23 @@ nestRoutes.patch("/:nestId/settings", async (c) => {
   if (typeof body.allow_self_approve === "boolean") {
     await setAllowSelfApprove(nestId, body.allow_self_approve);
   }
+  // Prime settings are non-destructive: flipping them changes which FUTURE
+  // writes need review, never the approval state of anything already published.
+  if (typeof body.prime_only_review === "boolean") {
+    await setPrimeOnlyReview(nestId, body.prime_only_review);
+  }
+  if (body.prime_tags !== undefined) {
+    await setPrimeTags(
+      nestId,
+      Array.isArray(body.prime_tags) ? body.prime_tags : [body.prime_tags],
+    );
+  }
 
   return c.json({
     stewardship_enabled: await isStewardshipEnabled(nestId),
     allow_self_approve: await nestAllowsSelfApprove(nestId),
+    prime_only_review: await nestReviewsPrimeOnly(nestId),
+    prime_tags: await nestPrimeTags(nestId),
     wiped,
   });
 });

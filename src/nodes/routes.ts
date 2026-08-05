@@ -110,6 +110,7 @@ nodeRoutes.post("/", async (c) => {
     status?: string;
     schedule?: string;
     folder?: string;
+    prime?: boolean;
   }>();
 
   if (!body.title || !body.content) {
@@ -132,6 +133,7 @@ nodeRoutes.post("/", async (c) => {
       status: body.status,
       schedule: body.schedule,
       folder: body.folder,
+      prime: body.prime,
     },
     authorEmail,
   );
@@ -179,51 +181,11 @@ nodeRoutes.get("/:nodeId{.+}/stewards", async (c) => {
   });
 });
 
-// GET /nests/:nestId/nodes/:nodeId/versions
-nodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
-  const nestId = c.req.param("nestId")!;
-  const nodeId = c.req.param("nodeId")!;
-
-  const { getVersions, getApprovedVersion } = await import("../governance/version-service.js");
-  const allVersions = await getVersions(nestId, nodeId);
-  const approved = await getApprovedVersion(nestId, nodeId);
-
-  // Enrich each version with the resolver (approver/rejecter) so the UI
-  // can show "approved by X" next to the row. We pull the latest
-  // resolution per version from review_requests; node_versions itself
-  // doesn't carry approver email.
-  const db = getDb();
-  const resolutions = await db
-    .all(
-      `SELECT version, status, resolved_by, resolved_at
-         FROM review_requests
-        WHERE nest_id = ? AND node_id = ?
-          AND status IN ('approved', 'rejected')
-          AND resolved_by IS NOT NULL
-        ORDER BY resolved_at DESC`,
-      [nestId, nodeId],
-    ) as Array<{
-      version: number;
-      status: string;
-      resolved_by: string;
-    }>;
-  const byVersion = new Map<number, { status: string; resolvedBy: string }>();
-  for (const r of resolutions) {
-    if (!byVersion.has(r.version)) {
-      byVersion.set(r.version, { status: r.status, resolvedBy: r.resolved_by });
-    }
-  }
-  const enriched = allVersions.map((v) => {
-    const r = byVersion.get(v.version);
-    return r ? { ...v, resolvedBy: r.resolvedBy, resolutionStatus: r.status } : v;
-  });
-
-  return c.json({
-    versions: enriched,
-    approvedVersion: approved,
-    currentVersion: allVersions[0]?.version || 0,
-  });
-});
+// NOTE: no `/:nodeId{.+}/versions` handler here. governanceNodeRoutes is
+// mounted ahead of nodeRoutes (see app.ts) and registers the same path, so a
+// duplicate here is unreachable — it silently shadowed itself, which is why the
+// `resolvedBy` enrichment it used to carry never reached the UI. That query now
+// lives in the governance handler alongside the per-version change log.
 
 // GET /nests/:nestId/nodes/:nodeId/reviews
 nodeRoutes.get("/:nodeId{.+}/reviews", async (c) => {
@@ -502,6 +464,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
     title?: string;
     changeNote?: string;
     schedule?: string;
+    prime?: boolean | null;
   }>();
 
   // Conflict detection via X-Base-Version header — REST-only contract.
@@ -536,6 +499,7 @@ nodeRoutes.patch("/:nodeId{.+}", async (c) => {
       status: body.status,
       changeNote: body.changeNote,
       schedule: body.schedule,
+      prime: body.prime,
     },
     authorEmail,
   );

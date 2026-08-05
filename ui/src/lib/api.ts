@@ -553,21 +553,50 @@ export async function deleteApiKey(keyId: string) {
 
 // ─── Nest settings ─────────────────────────────────────────────────────
 
+export interface NestSettings {
+  stewardship_enabled: boolean;
+  allow_self_approve: boolean;
+  /** Review only prime documents; everything else self-publishes. */
+  prime_only_review: boolean;
+  /** Tags that mark a document prime (normalized, no leading `#`). */
+  prime_tags: string[];
+}
+
 export async function getNestSettings(nestId: string) {
   return cachedRead(`/nests/${nestId}/settings`, () =>
-    request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
-      `/nests/${nestId}/settings`,
-    ),
+    request<NestSettings>(`/nests/${nestId}/settings`),
   );
 }
 
 export async function updateNestSettings(
   nestId: string,
-  data: { stewardship_enabled?: boolean; allow_self_approve?: boolean },
+  data: {
+    stewardship_enabled?: boolean;
+    allow_self_approve?: boolean;
+    prime_only_review?: boolean;
+    prime_tags?: string[];
+  },
 ) {
-  return request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
-    `/nests/${nestId}/settings`,
-    { method: "PATCH", body: JSON.stringify(data) },
+  return request<NestSettings>(`/nests/${nestId}/settings`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+/**
+ * Does this document need steward approval regardless of who edits it?
+ * Mirrors the server's document → tag → nest resolution (`isPrimeDocument`);
+ * the badge is advisory, the server gate is authoritative.
+ */
+export function isPrimeNode(
+  node: { tags?: string[]; prime?: boolean },
+  primeTags: string[],
+): boolean {
+  if (typeof node.prime === "boolean") return node.prime;
+  if (!primeTags.length) return false;
+  const wanted = new Set(primeTags);
+  return (node.tags || []).some((t) =>
+    wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
   );
 }
 
@@ -801,6 +830,8 @@ export async function createNode(
     folder?: string;
     /** Orchestrator schedule — runnable types (agent/skill) only. */
     schedule?: string;
+    /** Flag as prime (always needs approval). Owner/admin only. */
+    prime?: boolean;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -819,6 +850,8 @@ export async function updateNode(
     changeNote?: string;
     /** Runnable types (agent/skill) only; "" clears it. */
     schedule?: string;
+    /** Owner/admin only; `null` clears the flag back to tag/nest inheritance. */
+    prime?: boolean | null;
   },
   baseVersion?: number,
 ) {
@@ -1179,6 +1212,24 @@ export async function getNodeVersions(nestId: string, nodeId: string) {
     approvedVersion: number | null;
     currentVersion: number;
   }>(`/nests/${nestId}/nodes/${nodeId}/versions`);
+}
+
+/**
+ * One version's full body, reconstructed server-side on demand.
+ *
+ * The versions list ships each version's change log (a small diff) rather than
+ * every full body, so a body is fetched only for the version actually being
+ * previewed, compared, or restored. `content` is null when that version's chain
+ * no longer reconstructs.
+ */
+export async function getNodeVersionContent(
+  nestId: string,
+  nodeId: string,
+  version: number,
+) {
+  return request<{ version: number; content: string | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/versions/${version}`,
+  );
 }
 
 export async function getNodeReviews(nestId: string, nodeId: string) {

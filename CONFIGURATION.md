@@ -279,6 +279,20 @@ On first connect the server creates its schema automatically (idempotent) — no
 manual migration step. There is no built-in SQLite→Postgres data migration; a new
 Postgres backend starts empty.
 
+### First-boot upgrade passes
+
+Some upgrades carry a one-shot data pass that runs at startup, before the server
+accepts requests, and records itself in `schema_migrations` so it never repeats.
+Two exist today: the `node_versions` backfill from `history.yaml`, and the
+version-chain repair added in 1.13 (re-anchors documents whose version chain was
+grafted by an older import, and moves inline patches into `v{N}.diff` files).
+
+Both walk every document in every nest, so on a large vault the **first** boot
+after upgrading can take noticeably longer than usual — reads of the on-disk
+vault, not database work, so an install on network/FUSE storage feels it most.
+Every subsequent boot skips the pass entirely. Progress and a per-pass summary
+are printed to the server log.
+
 > ⚠️ **Cloud Run durability — read this.** Cloud SQL persists only the *metadata
 > database*. The actual **document content and version history** live on the
 > filesystem under `$DATA_ROOT/nests/`, which on Cloud Run is **ephemeral** and is

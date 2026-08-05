@@ -193,6 +193,18 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE nests ADD COLUMN allow_self_approve INTEGER NOT NULL DEFAULT 0");
   }
 
+  // Prime documents: a per-doc / per-tag escalation that forces the full
+  // draft → pending → approved cycle even when the actor would otherwise
+  // auto-publish. `prime_only_review` flips the governed nest's default from
+  // "review everything" to "review only prime docs"; off by default so
+  // existing governed nests keep their current posture on upgrade.
+  if (!nestCols.includes("prime_only_review")) {
+    db.exec("ALTER TABLE nests ADD COLUMN prime_only_review INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!nestCols.includes("prime_tags")) {
+    db.exec("ALTER TABLE nests ADD COLUMN prime_tags TEXT NOT NULL DEFAULT 'prime-document'");
+  }
+
   // Admin flag on users (first PromptOwl-authed user becomes the server admin)
   const userCols = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
   if (!userCols.includes("is_admin")) {

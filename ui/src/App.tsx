@@ -13,7 +13,7 @@ import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, LayoutGrid } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
@@ -596,6 +596,22 @@ export default function App() {
           </button>
 
           <div className="flex items-center gap-2">
+            {/* Prominent search entry — pulls full-text search out of the
+                buried Documents filter bar. Opens the same QuickOpen palette
+                as ⌘K. Shown wherever QuickOpen is available (nest/document). */}
+            {(view.page === "nest" || view.page === "document") && (
+              <button
+                onClick={() => setShowQuickOpen(true)}
+                title="Search this nest (⌘K)"
+                className="hidden sm:flex items-center gap-2 h-8 pl-2.5 pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+              >
+                <Search className="h-3.5 w-3.5" />
+                <span>Search</span>
+                <kbd className="ml-1 text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
+                  ⌘K
+                </kbd>
+              </button>
+            )}
             {/* Mode indicator — only when not logged-in (logged-in
                 users see open-mode context inside the dropdown) */}
             {authMode === "open" && !adminStatus?.me && (

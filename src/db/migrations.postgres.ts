@@ -100,6 +100,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       stewardship_enabled INTEGER NOT NULL DEFAULT 0,
       is_imported INTEGER NOT NULL DEFAULT 0,
       allow_self_approve INTEGER NOT NULL DEFAULT 0,
+      prime_only_review INTEGER NOT NULL DEFAULT 0,
+      prime_tags TEXT NOT NULL DEFAULT 'prime-document',
       shared_teams TEXT NOT NULL DEFAULT '[]',
       UNIQUE(user_id, slug)
     );
@@ -357,6 +359,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- permission check reads this column, so without the explicit ALTER an
     -- existing deployment breaks on upgrade, not just the Teams feature.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS shared_teams TEXT NOT NULL DEFAULT '[]';
+
+    -- Prime documents: same inline-plus-explicit-ALTER pattern, so a database
+    -- created before prime shipped still gets the columns on upgrade.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_only_review INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_tags TEXT NOT NULL DEFAULT 'prime-document';
 
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,

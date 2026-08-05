@@ -177,13 +177,26 @@ Owner only.
 
 ### GET `/nests/:nestId/settings`
 ```json
-{ "stewardship_enabled": false }
+{
+  "stewardship_enabled": false,
+  "allow_self_approve": false,
+  "prime_only_review": false,
+  "prime_tags": ["prime-document"]
+}
 ```
 
 ### PATCH `/nests/:nestId/settings` (admin/owner)
 ```json
-{ "stewardship_enabled": true }
+{ "stewardship_enabled": true, "prime_only_review": true, "prime_tags": ["prime-document"] }
 ```
+
+Every field is optional; only the ones present are changed.
+
+- `allow_self_approve` — owner/admin writes publish immediately instead of drafting.
+- `prime_only_review` — in a governed nest, only **prime** documents need approval; everything else self-publishes. Off by default.
+- `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
+
+Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
 
 ### PATCH `/nests/:nestId/visibility` (admin)
 ```json
@@ -467,6 +480,7 @@ Lists all readable docs.
 - Optional `folder` (string) nests the doc → `nodes/<folder>/<slug>`. Each `/`-separated segment is slugified independently (so `../` or absolute paths can't escape the vault); empty segments drop. A leading `nodes/` segment is stripped, so `nodes/gtm/deals` and `gtm/deals` mean the same folder. Max 8 levels deep; each segment (and the title slug) max 100 chars — otherwise `400`.
 - `409` when the derived id is already taken (same folder + same title). The existing document is left untouched — update it, or pick another folder or title. The same title in a *different* folder is still allowed here; MCP `context_create` is stricter and refuses it (see [§9 MCP](#9-mcp)).
 - Optional `schedule` (free-form cron/interval string, opaque to the server) — **only valid when `type` is `agent` or `skill`**; sent on any other type → `400`. Stored in frontmatter metadata and echoed back on every node response. See [§9 `GET /runnables`](#get-nestsnestidrunnables-read).
+- Optional `prime` (boolean) flags the document as **prime** — it then always requires steward approval, whoever writes it. Owner/admin only; any other caller sending the field gets `403`. Omit to inherit from the nest's `prime_tags`; `false` exempts this document from an otherwise-prime tag. Echoed back on every node response as `prime` (absent when inherited). See `STEWARDSHIP.md → Prime documents`.
 - If stewardship enabled → status defaults `draft`. Else `approved`.
 - Auto-syncs tag index for steward resolution.
 
@@ -520,6 +534,7 @@ Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
 ```
 Requires nest write permission.
 - `schedule` — runnable types (`agent`/`skill`) only; sent for any other type → `400`. Send `""` to clear it.
+- `prime` — owner/admin only (`403` otherwise). `true`/`false` set the document-scope flag, `null` clears it back to tag/nest inheritance. An edit that makes the document prime is itself gated, so it lands as a draft awaiting approval.
 
 ### DELETE `/nests/:nestId/nodes/:nodeId`
 Write permission. Hidden in UI for reviewer/viewer; server still enforces.
@@ -844,7 +859,24 @@ Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review`
 ## 7. Versions
 
 ### GET `/nests/:nestId/nodes/:nodeId/versions`
-**Enriched** (recent change) — each version may include `resolvedBy` + `resolutionStatus` pulled from `review_requests`.
+
+Version metadata plus each version's **change log** — the unified diff taking the
+previous version to this one, as the engine stored it. `diff` is absent for v1
+and for keyframe versions (a keyframe is a full snapshot, so there is no patch).
+
+`content` is always `""` here. The list deliberately does **not** carry bodies:
+attaching them means replaying the version chain once per row and shipping N
+full copies of the document just to open the history panel. Fetch the one body
+you need from `GET .../versions/:version` below.
+
+Each version may also include `resolvedBy` + `resolutionStatus`, the steward who
+approved or rejected it, joined from `review_requests` (`node_versions` stores
+the status but not the resolver's email).
+
+Gated by the same node-level read check as the document itself — `403` when the
+caller can't read the node, which for a public reader means any node without an
+approved version.
+
 ```json
 {
   "currentVersion": 3,
@@ -855,7 +887,9 @@ Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review`
       "editedBy": "author@x.com",
       "editedAt": "...",
       "status": "pending_review",
-      "changeNote": "..."
+      "changeNote": "...",
+      "content": "",
+      "diff": "Index: v2\n===...\n--- v2\tv2\n+++ v2\tv3\n@@ -1,4 +1,5 @@\n title: doc\n-old line\n+new line\n"
     },
     {
       "version": 2,
@@ -863,11 +897,29 @@ Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review`
       "editedAt": "...",
       "status": "approved",
       "changeNote": "...",
+      "content": "",
       "resolvedBy": "reviewer@x.com",
       "resolutionStatus": "approved"
     }
   ]
 }
+```
+
+### GET `/nests/:nestId/nodes/:nodeId/versions/:version`
+
+One version's full body, reconstructed on demand from the nearest keyframe plus
+the diffs after it.
+
+`content` is `null` — with HTTP 200, not an error — when that version's chain can
+no longer be replayed (e.g. history grafted by an older import). Callers render
+it as "no content" rather than failing the whole panel.
+
+Same node-level read check as the list above: `403` when the caller can't read
+the node. A public reader can only reach versions of a node that has an approved
+version, so drafts of an unapproved document are never reconstructable this way.
+
+```json
+{ "version": 2, "content": "# Heading\n\nbody as of v2\n" }
 ```
 
 ---
