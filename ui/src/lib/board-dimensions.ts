@@ -36,8 +36,10 @@ export interface BoardConfig {
 
 export interface BoardColumn {
   key: string;
-  /** Human label — same as key except UNCATEGORIZED and the folder root. */
+  /** Heading text. For folder columns, just the folder's own name. */
   label: string;
+  /** Full, untrimmed name for the tooltip, since `label` may be shortened. */
+  title: string;
 }
 
 /** Parent path of a path-like node id: "gtm/deals/foo" → "gtm/deals"; root → "". */
@@ -58,22 +60,98 @@ export function tagValueInNamespace(
   return null;
 }
 
-/** Which column key a node sits in for the active dimension. */
-export function cardColumnKey(node: BoardNode, config: BoardConfig): string {
+/**
+ * The namespace to group by, from whatever the user typed. Everything from the
+ * first colon on is dropped: the field wants a namespace ("stage"), but typing
+ * a whole tag ("stage:draft") is the obvious mistake, and looking for
+ * `stage:draft:` would silently match nothing. Empty means "group by every tag".
+ */
+function namespaceOf(config: BoardConfig): string {
+  return (config.tagNamespace ?? "").trim().split(":")[0]!.trim();
+}
+
+/**
+ * Every column a node belongs to. Folder and status put a node in exactly one;
+ * tag can put it in several, because a document carries several tags and there
+ * is no basis for picking one. Nodes with nothing to group on get UNCATEGORIZED.
+ */
+export function cardColumnKeys(node: BoardNode, config: BoardConfig): string[] {
   switch (config.dimension) {
     case "folder":
-      return folderOf(node.id);
+      return [folderOf(node.id)];
     case "status":
-      return node.status || UNCATEGORIZED;
+      return [node.status || UNCATEGORIZED];
     case "tag": {
-      const ns = config.tagNamespace?.trim();
-      if (!ns) return UNCATEGORIZED;
-      return tagValueInNamespace(node.tags, ns) ?? UNCATEGORIZED;
+      const ns = namespaceOf(config);
+      // With a namespace, group by the value after the colon; without one,
+      // every tag is its own column (which is what a vault of flat tags needs).
+      const values = ns
+        ? node.tags
+            .filter((t) => t.startsWith(`${ns}:`))
+            .map((t) => t.slice(ns.length + 1))
+            .filter(Boolean)
+        : node.tags.filter(Boolean);
+      return values.length > 0 ? [...new Set(values)] : [UNCATEGORIZED];
     }
   }
 }
 
+/**
+ * The single column a node sits in. Kept for the move-planning check; on the
+ * tag dimension a node can be in several columns, so prefer cardColumnKeys.
+ */
+export function cardColumnKey(node: BoardNode, config: BoardConfig): string {
+  return cardColumnKeys(node, config)[0]!;
+}
+
+/**
+ * Folder headings: the folder's own name, and only as much of its parent path
+ * as it takes to be unique.
+ *
+ * The full path is useless as a heading — an imported vault puts every folder
+ * under one long root, so the headings all truncate to the same elided prefix.
+ * The last segment alone is readable but collides (`content/social` and
+ * `content/published/social` both read "social"), so colliding labels grow one
+ * parent segment at a time until they separate: "content/social" vs
+ * "published/social". Columns that were already unique keep their short name.
+ */
+function disambiguateFolderLabels(keys: string[]): Map<string, string> {
+  const segments = new Map(keys.map((k) => [k, k.split("/")]));
+  const depth = new Map(keys.map((k) => [k, 1]));
+  const labelOf = (k: string) => segments.get(k)!.slice(-depth.get(k)!).join("/");
+
+  for (;;) {
+    const byLabel = new Map<string, string[]>();
+    for (const k of keys) {
+      const label = labelOf(k);
+      const group = byLabel.get(label);
+      if (group) group.push(k);
+      else byLabel.set(label, [k]);
+    }
+    // Deepen only the colliding ones. Terminates: each pass either deepens a
+    // key (bounded by its segment count) or changes nothing and stops.
+    let deepened = false;
+    for (const group of byLabel.values()) {
+      if (group.length < 2) continue;
+      for (const k of group) {
+        if (depth.get(k)! < segments.get(k)!.length) {
+          depth.set(k, depth.get(k)! + 1);
+          deepened = true;
+        }
+      }
+    }
+    if (!deepened) break;
+  }
+  return new Map(keys.map((k) => [k, labelOf(k)]));
+}
+
 function labelFor(key: string, config: BoardConfig): string {
+  if (key === UNCATEGORIZED) return "Uncategorized";
+  if (key === "" && config.dimension === "folder") return "(root)";
+  return key;
+}
+
+function titleFor(key: string, config: BoardConfig): string {
   if (key === UNCATEGORIZED) return "Uncategorized";
   if (key === "" && config.dimension === "folder") return "(root)";
   return key;
@@ -89,7 +167,9 @@ export function buildColumns(
   config: BoardConfig,
 ): BoardColumn[] {
   const present = new Set<string>();
-  for (const n of nodes) present.add(cardColumnKey(n, config));
+  for (const n of nodes) {
+    for (const key of cardColumnKeys(n, config)) present.add(key);
+  }
 
   const ordered: string[] = [];
   const seen = new Set<string>();
@@ -101,17 +181,30 @@ export function buildColumns(
   }
 
   const rest = [...present].filter((k) => k !== UNCATEGORIZED).sort();
-  const keys = [...ordered, ...rest];
+  let keys = [...ordered, ...rest];
   if (present.has(UNCATEGORIZED) || [...seen].includes(UNCATEGORIZED)) {
     // UNCATEGORIZED always trails, regardless of columnOrder placement.
-    const withoutUncat = keys.filter((k) => k !== UNCATEGORIZED);
-    withoutUncat.push(UNCATEGORIZED);
-    return withoutUncat.map((key) => ({ key, label: labelFor(key, config) }));
+    keys = keys.filter((k) => k !== UNCATEGORIZED);
+    keys.push(UNCATEGORIZED);
   }
-  return keys.map((key) => ({ key, label: labelFor(key, config) }));
+  const folderLabels =
+    config.dimension === "folder"
+      ? disambiguateFolderLabels(
+          keys.filter((k) => k !== UNCATEGORIZED && k !== ""),
+        )
+      : null;
+  return keys.map((key) => ({
+    key,
+    label: folderLabels?.get(key) ?? labelFor(key, config),
+    title: titleFor(key, config),
+  }));
 }
 
-/** Columns + a key→nodes map. Every node lands in exactly one bucket. */
+/**
+ * Columns + a key→nodes map. Every node lands in at least one bucket — exactly
+ * one for folder/status, but a multi-tagged node appears under each of its tags,
+ * so on the tag dimension the column counts sum to more than the node count.
+ */
 export function groupByColumn(
   nodes: BoardNode[],
   config: BoardConfig,
@@ -120,8 +213,9 @@ export function groupByColumn(
   const byColumn: Record<string, BoardNode[]> = {};
   for (const col of columns) byColumn[col.key] = [];
   for (const n of nodes) {
-    const key = cardColumnKey(n, config);
-    (byColumn[key] ??= []).push(n);
+    for (const key of cardColumnKeys(n, config)) {
+      (byColumn[key] ??= []).push(n);
+    }
   }
   return { columns, byColumn };
 }

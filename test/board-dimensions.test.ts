@@ -103,6 +103,93 @@ describe("buildColumns", () => {
       "weird",
     ]);
   });
+  it("labels a folder column with its own name, full path in the title", () => {
+    const cfg: BoardConfig = { dimension: "folder" };
+    const cols = buildColumns(
+      [
+        node({ id: "b006e456-15de/nodes/architecture/a" }),
+        node({ id: "b006e456-15de/nodes/gtm/deals/b" }),
+      ],
+      cfg,
+    );
+    expect(cols.map((c) => c.label)).toEqual(["architecture", "deals"]);
+    expect(cols.map((c) => c.title)).toEqual([
+      "b006e456-15de/nodes/architecture",
+      "b006e456-15de/nodes/gtm/deals",
+    ]);
+  });
+  it("grows colliding folder labels until they are distinct", () => {
+    const cfg: BoardConfig = { dimension: "folder" };
+    const cols = buildColumns(
+      [
+        node({ id: "v1/nodes/content/social/a" }),
+        node({ id: "v1/nodes/content/published/social/b" }),
+        node({ id: "v1/nodes/content/blog/c" }),
+      ],
+      cfg,
+    );
+    // Only the two "social" columns deepen; "blog" was already unique.
+    expect(cols.map((c) => c.label).sort()).toEqual([
+      "blog",
+      "content/social",
+      "published/social",
+    ]);
+  });
+  it("labels a doc at the vault root '(root)'", () => {
+    const cfg: BoardConfig = { dimension: "folder" };
+    const cols = buildColumns(
+      [node({ id: "loose-doc" }), node({ id: "gtm/deals/b" })],
+      cfg,
+    );
+    expect(cols.map((c) => c.label)).toEqual(["(root)", "deals"]);
+  });
+  it("shows the folder's own name even when it is the only column", () => {
+    const cfg: BoardConfig = { dimension: "folder" };
+    const cols = buildColumns([node({ id: "gtm/deals/a" })], cfg);
+    expect(cols.map((c) => c.label)).toEqual(["deals"]);
+    expect(cols.map((c) => c.title)).toEqual(["gtm/deals"]);
+  });
+});
+
+describe("tag dimension grouping", () => {
+  it("groups by every tag when no namespace is given", () => {
+    const cfg: BoardConfig = { dimension: "tag", tagNamespace: "" };
+    const { columns, byColumn } = groupByColumn(
+      [
+        node({ id: "a", tags: ["blog", "marketing"] }),
+        node({ id: "b", tags: ["blog"] }),
+        node({ id: "c", tags: [] }),
+      ],
+      cfg,
+    );
+    expect(columns.map((c) => c.key)).toEqual([
+      "blog",
+      "marketing",
+      UNCATEGORIZED,
+    ]);
+    // A multi-tagged doc appears under each of its tags.
+    expect(byColumn["blog"].map((n) => n.id)).toEqual(["a", "b"]);
+    expect(byColumn["marketing"].map((n) => n.id)).toEqual(["a"]);
+    expect(byColumn[UNCATEGORIZED].map((n) => n.id)).toEqual(["c"]);
+  });
+  it("treats a typed 'ns:value' as just the namespace", () => {
+    // The field wants a namespace; typing a whole tag is the obvious slip and
+    // used to match nothing at all (it searched for "status:draft:").
+    const cfg: BoardConfig = { dimension: "tag", tagNamespace: "status:draft" };
+    const { byColumn } = groupByColumn(
+      [node({ id: "a", tags: ["status:draft"] })],
+      cfg,
+    );
+    expect(byColumn["draft"].map((n) => n.id)).toEqual(["a"]);
+  });
+  it("keeps flat tags out of a namespaced grouping", () => {
+    const cfg: BoardConfig = { dimension: "tag", tagNamespace: "stage" };
+    const { byColumn } = groupByColumn(
+      [node({ id: "a", tags: ["blog", "sales"] })],
+      cfg,
+    );
+    expect(byColumn[UNCATEGORIZED].map((n) => n.id)).toEqual(["a"]);
+  });
 });
 
 describe("groupByColumn", () => {

@@ -68,13 +68,15 @@ function loadConfig(nestId: string): BoardConfig {
       return {
         dimension,
         tagNamespace:
-          typeof p.tagNamespace === "string" ? p.tagNamespace : "stage",
+          typeof p.tagNamespace === "string" ? p.tagNamespace : "",
       };
     }
   } catch {
     // ignore corrupt storage — fall through to default
   }
-  return { dimension: "folder", tagNamespace: "stage" };
+  // Empty namespace = group by every tag, which is the only setting that shows
+  // real columns on a vault of flat (un-namespaced) tags.
+  return { dimension: "folder", tagNamespace: "" };
 }
 
 function saveConfig(nestId: string, config: BoardConfig) {
@@ -222,10 +224,11 @@ export function MaturityBoard({
     [dragId, nodes, effectiveConfig, nestId, load],
   );
 
-  // Two independent reasons a card can't be dragged: the dimension has no
-  // direct setter (status), or the viewer has no write access. They need
-  // different explanations, so keep them apart.
-  const dimensionDraggable = effectiveConfig.dimension !== "status";
+  // Folder is the only dimension a drag can set. Status moves through the
+  // review workflow, and a tag column can hold the same doc more than once
+  // (a doc has many tags), so "moved out of this column" has no single
+  // meaning. Write access is the second, independent condition.
+  const dimensionDraggable = effectiveConfig.dimension === "folder";
   const draggable = dimensionDraggable && canEditDocs;
 
   return (
@@ -248,9 +251,9 @@ export function MaturityBoard({
             <Input
               value={config.tagNamespace ?? ""}
               onChange={(e) => updateConfig({ tagNamespace: e.target.value })}
-              placeholder="stage"
-              className="h-8 w-28"
-              title="Groups by tags like <namespace>:value"
+              placeholder="all tags"
+              className="h-8 w-32"
+              title="Optional. Empty groups by every tag; a namespace like 'stage' groups by stage:<value> tags only."
             />
           )}
           <Button variant="outline" size="sm" onClick={load} disabled={loading}>
@@ -261,11 +264,19 @@ export function MaturityBoard({
         </div>
       </NestPageHeader>
 
-      {!dimensionDraggable ? (
+      {config.dimension === "status" ? (
         <p className="text-xs text-muted-foreground">
           Status reflects the governance lifecycle and is read-only here — moving
-          a doc through review happens in the document view. Switch to Folder or
-          a Tag namespace for a draggable board.
+          a doc through review happens in the document view. Switch to Folder for
+          a draggable board.
+        </p>
+      ) : config.dimension === "tag" ? (
+        <p className="text-xs text-muted-foreground">
+          {config.tagNamespace?.trim()
+            ? `Grouped by ${config.tagNamespace.trim().split(":")[0]}: tags — only documents carrying one appear in a column. Clear the box to group by every tag instead.`
+            : "Grouped by tag — one column per tag, so a document with several tags appears in each of them. Type a namespace (e.g. stage) to group by stage: values only."}{" "}
+          Read-only: a document has many tags, so dragging it out of one column
+          has no single meaning.
         </p>
       ) : !canEditDocs ? (
         <p className="text-xs text-muted-foreground">
@@ -274,10 +285,7 @@ export function MaturityBoard({
         </p>
       ) : (
         <p className="text-xs text-muted-foreground">
-          Drag a card between columns to
-          {config.dimension === "folder"
-            ? " move it to that folder."
-            : ` set its ${config.tagNamespace || "…"}: tag.`}
+          Drag a card between columns to move it to that folder.
         </p>
       )}
 
@@ -322,7 +330,7 @@ export function MaturityBoard({
                     className={`text-sm font-medium truncate capitalize ${
                       col.key === UNCATEGORIZED ? "text-muted-foreground" : ""
                     }`}
-                    title={col.label}
+                    title={col.title}
                   >
                     {col.label}
                   </span>
