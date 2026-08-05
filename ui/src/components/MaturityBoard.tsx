@@ -351,7 +351,12 @@ export function MaturityBoard({
                           <GripVertical className="h-3.5 w-3.5 mt-0.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0" />
                         )}
                         <TypeIcon type={n.type} />
-                        <span className="flex-1 leading-snug break-words">
+                        {/* min-w-0: a flex item defaults to min-width:auto, so
+                            it refuses to shrink below its content and
+                            break-words never fires — an unbroken title like
+                            ENTERPRISE_LICENSING_IMPLEMENTATION widened the card
+                            past the column instead of wrapping. */}
+                        <span className="min-w-0 flex-1 leading-snug break-words">
                           {n.title}
                         </span>
                       </div>
