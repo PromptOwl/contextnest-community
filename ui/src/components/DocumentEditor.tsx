@@ -1205,9 +1205,9 @@ export function DocumentEditor({
   }
 
   return (
-    <div className="md:py-6">
+    <div>
       {/* Header */}
-      <div className="flex items-center justify-between gap-3 mb-6 mt-14 md:mt-0">
+      <div className="flex items-center justify-between gap-3 mb-4 mt-14 md:mt-0">
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <Button
             variant="ghost"

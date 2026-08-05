@@ -13,8 +13,8 @@
  * this file owns React state, localStorage, and running the plan against the API.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { NestPageHeader } from "./NestPageHeader";
 import {
-  ArrowLeft,
   RefreshCw,
   Loader2,
   FileText,
@@ -25,6 +25,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
+import { useAuth } from "../auth/AuthContext";
+import { deriveNestCaps } from "../lib/nest-caps";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -39,6 +41,7 @@ import {
 interface Props {
   nestId: string;
   nestName: string;
+  isOwner: boolean;
   onBack: () => void;
   onOpenDocument: (nodeId: string) => void;
 }
@@ -93,9 +96,11 @@ function TypeIcon({ type }: { type: string }) {
 export function MaturityBoard({
   nestId,
   nestName,
+  isOwner,
   onBack,
   onOpenDocument,
 }: Props) {
+  const { isAdmin } = useAuth();
   const [nodes, setNodes] = useState<BoardNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -103,6 +108,34 @@ export function MaturityBoard({
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropCol, setDropCol] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Same derivation NestView uses. Starts false so a read-only viewer never
+  // sees a draggable card during the fetch, then flips on for writers.
+  const [canEditDocs, setCanEditDocs] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getNest(nestId)
+      .then((meta: any) => {
+        if (cancelled) return;
+        setCanEditDocs(
+          deriveNestCaps({
+            roles: meta?.roles ?? [],
+            permission: meta?.permission ?? null,
+            myStewards: meta?.myStewards ?? [],
+            isOwner,
+            isAdmin,
+          }).canEditDocs,
+        );
+      })
+      .catch(() => {
+        // Can't resolve caps → leave the board read-only rather than offer a
+        // drag the server will refuse.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [nestId, isOwner, isAdmin]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -189,19 +222,15 @@ export function MaturityBoard({
     [dragId, nodes, effectiveConfig, nestId, load],
   );
 
-  const draggable = effectiveConfig.dimension !== "status";
+  // Two independent reasons a card can't be dragged: the dimension has no
+  // direct setter (status), or the viewer has no write access. They need
+  // different explanations, so keep them apart.
+  const dimensionDraggable = effectiveConfig.dimension !== "status";
+  const draggable = dimensionDraggable && canEditDocs;
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={onBack}>
-            <ArrowLeft className="h-4 w-4 mr-1" />
-            {nestName}
-          </Button>
-          <h2 className="text-lg font-semibold">Board</h2>
-        </div>
-
+      <NestPageHeader nestName={nestName} onBack={onBack}>
         <div className="flex items-center gap-2">
           <label className="text-sm text-muted-foreground">Columns by</label>
           <select
@@ -230,13 +259,18 @@ export function MaturityBoard({
             />
           </Button>
         </div>
-      </div>
+      </NestPageHeader>
 
-      {config.dimension === "status" ? (
+      {!dimensionDraggable ? (
         <p className="text-xs text-muted-foreground">
           Status reflects the governance lifecycle and is read-only here — moving
           a doc through review happens in the document view. Switch to Folder or
           a Tag namespace for a draggable board.
+        </p>
+      ) : !canEditDocs ? (
+        <p className="text-xs text-muted-foreground">
+          You have read-only access to this nest, so cards can't be moved. Ask
+          the nest owner for write access to rearrange the board.
         </p>
       ) : (
         <p className="text-xs text-muted-foreground">
@@ -285,7 +319,7 @@ export function MaturityBoard({
               >
                 <div className="flex items-center justify-between px-3 py-2 border-b border-border sticky top-0">
                   <span
-                    className={`text-sm font-medium truncate ${
+                    className={`text-sm font-medium truncate capitalize ${
                       col.key === UNCATEGORIZED ? "text-muted-foreground" : ""
                     }`}
                     title={col.label}
@@ -341,7 +375,7 @@ export function MaturityBoard({
                   ))}
                   {cards.length === 0 && (
                     <div className="text-xs text-muted-foreground/60 text-center py-6">
-                      Drop here
+                      {draggable ? "Drop here" : "Empty"}
                     </div>
                   )}
                 </div>

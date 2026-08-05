@@ -125,7 +125,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
 
   return (
     <div>
-      <div className="flex items-center gap-3 mb-6">
+      <div className="flex items-center gap-3 mb-4">
         <Button variant="ghost" size="icon" onClick={onBack}>
           <ArrowLeft className="h-4 w-4" />
         </Button>
