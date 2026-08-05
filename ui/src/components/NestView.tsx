@@ -140,6 +140,10 @@ interface NestViewProps {
   /** Seed the search filter on mount. Used when arriving from a tag
    *  click on a document detail page. */
   initialSearch?: string;
+  /** Pre-seed the tag filter / folder scope when arriving from a tag chip or
+   *  a folder breadcrumb segment elsewhere in the app. */
+  initialTags?: string[];
+  initialFolder?: string;
   /** Tab to open on mount, from ?tab= — falls back to overview when the
    *  slug names a tab this user can't see. */
   initialTab?: string;
@@ -156,6 +160,8 @@ export function NestView({
   onOpenDocument,
   onOpenTrace,
   initialSearch,
+  initialTags,
+  initialFolder,
   initialTab,
   onTabChange,
 }: NestViewProps) {
@@ -320,7 +326,7 @@ export function NestView({
   const [initialLoad, setInitialLoad] = useState(true);
   const [search, setSearch] = useState(initialSearch ?? "");
   // Multi-tag AND filter; toggled by clicking tag chips on list rows.
-  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [tagFilters, setTagFilters] = useState<string[]>(initialTags ?? []);
   const toggleTagFilter = (tag: string) =>
     setTagFilters((prev) =>
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
@@ -462,14 +468,20 @@ export function NestView({
   // Documents), the folder the list is scoped to (null = whole nest, "" would
   // mean root-only but we scope by subtree), collapsed folder paths, and
   // drag-and-drop bookkeeping for moving docs between folders.
-  const [activeTab, setActiveTabState] = useState(initialTab ?? "overview");
+  const [folderFilter, setFolderFilter] = useState<string | null>(
+    initialFolder ?? null,
+  );
+  // A folder breadcrumb click arrives pre-scoped, and the folder-scoped list
+  // lives on Documents — Overview would hide the scope entirely.
+  const [activeTab, setActiveTabState] = useState(
+    initialTab ?? (initialFolder ? "documents" : "overview"),
+  );
   // Wrapper so every tab change — the tab strip, and the Overview folder
   // clicks that jump to Documents — mirrors into ?tab= via App.
   const setActiveTab = (tab: string) => {
     setActiveTabState(tab);
     onTabChange?.(tab);
   };
-  const [folderFilter, setFolderFilter] = useState<string | null>(null);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const [dropFolder, setDropFolder] = useState<string | null>(null);

@@ -23,6 +23,8 @@ import { NestPageHeader } from "./NestPageHeader";
 interface Props {
   nestId: string;
   nestName: string;
+  /** Open the nest list filtered by a tag (tag chip in the detail panel). */
+  onOpenTag?: (tag: string) => void;
   onBack: () => void;
 }
 
@@ -100,7 +102,7 @@ interface View {
  * native deps). The coverage-gaps panel is the headline: unstewarded
  * categories, bottleneck stewards, orphan nodes.
  */
-export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
+export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props) {
   const [graph, setGraph] = useState<NestGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -600,6 +602,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
               onHopDepth={setHopDepth}
               neighborhood={neighborhood}
               nodesById={nodesById}
+              onOpenTag={onOpenTag}
             />
           )}
 
@@ -647,6 +650,7 @@ function NodeDetail({
   onHopDepth,
   neighborhood,
   nodesById,
+  onOpenTag,
 }: {
   node: GNode;
   graph: NestGraph | null;
@@ -655,6 +659,7 @@ function NodeDetail({
   onHopDepth: (d: number) => void;
   neighborhood: Set<string> | null;
   nodesById: Map<string, GNode>;
+  onOpenTag?: (tag: string) => void;
 }) {
   const doc = node.kind === "doc" ? graph?.nodes.find((n) => n.id === node.id) : null;
   const linkCount =
@@ -692,9 +697,16 @@ function NodeDetail({
           {doc.tags.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {doc.tags.map((t) => (
-                <span key={t} className="rounded bg-amber-50 text-amber-700 px-1.5 py-0.5">
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => onOpenTag?.(t)}
+                  disabled={!onOpenTag}
+                  className="rounded bg-amber-50 text-amber-700 px-1.5 py-0.5 hover:bg-amber-100 disabled:hover:bg-amber-50 disabled:cursor-default"
+                  title={onOpenTag ? `Show #${t} documents` : `#${t}`}
+                >
                   #{t}
-                </span>
+                </button>
               ))}
             </div>
           )}
