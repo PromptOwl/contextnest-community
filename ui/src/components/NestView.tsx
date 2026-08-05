@@ -3817,6 +3817,9 @@ export function NestView({
           onClose={() => setVersionNode(null)}
           title={versionNode.title}
           versionData={versionData}
+          onLoadContent={async (v) =>
+            (await api.getNodeVersionContent(nestId, versionNode.id, v)).content
+          }
           onRestore={async (v) => {
             if (!versionNode) return;
             try {

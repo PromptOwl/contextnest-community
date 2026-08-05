@@ -859,7 +859,24 @@ Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review`
 ## 7. Versions
 
 ### GET `/nests/:nestId/nodes/:nodeId/versions`
-**Enriched** (recent change) — each version may include `resolvedBy` + `resolutionStatus` pulled from `review_requests`.
+
+Version metadata plus each version's **change log** — the unified diff taking the
+previous version to this one, as the engine stored it. `diff` is absent for v1
+and for keyframe versions (a keyframe is a full snapshot, so there is no patch).
+
+`content` is always `""` here. The list deliberately does **not** carry bodies:
+attaching them means replaying the version chain once per row and shipping N
+full copies of the document just to open the history panel. Fetch the one body
+you need from `GET .../versions/:version` below.
+
+Each version may also include `resolvedBy` + `resolutionStatus`, the steward who
+approved or rejected it, joined from `review_requests` (`node_versions` stores
+the status but not the resolver's email).
+
+Gated by the same node-level read check as the document itself — `403` when the
+caller can't read the node, which for a public reader means any node without an
+approved version.
+
 ```json
 {
   "currentVersion": 3,
@@ -870,7 +887,9 @@ Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review`
       "editedBy": "author@x.com",
       "editedAt": "...",
       "status": "pending_review",
-      "changeNote": "..."
+      "changeNote": "...",
+      "content": "",
+      "diff": "Index: v2\n===...\n--- v2\tv2\n+++ v2\tv3\n@@ -1,4 +1,5 @@\n title: doc\n-old line\n+new line\n"
     },
     {
       "version": 2,
@@ -878,11 +897,29 @@ Submitting one is the ordinary `POST /nests/:nestId/nodes/:nodeId/submit-review`
       "editedAt": "...",
       "status": "approved",
       "changeNote": "...",
+      "content": "",
       "resolvedBy": "reviewer@x.com",
       "resolutionStatus": "approved"
     }
   ]
 }
+```
+
+### GET `/nests/:nestId/nodes/:nodeId/versions/:version`
+
+One version's full body, reconstructed on demand from the nearest keyframe plus
+the diffs after it.
+
+`content` is `null` — with HTTP 200, not an error — when that version's chain can
+no longer be replayed (e.g. history grafted by an older import). Callers render
+it as "no content" rather than failing the whole panel.
+
+Same node-level read check as the list above: `403` when the caller can't read
+the node. A public reader can only reach versions of a node that has an approved
+version, so drafts of an unapproved document are never reconstructable this way.
+
+```json
+{ "version": 2, "content": "# Heading\n\nbody as of v2\n" }
 ```
 
 ---
