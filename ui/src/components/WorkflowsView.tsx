@@ -74,6 +74,7 @@ import {
 } from "./ui/select";
 import { useAuth } from "../auth/AuthContext";
 import { NodeTypeIcon } from "./NestView";
+import { NestPageHeader } from "./NestPageHeader";
 
 interface Props {
   nestId: string;
@@ -105,14 +106,7 @@ export function WorkflowsView({ nestId, nestName, onBack }: Props) {
 
   return (
     <div>
-      <div className="flex items-center gap-3 mb-4">
-        <Button variant="ghost" size="sm" onClick={onBack}>
-          <ArrowLeft className="h-4 w-4 mr-1" /> Back
-        </Button>
-        <div>
-          <h1 className="text-lg font-semibold leading-tight">{nestName} Workflows</h1>
-        </div>
-      </div>
+      <NestPageHeader nestName={nestName} onBack={onBack} />
 
       {/* One mental model, four views of it: the CANVAS is the workflow
           itself (structure + per-wire conditions), the TABLE is the same

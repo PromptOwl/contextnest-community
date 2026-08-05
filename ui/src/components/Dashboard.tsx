@@ -319,7 +319,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Server info banner */}
       <Card className="bg-gradient-to-br from-blue-50 to-indigo-50 border-blue-200">
         <CardHeader className="pb-3">
