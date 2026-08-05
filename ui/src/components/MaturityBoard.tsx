@@ -201,9 +201,6 @@ export function MaturityBoard({
         if (plan.kind === "move-folder") {
           await api.moveNode(nestId, id, plan.folder);
           toast.success("Moved");
-        } else if (plan.kind === "set-tag") {
-          await api.updateNode(nestId, id, { tags: plan.tags });
-          toast.success("Updated");
         }
         await load();
       } catch (e: any) {

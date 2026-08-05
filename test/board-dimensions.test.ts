@@ -28,6 +28,18 @@ describe("folderOf", () => {
   it("returns '' for a root-level id", () => {
     expect(folderOf("foley")).toBe("");
   });
+  it("strips the 'nodes/' storage prefix real ids carry", () => {
+    // Server-generated ids always start with "nodes/". Without stripping it,
+    // a root doc lands in a bogus "nodes" column and "(root)" is unreachable.
+    expect(folderOf("nodes/foo")).toBe("");
+    expect(folderOf("nodes/gtm/deals/bar")).toBe("gtm/deals");
+  });
+  it("leaves an explicit id that lacks the prefix alone", () => {
+    // Imported vaults can supply their own id at creation.
+    expect(folderOf("b006e456-15de/nodes/architecture/a")).toBe(
+      "b006e456-15de/nodes/architecture",
+    );
+  });
 });
 
 describe("tagValueInNamespace", () => {
@@ -257,24 +269,14 @@ describe("planMove", () => {
     });
   });
 
-  it("tag → swaps the namespaced tag, preserving other tags", () => {
+  it("tag → unsupported (columns are read-only; PATCH unions tags)", () => {
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "stage" };
     const plan = planMove(
       node({ id: "a", tags: ["keep", "stage:draft"] }),
       "review",
       cfg,
     );
-    expect(plan).toEqual({ kind: "set-tag", tags: ["keep", "stage:review"] });
-  });
-
-  it("tag → dropping into UNCATEGORIZED removes the namespaced tag", () => {
-    const cfg: BoardConfig = { dimension: "tag", tagNamespace: "stage" };
-    const plan = planMove(
-      node({ id: "a", tags: ["keep", "stage:draft"] }),
-      UNCATEGORIZED,
-      cfg,
-    );
-    expect(plan).toEqual({ kind: "set-tag", tags: ["keep"] });
+    expect(plan.kind).toBe("unsupported");
   });
 
   it("status → unsupported (governance goes through the review workflow)", () => {

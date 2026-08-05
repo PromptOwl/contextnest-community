@@ -69,10 +69,23 @@ export interface BoardColumn {
   title: string;
 }
 
-/** Parent path of a path-like node id: "gtm/deals/foo" → "gtm/deals"; root → "". */
+/**
+ * Folder path of a node id, with the storage prefix removed:
+ * "nodes/gtm/deals/foo" → "gtm/deals"; "nodes/foo" → "" (the root).
+ *
+ * Server-generated ids always start with "nodes/" (see folderToSegments in
+ * src/nodes/service.ts), so without stripping it EVERY document looks nested
+ * one level deep: root docs bucket into a bogus "nodes" column, the "(root)"
+ * column becomes unreachable, and every column key leaks the storage prefix
+ * into its tooltip. Matches folderOfNode in NestView.
+ *
+ * An explicit id supplied at creation (an imported vault, say) can skip that
+ * prefix; such ids are left alone.
+ */
 export function folderOf(id: string): string {
-  const i = id.lastIndexOf("/");
-  return i === -1 ? "" : id.slice(0, i);
+  const rel = id.startsWith("nodes/") ? id.slice("nodes/".length) : id;
+  const i = rel.lastIndexOf("/");
+  return i === -1 ? "" : rel.slice(0, i);
 }
 
 /** Value carried by the first `ns:*` tag, or null. ["stage:review"] / "stage" → "review". */
@@ -250,7 +263,6 @@ export function groupByColumn(
 
 export type MovePlan =
   | { kind: "move-folder"; folder: string }
-  | { kind: "set-tag"; tags: string[] }
   | { kind: "unsupported"; reason: string };
 
 /**
@@ -269,17 +281,18 @@ export function planMove(
   switch (config.dimension) {
     case "folder":
       return { kind: "move-folder", folder: targetKey };
-    case "tag": {
-      const ns = config.tagNamespace?.trim();
-      if (!ns) {
-        return { kind: "unsupported", reason: "No tag namespace configured." };
-      }
-      const prefix = `${ns}:`;
-      const kept = node.tags.filter((t) => !t.startsWith(prefix));
-      const tags =
-        targetKey === UNCATEGORIZED ? kept : [...kept, `${prefix}${targetKey}`];
-      return { kind: "set-tag", tags };
-    }
+    // Tag columns are read-only. Beyond the multi-tag ambiguity (a document
+    // sits in one column per tag, so "moved out of this one" means nothing),
+    // a tag swap is not expressible today: PATCH /nodes/:id UNIONS the tags it
+    // is given with the existing set (src/nodes/service.ts), so it can add a
+    // tag but never drop the old one. Retagging needs a real replace there
+    // first — the same gap DocumentEditor's removeTag runs into.
+    case "tag":
+      return {
+        kind: "unsupported",
+        reason:
+          "Tag columns are read-only — a document carries several tags, so edit them in the document view.",
+      };
     case "status":
       return {
         kind: "unsupported",
