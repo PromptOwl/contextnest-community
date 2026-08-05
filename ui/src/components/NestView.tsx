@@ -5,6 +5,7 @@
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
 import { matchesFilters } from "../lib/node-filter";
+import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
 import { parseServerDate, formatServerDate } from "../lib/dates";
@@ -3904,9 +3905,12 @@ function ReviewDocumentModal({
       return;
     }
     try {
-      const { nodes } = await api.searchNodes(nestId, title);
-      const exact = (nodes as Array<{ id: string; title: string }>).find(
-        (n) => n.title.toLowerCase() === title.toLowerCase(),
+      // Full list + shared id/title/slug resolver (same rule as the editor) so
+      // a [[nodes/slug]] or slug-form link resolves here too, not title-only.
+      const { nodes } = await api.listNodes(nestId);
+      const exact = resolveWikiTarget(
+        nodes as Array<{ id: string; title: string }>,
+        title,
       );
       if (exact) {
         onOpenDocument(exact.id);

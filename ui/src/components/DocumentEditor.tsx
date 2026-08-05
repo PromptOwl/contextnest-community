@@ -1154,14 +1154,7 @@ export function DocumentEditor({
     try {
       const { nodes } = await api.listNodes(nestId);
       const list = nodes as Array<{ id: string; title: string }>;
-      const lower = linkTitle.toLowerCase();
-      const bareSlug = slugFromNodeId(linkTitle).toLowerCase();
-      const exact = list.find(
-        (n) =>
-          n.id.toLowerCase() === lower ||
-          n.title.toLowerCase() === lower ||
-          slugFromNodeId(n.id).toLowerCase() === bareSlug,
-      );
+      const exact = resolveWikiTarget(list, linkTitle);
       if (exact) {
         confirmLeave(
           `open "${exact.title}"`,
