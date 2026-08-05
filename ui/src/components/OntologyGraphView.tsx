@@ -14,10 +14,11 @@ import {
   forceCollide,
   type SimulationNodeDatum,
 } from "d3-force";
-import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, FolderTree } from "lucide-react";
+import { AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, FolderTree } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
 import { Button } from "./ui/button";
+import { NestPageHeader } from "./NestPageHeader";
 
 interface Props {
   nestId: string;
@@ -427,13 +428,7 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={onBack}>
-            <ArrowLeft className="h-4 w-4 mr-1" /> Back
-          </Button>
-          <h1 className="text-lg font-semibold">Ontology · {nestName}</h1>
-        </div>
+      <NestPageHeader nestName={nestName} onBack={onBack}>
         <div className="flex items-center gap-3 text-sm">
           {(
             [
@@ -462,7 +457,7 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
             Reset view
           </Button>
         </div>
-      </div>
+      </NestPageHeader>
 
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4">
         <div

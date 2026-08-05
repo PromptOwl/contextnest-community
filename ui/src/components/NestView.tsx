@@ -5,6 +5,7 @@
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
 import { matchesFilters } from "../lib/node-filter";
+import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
 import { parseServerDate, formatServerDate } from "../lib/dates";
 import {
@@ -58,6 +59,8 @@ export function NodeTypeIcon({
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { NestPageHeader } from "./NestPageHeader";
+import { deriveNestCaps } from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { Button } from "@/components/ui/button";
@@ -140,6 +143,11 @@ interface NestViewProps {
    *  a folder breadcrumb segment elsewhere in the app. */
   initialTags?: string[];
   initialFolder?: string;
+  /** Tab to open on mount, from ?tab= — falls back to overview when the
+   *  slug names a tab this user can't see. */
+  initialTab?: string;
+  /** Reports tab changes up so App can mirror them into ?tab=. */
+  onTabChange?: (tab: string) => void;
 }
 
 export function NestView({
@@ -153,6 +161,8 @@ export function NestView({
   initialSearch,
   initialTags,
   initialFolder,
+  initialTab,
+  onTabChange,
 }: NestViewProps) {
   const { isAdmin, adminStatus, authMode } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
@@ -324,10 +334,11 @@ export function NestView({
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [authorFilter, setAuthorFilter] = useState<string>("all");
   const [dateFilter, setDateFilter] = useState<DatePreset>("any");
-  // Document list sort: by title, last edited, or comment (annotation) count.
-  const [sortMode, setSortMode] = useState<"name" | "edited" | "comments">(
-    "name",
-  );
+  // Document list sort. Defaults to "activity" (most-recently-touched first) so
+  // the list opens on what changed, not an alphabetical wall.
+  const [sortMode, setSortMode] = useState<
+    "activity" | "name" | "edited" | "comments"
+  >("activity");
   // Per-node comment (annotation thread) counts, for the "Most comments" sort.
   const [commentCounts, setCommentCounts] = useState<
     Record<string, { count: number; lastAt: string | null }>
@@ -456,10 +467,16 @@ export function NestView({
   // Documents), the folder the list is scoped to (null = whole nest, "" would
   // mean root-only but we scope by subtree), collapsed folder paths, and
   // drag-and-drop bookkeeping for moving docs between folders.
-  const [activeTab, setActiveTab] = useState("overview");
   const [folderFilter, setFolderFilter] = useState<string | null>(
     initialFolder ?? null,
   );
+  const [activeTab, setActiveTabState] = useState(initialTab ?? "overview");
+  // Wrapper so every tab change — the tab strip, and the Overview folder
+  // clicks that jump to Documents — mirrors into ?tab= via App.
+  const setActiveTab = (tab: string) => {
+    setActiveTabState(tab);
+    onTabChange?.(tab);
+  };
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const [dropFolder, setDropFolder] = useState<string | null>(null);
@@ -786,7 +803,14 @@ export function NestView({
   // edited first (updated_at already on each node); "comments" = most comment
   // threads first, tie-broken by most recent comment then title.
   const sorted = [...filtered];
-  if (sortMode === "edited") {
+  if (sortMode === "activity") {
+    // Recent activity = the later of last edit and last comment, newest first.
+    sorted.sort((a, b) =>
+      activityTimestamp(b.updated_at, commentCounts[b.id]?.lastAt).localeCompare(
+        activityTimestamp(a.updated_at, commentCounts[a.id]?.lastAt),
+      ),
+    );
+  } else if (sortMode === "edited") {
     sorted.sort((a, b) =>
       String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
     );
@@ -995,20 +1019,15 @@ export function NestView({
   //   canReviewDocs  — approve/reject (owner/admin or reviewer steward)
   //   canEditDocs    — "New Document" (nest-wide write or nest-scope editor)
   //   isReadOnly     — no write/review/manage (public + plain 'read' collabs)
-  const caps = (() => {
-    const hasRole = (...r: string[]) => roles.some((x) => r.includes(x));
-    const canManage = isOwner || isAdmin || hasRole("owner", "admin");
-    const collabCanWrite =
-      permission === "owner" || permission === "admin" || permission === "write";
-    const canReviewDocs =
-      canManage || myStewards.some((s) => s.role === "reviewer");
-    const canEditDocs =
-      canManage ||
-      collabCanWrite ||
-      myStewards.some((s) => s.role === "editor" && s.scope === "nest");
-    const isReadOnly = !canEditDocs && !canReviewDocs && !canManage;
-    return { canManage, collabCanWrite, canReviewDocs, canEditDocs, isReadOnly };
-  })();
+  // Rules live in lib/nest-caps so the board (and any later nest-scoped view)
+  // gates on exactly the same derivation instead of a lookalike copy.
+  const caps = deriveNestCaps({
+    roles,
+    permission,
+    myStewards,
+    isOwner,
+    isAdmin,
+  });
   // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
   // canReviewNode for scope resolution, so it isn't destructured here.
   const { canManage, collabCanWrite, canEditDocs, isReadOnly } = caps;
@@ -1125,6 +1144,22 @@ export function NestView({
     // Comment activity renders in the same tab (the queue is now a feed) —
     // discussion must stay reachable even with stewardship off.
     feedCommentsTotal > 0;
+
+  // A shared ?tab= link can name a tab this viewer doesn't get (Stewards on a
+  // nest they only read, Review Queue while read-only). Radix would render an
+  // empty content area against a value with no trigger, so fall back to
+  // overview once the permission flags have resolved.
+  const tabVisible: Record<string, boolean> = {
+    overview: true,
+    documents: true,
+    review: showReviewTab && !isReadOnly,
+    "external-edits": !isReadOnly,
+    stewards: stewardshipEnabled && canManageGovernance,
+    collaborators: canManage || collabCanWrite,
+  };
+  useEffect(() => {
+    if (!initialLoad && !tabVisible[activeTab]) setActiveTab("overview");
+  }, [initialLoad, activeTab, tabVisible[activeTab]]);
 
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
@@ -1409,7 +1444,7 @@ export function NestView({
 
   return (
     <div
-      className="md:py-6 relative"
+      className="relative"
       onDragOver={(e) => {
         if (!canEditDocs) return;
         if (Array.from(e.dataTransfer.types).includes("Files")) {
@@ -1449,13 +1484,13 @@ export function NestView({
           </div>
         </div>
       )}
-      {/* Header — PromptOwl ContextDashboard layout */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4 mb-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={onBack} className="shrink-0">
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-          {canManage ? (
+      {/* Header — the row shared by every nest-scoped page. Only the actions
+          passed as children differ from Board/Graph/Definitions/Workflows. */}
+      <NestPageHeader
+        nestName={nestName}
+        onBack={onBack}
+        title={
+          canManage ? (
             <div className="min-w-0 flex-1">
               <input
                 value={editableName}
@@ -1491,11 +1526,10 @@ export function NestView({
                 </p>
               )}
             </div>
-          ) : (
-            <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
-              {nestName}
-            </h3>
-          )}
+          ) : undefined
+        }
+        badges={
+          <>
           {/* Visibility — an inline toggle for owner/admin (so the public/
               private switch isn't buried in the Share dialog), a read-only
               badge for everyone else. */}
@@ -1546,12 +1580,9 @@ export function NestView({
               Imported
             </Badge>
           )}
-        </div>
-        {/* Action row: wraps onto multiple lines below sm-breakpoint instead
-            of forcing a single horizontal scroll. `flex-wrap` + `justify-end`
-            on wider screens keeps the spacing visually intentional rather
-            than awkwardly clipped at the right edge. */}
-        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:shrink-0 sm:justify-end">
+          </>
+        }
+      >
           {/* Connect is the front door for every read/write surface (CLI,
               API, MCP, Add-with-AI) — a first-class button, not a menu item. */}
           <Button variant="outline" onClick={() => setShowConnect(true)}>
@@ -1676,14 +1707,13 @@ export function NestView({
               });
             return <OverflowMenu actions={actions} variant="outline" />;
           })()}
-        </div>
-      </div>
+      </NestPageHeader>
 
       {/* Stats Cards — only governance-related stats when stewardship is on.
           In ungoverned mode every doc is auto-approved so the pending/review
           columns are always zero and just add noise. */}
       <div
-        className={`grid grid-cols-1 gap-4 mb-6 ${stewardshipEnabled
+        className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
           ? "md:grid-cols-4"
           : "md:grid-cols-1 max-w-sm"
           }`}
@@ -2090,13 +2120,14 @@ export function NestView({
                   <Select
                     value={sortMode}
                     onValueChange={(v) =>
-                      setSortMode(v as "name" | "edited" | "comments")
+                      setSortMode(v as "activity" | "name" | "edited" | "comments")
                     }
                   >
                     <SelectTrigger className="w-[150px] h-8" title="Sort documents">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="activity">Recent activity</SelectItem>
                       <SelectItem value="name">Name (A–Z)</SelectItem>
                       <SelectItem value="edited">Recently edited</SelectItem>
                       <SelectItem value="comments">Most comments</SelectItem>
@@ -3825,6 +3856,9 @@ export function NestView({
           onClose={() => setVersionNode(null)}
           title={versionNode.title}
           versionData={versionData}
+          onLoadContent={async (v) =>
+            (await api.getNodeVersionContent(nestId, versionNode.id, v)).content
+          }
           onRestore={async (v) => {
             if (!versionNode) return;
             try {

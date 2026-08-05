@@ -8,10 +8,11 @@
  * and get a toast if they try to edit.
  */
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, BookMarked, Loader2, Plus, Trash2, Pencil } from "lucide-react";
+import { Loader2, Plus, Trash2, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { NestPageHeader } from "./NestPageHeader";
 import * as api from "../lib/api";
 import type { Definition } from "../lib/api";
 
@@ -101,15 +102,7 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <Button variant="ghost" size="sm" onClick={onBack}>
-          <ArrowLeft className="h-4 w-4 mr-1" /> Back
-        </Button>
-        <h1 className="text-lg font-semibold flex items-center gap-2">
-          <BookMarked className="h-4 w-4 text-muted-foreground" />
-          Definitions · {nestName}
-        </h1>
-      </div>
+      <NestPageHeader nestName={nestName} onBack={onBack} />
 
       <p className="text-sm text-muted-foreground">
         The nest's shared vocabulary — terms and tags, articulated once,
