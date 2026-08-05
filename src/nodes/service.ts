@@ -85,6 +85,16 @@ const slugify = (s: string) =>
     .replace(/^-|-$/g, "");
 
 /**
+ * Does this document id live under `folder`? The engine only prefixes ids
+ * with "nodes/" in a STRUCTURED vault (one with a top-level nodes/ dir); a
+ * nest whose files arrived without one reads as flat layout and its ids
+ * carry no prefix. Match both, or every folder op 404s on those nests.
+ */
+export function isIdUnderFolder(id: string, folder: string): boolean {
+  return id.startsWith(`nodes/${folder}/`) || id.startsWith(`${folder}/`);
+}
+
+/**
  * Slugify + validate a folder path into id segments. Shared by create and
  * move so both enforce the same depth/length bounds and the same traversal
  * defense (each segment slugified independently — "../" collapses to "-",
@@ -1515,11 +1525,11 @@ export async function deleteFolder(
   if (segments.length === 0) {
     throw new ValidationError("folder is required");
   }
-  const prefix = `nodes/${segments.join("/")}/`;
+  const rel = segments.join("/");
 
   const { storage } = await engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
-  const targets = docs.map((d) => d.id).filter((id) => id.startsWith(prefix));
+  const targets = docs.map((d) => d.id).filter((id) => isIdUnderFolder(id, rel));
   if (targets.length === 0) {
     throw new NotFoundError(`No documents found under folder: ${folder}`);
   }

@@ -29,6 +29,7 @@ import {
   deleteFolder,
   moveNode,
   listNodesForCallerByEmail,
+  isIdUnderFolder,
 } from "../nodes/service.js";
 import { deleteNest } from "../nests/service.js";
 import { listThreads } from "../annotations/service.js";
@@ -1119,7 +1120,7 @@ async function runTool(
           .replace(/^\/+|\/+$/g, "")
           .replace(/^nodes\//, "");
         const docs = await storage.discoverDocuments();
-        const inside = docs.filter((d) => d.id.startsWith(`nodes/${folder}/`));
+        const inside = docs.filter((d) => isIdUnderFolder(d.id, folder));
         if (inside.length === 0) {
           return `No folder "${folder}" — nothing is filed under it. Use context_list to see what exists.`;
         }

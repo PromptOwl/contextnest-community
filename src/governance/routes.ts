@@ -20,7 +20,12 @@ import * as externalEdits from "./external-edit-service.js";
 import { loadStewardsConfig } from "./stewards-parser.js";
 import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
-import { bodyOnly, deleteNode, deleteFolder } from "../nodes/service.js";
+import {
+  bodyOnly,
+  deleteNode,
+  deleteFolder,
+  isIdUnderFolder,
+} from "../nodes/service.js";
 import { deleteNest } from "../nests/service.js";
 import { canReadNode, resolveCallerEmail } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
@@ -278,7 +283,7 @@ governanceRoutes.post("/request-deletion", async (c) => {
   if (body.targetType === "folder") {
     const { storage } = await engineCache.get(nestId);
     const docs = await storage.discoverDocuments();
-    if (!docs.some((d) => d.id.startsWith(`nodes/${target}/`))) {
+    if (!docs.some((d) => isIdUnderFolder(d.id, target))) {
       return c.json({ error: `Folder not found: ${target}` }, 404);
     }
   }

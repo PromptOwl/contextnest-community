@@ -6,6 +6,7 @@ import {
   jsonRequest,
   resetAuthRateLimit,
 } from "./helpers.js";
+import { isIdUnderFolder } from "../src/nodes/service.js";
 
 // Request-deletion workflow (CU-wdqcpzxqcm): a read-only user flags a stale
 // node with a reason, a writer deletes it or declines with a note.
@@ -517,5 +518,22 @@ describe("deletion requests", () => {
       owner.apiKey,
     );
     expect(gone.status).toBe(404);
+  });
+});
+
+// A nest whose files arrived without a top-level nodes/ dir (e.g. a folder
+// import that carried another nest's data dir) reads as FLAT layout in the
+// engine, so its document ids carry no "nodes/" prefix. Folder flagging and
+// folder delete both looked up `nodes/<folder>/` only and 404'd on those
+// nests — "Folder not found" on a folder that is plainly there.
+describe("isIdUnderFolder", () => {
+  it("matches structured and flat layout ids", () => {
+    expect(isIdUnderFolder("nodes/legacy/api/doc", "legacy/api")).toBe(true);
+    expect(
+      isIdUnderFolder("b006e456/nodes/personal/creds", "b006e456/nodes/personal"),
+    ).toBe(true);
+    expect(isIdUnderFolder("nodes/legacy/doc", "legacy/api")).toBe(false);
+    // Sibling folder sharing a name prefix is not "under" it.
+    expect(isIdUnderFolder("nodes/legacy-api/doc", "legacy/api")).toBe(false);
   });
 });

@@ -260,9 +260,10 @@ export function NestView({
     [deletionRequests],
   );
   const folderFlagPending = (path: string) => pendingFolderFlags.has(path);
-  const nestFlagPending = deletionRequests.some(
+  const nestFlag = deletionRequests.find(
     (r) => r.targetType === "nest" && r.status === "pending",
   );
+  const nestFlagPending = !!nestFlag;
   const pendingDeletions = useMemo(
     () => deletionRequests.filter((r) => r.status === "pending"),
     [deletionRequests],
@@ -1583,6 +1584,19 @@ export function NestView({
             >
               <FolderInput className="h-3 w-3" />
               Imported
+            </Badge>
+          )}
+          {/* Same red flag a doc/folder row gets — the requester's only sign
+              their nest deletion request is still waiting on an admin. */}
+          {nestFlag && (
+            <Badge
+              variant="outline"
+              className="shrink-0 gap-1 border-red-200 bg-red-50 text-red-700"
+              title={`${nestFlag.requestedBy} asked for this nest to be deleted: "${nestFlag.reason}". A nest owner or admin decides.`}
+              data-testid="nest-deletion-flag"
+            >
+              <Trash2 className="h-3 w-3" />
+              Deletion requested
             </Badge>
           )}
           </>
