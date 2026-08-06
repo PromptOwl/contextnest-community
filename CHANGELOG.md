@@ -1,5 +1,111 @@
 # @promptowl/contextnest-community
 
+## 1.15.0
+
+### Minor Changes
+
+- a6661ff: Native PromptOwl connection: accept the short-lived `scope: "mcp"` service
+  ticket on the per-nest `/nests/:id/mcp` transport (in addition to `/index`,
+  server-level `/mcp`, `POST /context`, and `GET /nodes`), so a PromptOwl block
+  granted read & write on one nest can reach that nest's write tools. Add two
+  server-level bootstrap writes — `nest_create` and `context_create` — to the
+  cross-nest `/mcp`, each gated by the same per-user write checks, suspend
+  kill-switch, and license gate the per-nest path enforces. The MCP ticket and
+  the one-click SSO login ticket are now mutually exclusive: `/auth/sso` refuses
+  an `mcp`-scoped ticket and the MCP middleware refuses a ticket carrying a
+  `jti`.
+- e675f73: Prime documents: a per-document and per-tag review gate, so a nest no longer
+  has to choose between reviewing everything and reviewing nothing. A **prime**
+  document always goes through draft → pending → approved — it is the one thing
+  `allow_self_approve` does not bypass, so even an owner's edit to the sales
+  playbook lands as a draft.
+
+  Whether a document is prime resolves in the existing steward scope order,
+  **document → tag → nest**: a Prime switch in the document editor (owner/admin
+  only, where `false` exempts one doc from an otherwise-prime tag), then the
+  nest's configurable prime tags (`prime-document` by default), then not prime.
+  A new per-nest `prime_only_review` setting flips a governed nest's default to
+  self-publish so only prime documents queue for review; it is off by default, so
+  existing nests keep their current posture on upgrade. Prime documents carry a
+  badge in the nest's document list, and both settings are exposed on
+  `GET`/`PATCH /nests/:id/settings` alongside `prime` on node create/update.
+
+- Deletion requests as a first-class governance flow, a configurable maturity
+  board with a reworked nest workspace, and MCP delete/move tools backed by a
+  node-create path that no longer races itself.
+
+  ### Deletion requests
+
+  - **Request deletion of a document, folder or nest** (`src/db/migrations.ts`, `src/db/migrations.postgres.ts`, `src/governance/review-service.ts`, `src/governance/routes.ts`, `src/app.ts`) — a member without delete rights no longer has to ask an admin out of band. A new `deletion_requests` table keyed by target type carries the request through the same approve/reject vocabulary as a review, with the target resolved segment-aware so a folder named `policy` never matches `policies/` (`src/governance/title-resolver.ts`). Honouring the folder on approval is gated behind owner/admin, so a reviewer can clear a request without cascading a delete they were never entitled to.
+  - **One Delete action, permission picks the dialog** (`ui/src/components/NestView.tsx`, `ui/src/components/DocumentEditor.tsx`, `ui/src/components/governance/ReasonDialog.tsx`, `ui/src/components/Dashboard.tsx`) — the same button either deletes or opens a reason prompt depending on what the caller may do; authors can delete their own documents outright, and a target with a request already open shows a pending badge to the requester instead of appearing untouched.
+  - **Notifications on both ends** (`src/governance/notify-service.ts`, `src/notify/dispatch.ts`, `src/notify/email-render.ts`, `src/db/backfill.ts`) — admins hear about a new request, requesters hear the verdict. A one-shot backfill fills in notification titles that predate the change so old rows don't render blank.
+  - **Same flow from an agent** (`src/mcp/tools.ts`) — a deletion an MCP client isn't permitted to perform is filed as a request rather than refused.
+
+  ### Nest workspace
+
+  - **Configurable maturity board** (`ui/src/components/MaturityBoard.tsx`, `ui/src/lib/board-dimensions.ts`) — a per-nest board that groups documents by lifecycle status, folder, or tag, with drag-to-move on the folder dimension. Columns come from the real lifecycle statuses rather than an invented set, and folder keys drop the `nodes/` prefix so the headers read as paths a user recognises.
+  - **View switcher and a shared page header** (`ui/src/App.tsx`, `ui/src/components/NestPageHeader.tsx`, `ui/src/components/NestView.tsx`) — Documents, Board, Graph, Definitions and Workflows share one header and one spacing scale instead of each page inventing its own.
+  - **Search moved into the header** (`ui/src/App.tsx`) — reachable from every nest page instead of only from the Documents list.
+  - **Clickable tags and breadcrumbs** (`ui/src/App.tsx`, `ui/src/components/DocumentEditor.tsx`, `ui/src/components/OntologyGraphView.tsx`) — a nest-scope enabler lets a tag or breadcrumb segment navigate back into a filtered document list.
+  - **Documents default to "Recent activity"** (`ui/src/lib/node-sort.ts`, `ui/src/components/NestView.tsx`) — the list opens on what changed last rather than alphabetical order.
+
+  ### MCP & node integrity
+
+  - **`context_delete` and `context_move`** (`src/mcp/tools.ts`, `src/nodes/service.ts`) — agents can delete and move documents through the same permission checks the REST routes enforce; an ambiguous title is refused rather than resolved to a guess. Resolving a node by id now hits the record directly instead of scanning the vault.
+  - **Create no longer collides with itself** (`src/nodes/service.ts`) — creates serialize per node id and fail closed on the id check, a create that would collide with an existing node is refused, node-keyed rows no longer outlive the document they described, and the move-destination and duplicate-title races are closed.
+  - **Approvers can move and delete a node under review** (`src/nodes/service.ts`) — the review lock stopped the one role able to resolve the review.
+  - **Authors can find their own unsubmitted drafts** (`src/governance/version-service.ts`, `src/app.ts`, `src/mcp/tools.ts`, `ui/src/components/Dashboard.tsx`) — a draft that was never submitted was invisible to everyone including the person who wrote it.
+  - **Document titles bounded at 120 characters** (`src/nodes/service.ts`, `ui/src/components/DocumentEditor.tsx`) — an unbounded title overflowed the breadcrumb and every list that rendered it.
+
+  ### Fixes
+
+  - The write path records why it skipped review instead of guessing a reason (`src/nodes/service.ts`, `src/nests/service.ts`).
+  - Wiki links resolve by id, title or slug inside the review modal, matching the editor (`ui/src/components/NestView.tsx`).
+  - Server timestamps without a zone read as UTC rather than local time (`ui/src/lib/dates.ts`).
+  - The document title field is labelled and marked required instead of looking like static text (`ui/src/components/DocumentEditor.tsx`).
+  - Long board card titles wrap instead of overflowing their column (`ui/src/components/MaturityBoard.tsx`).
+  - Entering a nest folder-scoped opens Documents rather than the last view (`ui/src/components/NestView.tsx`).
+
+- ba11aba: Per-version change logs instead of full-body copies. The version list
+  (`GET /nests/:id/nodes/:nodeId/versions`) now returns each version's stored
+  unified diff rather than reconstructing every body — opening the history panel
+  of a long-lived document no longer replays the whole chain once per row and
+  ships N full copies of the text. One body is fetched on demand from the new
+  `GET /nests/:id/nodes/:nodeId/versions/:version`, which answers `200` with
+  `content: null` when a version's chain can no longer be replayed, so one
+  unreadable row doesn't fail the panel.
+
+  Three fixes ride along. Draft saves now number through the engine's
+  `nextVersion()` instead of the SQLite row count, closing the case where a DB
+  lagging `history.yaml` grafted a second chain onto the first (duplicate
+  versions, overwritten keyframes, "(no content)" from the graft point on) — a
+  gated one-shot startup pass re-anchors documents already in that state and
+  moves inline patches out into standalone `v{N}.diff` files. A duplicate
+  `/versions` handler that shadowed the governance route is removed, so
+  `resolvedBy` reaches the UI. And the diff viewer's line numbers no longer skip
+  two, having learned to read the engine's `Index:` / `===` preamble as a header.
+
+  Both version endpoints now take the same node-level read check as the document
+  itself (`403` when the caller can't read the node). The list handler never had
+  it, so on a public nest an anonymous reader could pull the change logs — and,
+  through the new per-version endpoint, the reconstructed body — of a document
+  that never cleared review, bypassing the approved-only rule public reads are
+  otherwise held to.
+
+  Requires `@promptowl/contextnest-engine` 1.3.0.
+
+### Patch Changes
+
+- 9447efe: Moving a document that isn't published no longer fails. A document stored with
+  an empty tag list reads back with an undefined `tags` value, which the YAML
+  serializer refuses to write — so every draft and pending-review move errored out
+  while published documents (already cleaned by the publish path) moved fine. The
+  same clean now runs on every write of a document that came from storage, which
+  also covers the two import paths that reset a broken version chain or persist
+  import metadata. The Documents list stops hiding "Move to folder" on a document
+  awaiting review: owners, admins, and reviewers assigned to it are the callers the
+  server already lets move one, and they now see the action.
+
 ## 1.14.0
 
 ### Minor Changes
