@@ -6,6 +6,7 @@ export { ReviewQueue } from "./ReviewQueue";
 export type { ReviewRequest, ReviewRequestPriority, FeedComment } from "./ReviewQueue";
 export { ReviewActions } from "./ReviewActions";
 export { SubmitForReviewModal } from "./SubmitForReviewModal";
+export { ReasonDialog } from "./ReasonDialog";
 export { VersionHistory } from "./VersionHistory";
 export type { Version } from "./VersionHistory";
 export { VersionHistoryModal } from "./VersionHistoryModal";

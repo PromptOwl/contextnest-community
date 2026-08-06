@@ -20,7 +20,14 @@ import * as externalEdits from "./external-edit-service.js";
 import { loadStewardsConfig } from "./stewards-parser.js";
 import { isSuperAdmin } from "./access-service.js";
 import { engineCache } from "../nodes/engine.js";
-import { bodyOnly } from "../nodes/service.js";
+import {
+  bodyOnly,
+  deleteNode,
+  deleteFolder,
+  isIdUnderFolder,
+} from "../nodes/service.js";
+import { deleteNest } from "../nests/service.js";
+import { canReadNode, resolveCallerEmail } from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -197,6 +204,180 @@ governanceRoutes.get("/review-queue", async (c) => {
   return c.json({ ...result, requests });
 });
 
+// ─── Deletion requests ──────────────────────────────────────────────────
+
+/**
+ * Owner/admin gate for the bulk deletions the middleware only holds at
+ * 'write' — that tier is calibrated for ONE document (DELETE /nodes/:id).
+ * Deleting a folder or a nest destroys many at once, so it sits with nest
+ * management instead.
+ *
+ * One helper, not a check per branch: the direct route and the honour path
+ * must assert the same policy, or honouring a request becomes the way around
+ * the direct route. Returns an error response, or null to proceed.
+ */
+function denyUnlessNestManager(c: any, what: string) {
+  const permission = c.get("nestPermission");
+  if (permission === "owner" || permission === "admin") return null;
+  return c.json(
+    {
+      error: `Only the nest owner or an admin can delete ${what}. Request its deletion instead, or ask an admin to action it.`,
+    },
+    403,
+  );
+}
+// Anyone who can read a node may flag it for deletion (POST on the node route
+// below); resolving is write-tier — the middleware already requires 'write' for
+// these paths, the same gate DELETE /nodes/:id passes, so no extra check here.
+
+// POST /nests/:nestId/delete-folder — delete a folder and every document
+// under it. Owner/admin only: a folder delete is many document deletes at
+// once, so it sits at the same tier as deleting the nest, not at 'write'.
+governanceRoutes.post("/delete-folder", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const denied = denyUnlessNestManager(c, "a folder");
+  if (denied) return denied;
+  const body = await c.req.json<{ folder?: string }>().catch(() => ({}) as any);
+  if (!body.folder?.trim()) {
+    throw new ValidationError("folder is required");
+  }
+  const deleted = await deleteFolder(
+    nestId,
+    body.folder.trim(),
+    await getUserEmail(c),
+  );
+  return c.json({ deleted: deleted.length, nodeIds: deleted });
+});
+
+// POST /nests/:nestId/request-deletion — flag a whole FOLDER or the NEST.
+// Read-tier for the same reason the per-node route is (see there); the path
+// suffix matches the middleware's request-deletion exception, so no new gate.
+// Per-document flags keep their own route under /nodes/:nodeId.
+governanceRoutes.post("/request-deletion", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const body = await c.req
+    .json<{ targetType?: string; target?: string; reason?: string }>()
+    .catch(() => ({}) as any);
+  const reason = body.reason?.trim();
+  if (!reason) {
+    throw new ValidationError("A reason for the deletion request is required");
+  }
+  if (body.targetType !== "folder" && body.targetType !== "nest") {
+    throw new ValidationError(
+      'targetType must be "folder" or "nest" — flag a single document via POST /nests/:nestId/nodes/:nodeId/request-deletion',
+    );
+  }
+
+  // Normalize the target so two people flagging "api/limits" and "/api/limits/"
+  // collide on the pending index instead of raising two requests.
+  const target =
+    body.targetType === "nest"
+      ? nestId
+      : (body.target || "").trim().replace(/^\/+|\/+$/g, "").replace(/^nodes\//, "");
+  if (body.targetType === "folder" && !target) {
+    throw new ValidationError("target (the folder path) is required");
+  }
+
+  // A folder only exists while documents sit under it — refuse a flag on one
+  // that isn't there, or the queue fills with requests that delete nothing.
+  if (body.targetType === "folder") {
+    const { storage } = await engineCache.get(nestId);
+    const docs = await storage.discoverDocuments();
+    if (!docs.some((d) => isIdUnderFolder(d.id, target))) {
+      return c.json({ error: `Folder not found: ${target}` }, 404);
+    }
+  }
+
+  const request = await reviews.requestDeletion({
+    nestId,
+    nodeId: target,
+    targetType: body.targetType,
+    requestedBy: await getUserEmail(c),
+    reason,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
+  return c.json({ request }, 201);
+});
+
+// GET /nests/:nestId/deletion-requests?status=pending|declined
+governanceRoutes.get("/deletion-requests", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const raw = c.req.query("status");
+  const status =
+    raw === "declined" || raw === "all" ? raw : "pending";
+  const requests = await reviews.listDeletionRequests({ nestId, status });
+  return c.json({ requests, total: requests.length });
+});
+
+// POST /nests/:nestId/deletion-requests/:id/delete — honour the request.
+governanceRoutes.post("/deletion-requests/:id/delete", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const request = await reviews.getDeletionRequest(c.req.param("id")!);
+  if (!request || request.nestId !== nestId || request.status !== "pending") {
+    return c.json({ error: "Deletion request not found" }, 404);
+  }
+  // Resolve the label BEFORE the delete — afterwards there's no document (or
+  // nest) left to read one from, and the verdict notification needs it.
+  const actor = await getUserEmail(c);
+  const docTitle = await reviews.deletionTargetTitle(request);
+
+  // Honouring must clear the SAME bar as deleting the thing directly — a
+  // request is not a side door around /delete-folder or DELETE /nests/:id.
+  if (request.targetType === "nest" || request.targetType === "folder") {
+    const denied = denyUnlessNestManager(
+      c,
+      request.targetType === "nest" ? "a nest" : "a folder",
+    );
+    if (denied) return denied;
+  }
+
+  if (request.targetType === "nest") {
+    // Nest rows cascade with the nest, so the request row goes with it.
+    await deleteNest(nestId);
+  } else if (request.targetType === "folder") {
+    await deleteFolder(nestId, request.nodeId, actor);
+    // A folder isn't node-keyed, so no purge took this row — drop it here so
+    // an honoured request leaves the queue like the other two kinds.
+    await reviews.dropDeletionRequest(request.id);
+  } else {
+    // deleteNode owns the review lock + tombstone, and its purge takes this row
+    // with the node's other rows — so an honoured request leaves the queue.
+    await deleteNode(nestId, request.nodeId, actor);
+  }
+  // Only the requester can learn the outcome from a notification — the
+  // document (and its request row) are gone from every other surface.
+  await reviews.notifyDeletionResolved({
+    nestId,
+    nodeId: request.nodeId,
+    docTitle,
+    outcome: "deleted",
+    requestedBy: request.requestedBy,
+    resolvedBy: actor,
+    requestId: request.id,
+    targetType: request.targetType,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
+  return c.json({ deleted: true, nodeId: request.nodeId });
+});
+
+// POST /nests/:nestId/deletion-requests/:id/decline
+governanceRoutes.post("/deletion-requests/:id/decline", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const body = await c.req.json<{ note?: string }>().catch(() => ({}) as any);
+  if (!body.note?.trim()) {
+    throw new ValidationError("A note is required when declining");
+  }
+  const request = await reviews.declineDeletion({
+    nestId,
+    id: c.req.param("id")!,
+    declinedBy: await getUserEmail(c),
+    note: body.note.trim(),
+    baseUrl: requestBaseUrl(c.req.url),
+  });
+  if (!request) return c.json({ error: "Deletion request not found" }, 404);
+  return c.json({ request });
+});
+
 // GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=
 // Activity feed: pending change submissions (the same rows the review queue
 // shows, every field intact) interleaved with annotation activity (new
@@ -296,29 +477,100 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
 
+  // Same node-level gate the document read itself takes: the nest middleware
+  // only clears the nest, and this route hands out every version's change log.
+  // A public reader is limited to nodes with an approved version, so a doc that
+  // never cleared review must not leak its drafts through its history.
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
+
   const allVersions = await versions.getVersions(nestId, nodeId);
   const approved = await versions.getApprovedVersion(nestId, nodeId);
 
-  // getVersions returns content:"" (bodies live on disk, not the table).
-  // Reconstruct each version's body so the history panel can preview it
-  // before restoring. Failures just leave content empty for that row.
+  // getVersions returns content:"" (bodies live on disk, not the table). Attach
+  // each version's stored change log — the unified diff from the version before
+  // it — which is one small file read apiece. Reconstructing every body here
+  // instead would replay the chain once per row and ship N full copies of the
+  // document just to open the history panel; the single body a caller actually
+  // previews or restores is fetched by GET .../versions/:version.
   const { versions: versionManager } = await engineCache.get(nestId);
-  const withContent = await Promise.all(
+
+  // Who approved/rejected each version. node_versions carries the status but
+  // not the resolver's email, so the latest resolution per version comes from
+  // review_requests — that is what the row's "approved by X" hint renders.
+  const resolutions = (await getDb().all(
+    `SELECT version, status, resolved_by
+       FROM review_requests
+      WHERE nest_id = ? AND node_id = ?
+        AND status IN ('approved', 'rejected')
+        AND resolved_by IS NOT NULL
+      ORDER BY resolved_at DESC`,
+    [nestId, nodeId],
+  )) as Array<{ version: number; status: string; resolved_by: string }>;
+  const byVersion = new Map<number, { status: string; resolvedBy: string }>();
+  for (const r of resolutions) {
+    if (!byVersion.has(r.version)) {
+      byVersion.set(r.version, { status: r.status, resolvedBy: r.resolved_by });
+    }
+  }
+
+  const enriched = await Promise.all(
     allVersions.map(async (v) => {
+      const r = byVersion.get(v.version);
+      const resolution = r
+        ? { resolvedBy: r.resolvedBy, resolutionStatus: r.status }
+        : {};
       try {
-        const raw = await versionManager.reconstructVersion(nodeId, v.version);
-        return { ...v, content: bodyOnly(nodeId, raw) };
+        const diff = await versionManager.getDiff(nodeId, v.version);
+        return { ...v, ...resolution, diff: diff ?? undefined };
       } catch {
-        return v;
+        return { ...v, ...resolution };
       }
     }),
   );
 
   return c.json({
-    versions: withContent,
+    versions: enriched,
     approvedVersion: approved,
     currentVersion: allVersions[0]?.version || 0,
   });
+});
+
+// GET /nests/:nestId/nodes/:nodeId/versions/:version — one version's full body,
+// reconstructed on demand (keyframe + replay). Split out from the list above so
+// opening the history panel costs N small diff reads instead of N chain replays.
+governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const version = Number(c.req.param("version"));
+
+  // Reconstructs a full historical body, so it takes the node read gate — a
+  // public reader must not pull an unapproved version out of the chain.
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
+
+  const { versions: versionManager } = await engineCache.get(nestId);
+  try {
+    const raw = await versionManager.reconstructVersion(nodeId, version);
+    return c.json({ version, content: bodyOnly(nodeId, raw) });
+  } catch (err) {
+    // A version whose chain no longer replays is a real state, not a 500 —
+    // the panel renders "(no content)" for it and Restore stays disabled.
+    console.error("reconstructVersion failed", nestId, nodeId, version, err);
+    return c.json({ version, content: null }, 200);
+  }
 });
 
 // GET /nests/:nestId/nodes/:nodeId/reviews
@@ -468,6 +720,41 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
     },
     201,
   );
+});
+
+// POST /nests/:nestId/nodes/:nodeId/request-deletion
+// Read-tier: anyone who can see the node may flag it (that's the point — the
+// people who spot stale content are usually below delete permission).
+governanceNodeRoutes.post("/:nodeId{.+}/request-deletion", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+  const body = await c.req.json<{ reason?: string }>().catch(() => ({}) as any);
+  const reason = body.reason?.trim();
+  if (!reason) {
+    throw new ValidationError("A reason for the deletion request is required");
+  }
+
+  const userEmail = await getUserEmail(c);
+  if (!(await canReadNode(nestId, nodeId, c.get("userId"), userEmail))) {
+    // Same message for "gone" and "no access" — no existence oracle.
+    return c.json({ error: `Node not found: ${nodeId}` }, 404);
+  }
+  // Existence check so a typo'd id can't park a row nobody can ever resolve.
+  const { storage } = await engineCache.get(nestId);
+  try {
+    await storage.readDocument(nodeId);
+  } catch {
+    return c.json({ error: `Node not found: ${nodeId}` }, 404);
+  }
+
+  const request = await reviews.requestDeletion({
+    nestId,
+    nodeId,
+    requestedBy: userEmail,
+    reason,
+    baseUrl: requestBaseUrl(c.req.url),
+  });
+  return c.json({ request }, 201);
 });
 
 // External-edit approve/reject MUST be registered before the generic

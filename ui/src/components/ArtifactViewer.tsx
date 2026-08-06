@@ -465,7 +465,7 @@ export function ArtifactViewer({
   }, [threads]);
 
   return (
-    <div className="md:py-6">
+    <div>
       {/* Header */}
       <div className="flex items-center justify-between gap-3 mb-4">
         <div className="flex items-center gap-2 min-w-0">
@@ -828,6 +828,9 @@ export function ArtifactViewer({
           versionData={versionData}
           previewAs="source"
           onView={viewVersion}
+          onLoadContent={async (v) =>
+            (await api.getNodeVersionContent(nestId, nodeId, v)).content
+          }
           onRestore={
             canRestore
               ? async (v) => {

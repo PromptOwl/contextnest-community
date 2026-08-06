@@ -3,6 +3,7 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
+import { parseServerDate } from "../lib/dates";
 import { useAuth } from "../auth/AuthContext";
 import { copyTextWithToast } from "../lib/clipboard";
 import {
@@ -112,8 +113,8 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
   });
 
   const formatDate = (d: string | null) => {
-    if (!d) return "Never";
-    const date = new Date(d);
+    const date = parseServerDate(d);
+    if (!date) return "Never";
     const diff = Date.now() - date.getTime();
     if (diff < 60000) return "Just now";
     if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
@@ -124,7 +125,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
 
   return (
     <div>
-      <div className="flex items-center gap-3 mb-6">
+      <div className="flex items-center gap-3 mb-4">
         <Button variant="ghost" size="icon" onClick={onBack}>
           <ArrowLeft className="h-4 w-4" />
         </Button>

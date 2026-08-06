@@ -62,11 +62,18 @@ describe("concurrent version writes", () => {
     for (let i = 1; i < nums.length; i++) {
       expect(nums[i]).toBe(nums[i - 1] + 1);
     }
-    // Latest version reconstructs to real content, not "(no content)".
-    const latest = data.versions.find(
-      (v: any) => v.version === data.currentVersion,
+    // Latest version reconstructs to real content, not "(no content)". The list
+    // ships change logs, so the body comes from the per-version endpoint.
+    const latest = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${nodeId}/versions/${data.currentVersion}`,
     );
-    expect(latest.content).toContain("edit");
+    expect(latest.data.content).toContain("edit");
+    // Each non-first version carries its own stored change log.
+    const withDiff = data.versions.filter((v: any) => v.diff);
+    expect(withDiff.length).toBeGreaterThan(0);
+    expect(withDiff[0].diff).toContain("@@");
   });
 
   it("keeps numbering after the burst (next save = max + 1, stored)", async () => {
@@ -91,9 +98,11 @@ describe("concurrent version writes", () => {
       `/nests/${nestId}/nodes/${nodeId}/versions`,
     );
     expect(after.data.currentVersion).toBe(maxBefore + 1);
-    const top = after.data.versions.find(
-      (v: any) => v.version === after.data.currentVersion,
+    const top = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${nodeId}/versions/${after.data.currentVersion}`,
     );
-    expect(top.content).toContain("final");
+    expect(top.data.content).toContain("final");
   });
 });

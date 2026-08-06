@@ -14,6 +14,7 @@
 
 import { NestStorage } from "@promptowl/contextnest-engine";
 import { resolveNestPath } from "../shared/paths.js";
+import { buildTitleMap, folderForNode } from "../governance/title-resolver.js";
 import type { DatabaseAdapter } from "./adapter.js";
 import { insertOrIgnore, nowExpr } from "./sql.js";
 
@@ -163,4 +164,88 @@ export async function backfillNodeVersionsFromHistory(
   console.log(
     `[backfill] node_versions: scanned ${totalDocs} docs across ${nests.length} nests, inserted ${totalInserted} rows`,
   );
+}
+
+const NOTIFICATION_TITLES_MIGRATION_ID = "006_backfill_notification_titles";
+
+/**
+ * One-shot: rewrite stored inbox messages that embed a raw node id.
+ *
+ * notify-service used to compose messages from the node id, so historic rows
+ * read `"<nestId>/nodes/content/blog-viewable-second-brain" was approved by …`
+ * — a storage path shown to the user. The write path now resolves titles, but
+ * the message is stored text, so existing rows stay wrong until rewritten here.
+ *
+ * Gated via schema_migrations so it doesn't repeat on restart.
+ */
+export async function backfillNotificationTitles(
+  db: DatabaseAdapter,
+): Promise<void> {
+  const already = await db.get(
+    "SELECT id FROM schema_migrations WHERE id = ?",
+    [NOTIFICATION_TITLES_MIGRATION_ID],
+  );
+  if (already) return;
+
+  // Only rows whose message carries an id — everything else is already clean.
+  const rows = (await db.all(
+    "SELECT id, nest_id, message FROM notifications WHERE message LIKE '%nodes/%'",
+  )) as Array<{ id: string; nest_id: string; message: string }>;
+
+  let rewritten = 0;
+  if (rows.length > 0) {
+    // One title map per nest, not per row — building it scans the nest folder.
+    const titlesByNest = new Map<string, Map<string, string>>();
+    for (const nestId of new Set(rows.map((r) => r.nest_id))) {
+      titlesByNest.set(nestId, await buildTitleMap(nestId));
+    }
+
+    for (const row of rows) {
+      const titles = titlesByNest.get(row.nest_id) ?? new Map();
+      // Every id in these messages sits inside double quotes; rewrite the
+      // quoted run, leaving the surrounding sentence untouched.
+      const next = row.message.replace(
+        /"([^"]*nodes\/[^"]*)"/g,
+        (whole, id: string) => {
+          const label = describeNodeWith(titles, id);
+          // A title containing a quote would break the next parse of this
+          // message — strip rather than escape.
+          return `"${label.replace(/"/g, "")}"`;
+        },
+      );
+      if (next === row.message) continue;
+      await db.run("UPDATE notifications SET message = ? WHERE id = ?", [
+        next,
+        row.id,
+      ]);
+      rewritten++;
+    }
+  }
+
+  await db.run(
+    insertOrIgnore(db, "INSERT INTO schema_migrations (id) VALUES (?)"),
+    [NOTIFICATION_TITLES_MIGRATION_ID],
+  );
+
+  console.log(
+    `[backfill] notifications: rewrote ${rewritten} of ${rows.length} message(s) carrying a node id`,
+  );
+}
+
+/**
+ * describeNode's resolution against an already-built map — same fallback
+ * chain (exact id → from the `nodes/` segment → slug), so a backfilled row
+ * reads exactly like a freshly written one. Deleted documents resolve to
+ * their slug, which still beats the full path.
+ */
+function describeNodeWith(titles: Map<string, string>, nodeId: string): string {
+  const at = nodeId.indexOf("nodes/");
+  const normalized = at > 0 ? nodeId.slice(at) : nodeId;
+  const title =
+    titles.get(nodeId) ||
+    titles.get(normalized) ||
+    normalized.split("/").pop() ||
+    nodeId;
+  const folder = folderForNode(normalized);
+  return folder ? `${title} (in ${folder})` : title;
 }

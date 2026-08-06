@@ -14,6 +14,7 @@ import { isLicenseAdminUserId } from "../auth/license.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError } from "../shared/errors.js";
+import { normalizeTag } from "../governance/tag-index-service.js";
 import type { Nest } from "../shared/types.js";
 
 /**
@@ -117,6 +118,77 @@ export async function setAllowSelfApprove(
     allow ? 1 : 0,
     nestId,
   ]);
+}
+
+/**
+ * Whether a governed nest reviews ONLY its prime documents. Off (the default)
+ * keeps the original posture: every write lands as a draft unless the actor
+ * holds a self-approve bypass. On, everything self-publishes except documents
+ * that resolve as prime — those always go through the review cycle.
+ */
+export async function nestReviewsPrimeOnly(nestId: string): Promise<boolean> {
+  const db = getDb();
+  const row = (await db.get(
+    "SELECT prime_only_review FROM nests WHERE id = ?",
+    [nestId],
+  )) as { prime_only_review: number } | undefined;
+  return !!row?.prime_only_review;
+}
+
+/** Toggle the prime-only review posture for a nest (admin-only). */
+export async function setPrimeOnlyReview(
+  nestId: string,
+  enabled: boolean,
+): Promise<void> {
+  const db = getDb();
+  await db.run("UPDATE nests SET prime_only_review = ? WHERE id = ?", [
+    enabled ? 1 : 0,
+    nestId,
+  ]);
+}
+
+/**
+ * Tags that mark a document prime, normalized and deduped. Stored as a comma
+ * list on the nest; an empty/blank value means "no tag marks a doc prime"
+ * (document-level flags still apply).
+ */
+export async function nestPrimeTags(nestId: string): Promise<string[]> {
+  const db = getDb();
+  const row = (await db.get("SELECT prime_tags FROM nests WHERE id = ?", [
+    nestId,
+  ])) as { prime_tags: string | null } | undefined;
+  return parsePrimeTags(row?.prime_tags);
+}
+
+/**
+ * Replace the nest's prime tag set (admin-only).
+ *
+ * Round-tripping through a comma string is deliberate: a comma is the
+ * separator, so it cannot be part of a tag. `normalizeTag` already keeps tags
+ * to bare words, and a caller sending "a,b" as one entry means two tags.
+ */
+export async function setPrimeTags(
+  nestId: string,
+  tags: string[],
+): Promise<void> {
+  const db = getDb();
+  await db.run("UPDATE nests SET prime_tags = ? WHERE id = ?", [
+    parsePrimeTags(tags.join(",")).join(","),
+    nestId,
+  ]);
+}
+
+/** Comma list → normalized, deduped tag names (no leading `#`, lowercased). */
+export function parsePrimeTags(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  return [
+    ...new Set(
+      raw
+        .split(",")
+        .map((t) => normalizeTag(t))
+        .filter(Boolean),
+    ),
+  ];
 }
 
 /**

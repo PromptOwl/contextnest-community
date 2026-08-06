@@ -561,14 +561,18 @@ export function ConnectModal({
                     <span>context_get</span>
                     <span>context_comments</span>
                     <span>context_list</span>
-                    {/* governance (7) */}
+                    {/* governance (11) */}
                     <span>context_stewards</span>
                     <span>context_review_queue</span>
+                    <span>context_my_drafts</span>
                     <span>context_submit_review</span>
                     <span>context_approve</span>
                     <span>context_reject</span>
                     <span>context_versions</span>
                     <span>context_assign_steward</span>
+                    <span>context_request_deletion</span>
+                    <span>context_deletion_queue</span>
+                    <span>context_resolve_deletion</span>
                     {/* admin / sync (3) */}
                     <span>context_share_nest</span>
                     <span>context_unsynced_list</span>

@@ -22,6 +22,7 @@ import {
   Save,
   AlertCircle,
   Send,
+  Trash2,
   X,
   FolderOpen,
   FolderPlus,
@@ -41,7 +42,9 @@ import {
   ChevronDown,
   Check,
   Copy,
+  Star,
 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
 import { toast } from "sonner";
 import {
@@ -63,7 +66,7 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
-import { SubmitForReviewModal, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
+import { SubmitForReviewModal, ReasonDialog, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
 import { unifiedDiff } from "./governance/diff-util";
 import {
   DropdownMenu,
@@ -120,6 +123,10 @@ interface DocumentEditorProps {
   ) => void;
   /** Tag chip click → filter nest list by tag. */
   onTagClick?: (tag: string) => void;
+  /** Open this nest's document list (breadcrumb nest-name click). */
+  onOpenNest?: () => void;
+  /** Open the nest list scoped to a folder (breadcrumb folder-segment click). */
+  onOpenFolder?: (folder: string) => void;
   /** Broken `[[Title]]` click → create-with-title. */
   onCreateDocument?: (nestId: string, title: string) => void;
   /** Pre-fill title when nodeId === "new" (wiki-create flow). */
@@ -147,6 +154,8 @@ export function DocumentEditor({
   onSaved,
   onNavigateDocument,
   onTagClick,
+  onOpenNest,
+  onOpenFolder,
   onCreateDocument,
   initialTitle,
   breadcrumb,
@@ -181,6 +190,12 @@ export function DocumentEditor({
   // Orchestrator schedule (free-form cron/interval). Only meaningful for
   // runnable node types (agent/skill); ignored/hidden otherwise. "" = none.
   const [schedule, setSchedule] = useState("");
+  // Document-scope prime flag: true/false override the nest's prime tags,
+  // null means "inherit". Governance, not authoring — owner/admin only, and
+  // the server re-checks (assertMayFlagPrime).
+  const [prime, setPrime] = useState<boolean | null>(null);
+  const loadedPrimeRef = useRef<boolean | null>(null);
+  const [primeTags, setPrimeTags] = useState<string[]>([]);
   // Node kind. An "artifact" node is rich HTML hosted + annotated, not edited
   // as markdown — once loaded we hand off to ArtifactViewer (see below).
   const [nodeType, setNodeType] = useState<string | null>(null);
@@ -236,7 +251,29 @@ export function DocumentEditor({
   const isViewOnly = isNew
     ? !canAuthorNew
     : isReadOnly && myNodeRoles.length === 0;
+  // Who deletes outright: the nest admin/owner tier, plus the person who wrote
+  // the document — asking permission to delete your own work is the wrong
+  // default. Everyone else goes through the request path. The server still
+  // gates on write permission, so an author downgraded to read-only since gets
+  // a 403 rather than a silent delete.
+  const authoredByMe =
+    !!author &&
+    !!adminStatus?.me?.email &&
+    author.toLowerCase() === adminStatus.me.email.toLowerCase();
+  const canDeleteDirectly =
+    isOwner ||
+    isAdmin ||
+    permission === "owner" ||
+    permission === "admin" ||
+    authoredByMe;
   const [showSubmitModal, setShowSubmitModal] = useState(false);
+  const [showDeletionModal, setShowDeletionModal] = useState(false);
+  // Latest deletion flag on this doc. Pending hides the request button (a
+  // second one would 409); declined stays visible with the note so the person
+  // who asked sees the verdict instead of the flag just vanishing.
+  const [deletionRequest, setDeletionRequest] =
+    useState<api.DeletionRequest | null>(null);
+  const deletionRequested = deletionRequest?.status === "pending";
   const [showDocPicker, setShowDocPicker] = useState(false);
   // CU-86ahmvmex: existing docs default to view mode; new docs to edit.
   const [mode, setMode] = useState<"view" | "edit">(isNew ? "edit" : "view");
@@ -592,15 +629,15 @@ export function DocumentEditor({
   const folderSegments = useMemo(() => {
     if (isNew || !nodeId) return [];
     const rel = nodeId.startsWith("nodes/") ? nodeId.slice(6) : nodeId;
-    return rel
-      .split("/")
-      .slice(0, -1)
-      .map((seg) =>
-        seg
-          .split("-")
-          .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
-          .join(" "),
-      );
+    const raw = rel.split("/").slice(0, -1);
+    return raw.map((seg, i) => ({
+      // Raw cumulative path (matches NestView's folderFilter) + prettified label.
+      path: raw.slice(0, i + 1).join("/"),
+      label: seg
+        .split("-")
+        .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+        .join(" "),
+    }));
   }, [isNew, nodeId]);
 
   // Docs in this nest that wiki-link to this one ("what links here").
@@ -658,12 +695,18 @@ export function DocumentEditor({
     (async () => {
       try {
         const [settings, meta] = await Promise.all([
-          api.getNestSettings(nestId).catch(() => ({ stewardship_enabled: false, allow_self_approve: false })),
+          api.getNestSettings(nestId).catch(() => ({
+            stewardship_enabled: false,
+            allow_self_approve: false,
+            prime_only_review: false,
+            prime_tags: [] as string[],
+          })),
           api.getNest(nestId).catch(() => null),
         ]);
         if (cancelled) return;
         setStewardshipEnabled(!!settings.stewardship_enabled);
         setAllowSelfApprove(!!settings.allow_self_approve);
+        setPrimeTags(((settings as any).prime_tags ?? []) as string[]);
         setPermission(meta?.permission ?? null);
         setMyStewards(((meta as any)?.myStewards ?? []) as Array<{
           role: string;
@@ -721,6 +764,9 @@ export function DocumentEditor({
       const loadedSchedule =
         node?.schedule == null ? "" : String(node.schedule);
       setSchedule(loadedSchedule);
+      const loadedPrime = typeof node?.prime === "boolean" ? node.prime : null;
+      setPrime(loadedPrime);
+      loadedPrimeRef.current = loadedPrime;
       setBaseVersion(node?.version);
       setStatus(node?.status ?? null);
       setAuthor(node?.author ?? null);
@@ -733,6 +779,7 @@ export function DocumentEditor({
       setPendingReviewBy(
         ((node as any)?.pendingReviewBy as string | null | undefined) ?? null,
       );
+      setDeletionRequest(((node as any)?.deletionRequest ?? null) as api.DeletionRequest | null);
       initialSnapshotRef.current = {
         title: loadedTitle,
         content: loadedContent,
@@ -836,8 +883,9 @@ export function DocumentEditor({
       if (tags[i] !== snap.tags[i]) return true;
     }
     if (schedule.trim() !== snap.schedule.trim()) return true;
+    if (prime !== loadedPrimeRef.current) return true;
     return false;
-  }, [touched, title, content, tags, schedule]);
+  }, [touched, title, content, tags, schedule, prime]);
 
   const addTag = useCallback(() => {
     // Split on whitespace/comma; strip leading "#" (stored bare).
@@ -874,16 +922,24 @@ export function DocumentEditor({
         // schedule is server-rejected on non-runnable types, so only send it
         // for agent/skill drafts.
         ...(isRunnable ? { schedule: schedule.trim() } : {}),
+        // Only sent when explicitly flagged — the server 403s a non-admin who
+        // sends `prime` at all, so an inherited (null) flag stays off the wire.
+        ...(prime === null ? {} : { prime }),
       });
       savedId = (res as any)?.node?.id;
     } else {
+      const primePatch =
+        prime === loadedPrimeRef.current ? {} : { prime };
       const res = await api.updateNode(
         nestId,
         nodeId,
         // Only runnable nodes accept schedule; "" clears it server-side.
-        isRunnable ? { ...payload, schedule: schedule.trim() } : payload,
+        isRunnable
+          ? { ...payload, ...primePatch, schedule: schedule.trim() }
+          : { ...payload, ...primePatch },
         baseVersion,
       );
+      loadedPrimeRef.current = prime;
       // Engine bumps version on publish; pick it up so next save's X-Base-Version matches.
       const nextVersion =
         (res as any)?.version ?? (res as any)?.node?.version;
@@ -1014,6 +1070,24 @@ export function DocumentEditor({
     await api.rejectNode(nestId, nodeId, note);
     await loadNode();
   };
+  // Flag this doc for deletion — for callers without delete permission. Errors
+  // stay inside the dialog (it keeps the typed reason); success closes it.
+  const handleRequestDeletion = async (reason: string) => {
+    if (isNew) return;
+    const { request } = await api.requestNodeDeletion(nestId, nodeId, reason);
+    setDeletionRequest(request);
+    toast.success("Deletion requested — a nest admin will review it");
+  };
+
+  // Delete outright (author / admin / owner). Leaves the page afterwards —
+  // staying on a document that no longer exists just 404s the next fetch.
+  const handleDeleteDocument = async () => {
+    if (isNew) return;
+    await api.deleteNode(nestId, nodeId);
+    toast.success(`Deleted "${title || nodeId}"`);
+    onBack();
+  };
+
   const hasReviewerRole = myNodeRoles.includes("reviewer");
   const hasEditorRole = myNodeRoles.includes("editor");
 
@@ -1026,6 +1100,15 @@ export function DocumentEditor({
   const isOwnSubmission = isOwnPendingReview;
   const hasAdminApprove =
     isAdmin || permission === "admin" || myNodeRoles.includes("admin");
+
+  // Prime resolution mirrors the server (document → tag → nest). `primeByTag`
+  // is what the doc would be WITHOUT its own flag, so the switch can tell an
+  // override from an inherited value and clear the override when they agree.
+  const primeByTag =
+    primeTags.length > 0 &&
+    tags.some((t) => primeTags.includes(t.trim().replace(/^#+/, "").toLowerCase()));
+  const effectivePrime = prime === null ? primeByTag : prime;
+  const canFlagPrime = isOwner || hasAdminApprove;
   const canApproveCapability =
     hasAdminApprove || hasReviewerRole || (isOwner && allowSelfApprove);
   const canReviewHere =
@@ -1077,14 +1160,7 @@ export function DocumentEditor({
     try {
       const { nodes } = await api.listNodes(nestId);
       const list = nodes as Array<{ id: string; title: string }>;
-      const lower = linkTitle.toLowerCase();
-      const bareSlug = slugFromNodeId(linkTitle).toLowerCase();
-      const exact = list.find(
-        (n) =>
-          n.id.toLowerCase() === lower ||
-          n.title.toLowerCase() === lower ||
-          slugFromNodeId(n.id).toLowerCase() === bareSlug,
-      );
+      const exact = resolveWikiTarget(list, linkTitle);
       if (exact) {
         confirmLeave(
           `open "${exact.title}"`,
@@ -1128,9 +1204,9 @@ export function DocumentEditor({
   }
 
   return (
-    <div className="md:py-6">
+    <div>
       {/* Header */}
-      <div className="flex items-center justify-between gap-3 mb-6 mt-14 md:mt-0">
+      <div className="flex items-center justify-between gap-3 mb-4 mt-14 md:mt-0">
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <Button
             variant="ghost"
@@ -1142,9 +1218,17 @@ export function DocumentEditor({
           </Button>
           {/* Chain: nest > ancestors… > doc. Chip click truncates chain. */}
           <div className="flex items-center gap-2 min-w-0 flex-wrap">
-            <span className="text-sm text-muted-foreground truncate">
+            <button
+              type="button"
+              onClick={() =>
+                onOpenNest && confirmLeave("go to the nest", onOpenNest)
+              }
+              disabled={!onOpenNest}
+              className="text-sm text-muted-foreground truncate hover:text-foreground hover:underline underline-offset-2 disabled:no-underline disabled:hover:text-muted-foreground disabled:cursor-default"
+              title={onOpenNest ? `Open ${nestName}` : nestName}
+            >
               {nestName}
-            </span>
+            </button>
             {breadcrumb?.map((entry, i) => (
               <Fragment key={`${entry.nestId}/${entry.nodeId}/${i}`}>
                 <span className="text-muted-foreground shrink-0">›</span>
@@ -1167,22 +1251,46 @@ export function DocumentEditor({
             {folderSegments.map((seg, i) => (
               <Fragment key={`folder-${i}`}>
                 <span className="text-muted-foreground shrink-0">›</span>
-                <span
-                  className="text-sm text-muted-foreground truncate max-w-[160px]"
-                  title={seg}
+                <button
+                  type="button"
+                  onClick={() =>
+                    onOpenFolder &&
+                    confirmLeave(`open "${seg.label}"`, () =>
+                      onOpenFolder(seg.path),
+                    )
+                  }
+                  disabled={!onOpenFolder}
+                  className="text-sm text-muted-foreground truncate max-w-[160px] hover:text-foreground hover:underline underline-offset-2 disabled:no-underline disabled:hover:text-muted-foreground disabled:cursor-default"
+                  title={seg.path}
                 >
-                  {seg}
-                </span>
+                  {seg.label}
+                </button>
               </Fragment>
             ))}
             <span className="text-muted-foreground shrink-0">›</span>
             <h3
-              className="text-sm font-bold text-foreground truncate mb-0 leading-none"
+              className="text-sm font-bold text-foreground truncate max-w-[320px] mb-0 leading-none"
+              title={title || undefined}
               data-testid="document-editor-header-title"
             >
               {title || (isNew ? "New document" : "Untitled")}
             </h3>
             {!isNew && status && <StatusBadge status={status} />}
+            {/* Pending only. A DECLINED flag is a past event, not a state of
+                the document — badging it forever nags everyone who opens a doc
+                that is very much alive, with no way to dismiss it. The verdict
+                reaches the requester as a notification (which has read state),
+                and anyone re-flagging sees it in the request dialog. */}
+            {!isNew && deletionRequested && (
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-red-50 text-red-700 border-red-200"
+                title={`${deletionRequest!.requestedBy} asked for this to be deleted: "${deletionRequest!.reason}". A nest admin decides.`}
+                data-testid="deletion-requested-badge"
+              >
+                <Trash2 className="h-3 w-3" />
+                Deletion requested
+              </span>
+            )}
             {!isNew && !stewardshipEnabled && status === "published" && (
               <span
                 className="px-1.5 py-0.5 rounded text-xs bg-green-50 text-green-700 border border-green-200"
@@ -1356,6 +1464,23 @@ export function DocumentEditor({
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
               });
+            // Below admin only: this opens the REQUEST dialog, not a delete.
+            // Admins delete from the nest list — this page has never carried a
+            // real delete. Hidden once a flag is already pending.
+            // One Delete entry: the author (and the admin/owner tier) deletes
+            // outright, everyone else raises a request. Hidden below that tier
+            // once a flag is already open.
+            if (!isNew && (canDeleteDirectly || !deletionRequested))
+              moreActions.push({
+                label: "Delete",
+                icon: Trash2,
+                separatorBefore: true,
+                destructive: canDeleteDirectly,
+                testId: canDeleteDirectly
+                  ? "document-editor-delete"
+                  : "document-editor-request-deletion",
+                onSelect: () => setShowDeletionModal(true),
+              });
             return moreActions.length ? (
               <OverflowMenu
                 actions={moreActions}
@@ -1435,21 +1560,52 @@ export function DocumentEditor({
                 {title || "Untitled"}
               </h1>
             ) : (
-              // Borderless, h1-styled title input so the always-editable page
-              // reads like a document, not a form. Placeholder stands in for
-              // the old "Title *" label; Save stays gated on a non-empty title.
-              <Input
-                value={title}
-                onChange={(e) => {
-                  setTitle(e.target.value);
-                  setTouched(true);
-                }}
-                onBlur={saveOnBlur}
-                placeholder="Untitled"
-                disabled={fieldsDisabled}
-                data-testid="document-editor-title"
-                className="border-0 px-0 h-auto py-0 text-3xl font-bold leading-tight shadow-none focus-visible:ring-0 placeholder:text-muted-foreground/40"
-              />
+              // Labeled, outlined title field — required like Content, and
+              // visibly a field before it's clicked. Sized like the other
+              // inputs, only a notch heavier, so the form reads as one rhythm.
+              <>
+                <label
+                  htmlFor="document-editor-title"
+                  className="block text-sm font-medium mb-1"
+                >
+                  Title <span className="text-destructive">*</span>
+                </label>
+                <Input
+                  id="document-editor-title"
+                  value={title}
+                  onChange={(e) => {
+                    setTitle(e.target.value);
+                    setTouched(true);
+                  }}
+                  onBlur={saveOnBlur}
+                  placeholder="Give this document a name"
+                  // Mirrors MAX_TITLE_LENGTH in src/nodes/service.ts — a hard
+                  // stop here so the server's 400 is unreachable from the UI.
+                  // maxLength never truncates an existing longer value, so
+                  // grandfathered titles still load and save.
+                  maxLength={120}
+                  disabled={fieldsDisabled}
+                  required
+                  aria-required="true"
+                  aria-invalid={touched && !title.trim() ? true : undefined}
+                  data-testid="document-editor-title"
+                  className={`h-10 text-base font-medium placeholder:font-normal placeholder:text-muted-foreground/60${
+                    touched && !title.trim()
+                      ? " border-destructive focus-visible:ring-destructive"
+                      : ""
+                  }`}
+                />
+                {((touched && !title.trim()) || title.length >= 90) && (
+                  <div className="mt-1 flex items-start justify-between gap-2 text-xs">
+                    <span className="text-destructive">
+                      {touched && !title.trim() ? "Title is required" : ""}
+                    </span>
+                    <span className="text-muted-foreground tabular-nums">
+                      {title.length >= 90 ? `${title.length}/120` : ""}
+                    </span>
+                  </div>
+                )}
+              </>
             )}
             {/* Rename safety: links referencing this doc by its old title
                 either break ([[Old Title]]) or go stale ([[slug|Old Title]] —
@@ -1684,6 +1840,49 @@ export function DocumentEditor({
               </div>
             )}
           </div>
+
+          {/* Prime — governed nests only, and only for the roles allowed to
+              set it. Everyone else just sees the badge next to the title. */}
+          {stewardshipEnabled && canFlagPrime && (
+            <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <span className="flex items-center gap-1.5 text-sm font-medium">
+                  <Star className="h-4 w-4" />
+                  Prime document
+                </span>
+                <p className="text-xs text-muted-foreground">
+                  {primeByTag && prime === null
+                    ? "Inherited from a prime tag on this document — it always needs steward approval."
+                    : "Always require steward approval for this document, even from an owner or admin with auto-publish on."}
+                </p>
+                {primeByTag && prime === false && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    Exempted from its prime tag.
+                  </p>
+                )}
+                {/* The one case people get wrong: an owner with auto-publish on
+                    expects their edit to go live, and on a prime doc it won't. */}
+                {effectivePrime && allowSelfApprove && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    Overrides auto-publish — your edits here queue for review
+                    like everyone else&rsquo;s.
+                  </p>
+                )}
+              </div>
+              <Switch
+                checked={effectivePrime}
+                disabled={fieldsDisabled}
+                onCheckedChange={(next) => {
+                  // Turning the switch back to whatever the tags already imply
+                  // clears the override rather than pinning a redundant flag.
+                  setPrime(next === primeByTag ? null : next);
+                  setTouched(true);
+                }}
+                aria-label="Prime document"
+                data-testid="document-editor-prime"
+              />
+            </div>
+          )}
 
           {/* People — "Created by" + collaborator chips (version authors ∪
               document grantees, server-resolved). Hidden entirely for docs
@@ -2306,6 +2505,9 @@ export function DocumentEditor({
           onClose={() => setShowVersions(false)}
           title={title || nodeId}
           versionData={versionData}
+          onLoadContent={async (v) =>
+            (await api.getNodeVersionContent(nestId, nodeId, v)).content
+          }
           onRestore={
             isViewOnly
               ? undefined
@@ -2329,6 +2531,37 @@ export function DocumentEditor({
           documentTitle={title}
           currentVersion={baseVersion ?? 1}
           onSubmit={handleSubmitForReview}
+        />
+      )}
+
+      {!isNew && (
+        <ReasonDialog
+          open={showDeletionModal}
+          onOpenChange={setShowDeletionModal}
+          title={
+            canDeleteDirectly
+              ? `Delete "${title || nodeId}"?`
+              : `Request deletion of "${title || nodeId}"`
+          }
+          description={
+            canDeleteDirectly
+              ? "This removes the document, its version history, comments and annotations. It cannot be undone."
+              : "A nest admin reviews this and either deletes the document or declines with a note. Nothing is removed yet."
+          }
+          // Deleting your own work needs no justification; asking for someone
+          // else's does.
+          label={canDeleteDirectly ? undefined : "Why should it be deleted?"}
+          placeholder="e.g. superseded by the new runbook"
+          confirmLabel={canDeleteDirectly ? "Delete document" : "Request deletion"}
+          destructive={canDeleteDirectly}
+          priorDecline={
+            !canDeleteDirectly && deletionRequest?.status === "declined"
+              ? deletionRequest
+              : null
+          }
+          onConfirm={
+            canDeleteDirectly ? handleDeleteDocument : handleRequestDeletion
+          }
         />
       )}
 

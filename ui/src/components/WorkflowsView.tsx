@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import type React from "react";
+import { formatServerDate } from "../lib/dates";
 import {
   ArrowLeft,
   ArrowRight,
@@ -73,6 +74,7 @@ import {
 } from "./ui/select";
 import { useAuth } from "../auth/AuthContext";
 import { NodeTypeIcon } from "./NestView";
+import { NestPageHeader } from "./NestPageHeader";
 
 interface Props {
   nestId: string;
@@ -97,27 +99,14 @@ const stepIcon = (action: string) => {
   return <span className="h-3.5 w-3.5" />;
 };
 
-const timeOf = (iso: string) => {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
-};
+const timeOf = (iso: string) => formatServerDate(iso) || iso;
 
 export function WorkflowsView({ nestId, nestName, onBack }: Props) {
   const [tab, setTab] = useState("canvas");
 
   return (
     <div>
-      <div className="flex items-center gap-3 mb-4">
-        <Button variant="ghost" size="sm" onClick={onBack}>
-          <ArrowLeft className="h-4 w-4 mr-1" /> Back
-        </Button>
-        <div>
-          <h1 className="text-lg font-semibold leading-tight">{nestName} Workflows</h1>
-        </div>
-      </div>
+      <NestPageHeader nestName={nestName} onBack={onBack} />
 
       {/* One mental model, four views of it: the CANVAS is the workflow
           itself (structure + per-wire conditions), the TABLE is the same

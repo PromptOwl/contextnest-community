@@ -121,8 +121,10 @@ describe("server-level /mcp — one connection, all nests", () => {
     expect(names).toContain("context_query");
     expect(names).toContain("context_get");
     expect(names).toContain("context_resolve");
-    // Server-level endpoint is read-only — no write/governance tools.
-    expect(names).not.toContain("context_create");
+    // Two bootstrap writes only — governance/update tools stay per-nest.
+    expect(names).toContain("nest_create");
+    expect(names).toContain("context_create");
+    expect(names).not.toContain("context_update");
     expect(names).not.toContain("context_approve");
   });
 
