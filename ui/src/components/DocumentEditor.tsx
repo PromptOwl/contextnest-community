@@ -1560,26 +1560,52 @@ export function DocumentEditor({
                 {title || "Untitled"}
               </h1>
             ) : (
-              // Borderless, h1-styled title input so the always-editable page
-              // reads like a document, not a form. Placeholder stands in for
-              // the old "Title *" label; Save stays gated on a non-empty title.
-              <Input
-                value={title}
-                onChange={(e) => {
-                  setTitle(e.target.value);
-                  setTouched(true);
-                }}
-                onBlur={saveOnBlur}
-                placeholder="Untitled"
-                // Mirrors MAX_TITLE_LENGTH in src/nodes/service.ts — a hard
-                // stop here so the server's 400 is unreachable from the UI.
-                // maxLength never truncates an existing longer value, so
-                // grandfathered titles still load and save.
-                maxLength={120}
-                disabled={fieldsDisabled}
-                data-testid="document-editor-title"
-                className="border-0 px-0 h-auto py-0 text-3xl font-bold leading-tight shadow-none focus-visible:ring-0 placeholder:text-muted-foreground/40"
-              />
+              // Labeled, outlined title field — required like Content, and
+              // visibly a field before it's clicked. Sized like the other
+              // inputs, only a notch heavier, so the form reads as one rhythm.
+              <>
+                <label
+                  htmlFor="document-editor-title"
+                  className="block text-sm font-medium mb-1"
+                >
+                  Title <span className="text-destructive">*</span>
+                </label>
+                <Input
+                  id="document-editor-title"
+                  value={title}
+                  onChange={(e) => {
+                    setTitle(e.target.value);
+                    setTouched(true);
+                  }}
+                  onBlur={saveOnBlur}
+                  placeholder="Give this document a name"
+                  // Mirrors MAX_TITLE_LENGTH in src/nodes/service.ts — a hard
+                  // stop here so the server's 400 is unreachable from the UI.
+                  // maxLength never truncates an existing longer value, so
+                  // grandfathered titles still load and save.
+                  maxLength={120}
+                  disabled={fieldsDisabled}
+                  required
+                  aria-required="true"
+                  aria-invalid={touched && !title.trim() ? true : undefined}
+                  data-testid="document-editor-title"
+                  className={`h-10 text-base font-medium placeholder:font-normal placeholder:text-muted-foreground/60${
+                    touched && !title.trim()
+                      ? " border-destructive focus-visible:ring-destructive"
+                      : ""
+                  }`}
+                />
+                {((touched && !title.trim()) || title.length >= 90) && (
+                  <div className="mt-1 flex items-start justify-between gap-2 text-xs">
+                    <span className="text-destructive">
+                      {touched && !title.trim() ? "Title is required" : ""}
+                    </span>
+                    <span className="text-muted-foreground tabular-nums">
+                      {title.length >= 90 ? `${title.length}/120` : ""}
+                    </span>
+                  </div>
+                )}
+              </>
             )}
             {/* Rename safety: links referencing this doc by its old title
                 either break ([[Old Title]]) or go stale ([[slug|Old Title]] —
