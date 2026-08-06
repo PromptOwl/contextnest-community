@@ -3,6 +3,8 @@ import {
   GraphQueryEngine,
   VersionManager,
 } from "@promptowl/contextnest-engine";
+import { createEngineApi } from "@promptowl/contextnest-engine/api";
+import type { OperationContext } from "@promptowl/contextnest-engine/api";
 import { resolveNestPath, isImportedNest } from "../nests/service.js";
 import { FlatNestStorage } from "./flat-storage.js";
 
@@ -43,3 +45,26 @@ class NestEngineCache {
 }
 
 export const engineCache = new NestEngineCache();
+
+/**
+ * The engine's canonical operation catalog (`context_*`). Prefer running an
+ * operation through this over re-implementing it against engine primitives —
+ * it is the same catalog the OSS CLI and mcp-server execute, so all three
+ * surfaces stay on one contract (see docs/prds/api-convergence.md).
+ */
+export const engineApi = createEngineApi();
+
+/**
+ * Build an OperationContext for one nest. `onProgress` is the engine's
+ * transport-agnostic progress sink — supply it for long batch operations
+ * (import/publish) to drive a progress stream; omit it and the operation runs
+ * identically.
+ */
+export async function opContext(
+  nestId: string,
+  actor: string,
+  onProgress?: (done: number, total: number) => void,
+): Promise<OperationContext> {
+  const { storage, query, versions } = await engineCache.get(nestId);
+  return { storage, query, versions, actor, onProgress };
+}

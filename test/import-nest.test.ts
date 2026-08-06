@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { existsSync, readdirSync } from "fs";
+import { existsSync, readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import {
   setupTestEnv,
@@ -88,6 +88,42 @@ describe("import folder as nest (upload model)", () => {
     );
     expect(delStatus).toBe(200);
     expect(existsSync(dataNestDir)).toBe(false);
+  });
+
+  it("publishes the whole batch under ONE checkpoint, not one per document", async () => {
+    // The import registers docs through the engine's `context_import` operation
+    // in a single batch. Publishing one-by-one is O(N²) — each publish seals its
+    // own checkpoint and every checkpoint re-scans the whole vault — so a
+    // per-doc checkpoint count is the regression signal for that loop coming back.
+    const files = Array.from({ length: 8 }, (_, i) =>
+      mdFile(`batch/doc-${i}.md`, `title: Doc ${i}\ntype: document`, `body ${i}`),
+    );
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Batched", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.documents).toBe(8);
+
+    const history = readFileSync(
+      join(env.dataDir, "nests", data.nest.id, ".versions", "context_history.yaml"),
+      "utf-8",
+    );
+    expect(history.match(/^\s*- checkpoint:/gm) ?? []).toHaveLength(1);
+
+    // Every doc is genuinely published, not just cheaply counted.
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${data.nest.id}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(list.data.nodes).toHaveLength(8);
+    expect(list.data.nodes.every((n: any) => n.status === "published")).toBe(true);
   });
 
   it("allows importing an empty folder, then creating a doc in it", async () => {
