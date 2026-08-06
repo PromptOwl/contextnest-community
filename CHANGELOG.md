@@ -1,5 +1,180 @@
 # @promptowl/contextnest-community
 
+## 1.15.0
+
+### Minor Changes
+
+- a6661ff: Native PromptOwl connection: accept the short-lived `scope: "mcp"` service
+  ticket on the per-nest `/nests/:id/mcp` transport (in addition to `/index`,
+  server-level `/mcp`, `POST /context`, and `GET /nodes`), so a PromptOwl block
+  granted read & write on one nest can reach that nest's write tools. Add two
+  server-level bootstrap writes — `nest_create` and `context_create` — to the
+  cross-nest `/mcp`, each gated by the same per-user write checks, suspend
+  kill-switch, and license gate the per-nest path enforces. The MCP ticket and
+  the one-click SSO login ticket are now mutually exclusive: `/auth/sso` refuses
+  an `mcp`-scoped ticket and the MCP middleware refuses a ticket carrying a
+  `jti`.
+- e675f73: Prime documents: a per-document and per-tag review gate, so a nest no longer
+  has to choose between reviewing everything and reviewing nothing. A **prime**
+  document always goes through draft → pending → approved — it is the one thing
+  `allow_self_approve` does not bypass, so even an owner's edit to the sales
+  playbook lands as a draft.
+
+  Whether a document is prime resolves in the existing steward scope order,
+  **document → tag → nest**: a Prime switch in the document editor (owner/admin
+  only, where `false` exempts one doc from an otherwise-prime tag), then the
+  nest's configurable prime tags (`prime-document` by default), then not prime.
+  A new per-nest `prime_only_review` setting flips a governed nest's default to
+  self-publish so only prime documents queue for review; it is off by default, so
+  existing nests keep their current posture on upgrade. Prime documents carry a
+  badge in the nest's document list, and both settings are exposed on
+  `GET`/`PATCH /nests/:id/settings` alongside `prime` on node create/update.
+
+- Deletion requests as a first-class governance flow, a configurable maturity
+  board with a reworked nest workspace, and MCP delete/move tools backed by a
+  node-create path that no longer races itself.
+
+  ### Deletion requests
+
+  - **Request deletion of a document, folder or nest** (`src/db/migrations.ts`, `src/db/migrations.postgres.ts`, `src/governance/review-service.ts`, `src/governance/routes.ts`, `src/app.ts`) — a member without delete rights no longer has to ask an admin out of band. A new `deletion_requests` table keyed by target type carries the request through the same approve/reject vocabulary as a review, with the target resolved segment-aware so a folder named `policy` never matches `policies/` (`src/governance/title-resolver.ts`). Honouring the folder on approval is gated behind owner/admin, so a reviewer can clear a request without cascading a delete they were never entitled to.
+  - **One Delete action, permission picks the dialog** (`ui/src/components/NestView.tsx`, `ui/src/components/DocumentEditor.tsx`, `ui/src/components/governance/ReasonDialog.tsx`, `ui/src/components/Dashboard.tsx`) — the same button either deletes or opens a reason prompt depending on what the caller may do; authors can delete their own documents outright, and a target with a request already open shows a pending badge to the requester instead of appearing untouched.
+  - **Notifications on both ends** (`src/governance/notify-service.ts`, `src/notify/dispatch.ts`, `src/notify/email-render.ts`, `src/db/backfill.ts`) — admins hear about a new request, requesters hear the verdict. A one-shot backfill fills in notification titles that predate the change so old rows don't render blank.
+  - **Same flow from an agent** (`src/mcp/tools.ts`) — a deletion an MCP client isn't permitted to perform is filed as a request rather than refused.
+
+  ### Nest workspace
+
+  - **Configurable maturity board** (`ui/src/components/MaturityBoard.tsx`, `ui/src/lib/board-dimensions.ts`) — a per-nest board that groups documents by lifecycle status, folder, or tag, with drag-to-move on the folder dimension. Columns come from the real lifecycle statuses rather than an invented set, and folder keys drop the `nodes/` prefix so the headers read as paths a user recognises.
+  - **View switcher and a shared page header** (`ui/src/App.tsx`, `ui/src/components/NestPageHeader.tsx`, `ui/src/components/NestView.tsx`) — Documents, Board, Graph, Definitions and Workflows share one header and one spacing scale instead of each page inventing its own.
+  - **Search moved into the header** (`ui/src/App.tsx`) — reachable from every nest page instead of only from the Documents list.
+  - **Clickable tags and breadcrumbs** (`ui/src/App.tsx`, `ui/src/components/DocumentEditor.tsx`, `ui/src/components/OntologyGraphView.tsx`) — a nest-scope enabler lets a tag or breadcrumb segment navigate back into a filtered document list.
+  - **Documents default to "Recent activity"** (`ui/src/lib/node-sort.ts`, `ui/src/components/NestView.tsx`) — the list opens on what changed last rather than alphabetical order.
+
+  ### MCP & node integrity
+
+  - **`context_delete` and `context_move`** (`src/mcp/tools.ts`, `src/nodes/service.ts`) — agents can delete and move documents through the same permission checks the REST routes enforce; an ambiguous title is refused rather than resolved to a guess. Resolving a node by id now hits the record directly instead of scanning the vault.
+  - **Create no longer collides with itself** (`src/nodes/service.ts`) — creates serialize per node id and fail closed on the id check, a create that would collide with an existing node is refused, node-keyed rows no longer outlive the document they described, and the move-destination and duplicate-title races are closed.
+  - **Approvers can move and delete a node under review** (`src/nodes/service.ts`) — the review lock stopped the one role able to resolve the review.
+  - **Authors can find their own unsubmitted drafts** (`src/governance/version-service.ts`, `src/app.ts`, `src/mcp/tools.ts`, `ui/src/components/Dashboard.tsx`) — a draft that was never submitted was invisible to everyone including the person who wrote it.
+  - **Document titles bounded at 120 characters** (`src/nodes/service.ts`, `ui/src/components/DocumentEditor.tsx`) — an unbounded title overflowed the breadcrumb and every list that rendered it.
+
+  ### Fixes
+
+  - The write path records why it skipped review instead of guessing a reason (`src/nodes/service.ts`, `src/nests/service.ts`).
+  - Wiki links resolve by id, title or slug inside the review modal, matching the editor (`ui/src/components/NestView.tsx`).
+  - Server timestamps without a zone read as UTC rather than local time (`ui/src/lib/dates.ts`).
+  - The document title field is labelled and marked required instead of looking like static text (`ui/src/components/DocumentEditor.tsx`).
+  - Long board card titles wrap instead of overflowing their column (`ui/src/components/MaturityBoard.tsx`).
+  - Entering a nest folder-scoped opens Documents rather than the last view (`ui/src/components/NestView.tsx`).
+
+- ba11aba: Per-version change logs instead of full-body copies. The version list
+  (`GET /nests/:id/nodes/:nodeId/versions`) now returns each version's stored
+  unified diff rather than reconstructing every body — opening the history panel
+  of a long-lived document no longer replays the whole chain once per row and
+  ships N full copies of the text. One body is fetched on demand from the new
+  `GET /nests/:id/nodes/:nodeId/versions/:version`, which answers `200` with
+  `content: null` when a version's chain can no longer be replayed, so one
+  unreadable row doesn't fail the panel.
+
+  Three fixes ride along. Draft saves now number through the engine's
+  `nextVersion()` instead of the SQLite row count, closing the case where a DB
+  lagging `history.yaml` grafted a second chain onto the first (duplicate
+  versions, overwritten keyframes, "(no content)" from the graft point on) — a
+  gated one-shot startup pass re-anchors documents already in that state and
+  moves inline patches out into standalone `v{N}.diff` files. A duplicate
+  `/versions` handler that shadowed the governance route is removed, so
+  `resolvedBy` reaches the UI. And the diff viewer's line numbers no longer skip
+  two, having learned to read the engine's `Index:` / `===` preamble as a header.
+
+  Both version endpoints now take the same node-level read check as the document
+  itself (`403` when the caller can't read the node). The list handler never had
+  it, so on a public nest an anonymous reader could pull the change logs — and,
+  through the new per-version endpoint, the reconstructed body — of a document
+  that never cleared review, bypassing the approved-only rule public reads are
+  otherwise held to.
+
+  Requires `@promptowl/contextnest-engine` 1.3.0.
+
+### Patch Changes
+
+- 9447efe: Moving a document that isn't published no longer fails. A document stored with
+  an empty tag list reads back with an undefined `tags` value, which the YAML
+  serializer refuses to write — so every draft and pending-review move errored out
+  while published documents (already cleaned by the publish path) moved fine. The
+  same clean now runs on every write of a document that came from storage, which
+  also covers the two import paths that reset a broken version chain or persist
+  import metadata. The Documents list stops hiding "Move to folder" on a document
+  awaiting review: owners, admins, and reviewers assigned to it are the callers the
+  server already lets move one, and they now see the action.
+
+## 1.14.0
+
+### Minor Changes
+
+- v1.14.0 — Microsoft Teams notifications, direct email to the people an event concerns, portable nest export/import, drag-and-drop document moves, and authors editing their own pending reviews.
+
+  ### Notifications
+
+  - **Microsoft Teams connector** (`src/notify/msteams.ts`, `src/notify/webhook.ts`, `src/notify/dispatch.ts`, `ui/src/components/SettingsPage.tsx`) — a second server-wide connector at full parity with Slack: the same governance events (review requested / approved / rejected, collaborator added, per-nest burst digests) post to a Teams channel as Adaptive Cards, configured via `MSTEAMS_WEBHOOK_URL` or the Settings card. Per-nest connector rows accept `channel: "teams"` with the same per-event filtering and `env:KEY` URL indirection as Slack. Delivery is fire-and-forget with a short timeout so a Teams outage never slows or fails the action that triggered it, and every user-controlled string in a card is escaped so a nest or document name cannot inject markup or links. The setting is named `msteams_*` because "teams" already means user groups in this product. `CONFIGURATION.md` documents creating the webhook through the Workflows (Power Automate) app, since Microsoft retired the classic Office 365 incoming-webhook connectors.
+  - **Send test on the connector cards** (`src/app.ts`, `src/notify/webhook.ts`, `ui/src/components/SettingsPage.tsx`) — new `POST /admin/settings/test-notification` posts a message to the saved Slack or Teams webhook and reports whether it landed (200, 502 with the webhook's own reason, 400 for an unknown channel), so an admin can confirm a hook without waiting for a real governance event. The test renders through the same `formatBody` the live paths use, so what you see in the test is the real wire format. The route is gated on `serverAdminAllowed` — the same guard as reading and saving the webhook — instead of the license-admin-only check that previously 403'd a superadmin who could edit the URL but not test it.
+  - **Emails go to the person the event concerns** (`src/notify/email.ts`, `src/notify/email-render.ts`, `src/governance/notify-service.ts`, `src/auth/routes.ts`, `src/nests/sharing-service.ts`, `src/governance/stewardship-service.ts`) — until now every notification email went to the shared `NOTIFY_EMAIL_TO` team inbox. A new direct-recipient send path emails the individuals involved: the invitee gets their nest invite (plus a Hootie inbox row surfaced by ContextNest Desktop), a new teammate gets their sign-in email carrying the one-time temporary password, every newly-assigned steward is told their role and scope, reviewers are emailed on submit, the submitter is emailed the verdict, and team members are emailed when their team is shared onto a nest. The per-status email copy collapsed into one status-keyed template table and the "shared" copy now addresses the recipient in the second person. All sends are best-effort — a dead SMTP never fails the invite, share, or review. The SMTP path gained a connection pool, a per-second rate limit, and backoff retry on provider throttle replies so a reviewer fan-out cannot trip a "too many emails" 550.
+  - **Email sign-off** (`src/notify/email-render.ts`) — the "Automated governance notification" footer is gone and emails sign off as Community Nest.
+
+  ### Nest portability
+
+  - **Export a nest as a portable bundle** (`src/nests/bundle-service.ts`, `src/nests/routes.ts`, `ui/src/components/ConnectModal.tsx`) — `GET /nests/:id/export?format=bundle` (owner/admin) streams a `.zip` of the nest's documents plus engine version history (`.versions`) and nest config, so a nest can move to another ContextNest host. Documents are serialized from their approved/published state so they re-import published rather than as drafts; `?includeDrafts=1` also ships unapproved drafts, offered as an "Include draft documents" toggle in the Connect dialog's new Export dialog. Identities, attribution, and the governance overlay (stewards, reviews, comments, definitions, edges, grants) deliberately do not travel — the importer owns and re-governs the new nest. When an approved version cannot be reconstructed the document is skipped rather than shipping working-copy bytes stamped `status: published`.
+  - **Import a bundle through the existing importer** (`ui/src/components/ImportFolderModal.tsx`, `ui/src/lib/markdown-split.ts`, `src/fs/vault-import.ts`) — the Import dialog gains a source selector (folder vs file) whose file picker accepts an exported nest `.zip` (expanded client-side), loose markdown/text files, or a whole-nest "Export as markdown" file split back into individual documents. Everything routes through the existing `POST /nests/import`; there is no second endpoint. `.context` is allowed alongside `.versions` through the import path so nest config and version history survive the round trip.
+
+  ### Governance
+
+  - **Authors can revise their own pending-review submissions** (`src/nodes/service.ts`, `src/governance/review-service.ts`, `src/shared/node-write-lock.ts`, `ui/src/components/DocumentEditor.tsx`) — submitting a document used to lock its own author out with a 423 until a steward ruled, forcing withdraw-and-resubmit to fix a typo. The author may now keep editing: the edit lands as a new draft version through the engine's normal hash-chain append and the open review repoints onto it — same review row, no re-notify, no duplicate — so the steward reviews the final edited version. Non-authors stay locked, and an auto-publishing owner editing their own pending review stays in review rather than self-approving past it. The repoint runs in a single transaction so the review pointer and version status can never disagree, and the editor shows the author a "still under review" notice while they revise.
+  - **Review resolution serialized against author edits** (`src/shared/node-write-lock.ts`, `src/governance/review-service.ts`, `src/governance/routes.ts`, `src/mcp/tools.ts`) — approve/reject/cancel now take the same per-node write lock as `updateNode` and read the current version inside it, instead of resolving against a version read in the route before the operation ran. A concurrent author edit can no longer land between the read and the resolution, orphaning the fresh revision. REST and MCP approve/reject also echo the version actually resolved rather than a stale pre-read.
+
+  ### Documents
+
+  - **Drag-and-drop documents into folders** (`ui/src/components/NestView.tsx`) — drag a document onto a folder to move it, with a loading toast that swaps to success carrying an Undo action, and a keyboard-accessible "Move to folder" menu item and dialog behind the same mover so the flow is not drag-only. Document rows act as drop proxies for the folder they sit in, hovering a collapsed folder for ~600ms springs it open so nested targets are reachable mid-drag, and invalid targets (a document's current folder) show the no-drop cursor instead of highlighting. Move permission mirrors the edit gate exactly — stewardship scope plus the pending-review lock. Folder-onto-folder is intentionally not implemented: the server moves one document per call, so it would be N non-atomic moves.
+
+  ### Fixes
+
+  - **Discard actually discards** (`ui/src/components/DocumentEditor.tsx`, `ui/src/lib/draft.ts`) — blur-autosave wrote to the server, and blurring a field to click the back arrow fired that write before the "Unsaved changes" dialog appeared, so Discard only navigated away and left the edit saved (and spun up one version per field exit). Blur now parks edits in localStorage; the server is written only on an explicit Save or Save-and-leave, and Discard clears the parked draft and reverts to the loaded snapshot. Reopening a document restores its draft only when it was taken from the version just loaded — a newer server copy wins — and the draft store evicts the stalest other draft to fit, reporting failure so the editor can warn that a reload would lose the edits.
+  - **Toggle blocks render a working disclosure control** (`ui/src/components/MarkdownEditor/editor-styles.css`, `ui/src/components/MarkdownEditor/extensions/Toggle.ts`) — TipTap renders a `div[data-type="details"]` rather than a native `<details>`, so the CSS targeting `.ProseMirror details` never matched: the chevron had no styling and the summary fell back to a list-item disc, reading as a stray bullet with no way to expand. The CSS retargets the data attribute, the chevron rotates on open, and a single click on the summary header toggles the block (double-click still edits the header text).
+  - **Slack review events no longer post twice** (`src/notify/dispatch.ts`) — review events fired down both the immediate dispatch path and the debounced digest, and both hit the same server-wide Slack webhook. The implicit server-slack connector now carries the same digest guard Teams already had, so the digest owns review events and dispatch keeps only `run_failed`.
+  - **Direct-recipient emails stay out of the team digest** (`src/notify/notify.ts`) — the email opt-out was all-or-nothing per debounce window, so an invite or verdict sharing a window with a non-skipped event still had its line folded into the team digest. The digest body is now built from non-skipped events only; Slack and Teams still receive everything.
+  - **Multi-recipient emails use Bcc** (`src/notify/email.ts`) — a reviewer fan-out or team share put every address in the To header, leaking the roster to every recipient. Two or more recipients now go out via Bcc; a single recipient is unchanged.
+
+  ### CI
+
+  - **Auto-deploy dev on merge to development** (`.github/workflows/deploy-dev.yml`) — a workflow that builds the image and deploys the `community-nest-dev` Cloud Run service when a PR merges into `development`, mirroring the manual `deploy-dev.ps1` step for step (service account, GCS nest volume, Cloud SQL, VPC, scaling, public access). Secrets moved out of the script into `DEV_*` repository secrets, leaving `PROD_*` free for a later main pipeline; deploys serialize rather than cancelling in flight so a second merge cannot interrupt a docker push or Cloud Run rollout mid-way.
+
+## 1.13.0
+
+### Minor Changes
+
+- v1.13.0 — dashboard cleanup, faster My Work, governance auto-publish, and safer email/upload handling.
+
+  ### Governance
+
+  - **Auto-publish owner & admin edits** (`src/nodes/service.ts`, `ui/src/components/NestSettingsModal.tsx`) — the nest "Allow self-approve" flag is redefined as an owner/admin governance bypass: with it on, create/update by an owner or admin publishes immediately instead of landing as a draft awaiting review. Editors and reviewers are unchanged (still draft → submit → review). Applies across REST and MCP via the shared node service, respects the pending-review edit lock, and the setting is renamed to "Auto-publish owner & admin edits".
+  - **Approval inbox hidden from non-approvers** (`src/governance/review-service.ts`) — the `/me/work` "waiting on me" bucket previously listed pending reviews from nests where the caller was only an editor or viewer, showing an Approve/Reject affordance the server would reject. It is now filtered to nests the caller can actually approve in, resolved per distinct nest and cached briefly so the polled inbox stays cheap.
+
+  ### Dashboard & My Work
+
+  - **Nests and My Work in tabs, faster load** (`ui/src/components/Dashboard.tsx`, `ui/src/lib/api.ts`) — dashboard annotate runs in parallel and My Work uses a single visible-nests query with a scoped review queue and paginated inbox.
+  - **Delete unwanted unsynced folders** (`src/nests/unsynced-service.ts`, `src/nests/routes.ts`, `ui/src/components/Dashboard.tsx`) — new `DELETE /nests/unsynced/sync` (server-admin gated, same safe-name and live-nest-root guards as sync) plus a confirmed Delete button on each unsynced card, so leftover imports can be removed instead of only synced.
+  - **Importer + date on imported nest cards** (`ui/src/components/Dashboard.tsx`) and the stray "0" / duplicate Overview stat tiles on non-imported cards are gone.
+
+  ### Teammates & nests
+
+  - **Teammate list polish** (`ui/src/components/TeammatesPage.tsx`) — a "You" badge, search, and role filter.
+  - **Private nests stay private** (`src/nests/service.ts`) — admins no longer see other users' private nests in the list.
+
+  ### Fixes
+
+  - **Email validation hardened** (`src/config.ts`, `src/auth/routes.ts`, `ui/src/components/*`) — `isEmailish` delegates to zod's email validator (rejecting junk like `*'/*'/8////@gmail.com`) while keeping the explicit CR/LF reject to close header-injection shapes; the UI validates email before adding a collaborator, steward, or team member.
+  - **Video upload cap** (`src/config.ts`, `src/nests/asset-routes.ts`) — default 30 MB, configurable via `VIDEO_MAX_MB`, kept under Cloud Run's request-body limit so oversized videos fail with a clear message instead of a bare 413.
+  - **Editor** (`ui/src/components/MarkdownEditor/MarkdownEditor.tsx`) — usable "Turn into Toggle" and the block menu survives paste.
+  - **Draft publish-in-place** (`src/nodes/service.ts`) — upsert the version on publish-in-place to avoid a UNIQUE clash.
+  - **Postgres counts** (`src/governance/review-service.ts`, `src/nests/service.ts`) — review-queue and nest-list totals are coerced to `Number` so counts are correct on Postgres.
+
 ## 1.12.0
 
 ### Minor Changes
