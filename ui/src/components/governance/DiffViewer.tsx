@@ -18,7 +18,6 @@ const ROW_BG: Record<Row["kind"], string> = {
   del: "bg-red-100 dark:bg-red-950/50",
   ctx: "",
   hunk: "bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300",
-  file: "bg-muted text-muted-foreground font-semibold",
 };
 
 const SIGN: Record<Row["kind"], string> = {
@@ -26,7 +25,6 @@ const SIGN: Record<Row["kind"], string> = {
   del: "-",
   ctx: " ",
   hunk: "",
-  file: "",
 };
 
 const GUTTER_CELL =
@@ -47,8 +45,8 @@ export function DiffViewer({ patch, className }: DiffViewerProps) {
       data-testid="diff-viewer"
     >
       {rows.map((r, i) => {
-        // Hunk + file headers span the full width without line-number gutters.
-        if (r.kind === "hunk" || r.kind === "file") {
+        // Hunk headers span the full width without line-number gutters.
+        if (r.kind === "hunk") {
           return (
             <div
               key={i}

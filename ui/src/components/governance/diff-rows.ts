@@ -10,7 +10,7 @@
  */
 
 export type Row = {
-  kind: "add" | "del" | "ctx" | "hunk" | "file";
+  kind: "add" | "del" | "ctx" | "hunk";
   oldNo: number | null;
   newNo: number | null;
   text: string;
@@ -30,25 +30,28 @@ export function toRows(patch: string): Row[] {
   const rows: Row[] = [];
   let oldNo = 0;
   let newNo = 0;
+  let inHunk = false;
   for (const line of lines) {
+    // The `Index: vN` / `====` / `---` / `+++` preamble is pure metadata and is
+    // dropped: the UI already heads the diff with "Changes in vN (from vM)".
+    // Only skipped before the first @@ — inside a hunk `----` is a deleted
+    // markdown frontmatter rule, not a file header.
     if (
-      line.startsWith("+++") ||
-      line.startsWith("---") ||
-      line.startsWith("diff ") ||
-      line.startsWith("index ") ||
-      // `Index: vN` + its `====` underline head every patch the engine stores
-      // for a version. Counted as context they would consume line numbers
-      // before the first @@ sets them, shifting the whole first hunk.
-      line.startsWith("Index: ") ||
-      /^=+$/.test(line)
+      !inHunk &&
+      (line.startsWith("+++") ||
+        line.startsWith("---") ||
+        line.startsWith("diff ") ||
+        line.startsWith("index ") ||
+        line.startsWith("Index: ") ||
+        /^=+$/.test(line))
     ) {
-      rows.push({ kind: "file", oldNo: null, newNo: null, text: line });
       continue;
     }
     const hunk = parseHunkHeader(line);
     if (hunk) {
       oldNo = hunk.oldStart;
       newNo = hunk.newStart;
+      inHunk = true;
       rows.push({ kind: "hunk", oldNo: null, newNo: null, text: line });
       continue;
     }

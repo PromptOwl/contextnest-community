@@ -2,10 +2,10 @@
  * DiffViewer parses the patches the engine stores per version.
  *
  * Every non-keyframe version is saved as a v{N}.diff file holding `createPatch`
- * output, which is headed by `Index: vN` and an `====` underline. Those two
- * lines are not part of any hunk: counted as context they consume old/new line
- * numbers before the first `@@` sets them, so every row in the first hunk
- * renders two lines off.
+ * output, headed by `Index: vN`, an `====` underline and `---`/`+++` lines.
+ * That preamble is dropped entirely — the UI already heads the diff with
+ * "Changes in vN (from vM)" — and it must not consume old/new line numbers
+ * before the first `@@` sets them.
  */
 import { describe, it, expect } from "vitest";
 import { toRows } from "../ui/src/components/governance/diff-rows";
@@ -24,13 +24,16 @@ const STORED_PATCH = [
 ].join("\n");
 
 describe("toRows", () => {
-  it("treats the Index: and ==== lines as headers, not content", () => {
+  it("drops the Index:/====/---/+++ preamble", () => {
     const rows = toRows(STORED_PATCH);
-    expect(rows[0]).toMatchObject({ kind: "file", text: "Index: v2" });
-    expect(rows[1].kind).toBe("file");
-    // Headers carry no line numbers, so they cannot advance the counters.
-    expect(rows[0].oldNo).toBeNull();
-    expect(rows[1].oldNo).toBeNull();
+    expect(rows[0]).toMatchObject({ kind: "hunk", text: "@@ -1,4 +1,4 @@" });
+    expect(rows.some((r) => r.text.startsWith("Index:"))).toBe(false);
+  });
+
+  it("keeps a deleted frontmatter rule inside a hunk", () => {
+    // "-" + "---" looks like a `---` file header but is a deleted line.
+    const rows = toRows(["@@ -1,2 +1,1 @@", "----", " title: doc"].join("\n"));
+    expect(rows[1]).toMatchObject({ kind: "del", text: "---", oldNo: 1 });
   });
 
   it("numbers hunk lines from the @@ header", () => {
