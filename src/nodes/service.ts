@@ -7,11 +7,12 @@ import {
   serializeDocument,
   parseDocument,
   normalizeStatus,
+  DocumentNotFoundError,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm } from "node:fs/promises";
 import { dirname, join, basename } from "node:path";
-import { safePublishDocument } from "../governance/safe-publish.js";
+import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache } from "./engine.js";
 import {
   AppError,
@@ -19,17 +20,21 @@ import {
   LockedError,
   ValidationError,
   ConflictError,
+  ForbiddenError,
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
-import { syncNodeTags } from "../governance/tag-index-service.js";
+import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
 import {
   isStewardshipEnabled,
   resolveNestPath,
   nestAllowsSelfApprove,
+  nestReviewsPrimeOnly,
 } from "../nests/service.js";
+import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
 import { resolveUserRoles } from "../governance/stewardship-service.js";
+import { canApproveWith } from "../governance/roles.js";
 import {
   resolveCallerEmail,
   filterAccessible,
@@ -41,6 +46,7 @@ import {
 } from "../governance/grants-service.js";
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
+import type { Querier } from "../db/adapter.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { config } from "../config.js";
@@ -57,11 +63,36 @@ async function userIdFromEmail(email: string): Promise<string> {
 
 const normalizeTag = (t: string) => (t.startsWith("#") ? t : `#${t}`);
 
+/** Max characters in a human-readable title. The id/slug bound (100 per
+ *  segment, below) doesn't cover this: a title of emoji or non-latin text
+ *  slugifies to almost nothing, so an unbounded title still lands in
+ *  frontmatter and stretches every header that renders it. */
+const MAX_TITLE_LENGTH = 120;
+
+/** Shared choke point for REST + MCP: both create and rename route here. */
+function assertTitleLength(title: string): void {
+  if (title.length > MAX_TITLE_LENGTH) {
+    throw new ValidationError(
+      `title must be at most ${MAX_TITLE_LENGTH} characters`
+    );
+  }
+}
+
 const slugify = (s: string) =>
   s
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
+
+/**
+ * Does this document id live under `folder`? The engine only prefixes ids
+ * with "nodes/" in a STRUCTURED vault (one with a top-level nodes/ dir); a
+ * nest whose files arrived without one reads as flat layout and its ids
+ * carry no prefix. Match both, or every folder op 404s on those nests.
+ */
+export function isIdUnderFolder(id: string, folder: string): boolean {
+  return id.startsWith(`nodes/${folder}/`) || id.startsWith(`${folder}/`);
+}
 
 /**
  * Slugify + validate a folder path into id segments. Shared by create and
@@ -71,6 +102,13 @@ const slugify = (s: string) =>
  */
 function folderToSegments(folder: string): string[] {
   const segments = folder.split("/").map(slugify).filter(Boolean);
+  // Callers think in node ids, and every node id starts with "nodes/" — so
+  // `folder: "nodes/signals"` is the natural thing to write. Both call sites
+  // below prefix "nodes/" themselves, so an unstripped leading segment lands
+  // the doc at nodes/nodes/signals/<slug>. Strip it here, once, rather than
+  // in create and move separately. Cost: a folder literally named "nodes"
+  // under the root is unaddressable — nobody wants nodes/nodes/.
+  if (segments[0] === "nodes") segments.shift();
   if (segments.length > 8) {
     throw new ValidationError("folder may nest at most 8 levels deep");
   }
@@ -153,6 +191,10 @@ export interface NodeResponse {
   /** Orchestrator hint for runnable nodes (type agent/skill) — free-form
    *  cron/interval string, opaque to the server. */
   schedule?: string;
+  /** Document-scope prime flag, undefined when the doc inherits from tag/nest
+   *  scope. Clients resolve the inherited case from `tags` + the nest's
+   *  `prime_tags` setting; the server gate is authoritative either way. */
+  prime?: boolean;
 }
 
 /** Node types an orchestrator can fetch and run; only these carry schedule. */
@@ -189,6 +231,7 @@ export function toNodeResponse(node: ContextNode): NodeResponse {
       (fm.metadata as any)?.schedule != null
         ? String((fm.metadata as any).schedule)
         : undefined,
+    prime: documentPrimeFlag(fm.metadata),
   };
 }
 
@@ -427,6 +470,10 @@ export interface CreateNodeInput {
    *  storage and read/update/delete already handle nested ids, only creation
    *  was flat. Ignored when an explicit id is given. */
   folder?: string;
+  /** Document-scope prime flag — see `isPrimeDocument`. Omit to inherit from
+   *  the nest's prime tags; `false` exempts this doc from an otherwise-prime
+   *  tag. */
+  prime?: boolean;
 }
 
 export interface UpdateNodePatch {
@@ -438,6 +485,8 @@ export interface UpdateNodePatch {
   changeNote?: string;
   /** Orchestrator schedule — runnable types only; empty string clears it. */
   schedule?: string;
+  /** Document-scope prime flag. `null` clears it back to tag/nest inheritance. */
+  prime?: boolean | null;
 }
 
 export interface NodeMutationResult {
@@ -462,6 +511,55 @@ async function actorAutoPublishes(
   return roles.includes("owner") || roles.includes("admin");
 }
 
+/**
+ * Flagging a document prime (or un-flagging it) is a governance action, not an
+ * authoring one — otherwise any editor could set `prime: false` on the sales
+ * playbook and walk their own edit straight past the review gate.
+ */
+async function assertMayFlagPrime(
+  nestId: string,
+  userEmail: string
+): Promise<void> {
+  const roles = await resolveUserRoles(nestId, userEmail);
+  if (!roles.includes("owner") && !roles.includes("admin")) {
+    throw new ForbiddenError(
+      "Only the nest owner or an admin can change a document's prime flag."
+    );
+  }
+}
+
+/**
+ * Single decision point for "does this write publish immediately, or land as a
+ * draft?" — both createNode and updateNode route through here so the gate can
+ * never disagree between the two paths.
+ *
+ * Order matters: prime is checked BEFORE any bypass, because a prime document
+ * always requires approval — that is the whole point of flagging it. An owner
+ * with self-approve on still drafts when the doc is prime.
+ *
+ * Returns WHY the write publishes, or null when it must land as a draft. The
+ * reason is not decoration: it goes into the published version's audit note,
+ * and there are now three distinct ways to skip review — inferring which one
+ * applied after the fact would mislabel an editor's prime-only publish as an
+ * "owner/admin self-approve" they never had.
+ */
+async function autoPublishReason(
+  nestId: string,
+  userEmail: string,
+  doc: { tags?: readonly unknown[]; metadata?: unknown }
+): Promise<string | null> {
+  // Ungoverned nest: nothing to review, nobody to review it.
+  if (!(await isStewardshipEnabled(nestId))) return "no stewards configured";
+  if (await isPrimeDocument(nestId, doc.tags, doc.metadata)) return null;
+  // Prime-only posture: everything that isn't prime self-publishes.
+  if (await nestReviewsPrimeOnly(nestId)) {
+    return "prime-only review, document is not prime";
+  }
+  return (await actorAutoPublishes(nestId, userEmail))
+    ? "owner/admin self-approve"
+    : null;
+}
+
 export async function createNode(
   nestId: string,
   input: CreateNodeInput,
@@ -469,7 +567,15 @@ export async function createNode(
 ): Promise<NodeMutationResult> {
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
-  const slug = slugify(input.title);
+  assertTitleLength(input.title);
+  // The id slug is derived, not user-facing: a title within MAX_TITLE_LENGTH
+  // can still slugify past the 100-char path-segment bound, so truncate rather
+  // than reject. Keeps storage.writeDocument off ENAMETOOLONG without making
+  // a legal title a 400. (Two titles sharing their first 100 slug chars
+  // collide on id — same as two identical titles already do.)
+  // Order matters: slice THEN strip. A cut can land right after a run of
+  // dashes, so stripping first would leave a trailing "-" on the id.
+  const slug = slugify(input.title).slice(0, 100).replace(/-+$/, "");
   // Slugifying per segment means "../x" or absolute paths can never escape
   // the vault — traversal characters collapse to "-" and empty segments drop.
   // An explicit id wins outright: folder is documented as ignored then, so
@@ -477,14 +583,6 @@ export async function createNode(
   let id = input.id;
   if (!id) {
     const folderSegments = folderToSegments(input.folder ?? "");
-    // Bound the title slug too, so an overlong title fails as a clean 400
-    // instead of an ENAMETOOLONG surfacing as an unhandled 500 at
-    // storage.writeDocument.
-    if ([...folderSegments, slug].some((seg) => seg.length > 100)) {
-      throw new ValidationError(
-        "each folder or title segment must be at most 100 characters"
-      );
-    }
     id =
       folderSegments.length > 0
         ? `nodes/${folderSegments.join("/")}/${slug}`
@@ -514,84 +612,97 @@ export async function createNode(
     );
   }
 
-  // Optional dept:<slug> auto-tag — after the validations above so a request
-  // that fails them never pays the DB lookup. Deduped case-insensitively
-  // against the user-supplied tags (normalizeTag keeps the user's casing, so
-  // "#Dept:Engineering" must still match the all-lowercase auto tag).
-  const deptTag = await departmentTagFor(userEmail);
-  if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
-    tags.push(deptTag);
-  }
-
-  const hasStewards = await isStewardshipEnabled(nestId);
-  // Ungoverned always publishes; a governed nest publishes too when an
-  // owner/admin creates it under self-approve (their work bypasses review).
-  const autoPublish = !hasStewards || (await actorAutoPublishes(nestId, userEmail));
-  const initialStatus = autoPublish ? "published" : "draft";
-  // Publish path starts at v=0 so the engine publish bump lands at v=1.
-  const initialVersion = autoPublish ? 0 : 1;
-
-  let node: ContextNode = {
-    id,
-    filePath: "",
-    frontmatter: {
-      title: input.title,
-      type: requestedType as any,
-      tags,
-      status: (input.status as any) || (initialStatus as any),
-      version: initialVersion,
-      created_at: now,
-      updated_at: now,
-      metadata: {
-        owners: ["*"],
-        scope: input.scope || "team",
-        ...(input.schedule ? { schedule: input.schedule } : {}),
-      } as any,
-    },
-    body: input.content,
-    rawContent: "",
-  };
-  await storage.writeDocument(id, serializeDocument(node));
-  await syncNodeTags(nestId, id, tags);
-
-  let savedVersion = 1;
-  if (!autoPublish) {
+  // Check-then-write must be atomic per node id, or two concurrent creates
+  // (two tabs, REST + MCP, an agent retry) both see a free id and the second
+  // overwrites the first. Same lock updateNode and the governance writes take.
+  return withNodeWriteLock(nodeWriteKey(nestId, id), async () => {
+    // writeDocument overwrites, so a create onto an occupied id silently
+    // replaced that document and restarted its history (CU-wdqcpzxcg8).
+    // moveNode already refuses an occupied destination; create now agrees.
+    let occupied = false;
     try {
-      await versionManager.createVersion(node, userEmail);
+      await storage.readDocument(id);
+      occupied = true;
     } catch (err) {
-      console.error("VersionManager.createVersion failed (node create)", err);
+      // Fail closed: only a missing document means the id is free. Any other
+      // failure could be hiding a real one, so rethrow rather than overwrite.
+      if (!(err instanceof DocumentNotFoundError)) throw err;
     }
-    await versions.createVersion({
-      nestId,
-      nodeId: id,
-      version: 1,
-      content: input.content,
-      author: userEmail,
-      status: "draft",
+    if (occupied) {
+      throw new ConflictError(
+        `A document already exists at ${id}. Update it, or create this one under a different folder or title.`,
+      );
+    }
+
+    // Rows can outlive their document when a file goes missing outside the app
+    // — deleteNode's purge never runs because the delete 404s first. Those rows
+    // crashed the create on node_versions' unique constraint; clear them all so
+    // the new document starts clean instead of inheriting a stranger's history.
+    const db = getDb();
+    const orphan = await db.get(
+      "SELECT 1 AS present FROM node_versions WHERE nest_id = ? AND node_id = ? LIMIT 1",
+      [nestId, id],
+    );
+    if (orphan) {
+      console.warn(
+        `[nodes] clearing orphaned rows for ${id} — version history exists but no document does`,
+      );
+      await db.transaction(async (tx) => {
+        await purgeNodeKeyedRows(tx, nestId, id);
+      });
+    }
+
+    // Optional dept:<slug> auto-tag — after the validations above so a request
+    // that fails them never pays the DB lookup. Deduped case-insensitively
+    // against the user-supplied tags (normalizeTag keeps the user's casing, so
+    // "#Dept:Engineering" must still match the all-lowercase auto tag).
+    const deptTag = await departmentTagFor(userEmail);
+    if (deptTag && !tags.some((t) => t.toLowerCase() === deptTag)) {
+      tags.push(deptTag);
+    }
+
+    if (input.prime !== undefined) await assertMayFlagPrime(nestId, userEmail);
+    const metadata = {
+      owners: ["*"],
+      scope: input.scope || "team",
+      ...(input.schedule ? { schedule: input.schedule } : {}),
+      ...(input.prime === undefined ? {} : { prime: input.prime }),
+    };
+    const publishReason = await autoPublishReason(nestId, userEmail, {
       tags,
+      metadata,
     });
-  } else {
-    try {
-      const result = await safePublishDocument(storage, id, {
-        editedBy: userEmail,
-        note: hasStewards
-          ? "Auto-published on create (owner/admin self-approve)"
-          : "Auto-published on create (no stewards configured)",
-      });
-      savedVersion = result.node.frontmatter.version || 1;
-      await versions.createVersion({
-        nestId,
-        nodeId: id,
-        version: savedVersion,
-        content: result.node.body || "",
-        author: userEmail,
-        status: "published",
+    const autoPublish = publishReason !== null;
+    const initialStatus = autoPublish ? "published" : "draft";
+    // Publish path starts at v=0 so the engine publish bump lands at v=1.
+    const initialVersion = autoPublish ? 0 : 1;
+
+    let node: ContextNode = {
+      id,
+      filePath: "",
+      frontmatter: {
+        title: input.title,
+        type: requestedType as any,
         tags,
-      });
-      await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
-      node = result.node;
-    } catch (err) {
-      console.error("publishDocument failed (node create auto-publish)", err);
+        status: (input.status as any) || (initialStatus as any),
+        version: initialVersion,
+        created_at: now,
+        updated_at: now,
+        metadata: metadata as any,
+      },
+      body: input.content,
+      rawContent: "",
+    };
+    await storage.writeDocument(id, serializeDocument(node));
+    await syncNodeTags(nestId, id, tags);
+
+    let savedVersion = 1;
+    if (publishReason === null) {
+      try {
+        await versionManager.createVersion(node, userEmail);
+      } catch (err) {
+        console.error("VersionManager.createVersion failed (node create)", err);
+      }
       await versions.createVersion({
         nestId,
         nodeId: id,
@@ -601,11 +712,46 @@ export async function createNode(
         status: "draft",
         tags,
       });
+    } else {
+      // Same note in the engine history and the governance row: the version
+      // history an admin reads in the UI comes from node_versions, so leaving
+      // the reason only in history.yaml hides it from the audit that matters.
+      const publishNote = `Auto-published on create (${publishReason})`;
+      try {
+        const result = await safePublishDocument(storage, id, {
+          editedBy: userEmail,
+          note: publishNote,
+        });
+        savedVersion = result.node.frontmatter.version || 1;
+        await versions.createVersion({
+          nestId,
+          nodeId: id,
+          version: savedVersion,
+          content: result.node.body || "",
+          author: userEmail,
+          status: "published",
+          tags,
+          changeNote: publishNote,
+        });
+        await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
+        node = result.node;
+      } catch (err) {
+        console.error("publishDocument failed (node create auto-publish)", err);
+        await versions.createVersion({
+          nestId,
+          nodeId: id,
+          version: 1,
+          content: input.content,
+          author: userEmail,
+          status: "draft",
+          tags,
+        });
+      }
     }
-  }
 
-  await trackEvent("node.create", { nestId, nodeId: id });
-  return { node, version: savedVersion };
+    await trackEvent("node.create", { nestId, nodeId: id });
+    return { node, version: savedVersion };
+  });
 }
 
 /**
@@ -662,7 +808,7 @@ async function resetImportedDocForPublish(
   const fm = { ...node.frontmatter };
   delete (fm as Record<string, unknown>).version;
   delete (fm as Record<string, unknown>).checksum;
-  await storage.writeDocument(nodeId, serializeDocument({ ...node, frontmatter: fm }));
+  await storage.writeDocument(nodeId, serializeNodeSafe({ ...node, frontmatter: fm }));
 }
 
 /**
@@ -733,7 +879,7 @@ export async function registerImportedDocuments(
     const title = doc.frontmatter?.title ?? (nodeId.split("/").pop() || nodeId);
     doc = { ...doc, frontmatter: { ...doc.frontmatter, title, author: userEmail } };
     try {
-      await storage.writeDocument(nodeId, serializeDocument(doc));
+      await storage.writeDocument(nodeId, serializeNodeSafe(doc));
     } catch (err) {
       console.error("import: failed to persist import metadata", nodeId, err);
     }
@@ -876,6 +1022,12 @@ export async function updateNode(
         };
       }
       if (patch.title) {
+        // Grandfathered: docs saved before this bound existed keep their long
+        // title. The editor sends `title` on EVERY save, so a flat check would
+        // make those docs unsavable — enforce only on an actual rename.
+        if (patch.title !== node.frontmatter.title) {
+          assertTitleLength(patch.title);
+        }
         node = {
           ...node,
           frontmatter: { ...node.frontmatter, title: patch.title },
@@ -894,13 +1046,23 @@ export async function updateNode(
         else metadata.schedule = patch.schedule;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
       }
+      if (patch.prime !== undefined) {
+        await assertMayFlagPrime(nestId, userEmail);
+        const metadata = { ...(node.frontmatter.metadata as any) };
+        if (patch.prime === null) delete metadata.prime;
+        else metadata.prime = patch.prime;
+        node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+      }
 
       const hasStewards = await isStewardshipEnabled(nestId);
-      // Owner/admin edits publish straight through when the nest opts into
-      // self-approve; editors/reviewers still draft → review → approve.
-      const autoPublish =
-        !hasStewards || (await actorAutoPublishes(nestId, userEmail));
       const currentTags = (node.frontmatter.tags || []) as string[];
+      // Resolved from the POST-patch tags and metadata, which patch.tags has
+      // already merged into — so an edit that adds a prime tag gates itself,
+      // and one that clears the doc flag can't un-gate a prime-tagged doc.
+      const publishReason = await autoPublishReason(nestId, userEmail, {
+        tags: currentTags,
+        metadata: node.frontmatter.metadata,
+      });
 
       // Stewardship lock: a node with an open review request is frozen for
       // everyone EXCEPT its own author. A teammate's pending review is what
@@ -924,9 +1086,13 @@ export async function updateNode(
       let responseVersion: number;
       // Author editing their own pending review always drafts a new version
       // (never auto-publishes past the reviewer), then repoints the review.
-      if (!autoPublish || isAuthorEditingOwnReview) {
+      if (publishReason === null || isAuthorEditingOwnReview) {
         const currentVersion = await versions.getCurrentVersion(nestId, nodeId);
-        const newVersion = currentVersion + 1;
+        // Number past the engine's history.yaml too, not just the DB row. When
+        // the DB lags the on-disk chain (imported nest, a mirrored append that
+        // failed) `currentVersion + 1` reuses a version number, which grafts a
+        // second chain onto the first and breaks reconstruction from there on.
+        const newVersion = await versionManager.nextVersion(nodeId, currentVersion);
         node = {
           ...node,
           frontmatter: {
@@ -990,14 +1156,12 @@ export async function updateNode(
         // Publish through the engine FIRST; only mirror into the DB once it
         // actually landed. Rethrow on failure — swallowing here is what let
         // node_versions climb past what history.yaml stored (DB v19 vs v15).
+        const publishNote =
+          patch.changeNote || `Auto-published on edit (${publishReason})`;
         try {
           const result = await safePublishDocument(storage, nodeId, {
             editedBy: userEmail,
-            note:
-              patch.changeNote ||
-              (hasStewards
-                ? "Auto-published on edit (owner/admin self-approve)"
-                : "Auto-published on edit (no stewards)"),
+            note: publishNote,
           });
           publishedVersion =
             result.node.frontmatter.version || publishedVersion;
@@ -1021,7 +1185,7 @@ export async function updateNode(
           author: userEmail,
           status: "published",
           tags: currentTags,
-          changeNote: patch.changeNote,
+          changeNote: publishNote,
         });
         await versions.setApprovedVersion(
           nestId,
@@ -1047,10 +1211,108 @@ export async function updateNode(
   });
 }
 
+/**
+ * A node under open review is frozen so it can't move or vanish while a
+ * reviewer is looking at it. Approvers (owner/admin/reviewer) are exempt —
+ * they can reject the review and then act, so the lock only cost them a round
+ * trip and left admins unable to clean up superseded docs at all.
+ */
+async function assertNotReviewLocked(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+  action: "moving" | "deleting",
+): Promise<void> {
+  if (!(await isStewardshipEnabled(nestId))) return;
+  if (!(await getPendingReview(nestId, nodeId))) return;
+  if (canApproveWith(await resolveUserRoles(nestId, userEmail, { nodeId }))) return;
+  throw new LockedError(
+    `This document is awaiting steward review and is locked. Approve or reject the pending review before ${action}, or ask a reviewer to.`,
+  );
+}
+
 /** Mirror of annotations/service.ts derivedAnnotationsId — duplicated here
  *  because importing it would close the annotations→nodes import cycle. */
 function derivedIdOf(sourceNodeId: string): string {
   return `nodes/${sourceNodeId.replace(/^nodes\//, "")}--annotations`;
+}
+
+/**
+ * Every nest-scoped table keying rows to a node id, as [table, column]. ONE
+ * list so delete (purge) and move (repoint) can't drift — a node id derives
+ * from its title, so leftovers get inherited by the next doc to take that id.
+ *
+ * Predicated references (document-scoped stewards, document grants) sit beside
+ * the loop in both helpers. `runs`/`run_steps` are absent deliberately: a trace
+ * records what happened, so move retargets it but delete keeps it.
+ */
+export const NODE_KEYED_TABLES = [
+  ["node_versions", "node_id"],
+  ["review_requests", "node_id"],
+  ["deletion_requests", "node_id"],
+  ["approved_versions", "node_id"],
+  ["annotation_threads", "node_id"],
+  ["comments", "node_id"],
+  ["node_tag_index", "node_id"],
+  ["watchers", "node_id"],
+  ["schedules", "agent_node"],
+  // A live capability token bound to one agent node — deleting the agent must
+  // revoke it, or a later node at that id answers the old webhook.
+  ["trigger_hooks", "agent_node"],
+  ["edges", "from_node"],
+  ["edges", "to_node"],
+] as const;
+
+/** Drop every row keyed to a node id. Caller supplies the transaction. */
+async function purgeNodeKeyedRows(
+  tx: Querier,
+  nestId: string,
+  nodeId: string,
+): Promise<void> {
+  for (const [table, column] of NODE_KEYED_TABLES) {
+    await tx.run(`DELETE FROM ${table} WHERE nest_id = ? AND ${column} = ?`, [
+      nestId,
+      nodeId,
+    ]);
+  }
+  // Document-scoped stewards and grants pin to this exact id. Tag- and
+  // nest-scoped stewards, and folder grants, govern more than this document
+  // and stay.
+  await tx.run(
+    `DELETE FROM stewards
+     WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
+    [nestId, nodeId],
+  );
+  await tx.run(
+    `DELETE FROM grants
+     WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
+    [nestId, nodeId],
+  );
+}
+
+/** Repoint every row keyed to `oldId` at `newId`. Caller supplies the transaction. */
+async function rewriteNodeKeyedRows(
+  tx: Querier,
+  nestId: string,
+  oldId: string,
+  newId: string,
+): Promise<void> {
+  for (const [table, column] of NODE_KEYED_TABLES) {
+    await tx.run(
+      `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
+      [newId, nestId, oldId],
+    );
+  }
+  await tx.run(
+    `UPDATE stewards SET node_pattern = ?
+     WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
+    [newId, nestId, oldId],
+  );
+  await tx.run(
+    `UPDATE grants SET target = ?
+     WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
+    [newId, nestId, oldId],
+  );
 }
 
 export interface MoveNodeResult {
@@ -1087,11 +1349,7 @@ export async function moveNode(
 
   // Same freeze as edit/delete: a node under open review is what the
   // reviewer is looking at — its identity can't change mid-review.
-  if ((await isStewardshipEnabled(nestId)) && (await getPendingReview(nestId, nodeId))) {
-    throw new LockedError(
-      "This document is awaiting steward review and is locked. Approve or reject the pending review before moving.",
-    );
-  }
+  await assertNotReviewLocked(nestId, nodeId, userEmail, "moving");
 
   const leaf = nodeId.split("/").pop()!;
   const segments = folderToSegments(folder);
@@ -1099,111 +1357,200 @@ export async function moveNode(
     segments.length > 0 ? `nodes/${segments.join("/")}/${leaf}` : `nodes/${leaf}`;
   if (newId === nodeId) return { node, previousId: nodeId };
 
-  try {
-    await storage.readDocument(newId);
-    throw new ConflictError(
-      `A document already exists at that location: ${newId}`,
-    );
-  } catch (err) {
-    if (err instanceof ConflictError) throw err;
-    /* target free — proceed */
-  }
-
-  const moved: ContextNode = {
-    ...node,
-    id: newId,
-    frontmatter: {
-      ...node.frontmatter,
-      updated_at: new Date().toISOString(),
-    },
-  };
-  await storage.writeDocument(newId, serializeDocument(moved));
-
-  // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
-  // doc) so reconstructVersion keeps working for pre-move versions. Layout is
-  // engine-owned, so this is best-effort: if the chain isn't where the
-  // structured layout puts it (e.g. flat imported nests), history still
-  // serves from the governance DB rows migrated below.
-  try {
-    const nestPath = resolveNestPath(nestId);
-    const oldChain = join(nestPath, dirname(nodeId), ".versions", leaf);
-    const newChain = join(nestPath, dirname(newId), ".versions", leaf);
-    if (oldChain !== newChain) {
-      await mkdir(dirname(newChain), { recursive: true });
-      await rename(oldChain, newChain);
+  // Destination check through write under the destination's lock — same
+  // check-then-write race create takes it for, and the same key, so a
+  // concurrent create at that id can't slip in between either.
+  return withNodeWriteLock(nodeWriteKey(nestId, newId), async () => {
+    try {
+      await storage.readDocument(newId);
+      throw new ConflictError(
+        `A document already exists at that location: ${newId}`,
+      );
+    } catch (err) {
+      if (err instanceof ConflictError) throw err;
+      // Fail closed: only a missing document leaves the destination free.
+      if (!(err instanceof DocumentNotFoundError)) throw err;
     }
-  } catch {
-    /* no on-disk chain to carry */
-  }
 
-  await storage.deleteDocument(nodeId);
+    const moved: ContextNode = {
+      ...node,
+      id: newId,
+      frontmatter: {
+        ...node.frontmatter,
+        updated_at: new Date().toISOString(),
+      },
+    };
+    // serializeNodeSafe, not serializeDocument: `moved` came from
+    // readDocument, so an empty `tags: []` on disk is back as
+    // `tags: undefined` and the YAML dumper throws on it. Only published docs
+    // are already clean (approve rewrites them through safePublishDocument),
+    // which is why drafts and pending-review docs were the ones failing.
+    await storage.writeDocument(newId, serializeNodeSafe(moved));
 
-  // Rewrite every table that keys on the node id — the same reference set
-  // DELETE purges, plus workflow edges, grants, and run traces. One
-  // transaction: a half-moved node would be worse than a failed move.
-  const oldDerived = derivedIdOf(nodeId);
-  const newDerived = derivedIdOf(newId);
-  const db = getDb();
-  await db.transaction(async (tx) => {
-    for (const [table, column] of [
-      ["node_versions", "node_id"],
-      ["review_requests", "node_id"],
-      ["approved_versions", "node_id"],
-      ["annotation_threads", "node_id"],
-      ["comments", "node_id"],
-      ["node_tag_index", "node_id"],
-    ] as const) {
+    // Carry the engine's on-disk version chain (.versions/<leaf>/ next to the
+    // doc) so reconstructVersion keeps working for pre-move versions. Layout is
+    // engine-owned, so this is best-effort: if the chain isn't where the
+    // structured layout puts it (e.g. flat imported nests), history still
+    // serves from the governance DB rows migrated below.
+    try {
+      const nestPath = resolveNestPath(nestId);
+      const oldChain = join(nestPath, dirname(nodeId), ".versions", leaf);
+      const newChain = join(nestPath, dirname(newId), ".versions", leaf);
+      if (oldChain !== newChain) {
+        await mkdir(dirname(newChain), { recursive: true });
+        await rename(oldChain, newChain);
+      }
+    } catch {
+      /* no on-disk chain to carry */
+    }
+
+    await storage.deleteDocument(nodeId);
+
+    // Repoint every node-keyed table for the source doc and its derived
+    // annotations node, plus the run traces delete keeps. One transaction: a
+    // half-moved node would be worse than a failed move.
+    const oldDerived = derivedIdOf(nodeId);
+    const newDerived = derivedIdOf(newId);
+    const db = getDb();
+    await db.transaction(async (tx) => {
+      await rewriteNodeKeyedRows(tx, nestId, nodeId, newId);
+      await rewriteNodeKeyedRows(tx, nestId, oldDerived, newDerived);
       await tx.run(
-        `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
+        "UPDATE runs SET agent_node = ? WHERE nest_id = ? AND agent_node = ?",
         [newId, nestId, nodeId],
       );
       await tx.run(
-        `UPDATE ${table} SET ${column} = ? WHERE nest_id = ? AND ${column} = ?`,
-        [newDerived, nestId, oldDerived],
+        `UPDATE run_steps SET node_id = ?
+         WHERE node_id = ? AND run_id IN (SELECT id FROM runs WHERE nest_id = ?)`,
+        [newId, nodeId, nestId],
       );
+    });
+
+    // The derived annotations node (if any) lives beside its source — move its
+    // storage doc too. Best-effort, same as delete's handling of it.
+    try {
+      const derivedDoc = await storage.readDocument(oldDerived);
+      await storage.writeDocument(
+        newDerived,
+        serializeNodeSafe({ ...derivedDoc, id: newDerived }),
+      );
+      await storage.deleteDocument(oldDerived);
+    } catch {
+      /* no derived annotations node */
     }
+
+    await trackEvent("node.move", { nestId, nodeId, newId });
+    return { node: moved, previousId: nodeId };
+  });
+}
+
+/**
+ * Delete a node and every row keyed to its id. Lives here rather than in the
+ * DELETE handler because MCP's context_delete needs the identical purge — a
+ * second copy would drift the moment a new node-scoped table lands.
+ *
+ * Permission is the CALLER's job (REST: the nest permission middleware in
+ * app.ts; MCP: the per-tool canUserEdit check). This function enforces only
+ * the stewardship lock and does the cleanup.
+ */
+export async function deleteNode(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+): Promise<void> {
+  const { storage } = await engineCache.get(nestId);
+
+  // Stewardship lock: a node under open review can't be deleted out from
+  // under the reviewer (423). Mirrors the edit lock in updateNode.
+  await assertNotReviewLocked(nestId, nodeId, userEmail, "deleting");
+
+  try {
+    await storage.deleteDocument(nodeId);
+  } catch {
+    throw new NotFoundError(`Node not found: ${nodeId}`);
+  }
+
+  await removeNodeFromTagIndex(nestId, nodeId);
+
+  // A node's review comments and its derived annotations node are tied to the
+  // node id, not FK'd to it — so deleting the node would otherwise orphan both.
+  // Remove the derived `— Annotations` node's storage doc (best-effort: plain
+  // documents and never-commented artifacts have none) here; its DB rows and
+  // the annotation threads themselves are purged in the transaction below.
+  const derivedId = derivedIdOf(nodeId);
+  try {
+    await storage.deleteDocument(derivedId);
+    await removeNodeFromTagIndex(nestId, derivedId);
+  } catch {
+    /* no derived annotations node — nothing to remove */
+  }
+
+  // Purge every row tied to this node id and its derived annotations node, so
+  // a later doc landing on the same id inherits no history, readers, watchers
+  // or comments. Annotation comments cascade via their thread FK.
+  const db = getDb();
+  await db.transaction(async (tx) => {
+    await purgeNodeKeyedRows(tx, nestId, nodeId);
+    await purgeNodeKeyedRows(tx, nestId, derivedId);
+    // Deletion tombstone — the one record that survives the purge above, so
+    // GET /changes can tell external mirrors a doc was removed. Upsert:
+    // delete → recreate → delete again just refreshes the timestamp.
     await tx.run(
-      `UPDATE stewards SET node_pattern = ?
-       WHERE nest_id = ? AND scope = 'document' AND node_pattern = ?`,
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      `UPDATE grants SET target = ?
-       WHERE nest_id = ? AND target_type = 'document' AND target = ?`,
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      "UPDATE edges SET from_node = ? WHERE nest_id = ? AND from_node = ?",
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      "UPDATE edges SET to_node = ? WHERE nest_id = ? AND to_node = ?",
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      "UPDATE runs SET agent_node = ? WHERE nest_id = ? AND agent_node = ?",
-      [newId, nestId, nodeId],
-    );
-    await tx.run(
-      `UPDATE run_steps SET node_id = ?
-       WHERE node_id = ? AND run_id IN (SELECT id FROM runs WHERE nest_id = ?)`,
-      [newId, nodeId, nestId],
+      `INSERT INTO node_deletions (nest_id, node_id, deleted_by, deleted_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(nest_id, node_id) DO UPDATE
+         SET deleted_by = excluded.deleted_by, deleted_at = excluded.deleted_at`,
+      [nestId, nodeId, userEmail, new Date().toISOString()],
     );
   });
 
-  // The derived annotations node (if any) lives beside its source — move its
-  // storage doc too. Best-effort, same as delete's handling of it.
-  try {
-    const derivedDoc = await storage.readDocument(oldDerived);
-    await storage.writeDocument(
-      newDerived,
-      serializeDocument({ ...derivedDoc, id: newDerived }),
-    );
-    await storage.deleteDocument(oldDerived);
-  } catch {
-    /* no derived annotations node */
+  await trackEvent("node.delete", { nestId, nodeId });
+}
+
+/**
+ * Delete every document under a folder prefix, sub-folders included.
+ *
+ * A folder isn't a stored thing — it exists only as a segment of the node ids
+ * beneath it (`nodes/<folder>/<slug>`), so deleting one IS deleting its
+ * documents. Each goes through deleteNode, which keeps the per-node contract
+ * intact: review lock, purge of node-keyed rows, and a tombstone for external
+ * mirrors. Returns the ids removed.
+ */
+export async function deleteFolder(
+  nestId: string,
+  folder: string,
+  userEmail: string,
+): Promise<string[]> {
+  const segments = folderToSegments(folder);
+  if (segments.length === 0) {
+    throw new ValidationError("folder is required");
+  }
+  const rel = segments.join("/");
+
+  const { storage } = await engineCache.get(nestId);
+  const docs = await storage.discoverDocuments();
+  const targets = docs.map((d) => d.id).filter((id) => isIdUnderFolder(id, rel));
+  if (targets.length === 0) {
+    throw new NotFoundError(`No documents found under folder: ${folder}`);
   }
 
-  await trackEvent("node.move", { nestId, nodeId, newId });
-  return { node: moved, previousId: nodeId };
+  // Sequential, not Promise.all: deleteNode takes a per-node write lock and
+  // writes the shared tag index, and a partial failure must leave a coherent
+  // vault — the error names how far it got.
+  const deleted: string[] = [];
+  for (const id of targets) {
+    try {
+      await deleteNode(nestId, id, userEmail);
+      deleted.push(id);
+    } catch (err) {
+      const detail =
+        deleted.length > 0
+          ? ` (${deleted.length} of ${targets.length} already deleted)`
+          : "";
+      throw new Error(
+        `Failed to delete "${id}"${detail}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  return deleted;
 }

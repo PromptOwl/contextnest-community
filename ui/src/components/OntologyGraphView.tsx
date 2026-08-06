@@ -14,14 +14,17 @@ import {
   forceCollide,
   type SimulationNodeDatum,
 } from "d3-force";
-import { ArrowLeft, AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, FolderTree } from "lucide-react";
+import { AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, FolderTree } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
 import { Button } from "./ui/button";
+import { NestPageHeader } from "./NestPageHeader";
 
 interface Props {
   nestId: string;
   nestName: string;
+  /** Open the nest list filtered by a tag (tag chip in the detail panel). */
+  onOpenTag?: (tag: string) => void;
   onBack: () => void;
 }
 
@@ -99,7 +102,7 @@ interface View {
  * native deps). The coverage-gaps panel is the headline: unstewarded
  * categories, bottleneck stewards, orphan nodes.
  */
-export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
+export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props) {
   const [graph, setGraph] = useState<NestGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -425,13 +428,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" onClick={onBack}>
-            <ArrowLeft className="h-4 w-4 mr-1" /> Back
-          </Button>
-          <h1 className="text-lg font-semibold">Ontology · {nestName}</h1>
-        </div>
+      <NestPageHeader nestName={nestName} onBack={onBack}>
         <div className="flex items-center gap-3 text-sm">
           {(
             [
@@ -460,7 +457,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
             Reset view
           </Button>
         </div>
-      </div>
+      </NestPageHeader>
 
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4">
         <div
@@ -605,6 +602,7 @@ export function OntologyGraphView({ nestId, nestName, onBack }: Props) {
               onHopDepth={setHopDepth}
               neighborhood={neighborhood}
               nodesById={nodesById}
+              onOpenTag={onOpenTag}
             />
           )}
 
@@ -652,6 +650,7 @@ function NodeDetail({
   onHopDepth,
   neighborhood,
   nodesById,
+  onOpenTag,
 }: {
   node: GNode;
   graph: NestGraph | null;
@@ -660,6 +659,7 @@ function NodeDetail({
   onHopDepth: (d: number) => void;
   neighborhood: Set<string> | null;
   nodesById: Map<string, GNode>;
+  onOpenTag?: (tag: string) => void;
 }) {
   const doc = node.kind === "doc" ? graph?.nodes.find((n) => n.id === node.id) : null;
   const linkCount =
@@ -697,9 +697,16 @@ function NodeDetail({
           {doc.tags.length > 0 && (
             <div className="flex flex-wrap gap-1">
               {doc.tags.map((t) => (
-                <span key={t} className="rounded bg-amber-50 text-amber-700 px-1.5 py-0.5">
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => onOpenTag?.(t)}
+                  disabled={!onOpenTag}
+                  className="rounded bg-amber-50 text-amber-700 px-1.5 py-0.5 hover:bg-amber-100 disabled:hover:bg-amber-50 disabled:cursor-default"
+                  title={onOpenTag ? `Show #${t} documents` : `#${t}`}
+                >
                   #{t}
-                </span>
+                </button>
               ))}
             </div>
           )}

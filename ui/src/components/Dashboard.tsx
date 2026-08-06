@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
+import { relTime, formatServerDate } from "../lib/dates";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -25,21 +26,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ReasonDialog, SubmitForReviewModal } from "./governance";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
 
-function relTime(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return "";
-  const secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
-  if (secs < 60) return "just now";
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
-}
+// relTime / formatServerDate live in lib/dates: SQL-default timestamps arrive
+// as UTC with no zone, which new Date() would read as local time.
 
 interface DashboardProps {
   onSelectNest: (
@@ -61,7 +54,17 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     pagination?: api.WorkPagination;
   }>({ items: [], waiting: [] });
   const [loadingMoreWork, setLoadingMoreWork] = useState(false);
+  // Drafts you never submitted — their own tab, not folded into My Work.
+  const [drafts, setDrafts] = useState<api.MyDraft[]>([]);
+  const [draftsPage, setDraftsPage] = useState<api.WorkPagination | null>(null);
+  const [draftsLoading, setDraftsLoading] = useState(true);
+  // Draft awaiting the submit dialog (priority + note) — same modal the editor
+  // uses, so submitting from here isn't a second, weaker path.
+  const [submitTarget, setSubmitTarget] = useState<api.MyDraft | null>(null);
   const [acting, setActing] = useState<Record<string, boolean>>({});
+  // Deletion flag being resolved from the inbox, and which dialog it opens.
+  const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
+  const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
   const [nests, setNests] = useState<any[]>([]);
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
@@ -103,6 +106,9 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
       .getMyWork()
       .then(setWork)
       .catch(() => setWork({ items: [], waiting: [], notifications: [] }));
+    // Streams into its own tab like the other extras — never gated behind
+    // setLoading, so it can't add to the dashboard's time-to-first-paint.
+    void goToDraftsPage(0);
     try {
       const nestsData = await api.listNests();
       setNests(nestsData.nests);
@@ -110,6 +116,22 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
       console.error("[Dashboard] fetchNests failed", e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Jump to a page of drafts. Same replace-the-page contract as the work
+  // inbox below, so submitting one can reload the page the user is standing on.
+  const goToDraftsPage = async (offset: number) => {
+    setDraftsLoading(true);
+    try {
+      const next = await api.getMyDrafts({ offset });
+      setDrafts(next.drafts);
+      setDraftsPage(next.pagination);
+    } catch (e) {
+      console.error("[Dashboard] goToDraftsPage failed", e);
+      setDrafts([]);
+    } finally {
+      setDraftsLoading(false);
     }
   };
 
@@ -220,6 +242,62 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     }
   };
 
+  // Resolve a deletion flag straight from the inbox. Delete needs a confirm and
+  // decline needs a note, so both go through ReasonDialog; the handlers throw
+  // on failure so the error lands in the dialog, not a swallowed console line.
+  const handleInboxDelete = async () => {
+    const w = deletionTarget!;
+    await api.approveDeletionRequest(w.nest_id, w.request_id!);
+    dropWorkItem(w);
+  };
+  const handleInboxDecline = async (note: string) => {
+    const w = deletionTarget!;
+    await api.declineDeletionRequest(w.nest_id, w.request_id!, note);
+    dropWorkItem(w);
+  };
+  // A folder or nest deletion item carries a folder path / nest id in node_id,
+  // not a document id — opening the editor on it lands on a page for a node
+  // that was never there. Send those to the nest instead.
+  const openWorkItem = (w: api.WorkItem) => {
+    if (w.type === "deletion" && w.target_type && w.target_type !== "document") {
+      onSelectNest(w.nest_id, w.nest_name, false, false);
+      return;
+    }
+    onOpenReview(w.nest_id, w.nest_name, w.node_id);
+  };
+
+  // Submit a draft straight from the list — the whole point of the tab is that
+  // the doc was stranded, so the fix (hand it to a reviewer) is one click away.
+  // It leaves the drafts list and shows up under "Waiting on others". Throws on
+  // failure so the error surfaces in the dialog instead of a swallowed console
+  // line; the dialog also owns the busy state.
+  const submitDraft = async (
+    d: api.MyDraft,
+    note: string,
+    priority: string,
+  ) => {
+    await api.submitForReview(d.nest_id, d.node_id, note, priority);
+    // Optimistic drop, then reload the page the user is on — a row leaving
+    // pulls one up from the next page, and the total shifts.
+    setDrafts((prev) =>
+      prev.filter((x) => !(x.nest_id === d.nest_id && x.node_id === d.node_id)),
+    );
+    setSubmitTarget(null);
+    void goToDraftsPage(draftsPage?.offset ?? 0);
+    void goToWorkPage(work.pagination?.offset ?? 0);
+  };
+
+  // Optimistic drop + reconcile, same as actOnReview.
+  const dropWorkItem = (w: api.WorkItem) => {
+    setWork((prev) => ({
+      ...prev,
+      items: prev.items.filter(
+        (i) => !(i.nest_id === w.nest_id && i.node_id === w.node_id),
+      ),
+    }));
+    void goToWorkPage(work.pagination?.offset ?? 0);
+  };
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
@@ -241,7 +319,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Server info banner */}
       <Card className="bg-gradient-to-br from-blue-50 to-indigo-50 border-blue-200">
         <CardHeader className="pb-3">
@@ -310,6 +388,15 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
               </span>
             )}
           </TabsTrigger>
+          <TabsTrigger value="drafts" className="px-6 py-2 text-sm gap-1.5">
+            <Pencil className="h-4 w-4" />
+            My Drafts
+            {(draftsPage?.total ?? 0) > 0 && (
+              <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-1.5 py-0.5">
+                {draftsPage!.total}
+              </span>
+            )}
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="work">
@@ -342,7 +429,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                   <div key={n.id} className="px-4 py-2 text-xs flex items-center gap-2">
                     <span className="flex-1">{n.message}</span>
                     <span className="text-muted-foreground shrink-0">
-                      {new Date(n.created_at).toLocaleString()}
+                      {formatServerDate(n.created_at)}
                     </span>
                   </div>
                 ))}
@@ -372,37 +459,74 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                     key={key}
                     className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
                   >
-                    <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0">
-                      Review
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${
+                        w.type === "deletion"
+                          ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
+                          : "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                      }`}
+                    >
+                      {w.type === "deletion" ? "Deletion" : "Review"}
                     </span>
                     <button
-                      onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}
+                      onClick={() => openWorkItem(w)}
                       className="flex items-center gap-2 min-w-0 flex-1 text-left"
                     >
                       <span className="font-medium truncate">{w.title}</span>
-                      <span className="text-xs text-muted-foreground shrink-0">
+                      <span className="text-xs text-muted-foreground truncate">
                         in {w.nest_name} · {w.requested_by} · {relTime(w.requested_at)}
+                        {w.reason ? ` · "${w.reason}"` : ""}
                       </span>
                     </button>
                     <div className="flex items-center gap-1 shrink-0">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busy}
-                        onClick={() => actOnReview(w, "approve")}
-                      >
-                        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
-                        Approve
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busy}
-                        className="text-muted-foreground hover:text-destructive"
-                        onClick={() => actOnReview(w, "reject")}
-                      >
-                        Reject
-                      </Button>
+                      {w.type === "deletion" ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => {
+                              setDeletionAction("delete");
+                              setDeletionTarget(w);
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5 mr-1" />
+                            Delete
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-muted-foreground"
+                            onClick={() => {
+                              setDeletionAction("decline");
+                              setDeletionTarget(w);
+                            }}
+                          >
+                            Decline
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={busy}
+                            onClick={() => actOnReview(w, "approve")}
+                          >
+                            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
+                            Approve
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={busy}
+                            className="text-muted-foreground hover:text-destructive"
+                            onClick={() => actOnReview(w, "reject")}
+                          >
+                            Reject
+                          </Button>
+                        </>
+                      )}
                     </div>
                   </div>
                 );
@@ -425,15 +549,21 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
               {work.waiting.map((w) => (
                 <button
                   key={`${w.nest_id}:${w.node_id}`}
-                  onClick={() => onOpenReview(w.nest_id, w.nest_name, w.node_id)}
+                  onClick={() => openWorkItem(w)}
                   className="w-full flex items-center gap-3 px-4 py-2 text-left hover:bg-muted/40 group text-sm"
                 >
                   <span className="font-medium truncate">{w.title}</span>
                   <span className="text-xs text-muted-foreground shrink-0">
-                    in {w.nest_name} · submitted {relTime(w.requested_at)}
+                    in {w.nest_name} ·{" "}
+                    {w.type === "deletion" ? "requested" : "submitted"}{" "}
+                    {relTime(w.requested_at)}
                   </span>
                   <span className="flex-1" />
-                  <span className="text-xs text-muted-foreground">pending review</span>
+                  <span className="text-xs text-muted-foreground">
+                    {w.type === "deletion"
+                      ? "Deletion Requested"
+                      : "Pending Review"}
+                  </span>
                   <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-0.5 transition-transform shrink-0" />
                 </button>
               ))}
@@ -471,6 +601,116 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           </div>
         )}
       </div>
+        </TabsContent>
+
+        {/* My Drafts — everything you started and never handed off. A draft
+            that was never submitted has no review request, so before this it
+            appeared in no queue at all and was only findable by search. */}
+        <TabsContent value="drafts">
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <Pencil className="h-5 w-5 text-muted-foreground" />
+              <h2 className="text-xl font-semibold">My Drafts</h2>
+              {(draftsPage?.total ?? 0) > 0 && (
+                <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-2 py-0.5">
+                  {draftsPage!.total}
+                </span>
+              )}
+            </div>
+            {draftsLoading ? (
+              // Loader, not the empty state: "nothing here" while the request is
+              // still in flight reads as an answer, and this list existing at
+              // all is the fix for a draft nobody knew about.
+              <div className="rounded-lg border bg-muted/20 px-4 py-6 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading your drafts…
+              </div>
+            ) : drafts.length === 0 ? (
+              <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
+                No unsubmitted drafts — everything you've written is in review or approved.
+              </div>
+            ) : (
+              <div className="rounded-lg border divide-y overflow-hidden">
+                {drafts.map((d) => {
+                  const key = `${d.nest_id}:${d.node_id}`;
+                  return (
+                    <div
+                      key={key}
+                      className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
+                    >
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${
+                          d.status === "rejected"
+                            ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
+                            : "bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        {d.status === "rejected" ? "Rejected" : "Draft"}
+                      </span>
+                      {/* Two lines: the title gets the full width (these run
+                          long), its location sits under it. Inline, both
+                          competed for the same row and each truncated the
+                          other — the location being readable is the point. */}
+                      <button
+                        onClick={() => onOpenReview(d.nest_id, d.nest_name, d.node_id)}
+                        className="flex flex-col min-w-0 flex-1 text-left gap-0.5"
+                      >
+                        <span className="font-medium truncate">{d.title}</span>
+                        <span
+                          className="text-xs text-muted-foreground truncate"
+                          title={`${d.nest_name} / ${d.node_id}`}
+                        >
+                          <Folder className="h-3 w-3 inline mr-1 -mt-0.5" />
+                          {d.nest_name}
+                          {d.folder ? ` / ${d.folder}` : ""} · edited{" "}
+                          {relTime(d.updated_at)}
+                        </span>
+                      </button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0"
+                        onClick={() => setSubmitTarget(d)}
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+                        Submit for review
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {draftsPage && draftsPage.total > draftsPage.limit && (
+              <div className="flex items-center justify-center gap-3 pt-3 text-sm text-muted-foreground">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={draftsLoading || draftsPage.offset === 0}
+                  onClick={() =>
+                    goToDraftsPage(Math.max(0, draftsPage.offset - draftsPage.limit))
+                  }
+                >
+                  <ChevronLeft className="h-3.5 w-3.5 mr-1" />
+                  Prev
+                </Button>
+                <span>
+                  Page {Math.floor(draftsPage.offset / draftsPage.limit) + 1} of{" "}
+                  {Math.max(1, Math.ceil(draftsPage.total / draftsPage.limit))}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={draftsLoading || !draftsPage.has_more}
+                  onClick={() =>
+                    goToDraftsPage(draftsPage.offset + draftsPage.limit)
+                  }
+                >
+                  Next
+                  <ChevronRight className="h-3.5 w-3.5 ml-1" />
+                </Button>
+              </div>
+            )}
+          </div>
         </TabsContent>
 
         <TabsContent value="nests" className="space-y-6">
@@ -823,7 +1063,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                       {nest.is_imported ? (
                         <p
                           className="flex items-center gap-1 mt-1 text-xs text-muted-foreground truncate"
-                          title={`Imported ${new Date(nest.created_at).toLocaleString()}`}
+                          title={`Imported ${formatServerDate(nest.created_at)}`}
                         >
                           <FolderInput className="h-3 w-3 shrink-0" />
                           <span className="truncate">
@@ -831,7 +1071,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                             <span className="font-medium">
                               {nest.is_owner ? "you" : nest.owner_email || "unknown user"}
                             </span>{" "}
-                            · {new Date(nest.created_at).toLocaleDateString()}
+                            · {formatServerDate(nest.created_at)}
                           </span>
                         </p>
                       ) : null}
@@ -923,7 +1163,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                             Imported
                           </span>
                         ) : null}
-                        <span>{new Date(nest.created_at).toLocaleDateString()}</span>
+                        <span>{formatServerDate(nest.created_at)}</span>
                       </div>
                     </div>
                   </div>
@@ -962,6 +1202,44 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
             );
             setRenameTarget(null);
           }}
+        />
+      )}
+
+      {deletionTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setDeletionTarget(null)}
+          title={
+            deletionAction === "delete"
+              ? `Delete "${deletionTarget.title}"?`
+              : "Decline this deletion request"
+          }
+          description={`${deletionTarget.requested_by} asked for this: "${deletionTarget.reason ?? ""}". ${
+            deletionAction === "delete"
+              ? "Deleting removes the document, its history, comments and annotations. It cannot be undone."
+              : "The document stays; your note is the record, and the requester is notified."
+          }`}
+          label={
+            deletionAction === "decline" ? "Why are you declining?" : undefined
+          }
+          placeholder="e.g. still referenced by onboarding"
+          confirmLabel={
+            deletionAction === "delete" ? "Delete document" : "Decline"
+          }
+          destructive={deletionAction === "delete"}
+          onConfirm={
+            deletionAction === "delete" ? handleInboxDelete : handleInboxDecline
+          }
+        />
+      )}
+
+      {submitTarget && (
+        <SubmitForReviewModal
+          isOpen
+          onClose={() => setSubmitTarget(null)}
+          documentTitle={submitTarget.title}
+          currentVersion={submitTarget.version}
+          onSubmit={(note, priority) => submitDraft(submitTarget, note, priority)}
         />
       )}
 

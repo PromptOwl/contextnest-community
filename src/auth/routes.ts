@@ -38,7 +38,7 @@ import { isSuperAdmin } from "../governance/access-service.js";
 // same operator powers as the license owner (see shared/access.ts).
 import { isServerAdminUserId } from "../shared/access.js";
 import { tryConsume, isLimited, recordFailure, clear } from "../shared/rate-limit.js";
-import { verifySsoTicket } from "./sso-token.js";
+import { verifySsoTicket, isValidTicketSub } from "./sso-token.js";
 import { oidcRoutes } from "./oidc.js";
 import { clientIp } from "../shared/request-ip.js";
 import { ANON_USER_ID } from "../shared/constants.js";
@@ -766,6 +766,13 @@ authRoutes.get("/sso", async (c) => {
     return ssoError("invalid_ticket");
   }
 
+  // Reject an MCP bearer ticket here: this endpoint mints a full login
+  // session, so a `scope: "mcp"` ticket (server-to-server, no jti) must never
+  // be redeemable for one. Symmetric with flexAuthWithPromptowlTicket, which
+  // requires scope "mcp" — neither ticket kind can stand in for the other,
+  // and neither side has to trust the issuer to keep the jti/scope invariant.
+  if ((claims.scope || "") === "mcp") return ssoError("invalid_ticket");
+
   // Audience binding — a ticket minted for a different server is rejected, so
   // it can't be replayed elsewhere even if the secret were shared. When
   // PUBLIC_BASE_URL is unset this binding is DISABLED (the secret is the only
@@ -789,7 +796,7 @@ authRoutes.get("/sso", async (c) => {
   // PromptOwl (trusted), but a whitespace/garbage sub would otherwise create a
   // degenerate user row with an empty email that can never match a grant.
   const sub = (claims.sub || "").trim();
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(sub) || sub.length > 254) {
+  if (!isValidTicketSub(sub)) {
     return ssoError("invalid_ticket");
   }
 

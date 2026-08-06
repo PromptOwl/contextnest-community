@@ -5,7 +5,10 @@
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
 import { matchesFilters } from "../lib/node-filter";
+import { resolveWikiTarget } from "../lib/wiki-preview";
+import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
+import { parseServerDate, formatServerDate } from "../lib/dates";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
   parseSavedFilters, serializeSavedFilters,
@@ -57,6 +60,8 @@ export function NodeTypeIcon({
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { NestPageHeader } from "./NestPageHeader";
+import { deriveNestCaps } from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { Button } from "@/components/ui/button";
@@ -82,7 +87,7 @@ import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu
 import {
   StewardList, StewardModal,
   ReviewQueue, ReviewActions,
-  SubmitForReviewModal, VersionHistoryModal, LifecycleStatusBadge,
+  SubmitForReviewModal, ReasonDialog, VersionHistoryModal, LifecycleStatusBadge,
   type Steward, type StewardRole, type ReviewRequest, type Version,
   type DocumentLifecycleStatus,
 } from "./governance";
@@ -92,7 +97,9 @@ import { CollaboratorManager } from "./CollaboratorManager";
 import { toast } from "sonner";
 
 function timeAgo(dateStr: string) {
-  const date = new Date(dateStr);
+  // See lib/dates — SQL-default timestamps carry no zone.
+  const date = parseServerDate(dateStr);
+  if (!date) return "";
   const diff = Date.now() - date.getTime();
   if (diff < 60_000) return "just now";
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
@@ -133,6 +140,15 @@ interface NestViewProps {
   /** Seed the search filter on mount. Used when arriving from a tag
    *  click on a document detail page. */
   initialSearch?: string;
+  /** Pre-seed the tag filter / folder scope when arriving from a tag chip or
+   *  a folder breadcrumb segment elsewhere in the app. */
+  initialTags?: string[];
+  initialFolder?: string;
+  /** Tab to open on mount, from ?tab= — falls back to overview when the
+   *  slug names a tab this user can't see. */
+  initialTab?: string;
+  /** Reports tab changes up so App can mirror them into ?tab=. */
+  onTabChange?: (tab: string) => void;
 }
 
 export function NestView({
@@ -144,6 +160,10 @@ export function NestView({
   onOpenDocument,
   onOpenTrace,
   initialSearch,
+  initialTags,
+  initialFolder,
+  initialTab,
+  onTabChange,
 }: NestViewProps) {
   const { isAdmin, adminStatus, authMode } = useAuth();
   // Mirror server delete rule (see src/nests/routes.ts DELETE /:nestId):
@@ -205,6 +225,52 @@ export function NestView({
   // affordances for non-admin reviewers/editors who can't read the roster.
   const [myStewards, setMyStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
+  // Pending "please delete this" flags raised by people below admin.
+  const [deletionRequests, setDeletionRequests] = useState<api.DeletionRequest[]>([]);
+  // Node being flagged (dialog open when set), and the queue row being resolved
+  // — `action` picks between the confirm and the decline-with-note dialog.
+  const [deletionTarget, setDeletionTarget] = useState<any | null>(null);
+  // Node pending a plain delete confirm (for callers who can delete outright).
+  const [deleteNodeTarget, setDeleteNodeTarget] = useState<any | null>(null);
+  const [removeStewardId, setRemoveStewardId] = useState<string | null>(null);
+  // Folder pending deletion (admin) or a deletion request (everyone else).
+  const [folderTarget, setFolderTarget] = useState<
+    { path: string; label: string; total: number } | null
+  >(null);
+  // Non-owner asking for the whole nest to be deleted.
+  const [nestFlagOpen, setNestFlagOpen] = useState(false);
+  // Latest flag per node (the list arrives newest-first, so the first wins).
+  // Pending drops the flag action and badges red; declined badges amber with
+  // the resolver's note, and the doc can be flagged again. Document targets
+  // only — a folder path could otherwise collide with a node id.
+  const flagByNode = useMemo(() => {
+    const map = new Map<string, api.DeletionRequest>();
+    for (const r of deletionRequests)
+      if ((r.targetType ?? "document") === "document" && !map.has(r.nodeId))
+        map.set(r.nodeId, r);
+    return map;
+  }, [deletionRequests]);
+  const pendingFolderFlags = useMemo(
+    () =>
+      new Set(
+        deletionRequests
+          .filter((r) => r.targetType === "folder" && r.status === "pending")
+          .map((r) => r.nodeId),
+      ),
+    [deletionRequests],
+  );
+  const folderFlagPending = (path: string) => pendingFolderFlags.has(path);
+  const nestFlag = deletionRequests.find(
+    (r) => r.targetType === "nest" && r.status === "pending",
+  );
+  const nestFlagPending = !!nestFlag;
+  const pendingDeletions = useMemo(
+    () => deletionRequests.filter((r) => r.status === "pending"),
+    [deletionRequests],
+  );
+  const [resolveTarget, setResolveTarget] = useState<
+    { request: api.DeletionRequest; action: "delete" | "decline" } | null
+  >(null);
   // Comment activity (annotation threads + replies) for the feed, already
   // access-filtered server-side to docs the caller can read. Paged: the array
   // holds the pages fetched so far; feedCommentsTotal is the server's
@@ -221,6 +287,8 @@ export function NestView({
   const [externalEditsLoading, setExternalEditsLoading] = useState(false);
   const [stewardshipEnabled, setStewardshipEnabled] = useState(false);
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
+  const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
+  const [primeTags, setPrimeTags] = useState<string[]>([]);
   const [visibility, setVisibility] = useState<"private" | "public">("private");
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [isImported, setIsImported] = useState(false);
@@ -259,7 +327,7 @@ export function NestView({
   const [initialLoad, setInitialLoad] = useState(true);
   const [search, setSearch] = useState(initialSearch ?? "");
   // Multi-tag AND filter; toggled by clicking tag chips on list rows.
-  const [tagFilters, setTagFilters] = useState<string[]>([]);
+  const [tagFilters, setTagFilters] = useState<string[]>(initialTags ?? []);
   const toggleTagFilter = (tag: string) =>
     setTagFilters((prev) =>
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag],
@@ -268,10 +336,11 @@ export function NestView({
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [authorFilter, setAuthorFilter] = useState<string>("all");
   const [dateFilter, setDateFilter] = useState<DatePreset>("any");
-  // Document list sort: by title, last edited, or comment (annotation) count.
-  const [sortMode, setSortMode] = useState<"name" | "edited" | "comments">(
-    "name",
-  );
+  // Document list sort. Defaults to "activity" (most-recently-touched first) so
+  // the list opens on what changed, not an alphabetical wall.
+  const [sortMode, setSortMode] = useState<
+    "activity" | "name" | "edited" | "comments"
+  >("activity");
   // Per-node comment (annotation thread) counts, for the "Most comments" sort.
   const [commentCounts, setCommentCounts] = useState<
     Record<string, { count: number; lastAt: string | null }>
@@ -400,8 +469,20 @@ export function NestView({
   // Documents), the folder the list is scoped to (null = whole nest, "" would
   // mean root-only but we scope by subtree), collapsed folder paths, and
   // drag-and-drop bookkeeping for moving docs between folders.
-  const [activeTab, setActiveTab] = useState("overview");
-  const [folderFilter, setFolderFilter] = useState<string | null>(null);
+  const [folderFilter, setFolderFilter] = useState<string | null>(
+    initialFolder ?? null,
+  );
+  // A folder breadcrumb click arrives pre-scoped, and the folder-scoped list
+  // lives on Documents — Overview would hide the scope entirely.
+  const [activeTab, setActiveTabState] = useState(
+    initialTab ?? (initialFolder ? "documents" : "overview"),
+  );
+  // Wrapper so every tab change — the tab strip, and the Overview folder
+  // clicks that jump to Documents — mirrors into ?tab= via App.
+  const setActiveTab = (tab: string) => {
+    setActiveTabState(tab);
+    onTabChange?.(tab);
+  };
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const [dropFolder, setDropFolder] = useState<string | null>(null);
@@ -533,7 +614,7 @@ export function NestView({
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, settingsData, externalData, nestMeta, countsData, feedData] =
+    const [nodesData, stewardsData, queueData, deletionData, settingsData, externalData, nestMeta, countsData, feedData] =
       await Promise.all([
         api.listNodes(nestId).catch((e) => {
           console.error("[NestView] listNodes failed", nestId, e);
@@ -548,9 +629,20 @@ export function NestView({
           toast.error(e?.message || "Failed to load review queue");
           return { requests: [], total: 0 };
         }),
+        // Pending AND declined in one call: pending drives the admin queue,
+        // declined is how the person who asked learns the verdict.
+        api.getDeletionRequests(nestId, "all").catch((e) => {
+          console.error("[NestView] getDeletionRequests failed", nestId, e);
+          return { requests: [] as api.DeletionRequest[], total: 0 };
+        }),
         api.getNestSettings(nestId).catch((e) => {
           console.error("[NestView] getNestSettings failed", nestId, e);
-          return { stewardship_enabled: false, allow_self_approve: false };
+          return {
+            stewardship_enabled: false,
+            allow_self_approve: false,
+            prime_only_review: false,
+            prime_tags: [] as string[],
+          };
         }),
         api.listExternalEdits(nestId).catch((e) => {
           console.error("[NestView] listExternalEdits failed", nestId, e);
@@ -586,6 +678,7 @@ export function NestView({
     setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
+    setDeletionRequests(deletionData.requests);
     const commentItems = feedData.items.filter(
       (i): i is api.FeedCommentItem => i.type === "comment",
     );
@@ -595,6 +688,8 @@ export function NestView({
     setFeedCommentsTotal(feedData.counts?.comments ?? commentItems.length);
     setStewardshipEnabled(settingsData.stewardship_enabled);
     setAllowSelfApprove(settingsData.allow_self_approve);
+    setPrimeOnlyReview(!!settingsData.prime_only_review);
+    setPrimeTags(settingsData.prime_tags ?? []);
     setExternalEdits(externalData.entries);
     if (nestMeta?.nest?.visibility) {
       setVisibility(nestMeta.nest.visibility);
@@ -714,7 +809,14 @@ export function NestView({
   // edited first (updated_at already on each node); "comments" = most comment
   // threads first, tie-broken by most recent comment then title.
   const sorted = [...filtered];
-  if (sortMode === "edited") {
+  if (sortMode === "activity") {
+    // Recent activity = the later of last edit and last comment, newest first.
+    sorted.sort((a, b) =>
+      activityTimestamp(b.updated_at, commentCounts[b.id]?.lastAt).localeCompare(
+        activityTimestamp(a.updated_at, commentCounts[a.id]?.lastAt),
+      ),
+    );
+  } else if (sortMode === "edited") {
     sorted.sort((a, b) =>
       String(b.updated_at || "").localeCompare(String(a.updated_at || "")),
     );
@@ -923,20 +1025,15 @@ export function NestView({
   //   canReviewDocs  — approve/reject (owner/admin or reviewer steward)
   //   canEditDocs    — "New Document" (nest-wide write or nest-scope editor)
   //   isReadOnly     — no write/review/manage (public + plain 'read' collabs)
-  const caps = (() => {
-    const hasRole = (...r: string[]) => roles.some((x) => r.includes(x));
-    const canManage = isOwner || isAdmin || hasRole("owner", "admin");
-    const collabCanWrite =
-      permission === "owner" || permission === "admin" || permission === "write";
-    const canReviewDocs =
-      canManage || myStewards.some((s) => s.role === "reviewer");
-    const canEditDocs =
-      canManage ||
-      collabCanWrite ||
-      myStewards.some((s) => s.role === "editor" && s.scope === "nest");
-    const isReadOnly = !canEditDocs && !canReviewDocs && !canManage;
-    return { canManage, collabCanWrite, canReviewDocs, canEditDocs, isReadOnly };
-  })();
+  // Rules live in lib/nest-caps so the board (and any later nest-scoped view)
+  // gates on exactly the same derivation instead of a lookalike copy.
+  const caps = deriveNestCaps({
+    roles,
+    permission,
+    myStewards,
+    isOwner,
+    isAdmin,
+  });
   // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
   // canReviewNode for scope resolution, so it isn't destructured here.
   const { canManage, collabCanWrite, canEditDocs, isReadOnly } = caps;
@@ -1047,9 +1144,28 @@ export function NestView({
     stewardshipEnabled ||
     caps.canReviewDocs ||
     reviewQueue.length > 0 ||
+    // Deletion flags land in this tab too, and are raised on ungoverned nests
+    // as often as governed ones.
+    (caps.canManage && pendingDeletions.length > 0) ||
     // Comment activity renders in the same tab (the queue is now a feed) —
     // discussion must stay reachable even with stewardship off.
     feedCommentsTotal > 0;
+
+  // A shared ?tab= link can name a tab this viewer doesn't get (Stewards on a
+  // nest they only read, Review Queue while read-only). Radix would render an
+  // empty content area against a value with no trigger, so fall back to
+  // overview once the permission flags have resolved.
+  const tabVisible: Record<string, boolean> = {
+    overview: true,
+    documents: true,
+    review: showReviewTab && !isReadOnly,
+    "external-edits": !isReadOnly,
+    stewards: stewardshipEnabled && canManageGovernance,
+    collaborators: canManage || collabCanWrite,
+  };
+  useEffect(() => {
+    if (!initialLoad && !tabVisible[activeTab]) setActiveTab("overview");
+  }, [initialLoad, activeTab, tabVisible[activeTab]]);
 
   // Computed here so the Review Queue card binds to reviewableQueue.length
   // (what the user can actually act on) instead of reviewQueue.length
@@ -1159,17 +1275,14 @@ export function NestView({
     }
   };
 
-  const handleRemoveSteward = async (stewardId: string) => {
-    const ok = window.confirm(
-      "Remove this steward? They will lose approval rights immediately. The user account and any documents stay intact.",
-    );
-    if (!ok) return;
+  const handleRemoveSteward = async () => {
+    const stewardId = removeStewardId!;
     try {
       await api.removeSteward(nestId, stewardId);
       fetchData();
     } catch (err: any) {
       console.error("[NestView] removeSteward failed", nestId, stewardId, err);
-      window.alert(err?.message || "Failed to remove steward");
+      throw err;
     }
   };
 
@@ -1202,21 +1315,54 @@ export function NestView({
     fetchData();
   };
 
-  const handleDeleteNode = async (node: any) => {
-    // Plain confirm — destructive, irreversible. Promoting to a fancy
-    // AlertDialog when the rest of the destructive surfaces (nest
-    // delete, key revoke) standardise on one is a follow-up.
-    const ok = window.confirm(
-      `Delete "${node.title}"? This cannot be undone.`,
-    );
-    if (!ok) return;
+  // Destructive and irreversible, so it confirms first — through the same
+  // ReasonDialog the deletion-request flows use. Throwing keeps the failure
+  // (423 review lock, 403) inside the dialog instead of a dead-end alert.
+  const handleDeleteNode = async () => {
+    const node = deleteNodeTarget;
     try {
       await api.deleteNode(nestId, node.id);
       fetchData();
     } catch (err: any) {
       console.error("[NestView] deleteNode failed", nestId, node?.id, err);
-      window.alert(err?.message || "Failed to delete document");
+      throw err;
     }
+  };
+
+  // Flag a doc for deletion when you can't delete it yourself. Each handler
+  // throws on failure so ReasonDialog shows the error and keeps the input.
+  const handleRequestDeletion = async (reason: string) => {
+    await api.requestNodeDeletion(nestId, deletionTarget!.id, reason);
+    toast.success("Deletion requested — a nest admin will review it");
+    fetchData();
+  };
+
+  // Folder: admins delete it outright (every doc under it), everyone else
+  // raises a request. One handler — the dialog it came from set the mode.
+  const handleFolderDeletion = async (reason: string) => {
+    const folder = folderTarget!;
+    if (canManage) {
+      const { deleted } = await api.deleteFolder(nestId, folder.path);
+      toast.success(
+        `Deleted ${folder.label} — ${deleted} document${deleted === 1 ? "" : "s"}`,
+      );
+    } else {
+      await api.requestTargetDeletion(nestId, "folder", folder.path, reason);
+      toast.success("Deletion requested — a nest admin will review it");
+    }
+    fetchData();
+  };
+
+  const handleHonourDeletion = async () => {
+    await api.approveDeletionRequest(nestId, resolveTarget!.request.id);
+    toast.success("Document deleted");
+    fetchData();
+  };
+
+  const handleDeclineDeletion = async (note: string) => {
+    await api.declineDeletionRequest(nestId, resolveTarget!.request.id, note);
+    toast.success("Request declined");
+    fetchData();
   };
 
   // Inline visibility toggle from the header (owner/admin only). Optimistic
@@ -1304,7 +1450,7 @@ export function NestView({
 
   return (
     <div
-      className="md:py-6 relative"
+      className="relative"
       onDragOver={(e) => {
         if (!canEditDocs) return;
         if (Array.from(e.dataTransfer.types).includes("Files")) {
@@ -1344,13 +1490,13 @@ export function NestView({
           </div>
         </div>
       )}
-      {/* Header — PromptOwl ContextDashboard layout */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-4 mb-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={onBack} className="shrink-0">
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-          {canManage ? (
+      {/* Header — the row shared by every nest-scoped page. Only the actions
+          passed as children differ from Board/Graph/Definitions/Workflows. */}
+      <NestPageHeader
+        nestName={nestName}
+        onBack={onBack}
+        title={
+          canManage ? (
             <div className="min-w-0 flex-1">
               <input
                 value={editableName}
@@ -1386,11 +1532,10 @@ export function NestView({
                 </p>
               )}
             </div>
-          ) : (
-            <h3 className="min-w-0 truncate text-xl font-semibold" title={nestName}>
-              {nestName}
-            </h3>
-          )}
+          ) : undefined
+        }
+        badges={
+          <>
           {/* Visibility — an inline toggle for owner/admin (so the public/
               private switch isn't buried in the Share dialog), a read-only
               badge for everyone else. */}
@@ -1441,12 +1586,22 @@ export function NestView({
               Imported
             </Badge>
           )}
-        </div>
-        {/* Action row: wraps onto multiple lines below sm-breakpoint instead
-            of forcing a single horizontal scroll. `flex-wrap` + `justify-end`
-            on wider screens keeps the spacing visually intentional rather
-            than awkwardly clipped at the right edge. */}
-        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:shrink-0 sm:justify-end">
+          {/* Same red flag a doc/folder row gets — the requester's only sign
+              their nest deletion request is still waiting on an admin. */}
+          {nestFlag && (
+            <Badge
+              variant="outline"
+              className="shrink-0 gap-1 border-red-200 bg-red-50 text-red-700"
+              title={`${nestFlag.requestedBy} asked for this nest to be deleted: "${nestFlag.reason}". A nest owner or admin decides.`}
+              data-testid="nest-deletion-flag"
+            >
+              <Trash2 className="h-3 w-3" />
+              Deletion requested
+            </Badge>
+          )}
+          </>
+        }
+      >
           {/* Connect is the front door for every read/write surface (CLI,
               API, MCP, Add-with-AI) — a first-class button, not a menu item. */}
           <Button variant="outline" onClick={() => setShowConnect(true)}>
@@ -1557,24 +1712,27 @@ export function NestView({
                 icon: Activity,
                 onSelect: onOpenTrace,
               });
-            if (!isReadOnly && canDeleteNest)
+            // One Delete entry, like a document's: the owner deletes the nest
+            // outright, everyone else raises a request an owner/admin actions.
+            // Hidden below owner once a nest flag is already pending.
+            if (!isReadOnly && (canDeleteNest || !nestFlagPending))
               actions.push({
                 label: "Delete",
                 icon: Trash2,
-                destructive: true,
+                destructive: canDeleteNest,
                 separatorBefore: true,
-                onSelect: () => setShowDelete(true),
+                onSelect: () =>
+                  canDeleteNest ? setShowDelete(true) : setNestFlagOpen(true),
               });
             return <OverflowMenu actions={actions} variant="outline" />;
           })()}
-        </div>
-      </div>
+      </NestPageHeader>
 
       {/* Stats Cards — only governance-related stats when stewardship is on.
           In ungoverned mode every doc is auto-approved so the pending/review
           columns are always zero and just add noise. */}
       <div
-        className={`grid grid-cols-1 gap-4 mb-6 ${stewardshipEnabled
+        className={`grid grid-cols-1 gap-4 mb-4 ${stewardshipEnabled
           ? "md:grid-cols-4"
           : "md:grid-cols-1 max-w-sm"
           }`}
@@ -1981,13 +2139,14 @@ export function NestView({
                   <Select
                     value={sortMode}
                     onValueChange={(v) =>
-                      setSortMode(v as "name" | "edited" | "comments")
+                      setSortMode(v as "activity" | "name" | "edited" | "comments")
                     }
                   >
                     <SelectTrigger className="w-[150px] h-8" title="Sort documents">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="activity">Recent activity</SelectItem>
                       <SelectItem value="name">Name (A–Z)</SelectItem>
                       <SelectItem value="edited">Recently edited</SelectItem>
                       <SelectItem value="comments">Most comments</SelectItem>
@@ -2283,11 +2442,38 @@ export function NestView({
                       (isOwner && allowSelfApprove));
                   const canEdit =
                     node.status !== "pending_review" && canEditNode(node);
-                  const canDelete = canEditNode(node);
-                  // Move (drag OR menu) mirrors the edit gate exactly: same
-                  // stewardship scope, and the server locks moves while a
-                  // review is pending, so don't offer either path then.
-                  const canMove = canEdit;
+                  // Deleting is a nest admin/owner call — an editor who can
+                  // write this doc still goes through the request queue. Same
+                  // tier the document view uses for its Delete/Request split.
+                  // Exception: your own document. Asking permission to delete
+                  // work you wrote is the wrong default; the queue is for
+                  // someone else's content.
+                  const authoredByMe =
+                    !!node.author &&
+                    !!currentEmail &&
+                    node.author.toLowerCase() === currentEmail;
+                  const canDelete = canManage || authoredByMe;
+                  const flag = flagByNode.get(node.id);
+                  const flagPending = flag?.status === "pending";
+                  // ONE Delete action for everyone. Admins get the delete
+                  // confirm, everyone else gets the request dialog — which one
+                  // opens is the dialog's job to explain, not two menu items'.
+                  // Hidden below admin once a flag is open (a second 409s).
+                  const showDeleteAction = canDelete || !flagPending;
+                  const openDeleteFlow = () =>
+                    canDelete ? setDeleteNodeTarget(node) : setDeletionTarget(node);
+                  // Move (drag OR menu) mirrors the edit gate's stewardship
+                  // scope. The pending-review freeze is NOT absolute: the
+                  // server's move guard lets anyone approve-capable through
+                  // (owner/admin/reviewer on the node, no self-approve check),
+                  // so reorganizing an under-review doc stays possible.
+                  const canMove =
+                    canEditNode(node) &&
+                    (node.status !== "pending_review" ||
+                      isOwner ||
+                      isAdmin ||
+                      roles.includes("admin") ||
+                      hasRoleOnNode(node, "reviewer"));
                   const openMoveDialog = () => {
                     setMoveDest(folderOfNode(node.id));
                     setMoveTarget(node);
@@ -2344,17 +2530,19 @@ export function NestView({
                             <History className="h-3.5 w-3.5 mr-2" />
                             History
                           </DropdownMenuItem>
-                          {canDelete && (
-                            <>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                onSelect={() => handleDeleteNode(node)}
-                                className="text-destructive focus:text-destructive"
-                              >
-                                <Trash2 className="h-3.5 w-3.5 mr-2" />
-                                Delete
-                              </DropdownMenuItem>
-                            </>
+                          <DropdownMenuSeparator />
+                          {showDeleteAction && (
+                            <DropdownMenuItem
+                              onSelect={openDeleteFlow}
+                              className={
+                                canDelete
+                                  ? "text-destructive focus:text-destructive"
+                                  : undefined
+                              }
+                            >
+                              <Trash2 className="h-3.5 w-3.5 mr-2" />
+                              Delete
+                            </DropdownMenuItem>
                           )}
                         </DropdownMenuContent>
                       </DropdownMenu>
@@ -2423,6 +2611,37 @@ export function NestView({
                             size="sm"
                             className="shrink-0 whitespace-nowrap"
                           />
+                          {/* Pending only — see the note in DocumentEditor: a
+                              declined flag is history, and history belongs in
+                              the notification (dismissible), not a permanent
+                              badge on a document that was kept. */}
+                          {/* Prime — the doc always needs approval, whoever
+                              edits it. Only meaningful in a governed nest. */}
+                          {stewardshipEnabled &&
+                            api.isPrimeNode(node, primeTags) && (
+                            <span
+                              className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-500/10 dark:text-amber-400 dark:border-amber-500/30"
+                              title={
+                                typeof node.prime === "boolean"
+                                  ? "Prime: flagged on this document. Always requires steward approval."
+                                  : "Prime: inherited from a prime tag. Always requires steward approval."
+                              }
+                              data-testid={`prime-badge-${node.id}`}
+                            >
+                              <Star className="h-3 w-3" />
+                              Prime
+                            </span>
+                          )}
+                          {flagPending && (
+                            <span
+                              className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-red-50 text-red-700 border-red-200"
+                              title={`${flag!.requestedBy} asked for this to be deleted: "${flag!.reason}". A nest admin decides.`}
+                              data-testid={`deletion-flag-${node.id}`}
+                            >
+                              <Trash2 className="h-3 w-3" />
+                              Deletion requested
+                            </span>
+                          )}
                           {cards && <div className="ml-auto">{actionMenu}</div>}
                         </div>
                         <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
@@ -2511,13 +2730,18 @@ export function NestView({
                           <Button variant="ghost" size="sm" onClick={() => openVersions(node)} title="History">
                             <History className="h-3.5 w-3.5" />
                           </Button>
-                          {canDelete && (
+                          {showDeleteAction && (
                             <Button
                               variant="ghost"
                               size="sm"
-                              onClick={() => handleDeleteNode(node)}
-                              title="Delete"
-                              className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                              onClick={openDeleteFlow}
+                              title={canDelete ? "Delete" : "Delete (needs admin approval)"}
+                              data-testid={`delete-node-${node.id}`}
+                              className={
+                                canDelete
+                                  ? "text-destructive hover:text-destructive hover:bg-destructive/10"
+                                  : undefined
+                              }
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                             </Button>
@@ -2688,6 +2912,44 @@ export function NestView({
                                 <Plus className="h-3.5 w-3.5" />
                               </button>
                             )}
+                            {/* Same split as a document: admins/owners delete
+                                the folder (and everything under it), everyone
+                                else raises a request. Hidden while one is
+                                already pending on this folder. */}
+                            {(canManage || !folderFlagPending(node.path)) && (
+                              <button
+                                type="button"
+                                className={`rounded p-0.5 opacity-0 group-hover/fh:opacity-100 ${
+                                  canManage
+                                    ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                                    : "text-muted-foreground hover:text-primary hover:bg-primary/10"
+                                }`}
+                                title={
+                                  canManage
+                                    ? `Delete ${prettyFolderPath(node.path)} and everything in it`
+                                    : "Delete (needs admin approval)"
+                                }
+                                data-testid={`delete-folder-${node.path}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setFolderTarget({
+                                    path: node.path,
+                                    label: prettyFolderPath(node.path),
+                                    total: node.total,
+                                  });
+                                }}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                            {folderFlagPending(node.path) && (
+                              <span
+                                className="rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide bg-red-50 text-red-700 border border-red-200"
+                                title="Someone asked for this folder to be deleted. A nest admin decides."
+                              >
+                                Deletion requested
+                              </span>
+                            )}
                           </div>
                         );
                       }}
@@ -2809,6 +3071,67 @@ export function NestView({
                         Awaiting review
                       </Badge>
                     </button>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
+            {/* Deletion flags raised by everyone below admin. Only nest
+                admins/owners — the tier that deletes — resolve them. */}
+            {canManage && pendingDeletions.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Trash2 className="h-4 w-4 text-destructive" />
+                    Deletion requests
+                  </CardTitle>
+                  <CardDescription>
+                    Documents flagged as stale. Delete them, or decline with a
+                    note.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {pendingDeletions.map((r) => (
+                    <div
+                      key={r.id}
+                      data-testid="deletion-request-item"
+                      className="flex items-center gap-3 rounded-md border px-3 py-2 text-sm"
+                    >
+                      <button
+                        className="flex-1 min-w-0 text-left"
+                        onClick={() => onOpenDocument(r.nodeId)}
+                      >
+                        <span className="font-medium truncate block">
+                          {r.title || r.nodeId}
+                          {r.targetType && r.targetType !== "document" && (
+                            <span className="ml-2 rounded bg-muted px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                              {r.targetType === "folder" ? "Folder" : "Nest"}
+                            </span>
+                          )}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {r.requestedBy} — &ldquo;{r.reason}&rdquo;
+                        </span>
+                      </button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          setResolveTarget({ request: r, action: "decline" })
+                        }
+                      >
+                        Decline
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                        onClick={() =>
+                          setResolveTarget({ request: r, action: "delete" })
+                        }
+                      >
+                        Delete
+                      </Button>
+                    </div>
                   ))}
                 </CardContent>
               </Card>
@@ -2948,7 +3271,7 @@ export function NestView({
                           <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
                             <Clock className="h-3 w-3" />
                             <span>
-                              {new Date(entry.detected_at).toLocaleString()}
+                              {formatServerDate(entry.detected_at)}
                             </span>
                             <span>•</span>
                             <span>by {entry.actor}</span>
@@ -3076,7 +3399,11 @@ export function NestView({
                     onAddSteward={
                       canManageGovernance ? () => setShowAssignSteward(true) : undefined
                     }
-                    onRemove={canManageGovernance ? handleRemoveSteward : undefined}
+                    onRemove={
+                      canManageGovernance
+                        ? async (stewardId: string) => setRemoveStewardId(stewardId)
+                        : undefined
+                    }
                     onEditRole={canManageGovernance ? setEditingSteward : undefined}
                     currentUserEmail={currentEmail}
                   />
@@ -3180,6 +3507,8 @@ export function NestView({
           nestName={nestName}
           stewardshipEnabled={stewardshipEnabled}
           allowSelfApprove={allowSelfApprove}
+          primeOnlyReview={primeOnlyReview}
+          primeTags={primeTags}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
           onChanged={(next) => {
@@ -3189,6 +3518,8 @@ export function NestView({
             // refetch to land — then reconcile counts in the background.
             setStewardshipEnabled(next.stewardshipEnabled);
             setAllowSelfApprove(next.allowSelfApprove);
+            setPrimeOnlyReview(next.primeOnlyReview);
+            setPrimeTags(next.primeTags);
             fetchData();
           }}
         />
@@ -3423,12 +3754,130 @@ export function NestView({
         />
       )}
 
+      {removeStewardId && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setRemoveStewardId(null)}
+          title="Remove this steward?"
+          description="They lose approval rights immediately. The user account and any documents stay intact."
+          confirmLabel="Remove steward"
+          destructive
+          onConfirm={handleRemoveSteward}
+        />
+      )}
+
+      {nestFlagOpen && (
+        <ReasonDialog
+          open
+          onOpenChange={setNestFlagOpen}
+          title={`Request deletion of "${nestName}"`}
+          description="A nest owner or admin reviews this. Honouring it deletes the whole nest and every document in it. Nothing is removed yet."
+          label="Why should it be deleted?"
+          placeholder="e.g. project wound down, superseded by another nest"
+          confirmLabel="Request deletion"
+          onConfirm={async (reason) => {
+            await api.requestTargetDeletion(nestId, "nest", nestId, reason);
+            toast.success("Deletion requested — a nest admin will review it");
+            fetchData();
+          }}
+        />
+      )}
+
+      {folderTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setFolderTarget(null)}
+          title={
+            canManage
+              ? `Delete "${folderTarget.label}"?`
+              : `Request deletion of "${folderTarget.label}"`
+          }
+          description={
+            canManage
+              ? `This deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder and its subfolders, with their history, comments and annotations. It cannot be undone.`
+              : `A nest admin reviews this. Honouring it deletes all ${folderTarget.total} document${folderTarget.total === 1 ? "" : "s"} in this folder. Nothing is removed yet.`
+          }
+          // Admins confirm; a request must say why.
+          label={canManage ? undefined : "Why should it be deleted?"}
+          placeholder="e.g. superseded by the new API docs"
+          confirmLabel={canManage ? "Delete folder" : "Request deletion"}
+          destructive={canManage}
+          onConfirm={handleFolderDeletion}
+        />
+      )}
+
+      {deleteNodeTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setDeleteNodeTarget(null)}
+          title={`Delete "${deleteNodeTarget.title}"?`}
+          description="This removes the document, its version history, comments and annotations. It cannot be undone."
+          confirmLabel="Delete document"
+          destructive
+          onConfirm={handleDeleteNode}
+        />
+      )}
+
+      {deletionTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setDeletionTarget(null)}
+          title={`Request deletion of "${deletionTarget.title}"`}
+          description="A nest admin reviews this and either deletes the document or declines with a note. Nothing is removed yet."
+          label="Why should it be deleted?"
+          placeholder="e.g. superseded by the new runbook"
+          confirmLabel="Request deletion"
+          priorDecline={
+            flagByNode.get(deletionTarget.id)?.status === "declined"
+              ? flagByNode.get(deletionTarget.id)
+              : null
+          }
+          onConfirm={handleRequestDeletion}
+        />
+      )}
+
+      {resolveTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setResolveTarget(null)}
+          title={
+            resolveTarget.action === "delete"
+              ? `Delete "${resolveTarget.request.title || resolveTarget.request.nodeId}"?`
+              : "Decline this deletion request"
+          }
+          description={
+            resolveTarget.action === "delete"
+              ? `${resolveTarget.request.requestedBy} asked for this: "${resolveTarget.request.reason}". Deleting cannot be undone.`
+              : `${resolveTarget.request.requestedBy} asked for this: "${resolveTarget.request.reason}". The document stays; your note is the record.`
+          }
+          // No label on the delete branch — that dialog is a plain confirm.
+          label={
+            resolveTarget.action === "decline"
+              ? "Why are you declining?"
+              : undefined
+          }
+          placeholder="e.g. still referenced by onboarding"
+          confirmLabel={
+            resolveTarget.action === "delete" ? "Delete document" : "Decline"
+          }
+          destructive={resolveTarget.action === "delete"}
+          onConfirm={
+            resolveTarget.action === "delete"
+              ? handleHonourDeletion
+              : handleDeclineDeletion
+          }
+        />
+      )}
+
       {versionNode && (
         <VersionHistoryModal
           open
           onClose={() => setVersionNode(null)}
           title={versionNode.title}
           versionData={versionData}
+          onLoadContent={async (v) =>
+            (await api.getNodeVersionContent(nestId, versionNode.id, v)).content
+          }
           onRestore={async (v) => {
             if (!versionNode) return;
             try {
@@ -3482,9 +3931,12 @@ function ReviewDocumentModal({
       return;
     }
     try {
-      const { nodes } = await api.searchNodes(nestId, title);
-      const exact = (nodes as Array<{ id: string; title: string }>).find(
-        (n) => n.title.toLowerCase() === title.toLowerCase(),
+      // Full list + shared id/title/slug resolver (same rule as the editor) so
+      // a [[nodes/slug]] or slug-form link resolves here too, not title-only.
+      const { nodes } = await api.listNodes(nestId);
+      const exact = resolveWikiTarget(
+        nodes as Array<{ id: string; title: string }>,
+        title,
       );
       if (exact) {
         onOpenDocument(exact.id);

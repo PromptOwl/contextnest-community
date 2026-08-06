@@ -7,6 +7,7 @@
 
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
+import { ConflictError } from "../shared/errors.js";
 import { notifyReviewRequested, notifyReviewResolved } from "./notify-service.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 import { notifyNestEvent } from "../notify/notify.js";
@@ -17,7 +18,14 @@ import { engineCache } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
 import * as versions from "./version-service.js";
-import { buildTitleMap, describeNode, buildDocContext } from "./title-resolver.js";
+import {
+  buildTitleMap,
+  describeNode,
+  titleForNode,
+  buildDocContext,
+  nestName,
+  prettyFolderPath,
+} from "./title-resolver.js";
 import type {
   ReviewRequest,
   ReviewRequestPriority,
@@ -608,6 +616,468 @@ export async function getPendingReview(
     [nestId, nodeId],
   )) as any;
   return row ? rowToReviewRequest(row) : null;
+}
+
+// ─── Deletion Requests ──────────────────────────────────────────────────
+// Deleting a node is write-tier, so a reader/editor without that tier flags it
+// here with a reason and a writer resolves it from the queue. Separate rows
+// from review_requests on purpose: a flagged node is NOT under review, and
+// reusing that table would lock it against edits and surface it in the
+// content-review feed. Honouring a request deletes the node, which purges the
+// row via NODE_KEYED_TABLES; declining keeps it with the resolver's note.
+
+export type DeletionTargetType = "document" | "folder" | "nest";
+
+export interface DeletionRequest {
+  id: string;
+  nestId: string;
+  /** The target: a node id, a folder path ("api/limits"), or the nest id.
+   *  `targetType` says which — one column, one code path for all three. */
+  nodeId: string;
+  targetType: DeletionTargetType;
+  title?: string;
+  requestedBy: string;
+  reason: string;
+  status: "pending" | "declined";
+  createdAt: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+  resolutionNote?: string;
+}
+
+/** Human label for a target, used in the queue, inbox rows and emails. */
+export async function deletionTargetTitle(
+  request: Pick<DeletionRequest, "nestId" | "nodeId" | "targetType">,
+  titles?: Map<string, string>,
+): Promise<string> {
+  if (request.targetType === "folder") return prettyFolderPath(request.nodeId);
+  if (request.targetType === "nest") return await nestName(request.nestId);
+  return (
+    titles?.get(request.nodeId) ??
+    (await titleForNode(request.nestId, request.nodeId))
+  );
+}
+
+/** Emails of the people who can action a deletion: the nest owner plus
+ *  owner/admin collaborators. Mirrors the UI's `canManage` — the tier that
+ *  sees the Delete affordance is the tier that gets told about a request. */
+async function nestAdminEmails(nestId: string): Promise<string[]> {
+  const db = getDb();
+  const rows = (await db.all(
+    `SELECT u.email FROM nests n JOIN users u ON u.id = n.user_id WHERE n.id = ?
+     UNION
+     SELECT u.email FROM nest_collaborators nc JOIN users u ON u.id = nc.user_id
+      WHERE nc.nest_id = ? AND nc.permission IN ('owner', 'admin')`,
+    [nestId, nestId],
+  )) as Array<{ email: string }>;
+  return [...new Set(rows.map((r) => r.email.toLowerCase()))];
+}
+
+/** Inbox rows for /me/work. Best-effort by contract, like every other
+ *  notification path here — a delivery failure must never fail the action. */
+async function inboxInsert(
+  nestId: string,
+  recipients: string[],
+  kind: string,
+  subjectId: string,
+  message: string,
+): Promise<void> {
+  const db = getDb();
+  const now = new Date().toISOString();
+  for (const email of recipients) {
+    try {
+      await db.run(
+        `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [uuid(), nestId, email.toLowerCase(), kind, subjectId, message, now],
+      );
+    } catch (err) {
+      console.error("[notify] deletion inbox insert failed", nestId, email, err);
+    }
+  }
+}
+
+/**
+ * Notification context for any target kind. Documents keep buildDocContext's
+ * title + folder + deep link; a folder or nest has no document to describe, so
+ * the label is the path / nest name and the link points at the nest.
+ */
+async function deletionTargetContext(
+  request: DeletionRequest,
+  baseUrl?: string,
+): Promise<{
+  noun: string;
+  label: string;
+  docTitle: string;
+  path: string;
+  link: string;
+}> {
+  if (request.targetType === "document") {
+    const ctx = await buildDocContext(request.nestId, request.nodeId, baseUrl);
+    return { noun: "document", ...ctx };
+  }
+  const name = await nestName(request.nestId);
+  const label =
+    request.targetType === "folder"
+      ? prettyFolderPath(request.nodeId)
+      : name;
+  return {
+    noun: request.targetType,
+    label,
+    docTitle: label,
+    path: name,
+    link: baseUrl
+      ? `${baseUrl}/?nest=${encodeURIComponent(request.nestId)}`
+      : "",
+  };
+}
+
+/**
+ * Tell the nest admins a document was flagged: inbox row, Slack/Teams (via
+ * both the connector table and the digest), and a direct email. The requester
+ * is skipped — they know, they asked.
+ */
+async function notifyDeletionRequested(
+  request: DeletionRequest,
+  baseUrl?: string,
+): Promise<void> {
+  try {
+    const ctx = await deletionTargetContext(request, baseUrl);
+    const line = `Deletion requested for ${ctx.noun} *${ctx.label}* by ${request.requestedBy} — "${request.reason}"`;
+    const admins = (await nestAdminEmails(request.nestId)).filter(
+      (e) => e !== request.requestedBy.toLowerCase(),
+    );
+
+    await inboxInsert(
+      request.nestId,
+      admins,
+      "deletion_requested",
+      request.id,
+      `${ctx.noun === "document" ? "" : `${ctx.noun} `}"${ctx.docTitle}" was flagged for deletion by ${request.requestedBy} — "${request.reason}"`,
+    );
+
+    void dispatchEvent({
+      kind: "deletion_requested",
+      nestId: request.nestId,
+      subjectId: request.nodeId,
+      actor: request.requestedBy,
+      message: line,
+    });
+    void notifyNestEvent(
+      request.nestId,
+      `:wastebasket: ${line}`,
+      {
+        status: "deletion_requested",
+        docTitle: ctx.docTitle,
+        path: ctx.path,
+        link: ctx.link,
+        actor: request.requestedBy,
+        note: request.reason,
+      },
+      // The admins are emailed directly below; don't also hit the shared
+      // NOTIFY_EMAIL_TO team inbox with the same event.
+      { skipEmail: true },
+    );
+    if (admins.length > 0) {
+      void sendEmailToRecipient(admins, {
+        status: "deletion_requested",
+        docTitle: ctx.docTitle,
+        path: ctx.path,
+        link: ctx.link,
+        actor: request.requestedBy,
+        note: request.reason,
+      });
+    }
+  } catch (err) {
+    console.error(
+      "[notify] deletion request fan-out failed",
+      request.nestId,
+      request.nodeId,
+      err,
+    );
+  }
+}
+
+/**
+ * Tell the requester the verdict — the only way they learn it, since an
+ * honoured request takes the document (and its row) with it. `docTitle` is
+ * passed in because on the delete path the node is already gone by now.
+ */
+export async function notifyDeletionResolved(params: {
+  nestId: string;
+  nodeId: string;
+  docTitle: string;
+  outcome: "deleted" | "declined";
+  requestedBy: string;
+  resolvedBy: string;
+  requestId: string;
+  targetType?: DeletionTargetType;
+  note?: string;
+  baseUrl?: string;
+}): Promise<void> {
+  try {
+    const { outcome, resolvedBy, note } = params;
+    const verb = outcome === "deleted" ? "deleted" : "declined the deletion of";
+    const line = `${resolvedBy} ${verb} *${params.docTitle}*${note ? ` — "${note}"` : ""}`;
+    const recipient = params.requestedBy.toLowerCase();
+
+    // An honoured NEST deletion has no inbox row to write: notifications are
+    // nest-scoped and cascade with the nest that just went away. Email and the
+    // connectors carry that verdict instead — they aren't rows.
+    const canInbox = !(params.targetType === "nest" && outcome === "deleted");
+
+    // Nothing to tell someone about their own click.
+    if (canInbox && recipient !== resolvedBy.toLowerCase()) {
+      await inboxInsert(
+        params.nestId,
+        [recipient],
+        `deletion_${outcome}`,
+        params.requestId,
+        outcome === "deleted"
+          ? `"${params.docTitle}" was deleted by ${resolvedBy} — your request was accepted`
+          : `Your deletion request for "${params.docTitle}" was declined by ${resolvedBy}${note ? ` — "${note}"` : ""}`,
+      );
+    }
+
+    void dispatchEvent({
+      kind: `deletion_${outcome}`,
+      nestId: params.nestId,
+      subjectId: params.nodeId,
+      actor: resolvedBy,
+      message: line,
+    });
+    void notifyNestEvent(
+      params.nestId,
+      `${outcome === "deleted" ? ":wastebasket:" : ":no_entry_sign:"} ${line}`,
+      undefined,
+      // Verdict emails the requester directly (below), not the team inbox.
+      { skipEmail: true },
+    );
+    if (recipient !== resolvedBy.toLowerCase()) {
+      // A deleted document has no link left to offer — the nest does.
+      const link = params.baseUrl
+        ? `${params.baseUrl}/?nest=${encodeURIComponent(params.nestId)}`
+        : "";
+      void sendEmailToRecipient(recipient, {
+        status: outcome === "deleted" ? "deletion_deleted" : "deletion_declined",
+        docTitle: params.docTitle,
+        path: params.nestId,
+        link: outcome === "deleted" ? link : undefined,
+        actor: resolvedBy,
+        note: note || null,
+      });
+    }
+  } catch (err) {
+    console.error(
+      "[notify] deletion verdict fan-out failed",
+      params.nestId,
+      params.nodeId,
+      err,
+    );
+  }
+}
+
+export async function requestDeletion(params: {
+  nestId: string;
+  /** Node id, folder path, or nest id — see `targetType`. */
+  nodeId: string;
+  targetType?: DeletionTargetType;
+  requestedBy: string;
+  reason: string;
+  /** Request origin, for building the notification's document link. */
+  baseUrl?: string;
+}): Promise<DeletionRequest> {
+  const db = getDb();
+  const targetType = params.targetType || "document";
+  const noun =
+    targetType === "document" ? "node" : targetType === "folder" ? "folder" : "nest";
+  const existing = await db.get(
+    "SELECT id FROM deletion_requests WHERE nest_id = ? AND node_id = ? AND target_type = ? AND status = 'pending'",
+    [params.nestId, params.nodeId, targetType],
+  );
+  if (existing) {
+    throw new ConflictError(`A deletion request is already pending for this ${noun}`);
+  }
+
+  const id = uuid();
+  try {
+    await db.run(
+      `INSERT INTO deletion_requests (id, nest_id, node_id, target_type, requested_by, reason)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        params.nestId,
+        params.nodeId,
+        targetType,
+        params.requestedBy,
+        params.reason,
+      ],
+    );
+  } catch (err) {
+    // The partial unique index is the backstop for two concurrent flags racing
+    // past the check above — same answer as the check, not a 500. Log first:
+    // any OTHER insert failure (FK, connection drop) would otherwise be
+    // reported to the user as a misleading "already pending".
+    console.error(
+      "[deletion] request insert failed",
+      params.nestId,
+      params.nodeId,
+      err,
+    );
+    throw new ConflictError(`A deletion request is already pending for this ${noun}`);
+  }
+  const request = (await getDeletionRequest(id))!;
+  await notifyDeletionRequested(request, params.baseUrl);
+  return request;
+}
+
+/** The node's most recent request, whatever its state. Drives the document
+ *  badge: pending hides the flag affordance, declined tells the person who
+ *  asked what the answer was — without it a decline is silent. */
+export async function getLatestDeletionRequest(
+  nestId: string,
+  nodeId: string,
+): Promise<DeletionRequest | null> {
+  const db = getDb();
+  const row = (await db.get(
+    `SELECT * FROM deletion_requests WHERE nest_id = ? AND node_id = ?
+       ORDER BY created_at DESC LIMIT 1`,
+    [nestId, nodeId],
+  )) as any;
+  return row ? rowToDeletionRequest(row) : null;
+}
+
+export async function getDeletionRequest(
+  id: string,
+): Promise<DeletionRequest | null> {
+  const db = getDb();
+  const row = (await db.get(
+    "SELECT * FROM deletion_requests WHERE id = ?",
+    [id],
+  )) as any;
+  return row ? rowToDeletionRequest(row) : null;
+}
+
+export async function listDeletionRequests(params: {
+  nestId?: string;
+  /** Cross-nest scope for the /me/work inbox — the caller's visible nests. */
+  nestIds?: string[];
+  /** "all" returns pending + declined — one call for a client that badges
+   *  both states (a declined flag is how the requester learns the answer). */
+  status?: "pending" | "declined" | "all";
+}): Promise<DeletionRequest[]> {
+  const db = getDb();
+  const status = params.status || "pending";
+  const where: string[] = [];
+  const args: any[] = [];
+  if (params.nestId) {
+    where.push("nest_id = ?");
+    args.push(params.nestId);
+  }
+  if (params.nestIds) {
+    // Empty set = no visible nests. Short-circuit rather than emit `IN ()`.
+    if (params.nestIds.length === 0) return [];
+    where.push(`nest_id IN (${params.nestIds.map(() => "?").join(",")})`);
+    args.push(...params.nestIds);
+  }
+  if (status !== "all") {
+    where.push("status = ?");
+    args.push(status);
+  }
+  const rows = (await db.all(
+    `SELECT * FROM deletion_requests${
+      where.length ? ` WHERE ${where.join(" AND ")}` : ""
+    } ORDER BY created_at DESC`,
+    args,
+  )) as any[];
+  if (rows.length === 0) return [];
+  // Same reason the review queue resolves titles: the DB only stores node ids
+  // like "nodes/api-rate-limits", and rendering those raw leaks storage paths.
+  // One title map per nest — the queue can span nests via nestIds. Folder and
+  // nest targets resolve their own label (no document to look up).
+  const titlesByNest = new Map<string, Map<string, string>>();
+  for (const nid of new Set(rows.map((r) => r.nest_id as string))) {
+    titlesByNest.set(nid, await buildTitleMap(nid));
+  }
+  const out: DeletionRequest[] = [];
+  for (const r of rows) {
+    const request = rowToDeletionRequest(r);
+    out.push({
+      ...request,
+      title: await deletionTargetTitle(request, titlesByNest.get(r.nest_id)),
+    });
+  }
+  return out;
+}
+
+/**
+ * Drop a request that was honoured. A document's row is purged with the rest
+ * of its node-keyed rows by deleteNode, and a nest's cascades with the nest —
+ * a folder is neither, so its row is removed here. Same end state for all
+ * three: an honoured request leaves the queue rather than lingering resolved.
+ */
+export async function dropDeletionRequest(id: string): Promise<void> {
+  await getDb().run("DELETE FROM deletion_requests WHERE id = ?", [id]);
+}
+
+/** Decline a pending request, keeping the row (and the note) as the record.
+ *  Returns null when it is already resolved or belongs to another nest. */
+export async function declineDeletion(params: {
+  nestId: string;
+  id: string;
+  declinedBy: string;
+  note: string;
+  /** Request origin, for building the notification's document link. */
+  baseUrl?: string;
+}): Promise<DeletionRequest | null> {
+  const db = getDb();
+  const pending = await getDeletionRequest(params.id);
+  if (!pending || pending.nestId !== params.nestId || pending.status !== "pending") {
+    return null;
+  }
+  // The read above and this write aren't atomic, so two declines can both pass
+  // it — the `status = 'pending'` predicate lets exactly one through. Without
+  // checking `changes`, the loser would also notify, telling the requester it
+  // was declined by the wrong admin with the wrong note.
+  const { changes } = await db.run(
+    `UPDATE deletion_requests
+       SET status = 'declined', resolved_by = ?, resolved_at = ${nowExpr(db)},
+           resolution_note = ?
+     WHERE id = ? AND status = 'pending'`,
+    [params.declinedBy, params.note, params.id],
+  );
+  if (changes === 0) return null;
+  const declined = await getDeletionRequest(params.id);
+  if (declined) {
+    await notifyDeletionResolved({
+      nestId: params.nestId,
+      nodeId: declined.nodeId,
+      docTitle: await deletionTargetTitle(declined),
+      outcome: "declined",
+      requestedBy: declined.requestedBy,
+      resolvedBy: params.declinedBy,
+      requestId: declined.id,
+      note: params.note,
+      baseUrl: params.baseUrl,
+    });
+  }
+  return declined;
+}
+
+function rowToDeletionRequest(row: any): DeletionRequest {
+  return {
+    id: row.id,
+    nestId: row.nest_id,
+    nodeId: row.node_id,
+    targetType: (row.target_type || "document") as DeletionTargetType,
+    requestedBy: row.requested_by,
+    reason: row.reason,
+    status: row.status,
+    createdAt: row.created_at,
+    resolvedBy: row.resolved_by || undefined,
+    resolvedAt: row.resolved_at || undefined,
+    resolutionNote: row.resolution_note || undefined,
+  };
 }
 
 // ─── Permission Check ───────────────────────────────────────────────────

@@ -12,16 +12,19 @@ import { GuidePage } from "./components/GuidePage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen } from "./components/QuickOpen";
+import { deriveNestCaps } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
 import { DefinitionsPage } from "./components/DefinitionsPage";
+import { MaturityBoard } from "./components/MaturityBoard";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { BetaBadge } from "@/components/ui/beta-badge";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -62,6 +65,13 @@ type View =
       /** Seed the nest list's search filter when arriving via a tag
        *  click on a document detail page. */
       initialSearch?: string;
+      /** Pre-scope the nest list when arriving from a tag chip or a folder
+       *  breadcrumb segment on a document/graph page. */
+      initialTags?: string[];
+      initialFolder?: string;
+      /** Which of NestView's own tabs is open, mirrored to ?tab= so a link
+       *  to the Review Queue lands on the Review Queue. Absent = overview. */
+      tab?: string;
     }
   | {
       page: "document";
@@ -109,6 +119,13 @@ type View =
       isAnonOwned: boolean;
     }
   | {
+      page: "board";
+      nestId: string;
+      nestName: string;
+      isOwner: boolean;
+      isAnonOwned: boolean;
+    }
+  | {
       /** Nest-scoped activity trace (owner/nest-admin) — ActivityTracePage
        *  in nest mode, backed by GET /nests/:id/trace. */
       page: "nest-trace";
@@ -117,6 +134,32 @@ type View =
       isOwner: boolean;
       isAnonOwned: boolean;
     };
+
+/** The views of a single nest, in switcher order. "Nest" (not "Documents")
+ *  because the nest page has its own Documents tab inside it. */
+const NEST_VIEWS = [
+  { page: "nest", label: "Nest", icon: FileText },
+  { page: "board", label: "Board", icon: LayoutGrid },
+  { page: "ontology-graph", label: "Graph", icon: Network },
+  { page: "definitions", label: "Definitions", icon: BookMarked },
+  { page: "workflows", label: "Workflows", icon: Workflow, beta: true },
+] as const;
+
+/** NestView's own tab slugs — the whitelist for ?tab=. Some are permission
+ *  gated inside NestView, which falls back to overview when one isn't shown. */
+const NEST_TABS = [
+  "overview",
+  "documents",
+  "review",
+  "external-edits",
+  "stewards",
+  "collaborators",
+];
+
+type NestScopedView = Extract<View, { page: (typeof NEST_VIEWS)[number]["page"] }>;
+
+const isNestScoped = (view: View): view is NestScopedView =>
+  NEST_VIEWS.some((v) => v.page === view.page);
 
 // Runs the ?sso_error toast exactly once per page load (survives React
 // StrictMode's dev double-mount). Resets naturally on the next full navigation.
@@ -282,6 +325,7 @@ export default function App() {
           sub === "graph" ? "ontology-graph"
           : sub === "workflows" && workflowPlaneEnabled ? "workflows"
           : sub === "definitions" ? "definitions"
+          : sub === "board" ? "board"
           : sub === "trace" ? "nest-trace"
           : null;
         if (subPage) {
@@ -300,6 +344,12 @@ export default function App() {
           nestName: nest.name,
           isOwner,
           isAnonOwned: false,
+          // ?tab=<slug> → open on that NestView tab. Unknown slugs are
+          // dropped rather than passed through, so a stale link can't leave
+          // Radix with a value that matches no trigger (blank content area).
+          tab: NEST_TABS.includes(params.get("tab") ?? "")
+            ? params.get("tab")!
+            : undefined,
         });
       } catch {
         if (!cancelled) setDeepLinkProbe({ status: "missing" });
@@ -328,22 +378,29 @@ export default function App() {
       if (view.initialThreadId) params.set("thread", view.initialThreadId);
       else params.delete("thread");
       params.delete("view");
+      params.delete("tab");
     } else if (view.page === "nest") {
       params.set("nest", view.nestId);
       params.delete("doc");
       params.delete("thread");
       params.delete("view");
+      // Overview is the default, so it stays out of the URL — a plain ?nest
+      // link keeps working and doesn't grow a redundant &tab=overview.
+      if (view.tab && view.tab !== "overview") params.set("tab", view.tab);
+      else params.delete("tab");
     } else if (
       // Nest-scoped sub-pages: keep ?nest and tag the sub-view so the address
       // bar stays shareable instead of dropping the nest context.
       view.page === "ontology-graph" ||
       view.page === "workflows" ||
       view.page === "definitions" ||
+      view.page === "board" ||
       view.page === "nest-trace"
     ) {
       params.set("nest", view.nestId);
       params.delete("doc");
       params.delete("thread");
+      params.delete("tab");
       params.set(
         "view",
         view.page === "ontology-graph"
@@ -352,13 +409,16 @@ export default function App() {
             ? "workflows"
             : view.page === "definitions"
               ? "definitions"
-              : "trace",
+              : view.page === "board"
+                ? "board"
+                : "trace",
       );
     } else {
       params.delete("nest");
       params.delete("doc");
       params.delete("thread");
       params.delete("view");
+      params.delete("tab");
     }
     const qs = params.toString();
     const next =
@@ -369,6 +429,79 @@ export default function App() {
       window.history.replaceState({}, "", next);
     }
   }, [view, deepLinkProbe.status]);
+
+  // Caller's write access on the nest currently in view, for gating the
+  // Workflows tab (an execution plane — every action inside it mutates).
+  // null = not resolved yet; the tab stays hidden until we know, so a viewer
+  // never sees it flash. getNest is cached, so this shares NestView's fetch.
+  const nestScopedId = isNestScoped(view) ? view.nestId : null;
+  const nestScopedIsOwner = isNestScoped(view) ? view.isOwner : false;
+  const [nestCanEdit, setNestCanEdit] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!nestScopedId) {
+      setNestCanEdit(null);
+      return;
+    }
+    let cancelled = false;
+    getNest(nestScopedId)
+      .then((meta: any) => {
+        if (cancelled) return;
+        setNestCanEdit(
+          deriveNestCaps({
+            roles: meta?.roles ?? [],
+            permission: meta?.permission ?? null,
+            myStewards: meta?.myStewards ?? [],
+            isOwner: nestScopedIsOwner,
+            isAdmin,
+          }).canEditDocs,
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setNestCanEdit(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [nestScopedId, nestScopedIsOwner, isAdmin]);
+
+  // A read-only caller who deep-links ?view=workflows would otherwise sit on a
+  // page whose tab isn't in the strip. Bounce once caps actually resolve —
+  // never while they're still null, or writers would get bounced mid-load.
+  useEffect(() => {
+    if (view.page === "workflows" && nestCanEdit === false) {
+      setView({
+        page: "nest",
+        nestId: view.nestId,
+        nestName: view.nestName,
+        isOwner: view.isOwner,
+        isAnonOwned: view.isAnonOwned,
+      });
+    }
+  }, [view, nestCanEdit]);
+
+  // Back out of the nest entirely. Shared by all five nest-scoped pages —
+  // their back arrows used to return to the nest page, but the view switcher
+  // makes that a tab click, so back now means "leave this nest".
+  const leaveNest = useCallback(() => {
+    // Drop ?nest from URL so refresh doesn't re-enter the nest.
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has("nest")) {
+        params.delete("nest");
+        const qs = params.toString();
+        window.history.replaceState(
+          {},
+          "",
+          window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
+        );
+      }
+    }
+    // Unauth → bounce to Login (Dashboard would 401).
+    if (!authenticated && authMode === "key") {
+      setDeepLinkProbe({ status: "missing" });
+    }
+    setView({ page: "dashboard" });
+  }, [authenticated, authMode]);
 
   // One-click PromptOwl SSO (GET /auth/sso) bounces back to "/?sso_error=<code>"
   // when a ticket can't be redeemed (bad/expired/replayed ticket, wrong
@@ -566,7 +699,10 @@ export default function App() {
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
-      <header className="border-b border-border bg-card">
+      <header className="bg-card">
+        {/* The divider sits under the top row, not under the tabs — the tab
+            row reads as part of the page below it, not a second bar. */}
+        <div className="border-b border-border">
         <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
           <button
             onClick={() => setView({ page: "dashboard" })}
@@ -584,6 +720,22 @@ export default function App() {
           </button>
 
           <div className="flex items-center gap-2">
+            {/* Prominent search entry — pulls full-text search out of the
+                buried Documents filter bar. Opens the same QuickOpen palette
+                as ⌘K. Shown wherever QuickOpen is available (nest/document). */}
+            {(view.page === "nest" || view.page === "document") && (
+              <button
+                onClick={() => setShowQuickOpen(true)}
+                title="Search this nest (⌘K)"
+                className="hidden sm:flex items-center gap-2 h-8 pl-2.5 pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+              >
+                <Search className="h-3.5 w-3.5" />
+                <span>Search</span>
+                <kbd className="ml-1 text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
+                  ⌘K
+                </kbd>
+              </button>
+            )}
             {/* Mode indicator — only when not logged-in (logged-in
                 users see open-mode context inside the dropdown) */}
             {authMode === "open" && !adminStatus?.me && (
@@ -612,63 +764,10 @@ export default function App() {
               </Button>
             )}
 
-            {view.page === "nest" && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  setView({
-                    page: "ontology-graph",
-                    nestId: view.nestId,
-                    nestName: view.nestName,
-                    isOwner: view.isOwner,
-                    isAnonOwned: view.isAnonOwned,
-                  })
-                }
-              >
-                <Network className="h-3.5 w-3.5 mr-1" />
-                Graph
-              </Button>
-            )}
-
-            {view.page === "nest" && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  setView({
-                    page: "definitions",
-                    nestId: view.nestId,
-                    nestName: view.nestName,
-                    isOwner: view.isOwner,
-                    isAnonOwned: view.isAnonOwned,
-                  })
-                }
-              >
-                <BookMarked className="h-3.5 w-3.5 mr-1" />
-                Definitions
-              </Button>
-            )}
-
-            {view.page === "nest" && workflowPlaneEnabled && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() =>
-                  setView({
-                    page: "workflows",
-                    nestId: view.nestId,
-                    nestName: view.nestName,
-                    isOwner: view.isOwner,
-                    isAnonOwned: view.isAnonOwned,
-                  })
-                }
-              >
-                <Workflow className="h-3.5 w-3.5 mr-1" />
-                Workflows
-                <BetaBadge className="ml-1.5" />
-              </Button>
-            )}
+            {/* Graph / Definitions / Board / Workflows used to live here as
+                four separate buttons. They are views OF a nest, not global
+                actions, so they moved to the nest view switcher below — which
+                also keeps them reachable from each other. */}
 
             {adminStatus?.me ? (
               <UserMenu
@@ -694,10 +793,54 @@ export default function App() {
             )}
           </div>
         </div>
+        </div>
+
+        {/* Nest view switcher — one row for every view of the current nest.
+            Rendered on all five nest-scoped pages (not just the nest page) so
+            Board ⇄ Graph is one click instead of a trip back through the nest.
+            Lives inside <header> so the whole block is one surface with a
+            single bottom border, rather than two stacked bars.
+            Nest context is read straight off the view: every page in
+            NEST_VIEWS carries the same nestId/nestName/isOwner/isAnonOwned. */}
+        {isNestScoped(view) && (
+          <div className="max-w-6xl mx-auto px-4 py-2 overflow-x-auto">
+            <Tabs
+              value={view.page}
+              onValueChange={(page) =>
+                setView({
+                  page,
+                  nestId: view.nestId,
+                  nestName: view.nestName,
+                  isOwner: view.isOwner,
+                  isAnonOwned: view.isAnonOwned,
+                } as View)
+              }
+            >
+              <TabsList>
+                {NEST_VIEWS.filter(
+                  (v) =>
+                    v.page !== "workflows" ||
+                    (workflowPlaneEnabled && nestCanEdit === true),
+                ).map((v) => {
+                  const Icon = v.icon;
+                  return (
+                    <TabsTrigger key={v.page} value={v.page} className="gap-1.5">
+                      <Icon className="h-3.5 w-3.5" />
+                      {v.label}
+                      {"beta" in v && <BetaBadge />}
+                    </TabsTrigger>
+                  );
+                })}
+              </TabsList>
+            </Tabs>
+          </div>
+        )}
       </header>
 
       {/* Content */}
-      <main className="max-w-6xl mx-auto px-4 py-6">
+      {/* <main> owns page padding for every view — page roots must not add
+          their own md:py-*, or one section sits lower than the next. */}
+      <main className="max-w-6xl mx-auto px-4 py-4">
         {view.page === "dashboard" && (
           <Dashboard
             onSelectNest={(id, name, isOwner, isAnonOwned) =>
@@ -728,26 +871,11 @@ export default function App() {
             isOwner={view.isOwner}
             isAnonOwned={view.isAnonOwned}
             initialSearch={view.initialSearch}
-            onBack={() => {
-              // Drop ?nest from URL so refresh doesn't re-enter the nest.
-              if (typeof window !== "undefined") {
-                const params = new URLSearchParams(window.location.search);
-                if (params.has("nest")) {
-                  params.delete("nest");
-                  const qs = params.toString();
-                  window.history.replaceState(
-                    {},
-                    "",
-                    window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
-                  );
-                }
-              }
-              // Unauth → bounce to Login (Dashboard would 401).
-              if (!authenticated && authMode === "key") {
-                setDeepLinkProbe({ status: "missing" });
-              }
-              setView({ page: "dashboard" });
-            }}
+            initialTags={view.initialTags}
+            initialFolder={view.initialFolder}
+            initialTab={view.tab}
+            onTabChange={(tab) => setView({ ...view, tab })}
+            onBack={leaveNest}
             onOpenDocument={(nodeId, opts) =>
               setView({
                 page: "document",
@@ -797,14 +925,18 @@ export default function App() {
             initialTitle?: string;
             breadcrumb?: BreadcrumbEntry[];
           }) => setView({ page: "document", ...target });
-          const openNest = (initialSearch?: string) =>
+          const openNest = (opts?: {
+            initialSearch?: string;
+            initialTags?: string[];
+            initialFolder?: string;
+          }) =>
             setView({
               page: "nest",
               nestId: doc.nestId,
               nestName: doc.nestName,
               isOwner: doc.isOwner,
               isAnonOwned: doc.isAnonOwned,
-              initialSearch,
+              ...opts,
             });
           return (
             <DocumentEditor
@@ -890,9 +1022,12 @@ export default function App() {
                 });
               }}
               onTagClick={(tag) =>
-                // Tag chip → nest list filtered by tag.
-                openNest(tag)
+                // Tag chip → nest list filtered by that tag (same tagFilters
+                // mechanism the list rows use, not a text search).
+                openNest({ initialTags: [tag] })
               }
+              onOpenNest={() => openNest()}
+              onOpenFolder={(folder) => openNest({ initialFolder: folder })}
               onCreateDocument={(linkNestId, initialTitle) =>
                 // Broken `[[Title]]` → new-doc page with title pre-filled.
                 openDocument({
@@ -912,11 +1047,21 @@ export default function App() {
           <DefinitionsPage
             nestId={view.nestId}
             nestName={view.nestName}
-            onBack={() =>
+            onBack={leaveNest}
+          />
+        )}
+        {view.page === "board" && (
+          <MaturityBoard
+            nestId={view.nestId}
+            nestName={view.nestName}
+            isOwner={view.isOwner}
+            onBack={leaveNest}
+            onOpenDocument={(nodeId) =>
               setView({
-                page: "nest",
+                page: "document",
                 nestId: view.nestId,
                 nestName: view.nestName,
+                nodeId,
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
               })
@@ -947,15 +1092,17 @@ export default function App() {
           <OntologyGraphView
             nestId={view.nestId}
             nestName={view.nestName}
-            onBack={() =>
+            onOpenTag={(tag) =>
               setView({
                 page: "nest",
                 nestId: view.nestId,
                 nestName: view.nestName,
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
+                initialTags: [tag],
               })
             }
+            onBack={leaveNest}
           />
         )}
 
@@ -967,15 +1114,7 @@ export default function App() {
           <WorkflowsView
             nestId={view.nestId}
             nestName={view.nestName}
-            onBack={() =>
-              setView({
-                page: "nest",
-                nestId: view.nestId,
-                nestName: view.nestName,
-                isOwner: view.isOwner,
-                isAnonOwned: view.isAnonOwned,
-              })
-            }
+            onBack={leaveNest}
           />
         )}
       </main>

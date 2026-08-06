@@ -553,21 +553,50 @@ export async function deleteApiKey(keyId: string) {
 
 // ─── Nest settings ─────────────────────────────────────────────────────
 
+export interface NestSettings {
+  stewardship_enabled: boolean;
+  allow_self_approve: boolean;
+  /** Review only prime documents; everything else self-publishes. */
+  prime_only_review: boolean;
+  /** Tags that mark a document prime (normalized, no leading `#`). */
+  prime_tags: string[];
+}
+
 export async function getNestSettings(nestId: string) {
   return cachedRead(`/nests/${nestId}/settings`, () =>
-    request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
-      `/nests/${nestId}/settings`,
-    ),
+    request<NestSettings>(`/nests/${nestId}/settings`),
   );
 }
 
 export async function updateNestSettings(
   nestId: string,
-  data: { stewardship_enabled?: boolean; allow_self_approve?: boolean },
+  data: {
+    stewardship_enabled?: boolean;
+    allow_self_approve?: boolean;
+    prime_only_review?: boolean;
+    prime_tags?: string[];
+  },
 ) {
-  return request<{ stewardship_enabled: boolean; allow_self_approve: boolean }>(
-    `/nests/${nestId}/settings`,
-    { method: "PATCH", body: JSON.stringify(data) },
+  return request<NestSettings>(`/nests/${nestId}/settings`, {
+    method: "PATCH",
+    body: JSON.stringify(data),
+  });
+}
+
+/**
+ * Does this document need steward approval regardless of who edits it?
+ * Mirrors the server's document → tag → nest resolution (`isPrimeDocument`);
+ * the badge is advisory, the server gate is authoritative.
+ */
+export function isPrimeNode(
+  node: { tags?: string[]; prime?: boolean },
+  primeTags: string[],
+): boolean {
+  if (typeof node.prime === "boolean") return node.prime;
+  if (!primeTags.length) return false;
+  const wanted = new Set(primeTags);
+  return (node.tags || []).some((t) =>
+    wanted.has(t.trim().replace(/^#+/, "").toLowerCase()),
   );
 }
 
@@ -801,6 +830,8 @@ export async function createNode(
     folder?: string;
     /** Orchestrator schedule — runnable types (agent/skill) only. */
     schedule?: string;
+    /** Flag as prime (always needs approval). Owner/admin only. */
+    prime?: boolean;
   },
 ) {
   return request<{ node: any; stewards?: any[] }>(`/nests/${nestId}/nodes`, {
@@ -819,6 +850,8 @@ export async function updateNode(
     changeNote?: string;
     /** Runnable types (agent/skill) only; "" clears it. */
     schedule?: string;
+    /** Owner/admin only; `null` clears the flag back to tag/nest inheritance. */
+    prime?: boolean | null;
   },
   baseVersion?: number,
 ) {
@@ -983,6 +1016,84 @@ export async function getNodeStewards(nestId: string, nodeId: string) {
   );
 }
 
+// ── Deletion requests ─────────────────────────────────────────────────────
+// Flagging is open to anyone who can read the node; resolving needs the same
+// write permission a direct delete does (server-enforced).
+
+export interface DeletionRequest {
+  id: string;
+  /** Node id, folder path, or nest id — see targetType. */
+  nodeId: string;
+  targetType?: "document" | "folder" | "nest";
+  title?: string;
+  requestedBy: string;
+  reason: string;
+  status: "pending" | "declined";
+  createdAt: string;
+  resolvedBy?: string;
+  resolutionNote?: string;
+}
+
+export async function requestNodeDeletion(
+  nestId: string,
+  nodeId: string,
+  reason: string,
+) {
+  return request<{ request: DeletionRequest }>(
+    `/nests/${nestId}/nodes/${nodeId}/request-deletion`,
+    { method: "POST", body: JSON.stringify({ reason }) },
+  );
+}
+
+/** Delete a folder and every document under it. Owner/admin only. */
+export async function deleteFolder(nestId: string, folder: string) {
+  return request<{ deleted: number; nodeIds: string[] }>(
+    `/nests/${nestId}/delete-folder`,
+    { method: "POST", body: JSON.stringify({ folder }) },
+  );
+}
+
+/** Flag a whole folder ("api/limits") or the nest itself for deletion. */
+export async function requestTargetDeletion(
+  nestId: string,
+  targetType: "folder" | "nest",
+  target: string,
+  reason: string,
+) {
+  return request<{ request: DeletionRequest }>(
+    `/nests/${nestId}/request-deletion`,
+    {
+      method: "POST",
+      body: JSON.stringify({ targetType, target, reason }),
+    },
+  );
+}
+
+/** status: "pending" | "declined" | "all" */
+export async function getDeletionRequests(nestId: string, status = "pending") {
+  return request<{ requests: DeletionRequest[]; total: number }>(
+    `/nests/${nestId}/deletion-requests?status=${encodeURIComponent(status)}`,
+  );
+}
+
+export async function approveDeletionRequest(nestId: string, id: string) {
+  return request<{ deleted: boolean; nodeId: string }>(
+    `/nests/${nestId}/deletion-requests/${id}/delete`,
+    { method: "POST" },
+  );
+}
+
+export async function declineDeletionRequest(
+  nestId: string,
+  id: string,
+  note: string,
+) {
+  return request<{ request: DeletionRequest }>(
+    `/nests/${nestId}/deletion-requests/${id}/decline`,
+    { method: "POST", body: JSON.stringify({ note }) },
+  );
+}
+
 export async function getReviewQueue(nestId: string, status = "pending") {
   return request<{ requests: any[]; total: number }>(
     `/nests/${nestId}/review-queue?status=${encodeURIComponent(status)}`,
@@ -1101,6 +1212,24 @@ export async function getNodeVersions(nestId: string, nodeId: string) {
     approvedVersion: number | null;
     currentVersion: number;
   }>(`/nests/${nestId}/nodes/${nodeId}/versions`);
+}
+
+/**
+ * One version's full body, reconstructed server-side on demand.
+ *
+ * The versions list ships each version's change log (a small diff) rather than
+ * every full body, so a body is fetched only for the version actually being
+ * previewed, compared, or restored. `content` is null when that version's chain
+ * no longer reconstructs.
+ */
+export async function getNodeVersionContent(
+  nestId: string,
+  nodeId: string,
+  version: number,
+) {
+  return request<{ version: number; content: string | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/versions/${version}`,
+  );
 }
 
 export async function getNodeReviews(nestId: string, nodeId: string) {
@@ -1684,7 +1813,9 @@ export async function getNestGraph(nestId: string) {
 // ─── My Work — cross-nest inbox ──────────────────────────────────────────
 
 export interface WorkItem {
-  type: "review";
+  /** "deletion" = someone asked for the document to be deleted; only nest
+   *  owners/admins get those in the waiting-on-me bucket. */
+  type: "review" | "deletion";
   nest_id: string;
   nest_name: string;
   node_id: string;
@@ -1692,6 +1823,12 @@ export interface WorkItem {
   requested_by: string;
   requested_at: string;
   priority?: string;
+  /** Deletion items only: why it was flagged, and the row to resolve. */
+  reason?: string;
+  request_id?: string;
+  /** Deletion items only. For "folder"/"nest", node_id is a folder path or the
+   *  nest id — NOT a document id, so don't open the editor on it. */
+  target_type?: "document" | "folder" | "nest";
 }
 
 export interface WatcherNotification {
@@ -1722,6 +1859,30 @@ export async function getMyWork(opts?: { limit?: number; offset?: number }) {
     notifications?: WatcherNotification[];
     pagination?: WorkPagination;
   }>(`/me/work${qs ? `?${qs}` : ""}`);
+}
+
+/** A document you left unsubmitted (or that came back rejected). */
+export interface MyDraft {
+  nest_id: string;
+  nest_name: string;
+  node_id: string;
+  title: string;
+  /** Folder path inside the nest ("" for a root-level doc). */
+  folder: string;
+  status: "draft" | "rejected";
+  /** Version that would go to review — shown in the submit dialog. */
+  version: number;
+  updated_at: string;
+}
+
+export async function getMyDrafts(opts?: { limit?: number; offset?: number }) {
+  const q = new URLSearchParams();
+  if (opts?.limit != null) q.set("limit", String(opts.limit));
+  if (opts?.offset != null) q.set("offset", String(opts.offset));
+  const qs = q.toString();
+  return request<{ drafts: MyDraft[]; pagination: WorkPagination }>(
+    `/me/drafts${qs ? `?${qs}` : ""}`,
+  );
 }
 
 export async function approveReview(nestId: string, nodeId: string, note?: string) {

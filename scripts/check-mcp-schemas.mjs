@@ -29,7 +29,36 @@ const MCP_DIR = join(REPO_ROOT, 'src', 'mcp');
 // only), so inline remains the only way to declare a tool schema here. The new tool follows
 // the same pattern as the other 40 rather than introducing drift. Migrate all 41 to the
 // engine module once it lands, then ratchet this back down.
-const BASELINE = 41;
+//
+// Raised 41 -> 42 for `context_delete`, same deliberate exception: engine 1.2.1 DOES define
+// context_delete in its operation catalog (dist/api/ — core namespace, alias
+// delete_document), but the engine's package.json `exports` map lists only ".", so
+// `@promptowl/contextnest-engine/api` is unimportable. The inline schema mirrors that
+// descriptor. Unblocking it is a one-line exports-map addition upstream in
+// PromptOwl/ContextNest — do that, then migrate all 42 at once.
+//
+// Raised 42 -> 43 for `context_move`. Different reason: move is NOT in the engine catalog
+// at all (the id rewrite spans governance tables the engine doesn't own), so there is no
+// upstream descriptor to import. The tool mirrors the existing REST POST /nodes/:id/move.
+// If move is ever promoted to a core engine operation, adopt its descriptor here.
+//
+// Raised 43 -> 46 for the deletion-request trio (`context_request_deletion`,
+// `context_deletion_queue`, `context_resolve_deletion`). Same reason as move: deletion
+// REQUESTS are not in the engine catalog at all — they live in this repo's governance
+// tables (a flag is not a document operation), so there is no upstream descriptor to
+// import. They mirror the REST surface 1:1. Mirror the names upstream if the operation is
+// ever promoted, then adopt its descriptor here.
+// Raised 46 -> 47 for `context_my_drafts`. Same reason as move and the deletion trio: it is
+// not an engine operation at all. "Drafts I never submitted" is derived from this repo's
+// governance tables (node_versions cross-checked against review_requests) — the engine has
+// no notion of a review request, so there is no upstream descriptor to import. It mirrors
+// the REST GET /me/drafts 1:1, nest-scoped. Promote it upstream only if review workflow ever
+// moves into the engine catalog.
+//
+// Raised 47 -> 49 in 1.12.0 for the server-level `nest_create` / `context_create` bootstrap
+// writes — same exception as `context_table_query`: no importable engine module yet, and the
+// tools follow the existing pattern rather than introducing drift.
+const BASELINE = 49;
 
 const INLINE_SCHEMA = /inputSchema:\s*\{/g;
 

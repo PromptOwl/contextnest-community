@@ -10,6 +10,7 @@ import { useState } from "react";
 import { FileWarning, Loader2 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { formatServerDate } from "@/lib/dates";
 import { Textarea } from "@/components/ui/textarea";
 import {
   approveExternalEdit,
@@ -99,7 +100,7 @@ export function ExternalEditBanner({
             This file was edited outside the app.
           </strong>{" "}
           <span className="text-sm text-orange-800/90 dark:text-orange-300/90">
-            Detected {new Date(pending.detected_at).toLocaleString()} ·{" "}
+            Detected {formatServerDate(pending.detected_at)} ·{" "}
             <code className="text-xs">{pending.source}</code>. The displayed
             content is the last approved version; the on-disk change is staged
             for review.
