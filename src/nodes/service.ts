@@ -321,6 +321,15 @@ export interface ListNodesFilters {
   /** One type, or several (e.g. runnable types) to keep. */
   type?: string | readonly string[];
   tag?: string;
+  /** Lifecycle status; aliases normalized. Retired nodes stay hidden without it. */
+  status?: string;
+  /**
+   * Return only nodes with an approved version, and serve that version's body
+   * rather than the live file — the view a public nest gives a stranger. Public
+   * readers get it regardless; this lets any caller ask for it, e.g. to preview
+   * what a nest exposes before making it public.
+   */
+  approvedOnly?: boolean;
   limit?: number;
 }
 
@@ -334,26 +343,42 @@ export async function listNodesForCaller(
   userId: string,
   filters: ListNodesFilters = {}
 ): Promise<NodeResponse[]> {
-  const { storage, versions: versionManager } = await engineCache.get(nestId);
-  let documents = await storage.discoverDocuments();
-
-  // Cheap on-frontmatter filters first — narrows what we enrich below, so the
-  // per-node governance/version work never runs on docs we'd discard anyway.
-  if (filters.type) {
-    const wanted = new Set(
-      Array.isArray(filters.type) ? filters.type : [filters.type]
-    );
-    documents = documents.filter((n) => wanted.has(n.frontmatter.type));
-  }
-  if (filters.tag) {
-    const tag = normalizeTag(filters.tag);
-    documents = documents.filter((n) =>
-      (n.frontmatter.tags || []).includes(tag)
-    );
-  }
-
+  const { versions: versionManager } = await engineCache.get(nestId);
   const userEmail = await resolveCallerEmail(userId);
-  let accessible = await filterAccessible(nestId, userId, userEmail, documents);
+
+  // Discovery and the cheap on-frontmatter filters go through the engine's
+  // canonical browse, so this surface can't drift from the CLI and mcp-server
+  // on what `type: document` or a `#`-less tag means — and so a future
+  // authorization extension on the operation covers this path too.
+  //
+  // `full` because the governance work below gates and renders these documents:
+  // a summary would force a second read of every file. `limit` is deliberately
+  // NOT passed — it applies after access filtering, further down.
+  const { documents } = await engineApi.run<{
+    documents: Array<{ id: string; frontmatter: ContextNode["frontmatter"]; body: string }>;
+  }>(
+    "context_list",
+    {
+      ...(filters.type ? { type: filters.type } : {}),
+      ...(filters.tag ? { tag: filters.tag } : {}),
+      ...(filters.status ? { status: filters.status } : {}),
+      // Unlike the CLI and mcp-server, a retired node stays in this listing:
+      // here it is an unpublished document its stewards may still need to act
+      // on, not one removed from retrieval. An imported vault carrying
+      // `status: rejected` registers exactly that way.
+      include_retired: true,
+      full: true,
+    },
+    await opContext(nestId, userEmail),
+  );
+  const nodes: ContextNode[] = documents.map((d) => ({
+    id: d.id,
+    filePath: "",
+    rawContent: "",
+    frontmatter: d.frontmatter,
+    body: d.body,
+  }));
+  let accessible = await filterAccessible(nestId, userId, userEmail, nodes);
 
   // Share grants: a caller with NO nest-wide permission sees exactly the
   // documents their grants cover — never the whole list. filterAccessible's
@@ -367,10 +392,31 @@ export async function listNodesForCaller(
   ) {
     const grants = await listUserGrants(nestId, userId);
     accessible = grants.length
-      ? documents.filter((d) => grantCoversNode(grants, d.id))
+      ? nodes.filter((d) => grantCoversNode(grants, d.id))
       : accessible;
   }
   const publicReader = await isPublicReader(nestId, userId);
+
+  // Approved-only view: what a public nest shows a stranger. Read once for the
+  // whole nest and reused by the enrichment below, which previously asked for
+  // each node's approved version a second time, one query at a time.
+  const approvedOnly = publicReader || filters.approvedOnly === true;
+  const approvedVersions = approvedOnly
+    ? await versions.getApprovedVersions(nestId)
+    : null;
+  // A public reader was already narrowed to approved nodes by filterAccessible;
+  // any other caller asking for this view is narrowed here.
+  if (approvedVersions && !publicReader) {
+    accessible = accessible.filter((d) => approvedVersions.has(d.id));
+  }
+
+  // Trim to the requested count BEFORE the per-node work below. Enrichment
+  // costs a reconstruct and two governance queries per node, and slicing
+  // afterwards paid all of that for every node the caller was never going to
+  // see — a 50-node MCP listing did a whole 500-node nest's worth of it. After
+  // access filtering, or a node dropped for permissions would come out of the
+  // caller's quota.
+  if (filters.limit) accessible = accessible.slice(0, filters.limit);
 
   // Author + collaborators for exactly the post-filter set — two batched
   // queries for the whole list (see resolveAuthorship), never per-node.
@@ -396,8 +442,8 @@ export async function listNodesForCaller(
         r.collaborators = people.collaborators;
       }
 
-      if (publicReader) {
-        const approved = await versions.getApprovedVersion(nestId, doc.id);
+      if (approvedVersions) {
+        const approved = approvedVersions.get(doc.id);
         if (approved != null) {
           try {
             const raw = await versionManager.reconstructVersion(
@@ -436,7 +482,7 @@ export async function listNodesForCaller(
     })
   );
 
-  return filters.limit ? enriched.slice(0, filters.limit) : enriched;
+  return enriched;
 }
 
 /** Email-keyed wrapper for callers that don't have userId in hand (MCP tools). */

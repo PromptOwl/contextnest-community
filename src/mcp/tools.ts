@@ -139,12 +139,20 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_list",
     description:
-      "Browse vault contents with optional type, tag, or limit filters.",
+      "Browse vault contents with optional type, tag, status, or limit filters.",
     inputSchema: {
       type: "object" as const,
       properties: {
         type: { type: "string", description: "Filter by node type" },
-        tag: { type: "string", description: "Filter by tag" },
+        tag: {
+          type: "string",
+          description: "Filter by tag (leading # optional, case-insensitive)",
+        },
+        status: {
+          type: "string",
+          description:
+            "Filter by status: draft | pending_review | approved | published | rejected. Aliases normalized. Retired nodes are hidden unless asked for.",
+        },
         limit: { type: "number", description: "Max nodes to return" },
       },
     },
@@ -819,6 +827,7 @@ async function runTool(
       const nodes = await listNodesForCallerByEmail(nestId, userEmail, {
         type: args.type,
         tag: args.tag,
+        status: args.status,
         limit: args.limit || 50,
       });
       if (!nodes.length) return "No nodes found with the given filters.";
