@@ -29,6 +29,7 @@ import {
   deleteFolder,
   moveNode,
   listNodesForCallerByEmail,
+  getNodeForCaller,
   isIdUnderFolder,
 } from "../nodes/service.js";
 import { deleteNest } from "../nests/service.js";
@@ -794,17 +795,20 @@ async function runTool(
     }
 
     case "context_get": {
-      const docs = await storage.discoverDocuments();
-      let node: ContextNode | undefined;
-      if (args.title) {
-        node = docs.find(
-          (n) =>
-            n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+      // Shared read. This used to load and parse EVERY file in the vault to
+      // find one node — an id lookup is a direct read, and only a title needs
+      // to search.
+      let node: ContextNode;
+      try {
+        node = await getNodeForCaller(
+          nestId,
+          args.title ? { title: args.title } : { id: args.id },
+          ctx.userId,
+          userEmail,
         );
-      } else if (args.id) {
-        node = docs.find((n) => n.id === args.id);
+      } catch {
+        return `Node not found: ${args.title || args.id}`;
       }
-      if (!node) return `Node not found: ${args.title || args.id}`;
       const body = await resolveLlmBody(ctx, node);
       if (body === null) {
         return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;

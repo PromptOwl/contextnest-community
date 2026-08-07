@@ -41,6 +41,7 @@ import {
   moveNode,
   deleteNode,
   listNodesForCaller,
+  getNodeForCaller,
   resolveAuthorship,
   toNodeResponse,
   bodyOnly,
@@ -322,23 +323,18 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
-  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
-    return c.json(
-      { error: "Access denied — no steward assignment for this node" },
-      403,
-    );
-  }
-
-  let node;
-  try {
-    // verifyChecksum=true triggers drift detection on read; on drift the
-    // engine returns the last-approved canonical body with pendingChange
-    // attached (hootie-inbox-spec §4.2). We then stage the drift as a
-    // suggestion so the next pendingChange lookup resolves a real id.
-    node = await storage.readDocument(nodeId, { verifyChecksum: true });
-  } catch {
-    throw new NotFoundError(`Node not found: ${nodeId}`);
-  }
+  // Shared read: resolves, gates, and asks the engine to verify the checksum so
+  // drift surfaces as pendingChange (last-approved content returned in place of
+  // the live bytes, hootie-inbox-spec §4.2). Staging the drift as a suggestion
+  // stays here — it is what makes the next pendingChange lookup resolve a real
+  // id, and only this surface does it.
+  let node = await getNodeForCaller(
+    nestId,
+    { id: nodeId },
+    userId,
+    userEmail,
+    { verifyChecksum: true },
+  );
   if (node.pendingChange) {
     try {
       await scanDocumentForDrift(nestId, nodeId, userEmail || "system:read");

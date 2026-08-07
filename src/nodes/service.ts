@@ -37,6 +37,7 @@ import { canApproveWith } from "../governance/roles.js";
 import {
   resolveCallerEmail,
   filterAccessible,
+  canReadNode,
 } from "../governance/access-guard.js";
 import { isPublicReader, resolveNestPermission } from "../shared/access.js";
 import {
@@ -338,6 +339,66 @@ export interface ListNodesFilters {
  * pending-change/status resolution. Single source of truth for REST GET
  * /nests/:id/nodes, MCP context_list, and any future surface.
  */
+/**
+ * Read ONE node the way every surface should: resolve the selector, gate it,
+ * and hand back the document.
+ *
+ * REST and MCP each grew their own version of this — the only read in the
+ * service that had no shared choke point, unlike create/update/list. MCP's
+ * loaded and parsed EVERY file in the vault (discoverDocuments) just to find
+ * one node by id.
+ *
+ * Response shaping stays with the caller: REST negotiates raw/markdown/JSON and
+ * resolves workflow status, MCP serves the approved body only. This owns the
+ * read and the access check, nothing above them.
+ */
+export async function getNodeForCaller(
+  nestId: string,
+  selector: { id?: string; title?: string },
+  userId: string,
+  userEmail: string,
+  opts: { verifyChecksum?: boolean } = {},
+): Promise<ContextNode> {
+  let got: {
+    id: string;
+    frontmatter: ContextNode["frontmatter"];
+    body: string;
+    raw?: string;
+    pendingChange?: ContextNode["pendingChange"];
+  };
+  try {
+    got = await engineApi.run(
+      "context_get",
+      {
+        ...selector,
+        include_raw: true,
+        // A retired node stays readable here: its stewards decide whether to
+        // revive it, and they cannot do that if the read refuses.
+        allow_rejected: true,
+        ...(opts.verifyChecksum ? { verify_checksum: true } : {}),
+      },
+      await opContext(nestId, userEmail),
+    );
+  } catch {
+    throw new NotFoundError(`Node not found: ${selector.id ?? selector.title}`);
+  }
+  // Gate on the RESOLVED id — a title selector doesn't tell us which node it
+  // landed on until the operation has run.
+  if (!(await canReadNode(nestId, got.id, userId, userEmail))) {
+    throw new ForbiddenError(
+      "Access denied — no steward assignment for this node",
+    );
+  }
+  return {
+    id: got.id,
+    filePath: "",
+    rawContent: got.raw ?? "",
+    frontmatter: got.frontmatter,
+    body: got.body,
+    ...(got.pendingChange ? { pendingChange: got.pendingChange } : {}),
+  };
+}
+
 export async function listNodesForCaller(
   nestId: string,
   userId: string,
