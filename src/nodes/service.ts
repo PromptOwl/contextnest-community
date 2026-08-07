@@ -13,7 +13,7 @@ import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm } from "node:fs/promises";
 import { dirname, join, basename } from "node:path";
 import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
-import { engineCache } from "./engine.js";
+import { engineCache, engineApi, opContext } from "./engine.js";
 import {
   AppError,
   NotFoundError,
@@ -588,7 +588,6 @@ export async function createNode(
         ? `nodes/${folderSegments.join("/")}/${slug}`
         : `nodes/${slug}`;
   }
-  const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
 
   // Content-type toggles: creation of a disabled type is refused here — the
@@ -672,36 +671,81 @@ export async function createNode(
       tags,
       metadata,
     });
-    const autoPublish = publishReason !== null;
-    const initialStatus = autoPublish ? "published" : "draft";
-    // Publish path starts at v=0 so the engine publish bump lands at v=1.
-    const initialVersion = autoPublish ? 0 : 1;
+    // Same note in the engine history and the governance row: the version
+    // history an admin reads in the UI comes from node_versions, so leaving the
+    // reason only in history.yaml hides it from the audit that matters.
+    const publishNote =
+      publishReason === null ? undefined : `Auto-published on create (${publishReason})`;
 
-    let node: ContextNode = {
-      id,
-      filePath: "",
-      frontmatter: {
-        title: input.title,
-        type: requestedType as any,
-        tags,
-        status: (input.status as any) || (initialStatus as any),
-        version: initialVersion,
-        created_at: now,
-        updated_at: now,
-        metadata: metadata as any,
-      },
-      body: input.content,
-      rawContent: "",
-    };
-    await storage.writeDocument(id, serializeDocument(node));
+    // Write — and publish, when the gate allows — through the engine's canonical
+    // create. Governance stays here; the engine owns frontmatter assembly,
+    // validation, version assignment and the index regen, so a document created
+    // here is identical to one created by the CLI or mcp-server.
+    let published = publishReason !== null;
+    try {
+      await engineApi.run(
+        "context_create",
+        {
+          id,
+          title: input.title,
+          content: input.content,
+          type: requestedType,
+          // A skill node is invalid without a skill block, and this surface has
+          // no field for one — default the trigger from the title, same as the
+          // CLI and mcp-server do.
+          ...(requestedType === "skill"
+            ? { trigger: `when asked to ${input.title.toLowerCase()}` }
+            : {}),
+          ...(tags.length ? { tags } : {}),
+          ...(input.status ? { status: input.status } : {}),
+          metadata,
+          publish: published,
+          ...(publishNote ? { note: publishNote } : {}),
+        },
+        await opContext(nestId, userEmail),
+      );
+    } catch (err) {
+      // The op writes the node before publishing it. If the write landed and
+      // only the publish failed, register the document as a draft instead of
+      // throwing and stranding a file that has no governance rows.
+      let onDisk = true;
+      try {
+        await storage.readDocument(id);
+      } catch {
+        onDisk = false;
+      }
+      if (!onDisk) throw err;
+      console.error("publishDocument failed (node create auto-publish)", err);
+      published = false;
+    }
+
+    const node = await storage.readDocument(id);
     await syncNodeTags(nestId, id, tags);
 
     let savedVersion = 1;
-    if (publishReason === null) {
-      try {
-        await versionManager.createVersion(node, userEmail);
-      } catch (err) {
-        console.error("VersionManager.createVersion failed (node create)", err);
+    if (published) {
+      savedVersion = node.frontmatter.version || 1;
+      await versions.createVersion({
+        nestId,
+        nodeId: id,
+        version: savedVersion,
+        content: node.body || "",
+        author: userEmail,
+        status: "published",
+        tags,
+        changeNote: publishNote,
+      });
+      await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
+    } else {
+      // Seed the engine history only for a genuine draft. A publish that failed
+      // above already wrote history entries; re-seeding would graft a second
+      // chain onto them.
+      if (publishReason === null) {
+        try {
+          await versionManager.createVersion(node, userEmail);
+        } catch (err) {
+          console.error("VersionManager.createVersion failed (node create)", err);
+        }
       }
       await versions.createVersion({
         nestId,
@@ -712,41 +756,6 @@ export async function createNode(
         status: "draft",
         tags,
       });
-    } else {
-      // Same note in the engine history and the governance row: the version
-      // history an admin reads in the UI comes from node_versions, so leaving
-      // the reason only in history.yaml hides it from the audit that matters.
-      const publishNote = `Auto-published on create (${publishReason})`;
-      try {
-        const result = await safePublishDocument(storage, id, {
-          editedBy: userEmail,
-          note: publishNote,
-        });
-        savedVersion = result.node.frontmatter.version || 1;
-        await versions.createVersion({
-          nestId,
-          nodeId: id,
-          version: savedVersion,
-          content: result.node.body || "",
-          author: userEmail,
-          status: "published",
-          tags,
-          changeNote: publishNote,
-        });
-        await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
-        node = result.node;
-      } catch (err) {
-        console.error("publishDocument failed (node create auto-publish)", err);
-        await versions.createVersion({
-          nestId,
-          nodeId: id,
-          version: 1,
-          content: input.content,
-          author: userEmail,
-          status: "draft",
-          tags,
-        });
-      }
     }
 
     await trackEvent("node.create", { nestId, nodeId: id });
