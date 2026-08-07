@@ -235,13 +235,16 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_update",
     description:
-      "Update an existing node — append, replace content, add tags.",
+      "Update an existing node — replace or append content, set tags, move it through its lifecycle. Whether the edit publishes is decided by this nest's stewardship rules, not by the caller.",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: {
+          // Selects the node; it does NOT rename it. Titles are unique here
+          // precisely so MCP callers can address a document this way. Renaming
+          // is not reachable from this tool.
           type: "string",
-          description: "Title of node to update",
+          description: "Title of node to update (selects it; does not rename)",
         },
         content: {
           type: "string",
@@ -253,7 +256,15 @@ export const TOOL_DEFINITIONS = [
           items: { type: "string" },
           description: "Tags to add",
         },
-        scope: { type: "string", description: "New scope" },
+        status: {
+          type: "string",
+          description:
+            "New lifecycle status: draft | pending_review | approved | published | rejected. Aliases are normalized.",
+        },
+        changeNote: {
+          type: "string",
+          description: "Why this changed — recorded in version history",
+        },
       },
       required: ["title"],
     },
@@ -981,17 +992,19 @@ async function runTool(
       if (!editCheck.allowed) {
         return `You don't have permission to edit "${args.title}": ${editCheck.reason}`;
       }
-      const { node: updated } = await updateNode(
+      const { node: updated, version } = await updateNode(
         nestId,
         node.id,
         {
           content: args.content,
           append: args.append,
           tags: args.tags,
+          status: args.status,
+          changeNote: args.changeNote,
         },
         userEmail,
       );
-      return `Updated node: **${updated.frontmatter.title}**`;
+      return `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}`;
     }
 
     case "context_delete": {

@@ -4,7 +4,6 @@
  * (auth, parse, response shape); this module owns create/update/list.
  */
 import {
-  serializeDocument,
   parseDocument,
   normalizeStatus,
   DocumentNotFoundError,
@@ -119,9 +118,6 @@ function folderToSegments(folder: string): string[] {
   }
   return segments;
 }
-
-const stripUndefined = <T extends Record<string, any>>(o: T): T =>
-  Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 
 /**
  * Optional `#dept:<slug>` auto-tag (CU-wdqcpzwf2p). When the superadmin
@@ -1011,11 +1007,17 @@ export async function updateNode(
         throw new NotFoundError(`Node not found: ${nodeId}`);
       }
 
+      // Assemble the op's input alongside a local projection of the patched
+      // node. The projection is what governance reads (auto-publish gate, tag
+      // index) BEFORE the write happens; the engine performs the actual write.
+      const opInput: Record<string, unknown> = {};
       if (patch.content !== undefined) {
         node = { ...node, body: patch.content };
+        opInput.content = patch.content;
       }
       if (patch.append) {
         node = { ...node, body: (node.body || "") + "\n\n" + patch.append };
+        opInput.append = "\n" + patch.append;
       }
       if (patch.tags) {
         const newTags = patch.tags.map(normalizeTag);
@@ -1023,12 +1025,16 @@ export async function updateNode(
           ...new Set([...(node.frontmatter.tags || []), ...newTags]),
         ];
         node = { ...node, frontmatter: { ...node.frontmatter, tags: merged } };
+        // The op REPLACES tags; this surface has always merged, so send the
+        // already-merged set rather than the caller's additions.
+        opInput.tags = merged;
       }
       if (patch.status) {
         node = {
           ...node,
           frontmatter: { ...node.frontmatter, status: patch.status as any },
         };
+        opInput.status = normalizeStatus(patch.status);
       }
       if (patch.title) {
         // Grandfathered: docs saved before this bound existed keep their long
@@ -1041,6 +1047,7 @@ export async function updateNode(
           ...node,
           frontmatter: { ...node.frontmatter, title: patch.title },
         };
+        opInput.title = patch.title;
       }
       if (patch.schedule !== undefined) {
         if (!isRunnableType(node.frontmatter.type)) {
@@ -1054,6 +1061,12 @@ export async function updateNode(
         if (patch.schedule === "") delete metadata.schedule;
         else metadata.schedule = patch.schedule;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        // The op merges metadata and reads null as "clear this key" — an empty
+        // schedule means remove it, not store "".
+        opInput.metadata = {
+          ...(opInput.metadata as object),
+          schedule: patch.schedule === "" ? null : patch.schedule,
+        };
       }
       if (patch.prime !== undefined) {
         await assertMayFlagPrime(nestId, userEmail);
@@ -1061,6 +1074,7 @@ export async function updateNode(
         if (patch.prime === null) delete metadata.prime;
         else metadata.prime = patch.prime;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = { ...(opInput.metadata as object), prime: patch.prime };
       }
 
       const hasStewards = await isStewardshipEnabled(nestId);
@@ -1102,19 +1116,16 @@ export async function updateNode(
         // failed) `currentVersion + 1` reuses a version number, which grafts a
         // second chain onto the first and breaks reconstruction from there on.
         const newVersion = await versionManager.nextVersion(nodeId, currentVersion);
-        node = {
-          ...node,
-          frontmatter: {
-            ...node.frontmatter,
-            version: newVersion,
-            updated_at: new Date().toISOString(),
-            // Drop stale published-state checksum so the next verified read
-            // doesn't flag this write as external drift.
-            checksum: undefined,
-          },
-        };
-        node = { ...node, frontmatter: stripUndefined(node.frontmatter) };
-        await storage.writeDocument(nodeId, serializeDocument(node));
+        // The engine owns the write: it applies the patch, validates, stamps the
+        // version we assigned and drops the stale published-state checksum, then
+        // regenerates the index. `publish: false` because this revision has not
+        // cleared review — governance below records it as a draft.
+        await engineApi.run(
+          "context_update",
+          { id: nodeId, ...opInput, publish: false, version: newVersion },
+          await opContext(nestId, userEmail),
+        );
+        node = await storage.readDocument(nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
 
         // Persist to the engine history FIRST, then mirror into the DB. If the
@@ -1149,32 +1160,19 @@ export async function updateNode(
         }
         responseVersion = newVersion;
       } else {
-        node = {
-          ...node,
-          frontmatter: {
-            ...node.frontmatter,
-            updated_at: new Date().toISOString(),
-            checksum: undefined,
-          },
-        };
-        node = { ...node, frontmatter: stripUndefined(node.frontmatter) };
-        await storage.writeDocument(nodeId, serializeDocument(node));
-        await syncNodeTags(nestId, nodeId, currentTags);
-
-        let publishedVersion = (node.frontmatter.version || 0) + 1;
         // Publish through the engine FIRST; only mirror into the DB once it
         // actually landed. Rethrow on failure — swallowing here is what let
         // node_versions climb past what history.yaml stored (DB v19 vs v15).
         const publishNote =
           patch.changeNote || `Auto-published on edit (${publishReason})`;
+        let publishedVersion: number;
         try {
-          const result = await safePublishDocument(storage, nodeId, {
-            editedBy: userEmail,
-            note: publishNote,
-          });
-          publishedVersion =
-            result.node.frontmatter.version || publishedVersion;
-          node = result.node;
+          const result = await engineApi.run<{ version: number }>(
+            "context_update",
+            { id: nodeId, ...opInput, publish: true, note: publishNote },
+            await opContext(nestId, userEmail),
+          );
+          publishedVersion = result.version;
         } catch (err) {
           console.error(
             "publishDocument failed (node patch auto-publish)",
@@ -1182,6 +1180,8 @@ export async function updateNode(
           );
           throw err;
         }
+        node = await storage.readDocument(nodeId);
+        await syncNodeTags(nestId, nodeId, currentTags);
         // upsert, not insert: the engine publishes a draft in place (draft N →
         // published N, no version bump), so a governance row may already exist
         // at this version (e.g. an imported draft). A plain insert here hit
