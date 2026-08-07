@@ -14,6 +14,7 @@ import {
   permissionLevel,
 } from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { queryTableNode } from "../tables/query.js";
 import {
@@ -696,30 +697,51 @@ async function runTool(
 
   switch (toolName) {
     case "context_init": {
-      const content = await storage.readContextMd();
-      if (!content)
+      const { context_md } = await engineApi.run<{ context_md: string | null }>(
+        "context_init",
+        {},
+        await opContext(nestId, userEmail),
+      );
+      if (!context_md)
         return "No CONTEXT.md found. Use context_overview to see what's available.";
-      return `# Vault Instructions (CONTEXT.md)\n\n${content}`;
+      return `# Vault Instructions (CONTEXT.md)\n\n${context_md}`;
     }
 
     case "context_overview": {
-      const docs = await storage.discoverDocuments();
+      // Counts come from the engine, which sees the whole vault; the NODE LIST
+      // must not. This tool used to dump every node's title, tags and a body
+      // excerpt straight from discoverDocuments with no gate at all — the same
+      // hole resolveLlmBody closed for context_get and context_search, still
+      // open here. Route the listing through the caller-gated path instead.
+      const { total } = await engineApi.run<{ total: number }>(
+        "context_init",
+        {},
+        await opContext(nestId, userEmail),
+      );
+
+      const visible = await listNodesForCallerByEmail(nestId, userEmail, {});
       const types: Record<string, number> = {};
       const tags: Record<string, number> = {};
-      for (const n of docs) {
-        const t = n.frontmatter.type || "document";
-        types[t] = (types[t] || 0) + 1;
-        for (const tag of n.frontmatter.tags || []) tags[tag] = (tags[tag] || 0) + 1;
+      for (const n of visible) {
+        types[n.type] = (types[n.type] || 0) + 1;
+        for (const tag of n.tags || []) tags[tag] = (tags[tag] || 0) + 1;
       }
-      const typeList = Object.entries(types).sort((a, b) => b[1] - a[1]).map(([t, c]) => `  ${t}: ${c}`).join("\n");
-      const tagList = Object.entries(tags).sort((a, b) => b[1] - a[1]).map(([t, c]) => `  ${t}: ${c}`).join("\n");
-      const nodeList = docs
+      const fmt = (counts: Record<string, number>) =>
+        Object.entries(counts)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, c]) => `  ${k}: ${c}`)
+          .join("\n");
+      const nodeList = visible
         .map(
           (n, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).slice(0, 4).join(" ")}\n   ${(n.body || "").slice(0, 120).replace(/\n/g, " ")}`,
+            `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).slice(0, 4).join(" ")}\n   ${(n.content || "").slice(0, 120).replace(/\n/g, " ")}`,
         )
         .join("\n\n");
-      return `# Vault Overview\n**Total nodes:** ${docs.length}\n\n## Types\n${typeList}\n\n## Tags\n${tagList}\n\n## All Nodes\n\n${nodeList}`;
+      // Say so when governance is hiding things, rather than quietly reporting
+      // a smaller vault than the one that exists.
+      const withheld = total - visible.length;
+      const note = withheld > 0 ? `\n_${withheld} node(s) not visible to you._\n` : "";
+      return `# Vault Overview\n**Total nodes:** ${visible.length}\n${note}\n## Types\n${fmt(types)}\n\n## Tags\n${fmt(tags)}\n\n## All Nodes\n\n${nodeList}`;
     }
 
     case "context_search": {
