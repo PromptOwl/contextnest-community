@@ -1046,10 +1046,13 @@ export async function registerImportedDocuments(
   // whole set. Progress ticks per doc through the engine's context sink.
   const publishStartedAt = Date.now();
   const publishedVersion = new Map<string, number>();
+  // `threw` distinguishes a batch-level throw (nothing was individually tried)
+  // from the engine's own per-doc failures — the reset below is destructive and
+  // must only run on the latter.
   const runImport = async (
     ids: string[],
     onTick?: (done: number, total: number) => void,
-  ): Promise<ImportOpResult> => {
+  ): Promise<ImportOpResult & { threw?: boolean }> => {
     try {
       return await engineApi.run<ImportOpResult>(
         "context_import",
@@ -1062,19 +1065,33 @@ export async function registerImportedDocuments(
       // register as drafts instead of aborting the whole import.
       console.error("[import] batch publish failed", nestId, err);
       const error = (err as Error)?.message ?? String(err);
-      return { published: [], failed: ids.map((id) => ({ id, error })), checkpoint: null };
+      return {
+        published: [],
+        failed: ids.map((id) => ({ id, error })),
+        checkpoint: null,
+        threw: true,
+      };
     }
   };
+
+  // Phase 1 already accounted for every doc the batch won't touch (already
+  // tracked, or kept unpublished) — the engine's ticks continue from there so
+  // the bar tracks all `docs`, not just the publishable slice.
+  const preDone = alreadyTracked + drafts.length;
 
   if (pending.length > 0) {
     const first = await runImport(
       pending.map((p) => p.nodeId),
-      (done) => void onProgress?.(done, docs.length),
+      (done) => void onProgress?.(preDone + done, docs.length),
     );
     for (const p of first.published) publishedVersion.set(p.id, p.version);
 
     const retry: string[] = [];
-    for (const f of first.failed) {
+    // Only per-doc failures get reset. On a batch-level throw (a corrupt shared
+    // context_history.yaml) no document was individually tried, and resetting
+    // would delete the imported version history of docs whose own chains are
+    // fine. They register as drafts with their history intact instead.
+    for (const f of first.threw ? [] : first.failed) {
       if (!f.id) continue; // ids[] failures always carry an id
       // Expected for an inconsistent imported chain — the reset below recovers
       // it. One quiet line, not a stack: a handled failure isn't a broken import.
@@ -1087,6 +1104,7 @@ export async function registerImportedDocuments(
         console.error("chain reset failed (import register)", f.id, err);
       }
     }
+    if (first.threw) publishFailed += first.failed.length;
 
     if (retry.length > 0) {
       const second = await runImport(retry);
@@ -1140,6 +1158,10 @@ export async function registerImportedDocuments(
     await syncNodeTags(nestId, p.nodeId, p.tags);
     registered++;
   }
+
+  // Phase 3 doesn't tick per row (DB inserts, fast next to publishing), so land
+  // the bar on 100% explicitly — the engine's ticks only cover `pending`.
+  await onProgress?.(docs.length, docs.length);
 
   // Phase split — a slow import is almost always one phase, and the total
   // alone doesn't say which.

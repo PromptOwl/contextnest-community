@@ -505,6 +505,33 @@ describe("imported vault: discovery + registration", () => {
     expect(done?.nest?.id).toBeTruthy();
   });
 
+  it("streams progress all the way to 100% when most docs are never batch-published", async () => {
+    // The engine's progress sink only ticks for docs that enter the publish
+    // batch. A mixed import (drafts here, already-tracked docs on a re-run)
+    // would otherwise leave the bar stalled well short of the total.
+    const files: FileEntry[] = [
+      mdFile("p1.md", "title: P1", "publish me"),
+      ...Array.from({ length: 5 }, (_, i) =>
+        mdFile(`d${i}.md`, `title: D${i}\nstatus: draft`, "kept unpublished"),
+      ),
+    ];
+    const res = await app.request("/nests/import?stream=1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(alice.apiKey) },
+      body: JSON.stringify({ name: "Mixed Progress", files }),
+    });
+    const lines = (await res.text())
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const ticks = lines.filter((m) => m.phase === "register");
+    expect(ticks.at(-1)).toEqual({ phase: "register", done: 6, total: 6 });
+    // Monotone — a bar that jumps backwards is its own bug.
+    expect(ticks.map((t) => t.done)).toEqual([...ticks.map((t) => t.done)].sort((a, b) => a - b));
+    expect(lines.find((m) => m.complete)?.documents).toBe(6);
+  });
+
   it("recovers a doc whose imported version chain won't reconstruct", async () => {
     // A half-migrated vault: frontmatter claims version 3 with a history whose
     // v2 diff won't apply (context lines absent from the keyframe). As-is
