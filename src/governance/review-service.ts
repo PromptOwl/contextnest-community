@@ -14,7 +14,7 @@ import { notifyNestEvent } from "../notify/notify.js";
 import { sendEmailToRecipient } from "../notify/email.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
-import { engineCache } from "../nodes/engine.js";
+import { engineCache, engineApi, opContext } from "../nodes/engine.js";
 import { safePublishDocument } from "./safe-publish.js";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
 import * as versions from "./version-service.js";
@@ -292,13 +292,19 @@ export async function approve(params: {
     // sees the DB stuck at N and 409s on every save.
     try {
       const { storage } = await engineCache.get(params.nestId);
-      const result = await safePublishDocument(storage, params.nodeId, {
-        editedBy: params.approvedBy,
-        note: params.note || `Approved review request ${pending.id}`,
-      });
-      const engineVersion = result.versionEntry.version;
+      const note = params.note || `Approved review request ${pending.id}`;
+      // Publish through the engine's canonical operation, so an approval seals
+      // its version and checkpoint exactly the way every other surface does —
+      // and regenerates the index, which a bare publish call does not.
+      const { version: engineVersion } = await engineApi.run<{ version: number }>(
+        "context_publish",
+        { id: params.nodeId, note },
+        await opContext(params.nestId, params.approvedBy),
+      );
       if (engineVersion !== version) {
-        const node = result.node;
+        // The operation reports the version, not the document — re-read for the
+        // body and tags the governance row mirrors.
+        const node = await storage.readDocument(params.nodeId);
         const tags = (node.frontmatter.tags || []) as string[];
         await versions.createVersion({
           nestId: params.nestId,
@@ -308,7 +314,7 @@ export async function approve(params: {
           author: params.approvedBy,
           status: "published",
           tags,
-          changeNote: params.note || `Approved review request ${pending.id}`,
+          changeNote: note,
         });
         // Re-pin to the engine-bumped version so getDisplayStatus() resolves
         // the latest row (N+1) as "approved" rather than falling through to

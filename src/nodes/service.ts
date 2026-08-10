@@ -1580,8 +1580,15 @@ export async function deleteNode(
   // under the reviewer (423). Mirrors the edit lock in updateNode.
   await assertNotReviewLocked(nestId, nodeId, userEmail, "deleting");
 
+  // Through the operation, which also regenerates the index — deleting the file
+  // alone left context.yaml still listing the node, so graph-mode reads kept
+  // resolving a document that was gone.
   try {
-    await storage.deleteDocument(nodeId);
+    await engineApi.run(
+      "context_delete",
+      { id: nodeId },
+      await opContext(nestId, userEmail),
+    );
   } catch {
     throw new NotFoundError(`Node not found: ${nodeId}`);
   }
@@ -1595,7 +1602,11 @@ export async function deleteNode(
   // the annotation threads themselves are purged in the transaction below.
   const derivedId = derivedIdOf(nodeId);
   try {
-    await storage.deleteDocument(derivedId);
+    await engineApi.run(
+      "context_delete",
+      { id: derivedId },
+      await opContext(nestId, userEmail),
+    );
     await removeNodeFromTagIndex(nestId, derivedId);
   } catch {
     /* no derived annotations node — nothing to remove */
