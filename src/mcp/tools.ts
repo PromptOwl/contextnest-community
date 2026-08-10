@@ -981,13 +981,18 @@ async function runTool(
       if (!editCheck.allowed) {
         return `You don't have permission to edit "${args.title}": ${editCheck.reason}`;
       }
+      // updateNode replaces tags; this tool's contract is "Tags to add", so
+      // merge against the current set here rather than in the service.
+      const mergedTags = args.tags
+        ? [...new Set([...(node.frontmatter.tags || []), ...args.tags])]
+        : undefined;
       const { node: updated } = await updateNode(
         nestId,
         node.id,
         {
           content: args.content,
           append: args.append,
-          tags: args.tags,
+          tags: mergedTags,
         },
         userEmail,
       );
