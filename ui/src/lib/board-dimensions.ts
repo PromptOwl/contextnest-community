@@ -62,6 +62,9 @@ export interface BoardConfig {
   tagNamespace?: string;
   /** Optional explicit column ordering; unknown-but-present keys append after. */
   columnOrder?: string[];
+  /** Columns to hide. A card whose only column(s) are hidden falls into
+   *  UNCATEGORIZED; a multi-tag card keeps any still-shown column. */
+  hiddenColumns?: string[];
 }
 
 export interface BoardColumn {
@@ -109,8 +112,48 @@ export function tagValueInNamespace(
  * a whole tag ("stage:draft") is the obvious mistake, and looking for
  * `stage:draft:` would silently match nothing. Empty means "group by every tag".
  */
-function namespaceOf(config: BoardConfig): string {
+function namespaceOf(config: { tagNamespace?: string }): string {
   return (config.tagNamespace ?? "").trim().split(":")[0]!.trim();
+}
+
+/** A saved column layout for one dimension. */
+export interface ColumnLayout {
+  columnOrder?: string[];
+  hiddenColumns?: string[];
+}
+
+/** What the board persists: the chosen dimension plus a layout per dimension. */
+export interface BoardSettings {
+  dimension: DimensionKind;
+  tagNamespace?: string;
+  layouts: Record<string, ColumnLayout>;
+}
+
+/**
+ * Storage key for the active dimension's layout. Column keys are
+ * dimension-specific ("draft" is a status, "gtm/deals" a folder), so one shared
+ * order leaked status columns onto the folder board. The tag namespace is part
+ * of the key too, since it changes which tag values are columns.
+ */
+export function layoutKey(s: {
+  dimension: DimensionKind;
+  tagNamespace?: string;
+}): string {
+  return s.dimension === "tag" ? `tag:${namespaceOf(s)}` : s.dimension;
+}
+
+/** The BoardConfig for the active dimension: its own layout, nothing else's. */
+export function resolveConfig(s: BoardSettings): BoardConfig {
+  const layout = s.layouts[layoutKey(s)] ?? {};
+  return {
+    dimension: s.dimension,
+    tagNamespace: s.tagNamespace,
+    // Status defaults to the lifecycle order until the user reorders it.
+    columnOrder:
+      layout.columnOrder ??
+      (s.dimension === "status" ? STATUS_ORDER : undefined),
+    hiddenColumns: layout.hiddenColumns,
+  };
 }
 
 /**
@@ -145,6 +188,20 @@ export function cardColumnKeys(node: BoardNode, config: BoardConfig): string[] {
  */
 export function cardColumnKey(node: BoardNode, config: BoardConfig): string {
   return cardColumnKeys(node, config)[0]!;
+}
+
+/**
+ * The columns a node actually appears in once hidden columns are removed: its
+ * column keys minus any hidden ones. If every one is hidden it collects in
+ * UNCATEGORIZED, so removing a column never makes documents disappear.
+ */
+function shownKeys(
+  node: BoardNode,
+  config: BoardConfig,
+  hidden: Set<string>,
+): string[] {
+  const keys = cardColumnKeys(node, config).filter((k) => !hidden.has(k));
+  return keys.length > 0 ? keys : [UNCATEGORIZED];
 }
 
 /**
@@ -213,27 +270,27 @@ export function buildColumns(
   nodes: BoardNode[],
   config: BoardConfig,
 ): BoardColumn[] {
+  const hidden = new Set(config.hiddenColumns ?? []);
   const present = new Set<string>();
   for (const n of nodes) {
-    for (const key of cardColumnKeys(n, config)) present.add(key);
+    for (const key of shownKeys(n, config, hidden)) present.add(key);
   }
+  const needUncat = present.has(UNCATEGORIZED);
+  present.delete(UNCATEGORIZED);
 
   const ordered: string[] = [];
   const seen = new Set<string>();
   for (const key of config.columnOrder ?? []) {
-    if (seen.has(key)) continue;
+    if (hidden.has(key) || key === UNCATEGORIZED || seen.has(key)) continue;
     seen.add(key);
     ordered.push(key);
     present.delete(key);
   }
 
-  const rest = [...present].filter((k) => k !== UNCATEGORIZED).sort();
-  let keys = [...ordered, ...rest];
-  if (present.has(UNCATEGORIZED) || [...seen].includes(UNCATEGORIZED)) {
-    // UNCATEGORIZED always trails, regardless of columnOrder placement.
-    keys = keys.filter((k) => k !== UNCATEGORIZED);
-    keys.push(UNCATEGORIZED);
-  }
+  const rest = [...present].sort();
+  const keys = [...ordered, ...rest];
+  // UNCATEGORIZED always trails, regardless of columnOrder placement.
+  if (needUncat) keys.push(UNCATEGORIZED);
   const folderLabels =
     config.dimension === "folder"
       ? disambiguateFolderLabels(
@@ -256,11 +313,12 @@ export function groupByColumn(
   nodes: BoardNode[],
   config: BoardConfig,
 ): { columns: BoardColumn[]; byColumn: Record<string, BoardNode[]> } {
+  const hidden = new Set(config.hiddenColumns ?? []);
   const columns = buildColumns(nodes, config);
   const byColumn: Record<string, BoardNode[]> = {};
   for (const col of columns) byColumn[col.key] = [];
   for (const n of nodes) {
-    for (const key of cardColumnKeys(n, config)) {
+    for (const key of shownKeys(n, config, hidden)) {
       (byColumn[key] ??= []).push(n);
     }
   }
