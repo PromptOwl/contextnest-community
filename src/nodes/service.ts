@@ -1147,6 +1147,10 @@ export async function updateNode(
         // context_update) merge against the current tags themselves.
         const nextTags = [...new Set(patch.tags.map(normalizeTag))];
         node = { ...node, frontmatter: { ...node.frontmatter, tags: nextTags } };
+        // The engine performs the write, so the new set has to reach it — the
+        // projection above only feeds the governance decisions below. It
+        // replaces too, so this is a straight hand-off.
+        opInput.tags = nextTags;
       }
       if (patch.status) {
         node = {
