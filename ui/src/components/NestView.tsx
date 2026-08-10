@@ -472,10 +472,11 @@ export function NestView({
   const [folderFilter, setFolderFilter] = useState<string | null>(
     initialFolder ?? null,
   );
-  // A folder breadcrumb click arrives pre-scoped, and the folder-scoped list
-  // lives on Documents — Overview would hide the scope entirely.
+  // A folder breadcrumb or tag chip click arrives pre-scoped, and both filtered
+  // lists live on Documents — Overview would hide the scope entirely.
   const [activeTab, setActiveTabState] = useState(
-    initialTab ?? (initialFolder ? "documents" : "overview"),
+    initialTab ??
+      (initialFolder || initialTags?.length ? "documents" : "overview"),
   );
   // Wrapper so every tab change — the tab strip, and the Overview folder
   // clicks that jump to Documents — mirrors into ?tab= via App.
