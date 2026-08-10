@@ -1868,6 +1868,14 @@ export function createApp(): Hono<AuthEnv> {
 
   app.route("/nests", nestsApp);
 
+  // /.well-known/* — discovery namespace, never an SPA route. Must 404 ahead
+  // of the catch-all below: OAuth/OIDC discovery clients JSON.parse the body
+  // unconditionally, so answering with the index.html shell crashes them with
+  // `Unexpected token '<', "<!DOCTYPE "...` instead of falling back cleanly.
+  // This server authenticates with Bearer cnst_ keys, not OAuth — no metadata
+  // to serve, so 404 is the correct answer.
+  app.all("/.well-known/*", (c) => c.json({ error: "Not found" }, 404));
+
   // ─── Dashboard UI (static files served from the bundled dist/web3 dir) ──
   // Hashed asset files are content-addressed — safe to cache forever.
   app.use(
@@ -1881,14 +1889,38 @@ export function createApp(): Hono<AuthEnv> {
   // index.html is NOT hashed and points at the current bundle — it must never
   // be cached, or a browser keeps loading a stale bundle after every deploy
   // (the workflow-plane UI "not showing up" bug). Always revalidate.
+  //
+  // The shell is served ONLY to browser document navigations. Anything else
+  // reaching here is a miss, not an SPA route: a mistyped API path, a discovery
+  // fetch, curl, or an /assets/* file that serveStatic above couldn't find and
+  // passed through. Those callers parse what they get, so a 200 HTML page turns
+  // a plain 404 into a confusing failure elsewhere (JSON.parse on "<!DOCTYPE",
+  // or a <script> tag executing the shell). Give them JSON 404 instead.
+  //
+  // Sec-Fetch-Mode is sent by every current browser on navigation; the Accept
+  // sniff is the fallback for older ones. Non-browser clients send neither
+  // (the MCP SDK's discovery fetch sets no Accept header at all).
+  const isDocumentNavigation = (c: { req: { header(n: string): string | undefined } }) =>
+    c.req.header("Sec-Fetch-Mode") === "navigate" ||
+    (c.req.header("Accept") || "").includes("text/html");
+
   app.get(
     "*",
+    async (c, next) => {
+      if (isDocumentNavigation(c)) return next();
+      return c.json({ error: "Not found" }, 404);
+    },
     serveStatic({
       root: UI_DIR_REL,
       path: "index.html",
       onFound: (_p, c) => c.header("Cache-Control", "no-cache"),
     }),
   );
+
+  // Non-GET requests that matched no route (POST to a mistyped endpoint, the
+  // OAuth /register probe) skip the catch-all above and land on Hono's default
+  // 404, which is plain text. Same reasoning — answer in JSON.
+  app.notFound((c) => c.json({ error: "Not found" }, 404));
 
   // Error handler — translate common low-level errors into messages
   // the UI can show as-is so users don't see "Internal server error"
