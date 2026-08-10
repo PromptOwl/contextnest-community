@@ -178,6 +178,26 @@ export async function getApprovedVersion(
   return row?.approved_version ?? null;
 }
 
+/**
+ * Every node's approved version in one nest, keyed by node id.
+ *
+ * The per-node lookup above run in a loop is what listing a public nest used to
+ * do — once to decide which nodes are visible at all, then again to fetch each
+ * one's body — so a 500-node nest paid 1000 sequential round trips. Scanning the
+ * nest once mirrors resolveAuthorship, and avoids an IN list long enough to hit
+ * SQLite's bound-parameter ceiling.
+ */
+export async function getApprovedVersions(
+  nestId: string,
+): Promise<Map<string, number>> {
+  const db = getDb();
+  const rows = (await db.all(
+    "SELECT node_id, approved_version FROM approved_versions WHERE nest_id = ?",
+    [nestId],
+  )) as Array<{ node_id: string; approved_version: number }>;
+  return new Map(rows.map((r) => [r.node_id, r.approved_version]));
+}
+
 export async function setApprovedVersion(
   nestId: string,
   nodeId: string,

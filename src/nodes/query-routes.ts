@@ -782,6 +782,11 @@ queryRoutes.post("/publish", async (c) => {
     created.push(id);
   }
 
+  // Once for the batch, not per document. Without it context.yaml never learned
+  // about these writes, so graph-mode reads — which seed from that index —
+  // could not see anything this endpoint created.
+  if (created.length > 0 || body.context_md) await storage.regenerateIndex();
+
   trackEvent("nest.publish", { nestId, count: created.length });
 
   return c.json(

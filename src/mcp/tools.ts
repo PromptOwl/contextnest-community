@@ -14,6 +14,7 @@ import {
   permissionLevel,
 } from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { queryTableNode } from "../tables/query.js";
 import {
@@ -29,6 +30,7 @@ import {
   deleteFolder,
   moveNode,
   listNodesForCallerByEmail,
+  getNodeForCaller,
   isIdUnderFolder,
 } from "../nodes/service.js";
 import { deleteNest } from "../nests/service.js";
@@ -139,12 +141,25 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_list",
     description:
-      "Browse vault contents with optional type, tag, or limit filters.",
+      "Browse vault contents with optional type, tag, status, or limit filters.",
     inputSchema: {
       type: "object" as const,
       properties: {
         type: { type: "string", description: "Filter by node type" },
-        tag: { type: "string", description: "Filter by tag" },
+        tag: {
+          type: "string",
+          description: "Filter by tag (leading # optional, case-insensitive)",
+        },
+        status: {
+          type: "string",
+          description:
+            "Filter by status: draft | pending_review | approved | published | rejected. Aliases normalized. Unlike the CLI and the OSS server, retired nodes stay in this listing whether or not you ask — here they are unpublished documents their stewards may still act on.",
+        },
+        approved_only: {
+          type: "boolean",
+          description:
+            "Return only nodes with an approved version, each served at that version rather than the live file — the view a public nest gives a stranger.",
+        },
         limit: { type: "number", description: "Max nodes to return" },
       },
     },
@@ -235,13 +250,16 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_update",
     description:
-      "Update an existing node — append, replace content, add tags.",
+      "Update an existing node — replace or append content, set tags, move it through its lifecycle. Whether the edit publishes is decided by this nest's stewardship rules, not by the caller.",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: {
+          // Selects the node; it does NOT rename it. Titles are unique here
+          // precisely so MCP callers can address a document this way. Renaming
+          // is not reachable from this tool.
           type: "string",
-          description: "Title of node to update",
+          description: "Title of node to update (selects it; does not rename)",
         },
         content: {
           type: "string",
@@ -253,7 +271,15 @@ export const TOOL_DEFINITIONS = [
           items: { type: "string" },
           description: "Tags to add",
         },
-        scope: { type: "string", description: "New scope" },
+        status: {
+          type: "string",
+          description:
+            "New lifecycle status: draft | pending_review | approved | published | rejected. Aliases are normalized.",
+        },
+        changeNote: {
+          type: "string",
+          description: "Why this changed — recorded in version history",
+        },
       },
       required: ["title"],
     },
@@ -676,30 +702,51 @@ async function runTool(
 
   switch (toolName) {
     case "context_init": {
-      const content = await storage.readContextMd();
-      if (!content)
+      const { context_md } = await engineApi.run<{ context_md: string | null }>(
+        "context_init",
+        {},
+        await opContext(nestId, userEmail),
+      );
+      if (!context_md)
         return "No CONTEXT.md found. Use context_overview to see what's available.";
-      return `# Vault Instructions (CONTEXT.md)\n\n${content}`;
+      return `# Vault Instructions (CONTEXT.md)\n\n${context_md}`;
     }
 
     case "context_overview": {
-      const docs = await storage.discoverDocuments();
+      // Counts come from the engine, which sees the whole vault; the NODE LIST
+      // must not. This tool used to dump every node's title, tags and a body
+      // excerpt straight from discoverDocuments with no gate at all — the same
+      // hole resolveLlmBody closed for context_get and context_search, still
+      // open here. Route the listing through the caller-gated path instead.
+      const { total } = await engineApi.run<{ total: number }>(
+        "context_init",
+        {},
+        await opContext(nestId, userEmail),
+      );
+
+      const visible = await listNodesForCallerByEmail(nestId, userEmail, {});
       const types: Record<string, number> = {};
       const tags: Record<string, number> = {};
-      for (const n of docs) {
-        const t = n.frontmatter.type || "document";
-        types[t] = (types[t] || 0) + 1;
-        for (const tag of n.frontmatter.tags || []) tags[tag] = (tags[tag] || 0) + 1;
+      for (const n of visible) {
+        types[n.type] = (types[n.type] || 0) + 1;
+        for (const tag of n.tags || []) tags[tag] = (tags[tag] || 0) + 1;
       }
-      const typeList = Object.entries(types).sort((a, b) => b[1] - a[1]).map(([t, c]) => `  ${t}: ${c}`).join("\n");
-      const tagList = Object.entries(tags).sort((a, b) => b[1] - a[1]).map(([t, c]) => `  ${t}: ${c}`).join("\n");
-      const nodeList = docs
+      const fmt = (counts: Record<string, number>) =>
+        Object.entries(counts)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, c]) => `  ${k}: ${c}`)
+          .join("\n");
+      const nodeList = visible
         .map(
           (n, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).slice(0, 4).join(" ")}\n   ${(n.body || "").slice(0, 120).replace(/\n/g, " ")}`,
+            `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).slice(0, 4).join(" ")}\n   ${(n.content || "").slice(0, 120).replace(/\n/g, " ")}`,
         )
         .join("\n\n");
-      return `# Vault Overview\n**Total nodes:** ${docs.length}\n\n## Types\n${typeList}\n\n## Tags\n${tagList}\n\n## All Nodes\n\n${nodeList}`;
+      // Say so when governance is hiding things, rather than quietly reporting
+      // a smaller vault than the one that exists.
+      const withheld = total - visible.length;
+      const note = withheld > 0 ? `\n_${withheld} node(s) not visible to you._\n` : "";
+      return `# Vault Overview\n**Total nodes:** ${visible.length}\n${note}\n## Types\n${fmt(types)}\n\n## Tags\n${fmt(tags)}\n\n## All Nodes\n\n${nodeList}`;
     }
 
     case "context_search": {
@@ -752,40 +799,55 @@ async function runTool(
       // hops mirrors REST POST /context — caller-controlled traversal depth.
       // External LLM callers set this directly, so normalize junk values
       // (negative, fractional, NaN) to a sane non-negative integer.
-      const result = await queryEngine.query(args.query, {
-        hops: normalizeHops(args.hops),
-      });
+      const { documents } = await engineApi.run<{
+        documents: Array<{
+          id: string;
+          title: string;
+          type: string;
+          tags?: string[];
+          body?: string;
+        }>;
+      }>(
+        "context_query",
+        { query: args.query, hops: normalizeHops(args.hops) },
+        await opContext(nestId, userEmail),
+      );
       // Hide nodes the caller can't see (approved-only under stewardship) so the
       // listing doesn't leak restricted titles — same gate as context_search.
       const visibility = await Promise.all(
-        result.documents.map(async (n) => ({
-          node: n,
-          visible: (await resolveLlmBody(ctx, n)) !== null,
+        documents.map(async (d) => ({
+          doc: d,
+          visible:
+            (await resolveLlmBody(ctx, {
+              id: d.id,
+              body: d.body ?? "",
+              frontmatter: { title: d.title },
+            } as ContextNode)) !== null,
         })),
       );
-      const nodes = visibility.filter((e) => e.visible).map((e) => e.node);
+      const nodes = visibility.filter((e) => e.visible).map((e) => e.doc);
       if (!nodes.length) return `No nodes matched: ${args.query}`;
       const list = nodes
-        .map(
-          (n, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}`,
-        )
+        .map((n, i) => `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).join(" ")}`)
         .join("\n\n");
       return `Found ${nodes.length} node(s) for \`${args.query}\`:\n\n${list}`;
     }
 
     case "context_get": {
-      const docs = await storage.discoverDocuments();
-      let node: ContextNode | undefined;
-      if (args.title) {
-        node = docs.find(
-          (n) =>
-            n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+      // Shared read. This used to load and parse EVERY file in the vault to
+      // find one node — an id lookup is a direct read, and only a title needs
+      // to search.
+      let node: ContextNode;
+      try {
+        node = await getNodeForCaller(
+          nestId,
+          args.title ? { title: args.title } : { id: args.id },
+          ctx.userId,
+          userEmail,
         );
-      } else if (args.id) {
-        node = docs.find((n) => n.id === args.id);
+      } catch {
+        return `Node not found: ${args.title || args.id}`;
       }
-      if (!node) return `Node not found: ${args.title || args.id}`;
       const body = await resolveLlmBody(ctx, node);
       if (body === null) {
         return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;
@@ -808,6 +870,8 @@ async function runTool(
       const nodes = await listNodesForCallerByEmail(nestId, userEmail, {
         type: args.type,
         tag: args.tag,
+        status: args.status,
+        approvedOnly: args.approved_only === true,
         limit: args.limit || 50,
       });
       if (!nodes.length) return "No nodes found with the given filters.";
@@ -981,17 +1045,24 @@ async function runTool(
       if (!editCheck.allowed) {
         return `You don't have permission to edit "${args.title}": ${editCheck.reason}`;
       }
-      const { node: updated } = await updateNode(
+      // updateNode replaces tags; this tool's contract is "Tags to add", so
+      // merge against the current set here rather than in the service.
+      const mergedTags = args.tags
+        ? [...new Set([...(node.frontmatter.tags || []), ...args.tags])]
+        : undefined;
+      const { node: updated, version } = await updateNode(
         nestId,
         node.id,
         {
           content: args.content,
           append: args.append,
-          tags: args.tags,
+          tags: mergedTags,
+          status: args.status,
+          changeNote: args.changeNote,
         },
         userEmail,
       );
-      return `Updated node: **${updated.frontmatter.title}**`;
+      return `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}`;
     }
 
     case "context_delete": {
