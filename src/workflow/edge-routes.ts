@@ -174,6 +174,33 @@ export async function assertNoFlowCycle(
   }
 }
 
+/**
+ * One edge per (from, to, type): a repeat carries no extra meaning and its wire
+ * draws exactly on top of the original, so the canvas shows one line where two
+ * exist. Runs inside the caller's tx (same BEGIN IMMEDIATE as the INSERT) so two
+ * concurrent creates can't both pass. `excludeId` skips the row being retyped.
+ */
+export async function assertNoDuplicateEdge(
+  db: Querier,
+  nestId: string,
+  fromNode: string,
+  toNode: string,
+  type: EdgeTypeRow,
+  excludeId?: string,
+): Promise<void> {
+  const row = await db.get(
+    `SELECT id FROM edges
+      WHERE nest_id = ? AND from_node = ? AND to_node = ? AND type_id = ?
+        AND (? IS NULL OR id != ?)`,
+    [nestId, fromNode, toNode, type.id, excludeId ?? null, excludeId ?? null],
+  );
+  if (row) {
+    throw new ConflictError(
+      `a "${type.name}" connection from "${fromNode}" to "${toNode}" already exists`,
+    );
+  }
+}
+
 export const edgeRoutes = new Hono<AuthEnv>();
 // Gate every route on the feature flag PER ROUTE, not via `use("*", …)`: this
 // router mounts under `/nests/:nestId/edges`, and a wildcard middleware there
@@ -272,6 +299,7 @@ edgeRoutes.post("/", requireWorkflowPlane, async (c) => {
   // creates can't each pass the DAG guard against the pre-request graph and
   // both land, closing a cycle.
   await db.transaction(async (tx) => {
+    await assertNoDuplicateEdge(tx, nestId, fromNode, toNode, type);
     if (type.is_flow) {
       await assertNoFlowCycle(tx, nestId, fromNode, toNode);
     }
@@ -314,6 +342,10 @@ edgeRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
       throw new ValidationError(
         `unknown edge type "${body.type}" — define it in the registry first`,
       );
+    }
+    // Retyping can land on a (from, to, type) triple that already exists.
+    if (next.id !== type.id) {
+      await assertNoDuplicateEdge(db, nestId, row.from_node, row.to_node, next, id);
     }
     // Becoming a flow edge can close a cycle the old type couldn't.
     if (next.is_flow && !type.is_flow) {

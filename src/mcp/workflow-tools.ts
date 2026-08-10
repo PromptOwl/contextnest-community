@@ -36,6 +36,7 @@ import {
 import {
   validateCondition,
   assertNoFlowCycle,
+  assertNoDuplicateEdge,
   toResponse as edgeToResponse,
   type EdgeRow,
 } from "../workflow/edge-routes.js";
@@ -414,6 +415,7 @@ async function createEdge(ctx: McpToolContext, args: Record<string, any>) {
   const now = new Date().toISOString();
   const id = uuid();
   await db.transaction(async (tx) => {
+    await assertNoDuplicateEdge(tx, ctx.nestId, fromNode, toNode, type);
     if (type.is_flow) {
       await assertNoFlowCycle(tx, ctx.nestId, fromNode, toNode);
     }
