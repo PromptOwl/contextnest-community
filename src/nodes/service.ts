@@ -379,7 +379,14 @@ export async function getNodeForCaller(
       },
       await opContext(nestId, userEmail),
     );
-  } catch {
+  } catch (err) {
+    // A missing document is the ordinary case and needs no noise. Anything else
+    // is a real fault, and reporting it as a 404 with no trace makes an engine
+    // bug look like an empty vault — this is now the single read path for both
+    // REST and MCP, so a silent one hides everywhere at once.
+    if ((err as { code?: string })?.code !== "DOCUMENT_NOT_FOUND") {
+      console.error(`getNodeForCaller failed (${nestId}/${selector.id ?? selector.title})`, err);
+    }
     throw new NotFoundError(`Node not found: ${selector.id ?? selector.title}`);
   }
   // Gate on the RESOLVED id — a title selector doesn't tell us which node it
@@ -439,7 +446,23 @@ export async function listNodesForCaller(
     frontmatter: d.frontmatter,
     body: d.body,
   }));
-  let accessible = await filterAccessible(nestId, userId, userEmail, nodes);
+  const publicReader = await isPublicReader(nestId, userId);
+  // Approved-only view: what a public nest shows a stranger. ONE scan of the
+  // nest, shared by the access filter (which decides what a public reader may
+  // see) and the enrichment below (which serves each body at its approved
+  // version) — those asked the same question separately.
+  const approvedOnly = publicReader || filters.approvedOnly === true;
+  const approvedVersions = approvedOnly
+    ? await versions.getApprovedVersions(nestId)
+    : null;
+
+  let accessible = await filterAccessible(
+    nestId,
+    userId,
+    userEmail,
+    nodes,
+    approvedVersions ?? undefined,
+  );
 
   // Share grants: a caller with NO nest-wide permission sees exactly the
   // documents their grants cover — never the whole list. filterAccessible's
@@ -456,15 +479,6 @@ export async function listNodesForCaller(
       ? nodes.filter((d) => grantCoversNode(grants, d.id))
       : accessible;
   }
-  const publicReader = await isPublicReader(nestId, userId);
-
-  // Approved-only view: what a public nest shows a stranger. Read once for the
-  // whole nest and reused by the enrichment below, which previously asked for
-  // each node's approved version a second time, one query at a time.
-  const approvedOnly = publicReader || filters.approvedOnly === true;
-  const approvedVersions = approvedOnly
-    ? await versions.getApprovedVersions(nestId)
-    : null;
   // A public reader was already narrowed to approved nodes by filterAccessible;
   // any other caller asking for this view is narrowed here.
   if (approvedVersions && !publicReader) {

@@ -153,7 +153,12 @@ export const TOOL_DEFINITIONS = [
         status: {
           type: "string",
           description:
-            "Filter by status: draft | pending_review | approved | published | rejected. Aliases normalized. Retired nodes are hidden unless asked for.",
+            "Filter by status: draft | pending_review | approved | published | rejected. Aliases normalized. Unlike the CLI and the OSS server, retired nodes stay in this listing whether or not you ask — here they are unpublished documents their stewards may still act on.",
+        },
+        approved_only: {
+          type: "boolean",
+          description:
+            "Return only nodes with an approved version, each served at that version rather than the live file — the view a public nest gives a stranger.",
         },
         limit: { type: "number", description: "Max nodes to return" },
       },
@@ -866,6 +871,7 @@ async function runTool(
         type: args.type,
         tag: args.tag,
         status: args.status,
+        approvedOnly: args.approved_only === true,
         limit: args.limit || 50,
       });
       if (!nodes.length) return "No nodes found with the given filters.";

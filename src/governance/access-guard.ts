@@ -68,10 +68,13 @@ export async function filterAccessible<T extends { id: string }>(
   userId: string,
   userEmail: string,
   nodes: T[],
+  /** Approved versions already read by the caller, to avoid a second scan. */
+  approvedVersions?: Map<string, number>,
 ): Promise<T[]> {
   if (await isPublicReader(nestId, userId)) {
-    // One scan of the nest, not a sequential lookup per node.
-    const approved = await getApprovedVersions(nestId);
+    // One scan of the nest, not a sequential lookup per node — and none at all
+    // when the caller has already read the map for its own use.
+    const approved = approvedVersions ?? (await getApprovedVersions(nestId));
     return nodes.filter((n) => approved.has(n.id));
   }
   if (!(await isStewardshipEnabled(nestId))) return nodes;

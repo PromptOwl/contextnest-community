@@ -107,6 +107,10 @@ nodeRoutes.get("/", async (c) => {
     ...(q.type ? { type: q.type } : {}),
     ...(q.tag ? { tag: q.tag } : {}),
     ...(q.status ? { status: q.status } : {}),
+    // Lets an owner preview what making the nest public would expose.
+    ...(q.approved_only === "1" || q.approved_only === "true"
+      ? { approvedOnly: true }
+      : {}),
     // Ignore junk rather than 400 — a bad ?limit should not fail a listing.
     ...(limit !== undefined && Number.isFinite(limit) && limit > 0 ? { limit } : {}),
   });

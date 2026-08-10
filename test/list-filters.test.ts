@@ -152,3 +152,50 @@ describe("GET /nests/:id/nodes filters", () => {
     expect(data.nodes).toHaveLength(3);
   });
 });
+
+// approvedOnly was implemented and unit-tested but reachable from no surface —
+// neither REST nor MCP passed it, so the "preview what going public exposes"
+// capability did not exist for any actual caller.
+describe("approved_only reaches the service from REST and MCP", () => {
+  it("REST ?approved_only=1 narrows to nodes with an approved version", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes?approved_only=1`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(status).toBe(200);
+    expect(data.nodes.length).toBeGreaterThan(0);
+    for (const n of data.nodes) {
+      expect(n.status).toBe("published");
+      expect(n.version).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("REST ignores the param unless it is explicitly on", async () => {
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes?approved_only=0`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(data.nodes).toHaveLength(3);
+  });
+
+  it("MCP context_list accepts approved_only", async () => {
+    const { handleToolCall } = await import("../src/mcp/tools.js");
+    const { engineCache } = await import("../src/nodes/engine.js");
+    const { storage, query, versions } = await (engineCache as any).get(nestId);
+    const text = await handleToolCall("context_list", { approved_only: true }, {
+      storage,
+      queryEngine: query,
+      versionManager: versions,
+      nestId,
+      userId: alice.userId,
+      userEmail: EMAIL,
+    } as any);
+    expect(text).toMatch(/node\(s\)/);
+  });
+});
