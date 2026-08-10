@@ -92,11 +92,24 @@ function rawNodeBody(c: any, response: any, storedRaw: string | undefined) {
   });
 }
 
-// GET /nests/:nestId/nodes
+// GET /nests/:nestId/nodes?type=&tag=&status=&limit=
+//
+// The filters the service and the MCP tool have always supported were simply
+// never wired up here, so REST callers fetched the whole nest and filtered
+// client-side — paying the per-node governance enrichment for every document
+// they then threw away. `limit` in particular now cuts that work server-side.
 nodeRoutes.get("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
-  const nodes = await listNodesForCaller(nestId, userId);
+  const q = c.req.query();
+  const limit = q.limit ? parseInt(q.limit, 10) : undefined;
+  const nodes = await listNodesForCaller(nestId, userId, {
+    ...(q.type ? { type: q.type } : {}),
+    ...(q.tag ? { tag: q.tag } : {}),
+    ...(q.status ? { status: q.status } : {}),
+    // Ignore junk rather than 400 — a bad ?limit should not fail a listing.
+    ...(limit !== undefined && Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+  });
   return c.json({ count: nodes.length, nodes });
 });
 

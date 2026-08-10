@@ -106,3 +106,49 @@ describe("listNodesForCaller filters", () => {
     }
   });
 });
+
+// ─── REST ────────────────────────────────────────────────────────────────────
+//
+// GET /nests/:id/nodes accepted no filters at all: callers fetched the whole
+// nest and narrowed it client-side, paying the per-node governance enrichment
+// for every document they then discarded.
+
+describe("GET /nests/:id/nodes filters", () => {
+  const get = (qs: string) =>
+    jsonRequest(app, "GET", `/nests/${nestId}/nodes${qs}`, undefined, alice.apiKey);
+
+  it("filters by type", async () => {
+    const { status, data } = await get("?type=skill");
+    expect(status).toBe(200);
+    expect(data.nodes.map((n: any) => n.title)).toEqual(["Gamma Skill"]);
+  });
+
+  it("filters by tag, with or without the #", async () => {
+    for (const q of ["?tag=api", "?tag=%23api"]) {
+      const { data } = await get(q);
+      expect(data.nodes.map((n: any) => n.title)).toEqual(["Alpha Doc"]);
+    }
+  });
+
+  it("filters by status", async () => {
+    const { data } = await get("?status=rejected");
+    expect(data.nodes).toHaveLength(0);
+  });
+
+  it("applies limit, and reports the returned count", async () => {
+    const { data } = await get("?limit=2");
+    expect(data.nodes).toHaveLength(2);
+    expect(data.count).toBe(2);
+  });
+
+  it("ignores a junk limit rather than failing the listing", async () => {
+    const { status, data } = await get("?limit=abc");
+    expect(status).toBe(200);
+    expect(data.nodes.length).toBeGreaterThan(0);
+  });
+
+  it("returns everything when no filter is given", async () => {
+    const { data } = await get("");
+    expect(data.nodes).toHaveLength(3);
+  });
+});
