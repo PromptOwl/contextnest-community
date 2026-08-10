@@ -291,3 +291,45 @@ describe("planMove", () => {
     expect(plan.kind).toBe("unsupported");
   });
 });
+
+describe("hidden columns (curated tag columns)", () => {
+  const cfg = (over: Partial<BoardConfig> = {}): BoardConfig => ({
+    dimension: "tag",
+    tagNamespace: "",
+    ...over,
+  });
+  const nodes = [
+    node({ id: "a", tags: ["draft"] }),
+    node({ id: "b", tags: ["review"] }),
+    node({ id: "c", tags: ["draft", "review"] }),
+  ];
+
+  it("omits a hidden column from the board", () => {
+    const cols = buildColumns(nodes, cfg({ hiddenColumns: ["review"] }));
+    expect(cols.map((c) => c.key)).toContain("draft");
+    expect(cols.map((c) => c.key)).not.toContain("review");
+  });
+
+  it("routes a card whose only column is hidden to Uncategorized, but keeps a card that still has a shown column", () => {
+    const { byColumn } = groupByColumn(nodes, cfg({ hiddenColumns: ["review"] }));
+    expect(byColumn[UNCATEGORIZED].map((n) => n.id)).toEqual(["b"]);
+    expect(byColumn["draft"].map((n) => n.id)).toEqual(["a", "c"]);
+  });
+
+  it("shows an added, empty column via columnOrder (add a tag with no cards yet)", () => {
+    const cols = buildColumns(
+      nodes,
+      cfg({ columnOrder: ["draft", "shipped", "review"] }),
+    );
+    expect(cols.map((c) => c.key)).toEqual(["draft", "shipped", "review"]);
+  });
+
+  it("drops a hidden key from columnOrder; its orphaned cards go to Uncategorized", () => {
+    const cols = buildColumns(
+      nodes,
+      cfg({ columnOrder: ["draft", "review"], hiddenColumns: ["review"] }),
+    );
+    // review column gone; doc `b` (only tagged review) surfaces in Uncategorized.
+    expect(cols.map((c) => c.key)).toEqual(["draft", UNCATEGORIZED]);
+  });
+});

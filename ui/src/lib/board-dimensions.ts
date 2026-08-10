@@ -59,6 +59,9 @@ export interface BoardConfig {
   tagNamespace?: string;
   /** Optional explicit column ordering; unknown-but-present keys append after. */
   columnOrder?: string[];
+  /** Columns to hide. A card whose only column(s) are hidden falls into
+   *  UNCATEGORIZED; a multi-tag card keeps any still-shown column. */
+  hiddenColumns?: string[];
 }
 
 export interface BoardColumn {
@@ -145,6 +148,20 @@ export function cardColumnKey(node: BoardNode, config: BoardConfig): string {
 }
 
 /**
+ * The columns a node actually appears in once hidden columns are removed: its
+ * column keys minus any hidden ones. If every one is hidden it collects in
+ * UNCATEGORIZED, so removing a column never makes documents disappear.
+ */
+function shownKeys(
+  node: BoardNode,
+  config: BoardConfig,
+  hidden: Set<string>,
+): string[] {
+  const keys = cardColumnKeys(node, config).filter((k) => !hidden.has(k));
+  return keys.length > 0 ? keys : [UNCATEGORIZED];
+}
+
+/**
  * Folder headings: the folder's own name, and only as much of its parent path
  * as it takes to be unique.
  *
@@ -207,27 +224,27 @@ export function buildColumns(
   nodes: BoardNode[],
   config: BoardConfig,
 ): BoardColumn[] {
+  const hidden = new Set(config.hiddenColumns ?? []);
   const present = new Set<string>();
   for (const n of nodes) {
-    for (const key of cardColumnKeys(n, config)) present.add(key);
+    for (const key of shownKeys(n, config, hidden)) present.add(key);
   }
+  const needUncat = present.has(UNCATEGORIZED);
+  present.delete(UNCATEGORIZED);
 
   const ordered: string[] = [];
   const seen = new Set<string>();
   for (const key of config.columnOrder ?? []) {
-    if (seen.has(key)) continue;
+    if (hidden.has(key) || key === UNCATEGORIZED || seen.has(key)) continue;
     seen.add(key);
     ordered.push(key);
     present.delete(key);
   }
 
-  const rest = [...present].filter((k) => k !== UNCATEGORIZED).sort();
-  let keys = [...ordered, ...rest];
-  if (present.has(UNCATEGORIZED) || [...seen].includes(UNCATEGORIZED)) {
-    // UNCATEGORIZED always trails, regardless of columnOrder placement.
-    keys = keys.filter((k) => k !== UNCATEGORIZED);
-    keys.push(UNCATEGORIZED);
-  }
+  const rest = [...present].sort();
+  const keys = [...ordered, ...rest];
+  // UNCATEGORIZED always trails, regardless of columnOrder placement.
+  if (needUncat) keys.push(UNCATEGORIZED);
   const folderLabels =
     config.dimension === "folder"
       ? disambiguateFolderLabels(
@@ -250,11 +267,12 @@ export function groupByColumn(
   nodes: BoardNode[],
   config: BoardConfig,
 ): { columns: BoardColumn[]; byColumn: Record<string, BoardNode[]> } {
+  const hidden = new Set(config.hiddenColumns ?? []);
   const columns = buildColumns(nodes, config);
   const byColumn: Record<string, BoardNode[]> = {};
   for (const col of columns) byColumn[col.key] = [];
   for (const n of nodes) {
-    for (const key of cardColumnKeys(n, config)) {
+    for (const key of shownKeys(n, config, hidden)) {
       (byColumn[key] ??= []).push(n);
     }
   }

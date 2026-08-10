@@ -22,6 +22,8 @@ import {
   Bot,
   Database,
   GripVertical,
+  X,
+  Plus,
 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
@@ -32,6 +34,7 @@ import { Input } from "@/components/ui/input";
 import {
   STATUS_ORDER,
   UNCATEGORIZED,
+  cardColumnKeys,
   groupByColumn,
   planMove,
   type BoardNode,
@@ -56,10 +59,16 @@ function loadConfig(nestId: string): BoardConfig {
       const p = JSON.parse(raw);
       const dimension: DimensionKind =
         p.dimension === "status" || p.dimension === "tag" ? p.dimension : "folder";
+      const strings = (v: unknown): string[] | undefined =>
+        Array.isArray(v) ? v.filter((k) => typeof k === "string") : undefined;
       return {
         dimension,
         tagNamespace:
           typeof p.tagNamespace === "string" ? p.tagNamespace : "",
+        // Restore the customised column order + hidden columns so a reordered /
+        // curated board survives a reload (previously dropped on load).
+        columnOrder: strings(p.columnOrder),
+        hiddenColumns: strings(p.hiddenColumns),
       };
     }
   } catch {
@@ -169,8 +178,11 @@ export function MaturityBoard({
   const effectiveConfig = useMemo<BoardConfig>(
     () => ({
       ...config,
+      // Status defaults to the lifecycle order, but a user reorder wins and
+      // persists. Folder/tag use whatever order the user set (if any).
       columnOrder:
-        config.dimension === "status" ? STATUS_ORDER : config.columnOrder,
+        config.columnOrder ??
+        (config.dimension === "status" ? STATUS_ORDER : undefined),
     }),
     [config],
   );
@@ -219,6 +231,66 @@ export function MaturityBoard({
   const dimensionDraggable = effectiveConfig.dimension === "folder";
   const draggable = dimensionDraggable && canEditDocs;
 
+  // ── Column management: reorder (all dimensions) + hide/add (tag columns) ──
+  const [colDrag, setColDrag] = useState<string | null>(null);
+  const [colDropTarget, setColDropTarget] = useState<string | null>(null);
+  const [newColumn, setNewColumn] = useState("");
+
+  // Reorderable keys — Uncategorized is pinned last by the lib, so exclude it.
+  const orderedKeys = useMemo(
+    () => columns.map((c) => c.key).filter((k) => k !== UNCATEGORIZED),
+    [columns],
+  );
+
+  const reorderColumns = useCallback(
+    (fromKey: string, toKey: string) => {
+      if (fromKey === toKey) return;
+      const order = [...orderedKeys];
+      const from = order.indexOf(fromKey);
+      const to = order.indexOf(toKey);
+      if (from < 0 || to < 0) return;
+      order.splice(from, 1);
+      order.splice(to, 0, fromKey);
+      updateConfig({ columnOrder: order });
+    },
+    [orderedKeys, updateConfig],
+  );
+
+  const hideColumn = useCallback(
+    (key: string) =>
+      updateConfig({
+        hiddenColumns: [...new Set([...(config.hiddenColumns ?? []), key])],
+      }),
+    [config.hiddenColumns, updateConfig],
+  );
+
+  const addTagColumn = useCallback(
+    (value: string) => {
+      const v = value.trim();
+      if (!v) return;
+      updateConfig({
+        // Append to the order (a key in columnOrder shows even with no cards)
+        // and un-hide it if it was removed earlier.
+        columnOrder: [...new Set([...orderedKeys, v])],
+        hiddenColumns: (config.hiddenColumns ?? []).filter((k) => k !== v),
+      });
+      setNewColumn("");
+    },
+    [orderedKeys, config.hiddenColumns, updateConfig],
+  );
+
+  // Distinct tag values present in the nest — suggestions for the add-column box.
+  const availableTagValues = useMemo(() => {
+    if (effectiveConfig.dimension !== "tag") return [];
+    const set = new Set<string>();
+    for (const n of nodes) {
+      for (const k of cardColumnKeys(n, effectiveConfig)) {
+        if (k !== UNCATEGORIZED) set.add(k);
+      }
+    }
+    return [...set].sort();
+  }, [nodes, effectiveConfig]);
+
   return (
     <div className="space-y-4">
       <NestPageHeader nestName={nestName} onBack={onBack}>
@@ -244,6 +316,38 @@ export function MaturityBoard({
               title="Optional. Empty groups by every tag; a namespace like 'stage' groups by stage:<value> tags only."
             />
           )}
+          {config.dimension === "tag" && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                addTagColumn(newColumn);
+              }}
+              className="flex items-center gap-1"
+            >
+              <Input
+                value={newColumn}
+                onChange={(e) => setNewColumn(e.target.value)}
+                placeholder="add column…"
+                list="board-tag-values"
+                className="h-8 w-32"
+                title="Add a tag column — pick an existing tag or type a new value"
+              />
+              <datalist id="board-tag-values">
+                {availableTagValues.map((v) => (
+                  <option key={v} value={v} />
+                ))}
+              </datalist>
+              <Button
+                type="submit"
+                variant="outline"
+                size="sm"
+                disabled={!newColumn.trim()}
+                title="Add column"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </Button>
+            </form>
+          )}
           <Button variant="outline" size="sm" onClick={load} disabled={loading}>
             <RefreshCw
               className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
@@ -256,15 +360,17 @@ export function MaturityBoard({
         <p className="text-xs text-muted-foreground">
           Status reflects the governance lifecycle and is read-only here — moving
           a doc through review happens in the document view. Switch to Folder for
-          a draggable board.
+          a draggable board. Drag a column header to reorder (remembered per nest).
         </p>
       ) : config.dimension === "tag" ? (
         <p className="text-xs text-muted-foreground">
           {config.tagNamespace?.trim()
             ? `Grouped by ${config.tagNamespace.trim().split(":")[0]}: tags — only documents carrying one appear in a column. Clear the box to group by every tag instead.`
             : "Grouped by tag — one column per tag, so a document with several tags appears in each of them. Type a namespace (e.g. stage) to group by stage: values only."}{" "}
-          Read-only: a document has many tags, so dragging it out of one column
-          has no single meaning.
+          Cards are read-only here (a document has many tags), but you own the
+          columns: drag a header to reorder, <span className="font-medium">+</span>{" "}
+          to add a tag column, <span className="font-medium">×</span> to remove
+          one. Your layout is remembered per nest.
         </p>
       ) : !canEditDocs ? (
         <p className="text-xs text-muted-foreground">
@@ -273,7 +379,8 @@ export function MaturityBoard({
         </p>
       ) : (
         <p className="text-xs text-muted-foreground">
-          Drag a card between columns to move it to that folder.
+          Drag a card between columns to move it to that folder. Drag a column
+          header to reorder — your order is remembered per nest.
         </p>
       )}
 
@@ -296,15 +403,27 @@ export function MaturityBoard({
               <div
                 key={col.key}
                 onDragOver={(e) => {
+                  if (colDrag) {
+                    e.preventDefault();
+                    setColDropTarget(col.key);
+                    return;
+                  }
                   if (!draggable) return;
                   e.preventDefault();
                   setDropCol(col.key);
                 }}
-                onDragLeave={() =>
-                  setDropCol((c) => (c === col.key ? null : c))
-                }
+                onDragLeave={() => {
+                  setDropCol((c) => (c === col.key ? null : c));
+                  setColDropTarget((c) => (c === col.key ? null : c));
+                }}
                 onDrop={(e) => {
                   e.preventDefault();
+                  if (colDrag) {
+                    reorderColumns(colDrag, col.key);
+                    setColDrag(null);
+                    setColDropTarget(null);
+                    return;
+                  }
                   handleDrop(col.key);
                 }}
                 className={`flex-shrink-0 w-64 rounded-lg border bg-muted/30 flex flex-col max-h-[70vh] transition-colors ${
@@ -313,18 +432,48 @@ export function MaturityBoard({
                     : "border-border"
                 }`}
               >
-                <div className="flex items-center justify-between px-3 py-2 border-b border-border sticky top-0">
+                <div
+                  className={`flex items-center justify-between gap-1 px-3 py-2 border-b border-border sticky top-0 ${
+                    col.key !== UNCATEGORIZED
+                      ? "cursor-grab active:cursor-grabbing"
+                      : ""
+                  } ${colDropTarget === col.key ? "bg-primary/10" : ""}`}
+                  draggable={col.key !== UNCATEGORIZED}
+                  onDragStart={(e) => {
+                    if (col.key === UNCATEGORIZED) return;
+                    setColDrag(col.key);
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", `col:${col.key}`);
+                  }}
+                  onDragEnd={() => {
+                    setColDrag(null);
+                    setColDropTarget(null);
+                  }}
+                  title={col.title}
+                >
                   <span
-                    className={`text-sm font-medium truncate capitalize ${
+                    className={`min-w-0 text-sm font-medium truncate capitalize ${
                       col.key === UNCATEGORIZED ? "text-muted-foreground" : ""
                     }`}
-                    title={col.title}
                   >
                     {col.label}
                   </span>
-                  <span className="text-xs text-muted-foreground tabular-nums">
-                    {cards.length}
-                  </span>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <span className="text-xs text-muted-foreground tabular-nums">
+                      {cards.length}
+                    </span>
+                    {effectiveConfig.dimension === "tag" &&
+                      col.key !== UNCATEGORIZED && (
+                        <button
+                          type="button"
+                          onClick={() => hideColumn(col.key)}
+                          className="text-muted-foreground/50 hover:text-foreground"
+                          title="Remove this column — its cards move to Uncategorized"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                  </div>
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-2 space-y-2">
