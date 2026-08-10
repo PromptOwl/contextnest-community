@@ -1141,14 +1141,12 @@ export async function updateNode(
         opInput.append = "\n" + patch.append;
       }
       if (patch.tags) {
-        const newTags = patch.tags.map(normalizeTag);
-        const merged = [
-          ...new Set([...(node.frontmatter.tags || []), ...newTags]),
-        ];
-        node = { ...node, frontmatter: { ...node.frontmatter, tags: merged } };
-        // The op REPLACES tags; this surface has always merged, so send the
-        // already-merged set rather than the caller's additions.
-        opInput.tags = merged;
+        // Replace, don't merge: the editor sends the full tag set on every
+        // save, so a union made removals impossible (CU: removed tag returns
+        // after reopen). Callers wanting additive semantics (MCP
+        // context_update) merge against the current tags themselves.
+        const nextTags = [...new Set(patch.tags.map(normalizeTag))];
+        node = { ...node, frontmatter: { ...node.frontmatter, tags: nextTags } };
       }
       if (patch.status) {
         node = {
@@ -1200,9 +1198,9 @@ export async function updateNode(
 
       const hasStewards = await isStewardshipEnabled(nestId);
       const currentTags = (node.frontmatter.tags || []) as string[];
-      // Resolved from the POST-patch tags and metadata, which patch.tags has
-      // already merged into — so an edit that adds a prime tag gates itself,
-      // and one that clears the doc flag can't un-gate a prime-tagged doc.
+      // Resolved from the POST-patch tags and metadata — so an edit that adds
+      // a prime tag gates itself, and one that clears the doc flag can't
+      // un-gate a prime-tagged doc.
       const publishReason = await autoPublishReason(nestId, userEmail, {
         tags: currentTags,
         metadata: node.frontmatter.metadata,
