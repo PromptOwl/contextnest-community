@@ -359,6 +359,16 @@ export async function getNodeForCaller(
   userEmail: string,
   opts: { verifyChecksum?: boolean } = {},
 ): Promise<ContextNode> {
+  // Gate BEFORE the read whenever the caller named an id. Reading first and
+  // gating after answers a question the caller was not entitled to ask: a
+  // missing node 404s while an existing-but-restricted one 403s, so probing ids
+  // reveals which documents a governed nest holds. Denying an id that does not
+  // exist is the point — the two cases have to look identical.
+  if (selector.id && !(await canReadNode(nestId, selector.id, userId, userEmail))) {
+    throw new ForbiddenError(
+      "Access denied — no steward assignment for this node",
+    );
+  }
   let got: {
     id: string;
     frontmatter: ContextNode["frontmatter"];
@@ -389,9 +399,9 @@ export async function getNodeForCaller(
     }
     throw new NotFoundError(`Node not found: ${selector.id ?? selector.title}`);
   }
-  // Gate on the RESOLVED id — a title selector doesn't tell us which node it
-  // landed on until the operation has run.
-  if (!(await canReadNode(nestId, got.id, userId, userEmail))) {
+  // A title selector cannot be gated up front — it does not name a node until
+  // the operation resolves it — so it is gated here instead.
+  if (!selector.id && !(await canReadNode(nestId, got.id, userId, userEmail))) {
     throw new ForbiddenError(
       "Access denied — no steward assignment for this node",
     );
