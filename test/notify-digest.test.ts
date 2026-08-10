@@ -16,7 +16,9 @@ let alice: { apiKey: string; userId: string; email: string };
 let nestId: string;
 
 beforeAll(async () => {
-  process.env.NOTIFY_DEBOUNCE_MS = "60";
+  // Window has to outlast the HTTP round-trips of a burst on a loaded CI box,
+  // or the buffer flushes mid-burst and the digest splits in two.
+  process.env.NOTIFY_DEBOUNCE_MS = "300";
   process.env.SLACK_WEBHOOK_URL = WEBHOOK;
   vi.stubGlobal("fetch", async (url: any, init?: any) => {
     if (String(url) === WEBHOOK) {
@@ -52,7 +54,7 @@ describe("notification digests", () => {
         alice.apiKey,
       );
     }
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 400));
 
     expect(sent.length).toBe(1);
     expect(sent[0]).toContain("3 updates");
@@ -70,7 +72,7 @@ describe("notification digests", () => {
       { email: "solo@acme.com", permission: "read" },
       alice.apiKey,
     );
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 400));
     expect(sent.length).toBe(1);
     expect(sent[0]).not.toContain("updates:");
     expect(sent[0]).toContain("solo@acme.com");
@@ -79,7 +81,7 @@ describe("notification digests", () => {
   it("caps the digest at DIGEST_LINE_CAP lines with an '…and K more' tail", async () => {
     sent.length = 0;
     // Widen the window so all 12 requests land in one burst deterministically.
-    process.env.NOTIFY_DEBOUNCE_MS = "400";
+    process.env.NOTIFY_DEBOUNCE_MS = "800";
     for (let i = 0; i < 12; i++) {
       await jsonRequest(
         app,
@@ -89,8 +91,8 @@ describe("notification digests", () => {
         alice.apiKey,
       );
     }
-    await new Promise((r) => setTimeout(r, 500));
-    process.env.NOTIFY_DEBOUNCE_MS = "60";
+    await new Promise((r) => setTimeout(r, 900));
+    process.env.NOTIFY_DEBOUNCE_MS = "300";
 
     expect(sent.length).toBe(1);
     expect(sent[0]).toContain("12 updates");
@@ -101,7 +103,7 @@ describe("notification digests", () => {
 
   it("buffers each nest independently — one nest's burst never merges with another's", async () => {
     sent.length = 0;
-    process.env.NOTIFY_DEBOUNCE_MS = "300";
+    process.env.NOTIFY_DEBOUNCE_MS = "600";
     const other = await jsonRequest(
       app,
       "POST",
@@ -115,8 +117,8 @@ describe("notification digests", () => {
     await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: "a1@acme.com", permission: "read" }, alice.apiKey);
     await jsonRequest(app, "POST", `/nests/${nestId}/collaborators`, { email: "a2@acme.com", permission: "read" }, alice.apiKey);
     await jsonRequest(app, "POST", `/nests/${otherId}/collaborators`, { email: "b1@acme.com", permission: "read" }, alice.apiKey);
-    await new Promise((r) => setTimeout(r, 400));
-    process.env.NOTIFY_DEBOUNCE_MS = "60";
+    await new Promise((r) => setTimeout(r, 700));
+    process.env.NOTIFY_DEBOUNCE_MS = "300";
 
     expect(sent.length).toBe(2);
     const digest = sent.find((s) => s.includes("2 updates"));

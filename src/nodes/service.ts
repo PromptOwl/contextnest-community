@@ -63,6 +63,14 @@ async function userIdFromEmail(email: string): Promise<string> {
 
 const normalizeTag = (t: string) => (t.startsWith("#") ? t : `#${t}`);
 
+/** Result shape of the engine's `context_import` operation. A failed entry
+ *  carries `id` (ids[] mode) or `title` (documents[] mode), never both. */
+type ImportOpResult = {
+  published: { id: string; version: number }[];
+  failed: { id?: string; title?: string; error: string }[];
+  checkpoint: number | null;
+};
+
 /** Max characters in a human-readable title. The id/slug bound (100 per
  *  segment, below) doesn't cover this: a title of emoji or non-latin text
  *  slugifies to almost nothing, so an unbounded title still lands in
@@ -955,23 +963,14 @@ async function resetImportedDocForPublish(
  * them the docs still list (discovery is disk-based) but show as "draft"
  * and editing wouldn't continue from their real version.
  *
- * This walks the folder's documents once. Docs the source marked not-yet-
- * approved (draft/rejected/superseded) are registered in a draft state and NOT
- * force-published — they become AI-visible only after review in the new nest
- * (and the engine hard-refuses to publish a rejected doc anyway). Every other
- * doc is run through the engine's publish (safePublishDocument) so it gains a
- * published checksum + a version-chain keyframe and context.yaml is regenerated
- * — exactly the no-stewards auto-publish path createNode uses. That is what
- * makes an imported doc usable by AI: GraphQueryEngine/Resolver only return
- * *published* documents, and public/shared readers reconstruct the approved
- * body from the keyframe. A valid .versions chain copied on import is preserved
- * (publish appends to it); an inconsistent chain that won't reconstruct is
- * reset to a fresh v1 and retried once, so a broken chain never drops the doc.
- * Each published doc is then seeded with a published+approved governance row at
- * its published version, plus its tag index. Idempotent: docs that already
- * carry a version row are skipped, so re-running is safe.
+ * Three phases: prep, one batch publish, governance rows. Publishing is what
+ * makes an imported doc AI-visible — retrieval returns only published docs.
  *
- * Returns the number of documents newly registered.
+ * ONE `context_import` call, not a publish-per-doc loop: per-doc publishing is
+ * O(N²) because every checkpoint re-scans the whole vault.
+ *
+ * Idempotent — docs that already carry a version row are skipped. Returns the
+ * number newly registered.
  */
 export async function registerImportedDocuments(
   nestId: string,
@@ -995,23 +994,25 @@ export async function registerImportedDocuments(
   let publishFailed = 0;
   let publishRecovered = 0;
   let keptUnpublished = 0;
-  let processed = 0;
+
+  /** One imported doc, carried from the prep phase to the DB phase. */
+  type Prepared = { nodeId: string; content: string; tags: string[]; version: number };
+  const drafts: Prepared[] = []; // source said not-yet-approved — never published
+  const pending: Prepared[] = []; // to publish in the batch below
+
+  // ── Phase 1: prep. Per-doc disk work only — no publishing, so the engine
+  // never re-scans the vault between documents.
   for (let doc of docs) {
     const nodeId = doc.id;
-    await onProgress?.(++processed, docs.length);
     if ((await versions.getCurrentVersion(nestId, nodeId)) > 0) {
       alreadyTracked++;
       continue; // already tracked
     }
 
-    // Normalize ownership + title on import, persisted BEFORE publish so both
-    // stick on disk:
-    //  - Author/owner is ALWAYS the importer. The vault's own `author:` names
-    //    someone who isn't a user on this instance (e.g. stacey@…) — showing
-    //    them as creator is wrong, and because the doc's version author is the
-    //    importer, an author≠importer mismatch also fabricates a phantom
-    //    "1 collaborator". Overwriting author fixes both.
-    //  - A title-less doc falls back to its filename (leaf of the node id).
+    // Author is ALWAYS the importer — the vault's own `author:` names a
+    // non-user here, and the mismatch also fabricates a phantom collaborator.
+    // Title falls back to the filename. serializeNodeSafe strips undefined
+    // frontmatter, which is what lets phase 2 publish straight from disk.
     const title = doc.frontmatter?.title ?? (nodeId.split("/").pop() || nodeId);
     doc = { ...doc, frontmatter: { ...doc.frontmatter, title, author: userEmail } };
     try {
@@ -1028,92 +1029,145 @@ export async function registerImportedDocuments(
     // Only trust an integer > 0 as the incoming version; junk like "3.011"
     // falls back to 1 (the fresh-publish path replaces it anyway).
     const fmVersion = Number(doc.frontmatter?.version);
-    let version = Number.isInteger(fmVersion) && fmVersion > 0 ? fmVersion : 1;
-    let content = doc.body || "";
+    const version = Number.isInteger(fmVersion) && fmVersion > 0 ? fmVersion : 1;
+    const prepared: Prepared = { nodeId, content: doc.body || "", tags, version };
 
-    // Docs the source EXPLICITLY marked not-yet-approved are registered as
-    // draft and NOT force-published — honors the imported governance state
-    // (and the engine refuses to publish a rejected doc regardless). Anything
-    // that isn't published/approved (draft, pending_review, rejected,
-    // superseded, or an unknown status) is kept unpublished; a status-less doc
-    // still takes the publish path below.
+    // Honor the imported governance state: anything EXPLICITLY not
+    // published/approved stays unpublished. A status-less doc still publishes.
     const status = explicitFrontmatterStatus(doc.rawContent);
     if (status && status !== "published" && status !== "approved") {
-      await versions.createVersion({
-        nestId,
-        nodeId,
-        version,
-        content,
-        author: userEmail,
-        status: "draft",
-        changeNote: "Imported from existing folder (kept unpublished)",
-        tags,
-      });
-      await syncNodeTags(nestId, nodeId, tags);
-      keptUnpublished++;
-      registered++;
-      continue;
+      drafts.push(prepared);
+    } else {
+      pending.push(prepared);
     }
+  }
 
-    // Publish in the engine so the doc is AI-visible (published status +
-    // checksum + keyframe). If the imported version chain is inconsistent and
-    // publish throws, reset the doc to a fresh base and retry once; if it
-    // still fails, register as draft rather than fake a published row.
-    let published = false;
+  // ── Phase 2: one batch publish — a single checkpoint and index regen for the
+  // whole set. Progress ticks per doc through the engine's context sink.
+  const publishStartedAt = Date.now();
+  const publishedVersion = new Map<string, number>();
+  // `threw` distinguishes a batch-level throw (nothing was individually tried)
+  // from the engine's own per-doc failures — the reset below is destructive and
+  // must only run on the latter.
+  const runImport = async (
+    ids: string[],
+    onTick?: (done: number, total: number) => void,
+  ): Promise<ImportOpResult & { threw?: boolean }> => {
     try {
-      const result = await safePublishDocument(storage, nodeId, {
-        editedBy: userEmail,
-        note: "Imported from existing folder",
-      });
-      version = result.node.frontmatter.version || version;
-      content = result.node.body || content;
-      published = true;
-    } catch (err) {
-      // Expected for docs carrying an inconsistent imported chain — the reset
-      // below recovers them. Log a quiet one-liner, not the full stack, so a
-      // handled failure doesn't read as a broken import.
-      console.warn(
-        `[import] publish retry needed for ${nodeId}: ${(err as Error)?.message ?? err}`,
+      return await engineApi.run<ImportOpResult>(
+        "context_import",
+        { ids },
+        await opContext(nestId, userEmail, onTick),
       );
+    } catch (err) {
+      // The engine seals its checkpoint OUTSIDE the per-doc guard, so a corrupt
+      // context_history.yaml throws for the batch. Absorb it — those docs
+      // register as drafts instead of aborting the whole import.
+      console.error("[import] batch publish failed", nestId, err);
+      const error = (err as Error)?.message ?? String(err);
+      return {
+        published: [],
+        failed: ids.map((id) => ({ id, error })),
+        checkpoint: null,
+        threw: true,
+      };
+    }
+  };
+
+  // Phase 1 already accounted for every doc the batch won't touch (already
+  // tracked, or kept unpublished) — the engine's ticks continue from there so
+  // the bar tracks all `docs`, not just the publishable slice.
+  const preDone = alreadyTracked + drafts.length;
+
+  if (pending.length > 0) {
+    const first = await runImport(
+      pending.map((p) => p.nodeId),
+      (done) => void onProgress?.(preDone + done, docs.length),
+    );
+    for (const p of first.published) publishedVersion.set(p.id, p.version);
+
+    const retry: string[] = [];
+    // Only per-doc failures get reset. On a batch-level throw (a corrupt shared
+    // context_history.yaml) no document was individually tried, and resetting
+    // would delete the imported version history of docs whose own chains are
+    // fine. They register as drafts with their history intact instead.
+    for (const f of first.threw ? [] : first.failed) {
+      if (!f.id) continue; // ids[] failures always carry an id
+      // Expected for an inconsistent imported chain — the reset below recovers
+      // it. One quiet line, not a stack: a handled failure isn't a broken import.
+      console.warn(`[import] publish retry needed for ${f.id}: ${f.error}`);
       try {
-        await resetImportedDocForPublish(storage, nestId, nodeId);
-        const result = await safePublishDocument(storage, nodeId, {
-          editedBy: userEmail,
-          note: "Imported from existing folder (reset chain)",
-        });
-        version = result.node.frontmatter.version || 1;
-        content = result.node.body || content;
-        published = true;
-        publishRecovered++;
-      } catch (err2) {
+        await resetImportedDocForPublish(storage, nestId, f.id);
+        retry.push(f.id);
+      } catch (err) {
         publishFailed++;
-        console.error(
-          "reset+republish failed (import register)",
-          nodeId,
-          err2
-        );
+        console.error("chain reset failed (import register)", f.id, err);
       }
     }
+    if (first.threw) publishFailed += first.failed.length;
 
+    if (retry.length > 0) {
+      const second = await runImport(retry);
+      for (const p of second.published) {
+        publishedVersion.set(p.id, p.version);
+        publishRecovered++;
+      }
+      for (const f of second.failed) {
+        publishFailed++;
+        console.error("reset+republish failed (import register)", f.id, f.error);
+      }
+    }
+  }
+
+  // ── Phase 3: governance rows. Published docs take the version the engine
+  // assigned; everything else registers as a draft at its imported version.
+  const dbStartedAt = Date.now();
+  for (const d of drafts) {
     await versions.createVersion({
       nestId,
-      nodeId,
-      version,
-      content,
+      nodeId: d.nodeId,
+      version: d.version,
+      content: d.content,
       author: userEmail,
-      status: published ? "published" : "draft",
-      changeNote: "Imported from existing folder",
-      tags,
+      status: "draft",
+      changeNote: "Imported from existing folder (kept unpublished)",
+      tags: d.tags,
     });
-    if (published) {
-      await versions.setApprovedVersion(nestId, nodeId, version, userEmail);
-    }
-    await syncNodeTags(nestId, nodeId, tags);
+    await syncNodeTags(nestId, d.nodeId, d.tags);
+    keptUnpublished++;
     registered++;
   }
 
+  for (const p of pending) {
+    const engineVersion = publishedVersion.get(p.nodeId);
+    const published = engineVersion !== undefined;
+    const version = engineVersion ?? p.version;
+    await versions.createVersion({
+      nestId,
+      nodeId: p.nodeId,
+      version,
+      content: p.content,
+      author: userEmail,
+      status: published ? "published" : "draft",
+      changeNote: "Imported from existing folder",
+      tags: p.tags,
+    });
+    if (published) {
+      await versions.setApprovedVersion(nestId, p.nodeId, version, userEmail);
+    }
+    await syncNodeTags(nestId, p.nodeId, p.tags);
+    registered++;
+  }
+
+  // Phase 3 doesn't tick per row (DB inserts, fast next to publishing), so land
+  // the bar on 100% explicitly — the engine's ticks only cover `pending`.
+  await onProgress?.(docs.length, docs.length);
+
+  // Phase split — a slow import is almost always one phase, and the total
+  // alone doesn't say which.
   console.log(
-    `[import] register done: registered=${registered} alreadyTracked=${alreadyTracked} keptUnpublished=${keptUnpublished} publishRecovered=${publishRecovered} publishFailed=${publishFailed} tookMs=${Date.now() - startedAt}`,
+    `[import] register done: registered=${registered} alreadyTracked=${alreadyTracked} keptUnpublished=${keptUnpublished} publishRecovered=${publishRecovered} publishFailed=${publishFailed}` +
+      ` prepMs=${publishStartedAt - startedAt} publishMs=${dbStartedAt - publishStartedAt} dbMs=${Date.now() - dbStartedAt} tookMs=${Date.now() - startedAt}`,
   );
   await trackEvent("nest.import.documents", { nestId, registered });
   return registered;

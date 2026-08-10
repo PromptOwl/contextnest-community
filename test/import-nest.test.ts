@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { existsSync, readdirSync } from "fs";
+import { existsSync, readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import {
   setupTestEnv,
@@ -88,6 +88,42 @@ describe("import folder as nest (upload model)", () => {
     );
     expect(delStatus).toBe(200);
     expect(existsSync(dataNestDir)).toBe(false);
+  });
+
+  it("publishes the whole batch under ONE checkpoint, not one per document", async () => {
+    // The import registers docs through the engine's `context_import` operation
+    // in a single batch. Publishing one-by-one is O(N²) — each publish seals its
+    // own checkpoint and every checkpoint re-scans the whole vault — so a
+    // per-doc checkpoint count is the regression signal for that loop coming back.
+    const files = Array.from({ length: 8 }, (_, i) =>
+      mdFile(`batch/doc-${i}.md`, `title: Doc ${i}\ntype: document`, `body ${i}`),
+    );
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Batched", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.documents).toBe(8);
+
+    const history = readFileSync(
+      join(env.dataDir, "nests", data.nest.id, ".versions", "context_history.yaml"),
+      "utf-8",
+    );
+    expect(history.match(/^\s*- checkpoint:/gm) ?? []).toHaveLength(1);
+
+    // Every doc is genuinely published, not just cheaply counted.
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${data.nest.id}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(list.data.nodes).toHaveLength(8);
+    expect(list.data.nodes.every((n: any) => n.status === "published")).toBe(true);
   });
 
   it("allows importing an empty folder, then creating a doc in it", async () => {
@@ -467,6 +503,33 @@ describe("imported vault: discovery + registration", () => {
     const done = lines.find((m) => m.complete);
     expect(done?.documents).toBe(2);
     expect(done?.nest?.id).toBeTruthy();
+  });
+
+  it("streams progress all the way to 100% when most docs are never batch-published", async () => {
+    // The engine's progress sink only ticks for docs that enter the publish
+    // batch. A mixed import (drafts here, already-tracked docs on a re-run)
+    // would otherwise leave the bar stalled well short of the total.
+    const files: FileEntry[] = [
+      mdFile("p1.md", "title: P1", "publish me"),
+      ...Array.from({ length: 5 }, (_, i) =>
+        mdFile(`d${i}.md`, `title: D${i}\nstatus: draft`, "kept unpublished"),
+      ),
+    ];
+    const res = await app.request("/nests/import?stream=1", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authed(alice.apiKey) },
+      body: JSON.stringify({ name: "Mixed Progress", files }),
+    });
+    const lines = (await res.text())
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    const ticks = lines.filter((m) => m.phase === "register");
+    expect(ticks.at(-1)).toEqual({ phase: "register", done: 6, total: 6 });
+    // Monotone — a bar that jumps backwards is its own bug.
+    expect(ticks.map((t) => t.done)).toEqual([...ticks.map((t) => t.done)].sort((a, b) => a - b));
+    expect(lines.find((m) => m.complete)?.documents).toBe(6);
   });
 
   it("recovers a doc whose imported version chain won't reconstruct", async () => {
