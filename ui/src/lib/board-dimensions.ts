@@ -109,8 +109,48 @@ export function tagValueInNamespace(
  * a whole tag ("stage:draft") is the obvious mistake, and looking for
  * `stage:draft:` would silently match nothing. Empty means "group by every tag".
  */
-function namespaceOf(config: BoardConfig): string {
+function namespaceOf(config: { tagNamespace?: string }): string {
   return (config.tagNamespace ?? "").trim().split(":")[0]!.trim();
+}
+
+/** A saved column layout for one dimension. */
+export interface ColumnLayout {
+  columnOrder?: string[];
+  hiddenColumns?: string[];
+}
+
+/** What the board persists: the chosen dimension plus a layout per dimension. */
+export interface BoardSettings {
+  dimension: DimensionKind;
+  tagNamespace?: string;
+  layouts: Record<string, ColumnLayout>;
+}
+
+/**
+ * Storage key for the active dimension's layout. Column keys are
+ * dimension-specific ("draft" is a status, "gtm/deals" a folder), so one shared
+ * order leaked status columns onto the folder board. The tag namespace is part
+ * of the key too, since it changes which tag values are columns.
+ */
+export function layoutKey(s: {
+  dimension: DimensionKind;
+  tagNamespace?: string;
+}): string {
+  return s.dimension === "tag" ? `tag:${namespaceOf(s)}` : s.dimension;
+}
+
+/** The BoardConfig for the active dimension: its own layout, nothing else's. */
+export function resolveConfig(s: BoardSettings): BoardConfig {
+  const layout = s.layouts[layoutKey(s)] ?? {};
+  return {
+    dimension: s.dimension,
+    tagNamespace: s.tagNamespace,
+    // Status defaults to the lifecycle order until the user reorders it.
+    columnOrder:
+      layout.columnOrder ??
+      (s.dimension === "status" ? STATUS_ORDER : undefined),
+    hiddenColumns: layout.hiddenColumns,
+  };
 }
 
 /**

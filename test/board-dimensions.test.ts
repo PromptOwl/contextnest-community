@@ -6,10 +6,12 @@ import {
   buildColumns,
   groupByColumn,
   planMove,
+  resolveConfig,
   STATUS_ORDER,
   UNCATEGORIZED,
   type BoardNode,
   type BoardConfig,
+  type BoardSettings,
 } from "../ui/src/lib/board-dimensions";
 
 const node = (over: Partial<BoardNode> & { id: string }): BoardNode => ({
@@ -331,5 +333,43 @@ describe("hidden columns (curated tag columns)", () => {
     );
     // review column gone; doc `b` (only tagged review) surfaces in Uncategorized.
     expect(cols.map((c) => c.key)).toEqual(["draft", UNCATEGORIZED]);
+  });
+});
+
+describe("resolveConfig", () => {
+  const settings = (over: Partial<BoardSettings> = {}): BoardSettings => ({
+    dimension: "folder",
+    tagNamespace: "",
+    layouts: {
+      status: { columnOrder: ["approved", "draft"] },
+      folder: { columnOrder: ["gtm"] },
+      "tag:stage": { columnOrder: ["ship"], hiddenColumns: ["old"] },
+    },
+    ...over,
+  });
+
+  it("uses only the active dimension's layout", () => {
+    // The bug: a status reorder leaked onto the folder board, which then
+    // rendered phantom "Draft"/"Approved" columns.
+    expect(resolveConfig(settings()).columnOrder).toEqual(["gtm"]);
+    expect(resolveConfig(settings({ dimension: "status" })).columnOrder).toEqual(
+      ["approved", "draft"],
+    );
+  });
+
+  it("keys tag layouts by namespace", () => {
+    const s = settings({ dimension: "tag", tagNamespace: "stage" });
+    expect(resolveConfig(s).columnOrder).toEqual(["ship"]);
+    expect(resolveConfig(s).hiddenColumns).toEqual(["old"]);
+    // A different namespace is a different column vocabulary — no layout yet.
+    const other = settings({ dimension: "tag", tagNamespace: "team" });
+    expect(resolveConfig(other).columnOrder).toBeUndefined();
+    expect(resolveConfig(other).hiddenColumns).toBeUndefined();
+  });
+
+  it("falls back to the lifecycle order for an un-reordered status board", () => {
+    expect(
+      resolveConfig({ dimension: "status", layouts: {} }).columnOrder,
+    ).toEqual(STATUS_ORDER);
   });
 });

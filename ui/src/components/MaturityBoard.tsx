@@ -32,13 +32,15 @@ import { deriveNestCaps } from "../lib/nest-caps";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  STATUS_ORDER,
   UNCATEGORIZED,
   cardColumnKeys,
   groupByColumn,
+  layoutKey,
   planMove,
+  resolveConfig,
   type BoardNode,
-  type BoardConfig,
+  type BoardSettings,
+  type ColumnLayout,
   type DimensionKind,
 } from "../lib/board-dimensions";
 
@@ -52,34 +54,48 @@ interface Props {
 
 const CONFIG_PREFIX = "cn.board.";
 
-function loadConfig(nestId: string): BoardConfig {
+function loadConfig(nestId: string): BoardSettings {
   try {
     const raw = localStorage.getItem(CONFIG_PREFIX + nestId);
     if (raw) {
       const p = JSON.parse(raw);
       const dimension: DimensionKind =
         p.dimension === "status" || p.dimension === "tag" ? p.dimension : "folder";
+      const tagNamespace =
+        typeof p.tagNamespace === "string" ? p.tagNamespace : "";
       const strings = (v: unknown): string[] | undefined =>
         Array.isArray(v) ? v.filter((k) => typeof k === "string") : undefined;
-      return {
-        dimension,
-        tagNamespace:
-          typeof p.tagNamespace === "string" ? p.tagNamespace : "",
-        // Restore the customised column order + hidden columns so a reordered /
-        // curated board survives a reload (previously dropped on load).
+      // Restore the customised column order + hidden columns, per dimension, so
+      // a reordered / curated board survives a reload.
+      const layouts: Record<string, ColumnLayout> = {};
+      for (const [k, v] of Object.entries(p.layouts ?? {})) {
+        if (v && typeof v === "object") {
+          layouts[k] = {
+            columnOrder: strings((v as any).columnOrder),
+            hiddenColumns: strings((v as any).hiddenColumns),
+          };
+        }
+      }
+      // Saves from before layouts existed kept one shared order; file it under
+      // whichever dimension was active when it was written.
+      const legacy = {
         columnOrder: strings(p.columnOrder),
         hiddenColumns: strings(p.hiddenColumns),
       };
+      if (legacy.columnOrder || legacy.hiddenColumns) {
+        layouts[layoutKey({ dimension, tagNamespace })] ??= legacy;
+      }
+      return { dimension, tagNamespace, layouts };
     }
   } catch {
     // ignore corrupt storage — fall through to default
   }
   // Empty namespace = group by every tag, which is the only setting that shows
   // real columns on a vault of flat (un-namespaced) tags.
-  return { dimension: "folder", tagNamespace: "" };
+  return { dimension: "folder", tagNamespace: "", layouts: {} };
 }
 
-function saveConfig(nestId: string, config: BoardConfig) {
+function saveConfig(nestId: string, config: BoardSettings) {
   try {
     localStorage.setItem(CONFIG_PREFIX + nestId, JSON.stringify(config));
   } catch {
@@ -106,7 +122,7 @@ export function MaturityBoard({
   const [nodes, setNodes] = useState<BoardNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [config, setConfig] = useState<BoardConfig>(() => loadConfig(nestId));
+  const [config, setConfig] = useState<BoardSettings>(() => loadConfig(nestId));
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropCol, setDropCol] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -165,7 +181,7 @@ export function MaturityBoard({
   }, [load]);
 
   const updateConfig = useCallback(
-    (patch: Partial<BoardConfig>) => {
+    (patch: Partial<BoardSettings>) => {
       setConfig((prev) => {
         const next = { ...prev, ...patch };
         saveConfig(nestId, next);
@@ -175,17 +191,26 @@ export function MaturityBoard({
     [nestId],
   );
 
-  const effectiveConfig = useMemo<BoardConfig>(
-    () => ({
-      ...config,
-      // Status defaults to the lifecycle order, but a user reorder wins and
-      // persists. Folder/tag use whatever order the user set (if any).
-      columnOrder:
-        config.columnOrder ??
-        (config.dimension === "status" ? STATUS_ORDER : undefined),
-    }),
-    [config],
+  /** Patch only the active dimension's column layout. */
+  const updateLayout = useCallback(
+    (patch: ColumnLayout) => {
+      setConfig((prev) => {
+        const key = layoutKey(prev);
+        const next = {
+          ...prev,
+          layouts: {
+            ...prev.layouts,
+            [key]: { ...prev.layouts[key], ...patch },
+          },
+        };
+        saveConfig(nestId, next);
+        return next;
+      });
+    },
+    [nestId],
   );
+
+  const effectiveConfig = useMemo(() => resolveConfig(config), [config]);
 
   const { columns, byColumn } = useMemo(
     () => groupByColumn(nodes, effectiveConfig),
@@ -251,32 +276,36 @@ export function MaturityBoard({
       if (from < 0 || to < 0) return;
       order.splice(from, 1);
       order.splice(to, 0, fromKey);
-      updateConfig({ columnOrder: order });
+      updateLayout({ columnOrder: order });
     },
-    [orderedKeys, updateConfig],
+    [orderedKeys, updateLayout],
   );
 
   const hideColumn = useCallback(
     (key: string) =>
-      updateConfig({
-        hiddenColumns: [...new Set([...(config.hiddenColumns ?? []), key])],
+      updateLayout({
+        hiddenColumns: [
+          ...new Set([...(effectiveConfig.hiddenColumns ?? []), key]),
+        ],
       }),
-    [config.hiddenColumns, updateConfig],
+    [effectiveConfig.hiddenColumns, updateLayout],
   );
 
   const addTagColumn = useCallback(
     (value: string) => {
       const v = value.trim();
       if (!v) return;
-      updateConfig({
+      updateLayout({
         // Append to the order (a key in columnOrder shows even with no cards)
         // and un-hide it if it was removed earlier.
         columnOrder: [...new Set([...orderedKeys, v])],
-        hiddenColumns: (config.hiddenColumns ?? []).filter((k) => k !== v),
+        hiddenColumns: (effectiveConfig.hiddenColumns ?? []).filter(
+          (k) => k !== v,
+        ),
       });
       setNewColumn("");
     },
-    [orderedKeys, config.hiddenColumns, updateConfig],
+    [orderedKeys, effectiveConfig.hiddenColumns, updateLayout],
   );
 
   // Distinct tag values present in the nest — suggestions for the add-column box.
