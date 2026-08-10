@@ -132,6 +132,45 @@ describe("title length bound", () => {
     expect(rename.status).toBe(400);
   });
 
+  it("rejects a title with no slug-able characters, on create and on rename", async () => {
+    // "###" slugifies to "" — the derived id was a bare `nodes/`, which wrote a
+    // ghost at nodes/.md: absent from the list, unopenable, undeletable, and
+    // colliding with the next symbols-only title.
+    for (const title of ["###", "...", "!!!", "   "]) {
+      const res = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title, content: "body" },
+        alice.apiKey,
+      );
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.data)).toMatch(/at least one letter or number/i);
+    }
+
+    // Nothing was created, so the list is unchanged and a later create at the
+    // same (empty) slug is not blocked.
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, alice.apiKey);
+    expect(list.data.nodes.some((n: any) => n.id === `nodes/` || n.id.endsWith("/"))).toBe(false);
+
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Renameable", content: "body" },
+      alice.apiKey,
+    );
+    const rename = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/${encodeURIComponent(created.data.node.id)}`,
+      { title: "###" },
+      alice.apiKey,
+    );
+    expect(rename.status).toBe(400);
+    expect(JSON.stringify(rename.data)).toMatch(/at least one letter or number/i);
+  });
+
   it("still projects the derived annotations node for an at-cap artifact title", async () => {
     // The derived title appends " — Annotations" (14 chars). Without bounding
     // the source title, an at-cap artifact pushes it past the limit and
