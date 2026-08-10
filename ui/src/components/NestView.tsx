@@ -432,13 +432,18 @@ export function NestView({
     .map((s) => s.trim())
     .filter(Boolean).length;
   const newFolderTooDeep = newFolderDepth > MAX_FOLDER_DEPTH;
+  // The server derives folder ids by slugifying to a-z0-9, so a name with none
+  // of those ("!!!", "...") slugifies away and the starter doc silently lands
+  // in the nest root instead of a folder.
+  const newFolderUnusable =
+    !!newFolderPath.trim() && !/[a-z0-9]/i.test(newFolderPath);
 
   const createFolder = async () => {
     const folder = newFolderPath.trim().replace(/^\/+|\/+$/g, "");
     if (!folder) return;
-    // Block deeper than the server allows before the round-trip, so the user
+    // Block what the server would reject before the round-trip, so the user
     // gets the reason inline instead of a swallowed 400.
-    if (newFolderTooDeep) return;
+    if (newFolderTooDeep || newFolderUnusable) return;
     setCreatingFolder(true);
     try {
       // Folders are path-derived — seed one with a starter node so it appears
@@ -3589,13 +3594,23 @@ export function NestView({
               level{newFolderDepth - MAX_FOLDER_DEPTH === 1 ? "" : "s"}.
             </p>
           )}
+          {newFolderUnusable && (
+            <p className="text-xs text-destructive">
+              Folder names must contain at least one letter or number.
+            </p>
+          )}
           <DialogFooter>
             <Button variant="ghost" onClick={() => setShowNewFolder(false)}>
               Cancel
             </Button>
             <Button
               onClick={() => void createFolder()}
-              disabled={creatingFolder || !newFolderPath.trim() || newFolderTooDeep}
+              disabled={
+                creatingFolder ||
+                !newFolderPath.trim() ||
+                newFolderTooDeep ||
+                newFolderUnusable
+              }
             >
               {creatingFolder ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />

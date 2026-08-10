@@ -94,6 +94,25 @@ describe("nested folder creation", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects a folder name that slugifies to nothing", async () => {
+    // "!!!" slugifies away, leaving no segments — the doc silently landed in the
+    // nest root, so the next such folder collided with it ("A document already
+    // exists at nodes/overview").
+    // Whitespace-only is NOT in this list: it reads as "no folder given", the
+    // same as omitting the field, and creating at the root is correct there.
+    for (const folder of ["!!!", "...", "?/?"]) {
+      const res = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title: "Overview", content: "# O", folder },
+        alice.apiKey,
+      );
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.data)).toMatch(/at least one letter or number/i);
+    }
+  });
+
   it("omitting folder keeps the flat nodes/<slug> behavior", async () => {
     const res = await jsonRequest(
       app,

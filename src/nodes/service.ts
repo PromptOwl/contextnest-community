@@ -125,6 +125,15 @@ export function isIdUnderFolder(id: string, folder: string): boolean {
  */
 function folderToSegments(folder: string): string[] {
   const segments = folder.split("/").map(slugify).filter(Boolean);
+  // A folder named "!!!" or "..." slugifies away entirely, and an empty segment
+  // list means "the nest root" — so the doc lands at nodes/<title> instead, and
+  // the next such folder collides with it ("already exists at nodes/overview").
+  // An absent folder is still fine; only a name the caller meant is refused.
+  if (folder.trim() && segments.length === 0) {
+    throw new ValidationError(
+      "folder name must contain at least one letter or number",
+    );
+  }
   // Callers think in node ids, and every node id starts with "nodes/" — so
   // `folder: "nodes/signals"` is the natural thing to write. Both call sites
   // below prefix "nodes/" themselves, so an unstripped leading segment lands
