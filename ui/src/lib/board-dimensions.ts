@@ -42,6 +42,7 @@ export const STATUS_ORDER = [
   "approved",
   "published",
   "rejected",
+  "external_edit_pending",
 ];
 
 /** Headings for STATUS_ORDER — the raw keys are snake_case. */
@@ -51,6 +52,8 @@ const STATUS_LABELS: Record<string, string> = {
   approved: "Approved",
   published: "Published",
   rejected: "Rejected",
+  // Same wording as LifecycleStatusBadge, so a card's pill and its column agree.
+  external_edit_pending: "External Edit",
 };
 
 export interface BoardConfig {
@@ -188,7 +191,10 @@ function disambiguateFolderLabels(keys: string[]): Map<string, string> {
 function labelFor(key: string, config: BoardConfig): string {
   if (key === UNCATEGORIZED) return "Uncategorized";
   if (key === "" && config.dimension === "folder") return "(root)";
-  if (config.dimension === "status") return STATUS_LABELS[key] ?? key;
+  // A status the server grew but this map hasn't: spaces beat raw snake_case,
+  // since the heading is rendered with CSS `capitalize`.
+  if (config.dimension === "status")
+    return STATUS_LABELS[key] ?? key.replace(/_/g, " ");
   return key;
 }
 

@@ -696,6 +696,11 @@ export default function App() {
     );
   }
 
+  // Board columns are fixed-width and scroll sideways, so the 6xl shell forces
+  // horizontal scrolling long before the viewport runs out. Widen the whole
+  // shell (header, tabs, main, footer) on that page so they stay aligned.
+  const shellWidth = view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -703,7 +708,7 @@ export default function App() {
         {/* The divider sits under the top row, not under the tabs — the tab
             row reads as part of the page below it, not a second bar. */}
         <div className="border-b border-border">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+        <div className={`${shellWidth} mx-auto px-4 py-3 flex items-center justify-between`}>
           <button
             onClick={() => setView({ page: "dashboard" })}
             className="flex items-center gap-2 hover:opacity-80"
@@ -803,7 +808,7 @@ export default function App() {
             Nest context is read straight off the view: every page in
             NEST_VIEWS carries the same nestId/nestName/isOwner/isAnonOwned. */}
         {isNestScoped(view) && (
-          <div className="max-w-6xl mx-auto px-4 py-2 overflow-x-auto">
+          <div className={`${shellWidth} mx-auto px-4 py-2 overflow-x-auto`}>
             <Tabs
               value={view.page}
               onValueChange={(page) =>
@@ -840,7 +845,7 @@ export default function App() {
       {/* Content */}
       {/* <main> owns page padding for every view — page roots must not add
           their own md:py-*, or one section sits lower than the next. */}
-      <main className="max-w-6xl mx-auto px-4 py-4">
+      <main className={`${shellWidth} mx-auto px-4 py-4`}>
         {view.page === "dashboard" && (
           <Dashboard
             onSelectNest={(id, name, isOwner, isAnonOwned) =>
@@ -1119,7 +1124,7 @@ export default function App() {
         )}
       </main>
 
-      <footer className="max-w-6xl mx-auto px-4 py-4 text-xs text-muted-foreground text-center">
+      <footer className={`${shellWidth} mx-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
         ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
       </footer>
 

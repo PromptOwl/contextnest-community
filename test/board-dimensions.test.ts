@@ -180,6 +180,7 @@ describe("status columns", () => {
       "approved",
       "published",
       "rejected",
+      "external_edit_pending",
     ]);
     expect(cols.map((c) => c.label)).toEqual([
       "Draft",
@@ -187,7 +188,13 @@ describe("status columns", () => {
       "Approved",
       "Published",
       "Rejected",
+      "External Edit",
     ]);
+  });
+  it("spaces out a status heading it has no label for", () => {
+    const cfg: BoardConfig = { dimension: "status" };
+    const cols = buildColumns([node({ id: "a", status: "awaiting_sync" })], cfg);
+    expect(cols.map((c) => c.label)).toEqual(["awaiting sync"]);
   });
   it("carries no status the server cannot produce", () => {
     // These three were columns that could never fill; pending_review and
