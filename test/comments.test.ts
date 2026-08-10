@@ -221,9 +221,18 @@ describe("comments: standalone, threaded, attributed, resolvable", () => {
     // drift scan — this is exactly "Bob proposed an edit" from the ticket.
     const nestDir = join(process.env.DATA_ROOT!, "nests", nestId);
     // The node's document body lives under nodes/<slug>.md inside the nest.
+    // Creating a node regenerates the vault index, so nodes/ also holds an
+    // INDEX.md. Editing that would stage no drift (the scan skips meta files),
+    // so match the document itself, not whatever .md lands there first.
     const docFile = (readdirSync(nestDir, { recursive: true } as any) as string[])
       .map((f) => String(f))
-      .find((f) => f.endsWith(".md") && f.includes("nodes"));
+      .find(
+        (f) =>
+          f.endsWith(".md") &&
+          f.includes("nodes") &&
+          !f.endsWith("INDEX.md") &&
+          !f.endsWith("CONTEXT.md"),
+      );
     expect(docFile).toBeTruthy();
     const docPath = join(nestDir, docFile!);
     writeFileSync(

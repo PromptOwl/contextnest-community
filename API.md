@@ -440,6 +440,16 @@ team each get their own local team.
 ### GET `/nests/:nestId/nodes`
 Lists all readable docs.
 - When `stewardship_enabled = true`, list is filtered by `filterAccessible` — non-steward users only see what they're assigned to.
+
+Optional query params, applied before the per-node enrichment:
+
+| Param | Notes |
+|---|---|
+| `type` | Node type. A doc with no `type:` counts as `document`. |
+| `tag` | Leading `#` optional, case-insensitive. |
+| `status` | `draft` \| `pending_review` \| `approved` \| `published` \| `rejected`; aliases normalized. Retired docs stay in this listing regardless — here they are unpublished docs their stewards may still act on. |
+| `approved_only` | `1`/`true` — only docs with an approved version, each served at that version rather than the live file. The view a public nest gives a stranger, so an owner can preview what going public would expose. |
+| `limit` | Max nodes to return. A non-numeric value is ignored, not an error. |
 ```json
 {
   "count": 1,

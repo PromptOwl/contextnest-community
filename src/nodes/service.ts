@@ -4,7 +4,6 @@
  * (auth, parse, response shape); this module owns create/update/list.
  */
 import {
-  serializeDocument,
   parseDocument,
   normalizeStatus,
   DocumentNotFoundError,
@@ -13,7 +12,7 @@ import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir, rm } from "node:fs/promises";
 import { dirname, join, basename } from "node:path";
 import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
-import { engineCache } from "./engine.js";
+import { engineCache, engineApi, opContext } from "./engine.js";
 import {
   AppError,
   NotFoundError,
@@ -38,6 +37,7 @@ import { canApproveWith } from "../governance/roles.js";
 import {
   resolveCallerEmail,
   filterAccessible,
+  canReadNode,
 } from "../governance/access-guard.js";
 import { isPublicReader, resolveNestPermission } from "../shared/access.js";
 import {
@@ -119,9 +119,6 @@ function folderToSegments(folder: string): string[] {
   }
   return segments;
 }
-
-const stripUndefined = <T extends Record<string, any>>(o: T): T =>
-  Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T;
 
 /**
  * Optional `#dept:<slug>` auto-tag (CU-wdqcpzwf2p). When the superadmin
@@ -325,6 +322,15 @@ export interface ListNodesFilters {
   /** One type, or several (e.g. runnable types) to keep. */
   type?: string | readonly string[];
   tag?: string;
+  /** Lifecycle status; aliases normalized. Retired nodes stay hidden without it. */
+  status?: string;
+  /**
+   * Return only nodes with an approved version, and serve that version's body
+   * rather than the live file — the view a public nest gives a stranger. Public
+   * readers get it regardless; this lets any caller ask for it, e.g. to preview
+   * what a nest exposes before making it public.
+   */
+  approvedOnly?: boolean;
   limit?: number;
 }
 
@@ -333,31 +339,140 @@ export interface ListNodesFilters {
  * pending-change/status resolution. Single source of truth for REST GET
  * /nests/:id/nodes, MCP context_list, and any future surface.
  */
+/**
+ * Read ONE node the way every surface should: resolve the selector, gate it,
+ * and hand back the document.
+ *
+ * REST and MCP each grew their own version of this — the only read in the
+ * service that had no shared choke point, unlike create/update/list. MCP's
+ * loaded and parsed EVERY file in the vault (discoverDocuments) just to find
+ * one node by id.
+ *
+ * Response shaping stays with the caller: REST negotiates raw/markdown/JSON and
+ * resolves workflow status, MCP serves the approved body only. This owns the
+ * read and the access check, nothing above them.
+ */
+export async function getNodeForCaller(
+  nestId: string,
+  selector: { id?: string; title?: string },
+  userId: string,
+  userEmail: string,
+  opts: { verifyChecksum?: boolean } = {},
+): Promise<ContextNode> {
+  // Gate BEFORE the read whenever the caller named an id. Reading first and
+  // gating after answers a question the caller was not entitled to ask: a
+  // missing node 404s while an existing-but-restricted one 403s, so probing ids
+  // reveals which documents a governed nest holds. Denying an id that does not
+  // exist is the point — the two cases have to look identical.
+  if (selector.id && !(await canReadNode(nestId, selector.id, userId, userEmail))) {
+    throw new ForbiddenError(
+      "Access denied — no steward assignment for this node",
+    );
+  }
+  let got: {
+    id: string;
+    frontmatter: ContextNode["frontmatter"];
+    body: string;
+    raw?: string;
+    pendingChange?: ContextNode["pendingChange"];
+  };
+  try {
+    got = await engineApi.run(
+      "context_get",
+      {
+        ...selector,
+        include_raw: true,
+        // A retired node stays readable here: its stewards decide whether to
+        // revive it, and they cannot do that if the read refuses.
+        allow_rejected: true,
+        ...(opts.verifyChecksum ? { verify_checksum: true } : {}),
+      },
+      await opContext(nestId, userEmail),
+    );
+  } catch (err) {
+    // A missing document is the ordinary case and needs no noise. Anything else
+    // is a real fault, and reporting it as a 404 with no trace makes an engine
+    // bug look like an empty vault — this is now the single read path for both
+    // REST and MCP, so a silent one hides everywhere at once.
+    if ((err as { code?: string })?.code !== "DOCUMENT_NOT_FOUND") {
+      console.error(`getNodeForCaller failed (${nestId}/${selector.id ?? selector.title})`, err);
+    }
+    throw new NotFoundError(`Node not found: ${selector.id ?? selector.title}`);
+  }
+  // A title selector cannot be gated up front — it does not name a node until
+  // the operation resolves it — so it is gated here instead.
+  if (!selector.id && !(await canReadNode(nestId, got.id, userId, userEmail))) {
+    throw new ForbiddenError(
+      "Access denied — no steward assignment for this node",
+    );
+  }
+  return {
+    id: got.id,
+    filePath: "",
+    rawContent: got.raw ?? "",
+    frontmatter: got.frontmatter,
+    body: got.body,
+    ...(got.pendingChange ? { pendingChange: got.pendingChange } : {}),
+  };
+}
+
 export async function listNodesForCaller(
   nestId: string,
   userId: string,
   filters: ListNodesFilters = {}
 ): Promise<NodeResponse[]> {
-  const { storage, versions: versionManager } = await engineCache.get(nestId);
-  let documents = await storage.discoverDocuments();
-
-  // Cheap on-frontmatter filters first — narrows what we enrich below, so the
-  // per-node governance/version work never runs on docs we'd discard anyway.
-  if (filters.type) {
-    const wanted = new Set(
-      Array.isArray(filters.type) ? filters.type : [filters.type]
-    );
-    documents = documents.filter((n) => wanted.has(n.frontmatter.type));
-  }
-  if (filters.tag) {
-    const tag = normalizeTag(filters.tag);
-    documents = documents.filter((n) =>
-      (n.frontmatter.tags || []).includes(tag)
-    );
-  }
-
+  const { versions: versionManager } = await engineCache.get(nestId);
   const userEmail = await resolveCallerEmail(userId);
-  let accessible = await filterAccessible(nestId, userId, userEmail, documents);
+
+  // Discovery and the cheap on-frontmatter filters go through the engine's
+  // canonical browse, so this surface can't drift from the CLI and mcp-server
+  // on what `type: document` or a `#`-less tag means — and so a future
+  // authorization extension on the operation covers this path too.
+  //
+  // `full` because the governance work below gates and renders these documents:
+  // a summary would force a second read of every file. `limit` is deliberately
+  // NOT passed — it applies after access filtering, further down.
+  const { documents } = await engineApi.run<{
+    documents: Array<{ id: string; frontmatter: ContextNode["frontmatter"]; body: string }>;
+  }>(
+    "context_list",
+    {
+      ...(filters.type ? { type: filters.type } : {}),
+      ...(filters.tag ? { tag: filters.tag } : {}),
+      ...(filters.status ? { status: filters.status } : {}),
+      // Unlike the CLI and mcp-server, a retired node stays in this listing:
+      // here it is an unpublished document its stewards may still need to act
+      // on, not one removed from retrieval. An imported vault carrying
+      // `status: rejected` registers exactly that way.
+      include_retired: true,
+      full: true,
+    },
+    await opContext(nestId, userEmail),
+  );
+  const nodes: ContextNode[] = documents.map((d) => ({
+    id: d.id,
+    filePath: "",
+    rawContent: "",
+    frontmatter: d.frontmatter,
+    body: d.body,
+  }));
+  const publicReader = await isPublicReader(nestId, userId);
+  // Approved-only view: what a public nest shows a stranger. ONE scan of the
+  // nest, shared by the access filter (which decides what a public reader may
+  // see) and the enrichment below (which serves each body at its approved
+  // version) — those asked the same question separately.
+  const approvedOnly = publicReader || filters.approvedOnly === true;
+  const approvedVersions = approvedOnly
+    ? await versions.getApprovedVersions(nestId)
+    : null;
+
+  let accessible = await filterAccessible(
+    nestId,
+    userId,
+    userEmail,
+    nodes,
+    approvedVersions ?? undefined,
+  );
 
   // Share grants: a caller with NO nest-wide permission sees exactly the
   // documents their grants cover — never the whole list. filterAccessible's
@@ -371,10 +486,22 @@ export async function listNodesForCaller(
   ) {
     const grants = await listUserGrants(nestId, userId);
     accessible = grants.length
-      ? documents.filter((d) => grantCoversNode(grants, d.id))
+      ? nodes.filter((d) => grantCoversNode(grants, d.id))
       : accessible;
   }
-  const publicReader = await isPublicReader(nestId, userId);
+  // A public reader was already narrowed to approved nodes by filterAccessible;
+  // any other caller asking for this view is narrowed here.
+  if (approvedVersions && !publicReader) {
+    accessible = accessible.filter((d) => approvedVersions.has(d.id));
+  }
+
+  // Trim to the requested count BEFORE the per-node work below. Enrichment
+  // costs a reconstruct and two governance queries per node, and slicing
+  // afterwards paid all of that for every node the caller was never going to
+  // see — a 50-node MCP listing did a whole 500-node nest's worth of it. After
+  // access filtering, or a node dropped for permissions would come out of the
+  // caller's quota.
+  if (filters.limit) accessible = accessible.slice(0, filters.limit);
 
   // Author + collaborators for exactly the post-filter set — two batched
   // queries for the whole list (see resolveAuthorship), never per-node.
@@ -400,8 +527,8 @@ export async function listNodesForCaller(
         r.collaborators = people.collaborators;
       }
 
-      if (publicReader) {
-        const approved = await versions.getApprovedVersion(nestId, doc.id);
+      if (approvedVersions) {
+        const approved = approvedVersions.get(doc.id);
         if (approved != null) {
           try {
             const raw = await versionManager.reconstructVersion(
@@ -440,7 +567,7 @@ export async function listNodesForCaller(
     })
   );
 
-  return filters.limit ? enriched.slice(0, filters.limit) : enriched;
+  return enriched;
 }
 
 /** Email-keyed wrapper for callers that don't have userId in hand (MCP tools). */
@@ -588,7 +715,6 @@ export async function createNode(
         ? `nodes/${folderSegments.join("/")}/${slug}`
         : `nodes/${slug}`;
   }
-  const now = new Date().toISOString();
   const tags = (input.tags || []).map(normalizeTag);
 
   // Content-type toggles: creation of a disabled type is refused here — the
@@ -672,36 +798,81 @@ export async function createNode(
       tags,
       metadata,
     });
-    const autoPublish = publishReason !== null;
-    const initialStatus = autoPublish ? "published" : "draft";
-    // Publish path starts at v=0 so the engine publish bump lands at v=1.
-    const initialVersion = autoPublish ? 0 : 1;
+    // Same note in the engine history and the governance row: the version
+    // history an admin reads in the UI comes from node_versions, so leaving the
+    // reason only in history.yaml hides it from the audit that matters.
+    const publishNote =
+      publishReason === null ? undefined : `Auto-published on create (${publishReason})`;
 
-    let node: ContextNode = {
-      id,
-      filePath: "",
-      frontmatter: {
-        title: input.title,
-        type: requestedType as any,
-        tags,
-        status: (input.status as any) || (initialStatus as any),
-        version: initialVersion,
-        created_at: now,
-        updated_at: now,
-        metadata: metadata as any,
-      },
-      body: input.content,
-      rawContent: "",
-    };
-    await storage.writeDocument(id, serializeDocument(node));
+    // Write — and publish, when the gate allows — through the engine's canonical
+    // create. Governance stays here; the engine owns frontmatter assembly,
+    // validation, version assignment and the index regen, so a document created
+    // here is identical to one created by the CLI or mcp-server.
+    let published = publishReason !== null;
+    try {
+      await engineApi.run(
+        "context_create",
+        {
+          id,
+          title: input.title,
+          content: input.content,
+          type: requestedType,
+          // A skill node is invalid without a skill block, and this surface has
+          // no field for one — default the trigger from the title, same as the
+          // CLI and mcp-server do.
+          ...(requestedType === "skill"
+            ? { trigger: `when asked to ${input.title.toLowerCase()}` }
+            : {}),
+          ...(tags.length ? { tags } : {}),
+          ...(input.status ? { status: input.status } : {}),
+          metadata,
+          publish: published,
+          ...(publishNote ? { note: publishNote } : {}),
+        },
+        await opContext(nestId, userEmail),
+      );
+    } catch (err) {
+      // The op writes the node before publishing it. If the write landed and
+      // only the publish failed, register the document as a draft instead of
+      // throwing and stranding a file that has no governance rows.
+      let onDisk = true;
+      try {
+        await storage.readDocument(id);
+      } catch {
+        onDisk = false;
+      }
+      if (!onDisk) throw err;
+      console.error("publishDocument failed (node create auto-publish)", err);
+      published = false;
+    }
+
+    const node = await storage.readDocument(id);
     await syncNodeTags(nestId, id, tags);
 
     let savedVersion = 1;
-    if (publishReason === null) {
-      try {
-        await versionManager.createVersion(node, userEmail);
-      } catch (err) {
-        console.error("VersionManager.createVersion failed (node create)", err);
+    if (published) {
+      savedVersion = node.frontmatter.version || 1;
+      await versions.createVersion({
+        nestId,
+        nodeId: id,
+        version: savedVersion,
+        content: node.body || "",
+        author: userEmail,
+        status: "published",
+        tags,
+        changeNote: publishNote,
+      });
+      await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
+    } else {
+      // Seed the engine history only for a genuine draft. A publish that failed
+      // above already wrote history entries; re-seeding would graft a second
+      // chain onto them.
+      if (publishReason === null) {
+        try {
+          await versionManager.createVersion(node, userEmail);
+        } catch (err) {
+          console.error("VersionManager.createVersion failed (node create)", err);
+        }
       }
       await versions.createVersion({
         nestId,
@@ -712,41 +883,6 @@ export async function createNode(
         status: "draft",
         tags,
       });
-    } else {
-      // Same note in the engine history and the governance row: the version
-      // history an admin reads in the UI comes from node_versions, so leaving
-      // the reason only in history.yaml hides it from the audit that matters.
-      const publishNote = `Auto-published on create (${publishReason})`;
-      try {
-        const result = await safePublishDocument(storage, id, {
-          editedBy: userEmail,
-          note: publishNote,
-        });
-        savedVersion = result.node.frontmatter.version || 1;
-        await versions.createVersion({
-          nestId,
-          nodeId: id,
-          version: savedVersion,
-          content: result.node.body || "",
-          author: userEmail,
-          status: "published",
-          tags,
-          changeNote: publishNote,
-        });
-        await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
-        node = result.node;
-      } catch (err) {
-        console.error("publishDocument failed (node create auto-publish)", err);
-        await versions.createVersion({
-          nestId,
-          nodeId: id,
-          version: 1,
-          content: input.content,
-          author: userEmail,
-          status: "draft",
-          tags,
-        });
-      }
     }
 
     await trackEvent("node.create", { nestId, nodeId: id });
@@ -1002,11 +1138,17 @@ export async function updateNode(
         throw new NotFoundError(`Node not found: ${nodeId}`);
       }
 
+      // Assemble the op's input alongside a local projection of the patched
+      // node. The projection is what governance reads (auto-publish gate, tag
+      // index) BEFORE the write happens; the engine performs the actual write.
+      const opInput: Record<string, unknown> = {};
       if (patch.content !== undefined) {
         node = { ...node, body: patch.content };
+        opInput.content = patch.content;
       }
       if (patch.append) {
         node = { ...node, body: (node.body || "") + "\n\n" + patch.append };
+        opInput.append = "\n" + patch.append;
       }
       if (patch.tags) {
         // Replace, don't merge: the editor sends the full tag set on every
@@ -1015,12 +1157,17 @@ export async function updateNode(
         // context_update) merge against the current tags themselves.
         const nextTags = [...new Set(patch.tags.map(normalizeTag))];
         node = { ...node, frontmatter: { ...node.frontmatter, tags: nextTags } };
+        // The engine performs the write, so the new set has to reach it — the
+        // projection above only feeds the governance decisions below. It
+        // replaces too, so this is a straight hand-off.
+        opInput.tags = nextTags;
       }
       if (patch.status) {
         node = {
           ...node,
           frontmatter: { ...node.frontmatter, status: patch.status as any },
         };
+        opInput.status = normalizeStatus(patch.status);
       }
       if (patch.title) {
         // Grandfathered: docs saved before this bound existed keep their long
@@ -1033,6 +1180,7 @@ export async function updateNode(
           ...node,
           frontmatter: { ...node.frontmatter, title: patch.title },
         };
+        opInput.title = patch.title;
       }
       if (patch.schedule !== undefined) {
         if (!isRunnableType(node.frontmatter.type)) {
@@ -1046,6 +1194,12 @@ export async function updateNode(
         if (patch.schedule === "") delete metadata.schedule;
         else metadata.schedule = patch.schedule;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        // The op merges metadata and reads null as "clear this key" — an empty
+        // schedule means remove it, not store "".
+        opInput.metadata = {
+          ...(opInput.metadata as object),
+          schedule: patch.schedule === "" ? null : patch.schedule,
+        };
       }
       if (patch.prime !== undefined) {
         await assertMayFlagPrime(nestId, userEmail);
@@ -1053,6 +1207,7 @@ export async function updateNode(
         if (patch.prime === null) delete metadata.prime;
         else metadata.prime = patch.prime;
         node = { ...node, frontmatter: { ...node.frontmatter, metadata } };
+        opInput.metadata = { ...(opInput.metadata as object), prime: patch.prime };
       }
 
       const hasStewards = await isStewardshipEnabled(nestId);
@@ -1094,19 +1249,16 @@ export async function updateNode(
         // failed) `currentVersion + 1` reuses a version number, which grafts a
         // second chain onto the first and breaks reconstruction from there on.
         const newVersion = await versionManager.nextVersion(nodeId, currentVersion);
-        node = {
-          ...node,
-          frontmatter: {
-            ...node.frontmatter,
-            version: newVersion,
-            updated_at: new Date().toISOString(),
-            // Drop stale published-state checksum so the next verified read
-            // doesn't flag this write as external drift.
-            checksum: undefined,
-          },
-        };
-        node = { ...node, frontmatter: stripUndefined(node.frontmatter) };
-        await storage.writeDocument(nodeId, serializeDocument(node));
+        // The engine owns the write: it applies the patch, validates, stamps the
+        // version we assigned and drops the stale published-state checksum, then
+        // regenerates the index. `publish: false` because this revision has not
+        // cleared review — governance below records it as a draft.
+        await engineApi.run(
+          "context_update",
+          { id: nodeId, ...opInput, publish: false, version: newVersion },
+          await opContext(nestId, userEmail),
+        );
+        node = await storage.readDocument(nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
 
         // Persist to the engine history FIRST, then mirror into the DB. If the
@@ -1141,32 +1293,19 @@ export async function updateNode(
         }
         responseVersion = newVersion;
       } else {
-        node = {
-          ...node,
-          frontmatter: {
-            ...node.frontmatter,
-            updated_at: new Date().toISOString(),
-            checksum: undefined,
-          },
-        };
-        node = { ...node, frontmatter: stripUndefined(node.frontmatter) };
-        await storage.writeDocument(nodeId, serializeDocument(node));
-        await syncNodeTags(nestId, nodeId, currentTags);
-
-        let publishedVersion = (node.frontmatter.version || 0) + 1;
         // Publish through the engine FIRST; only mirror into the DB once it
         // actually landed. Rethrow on failure — swallowing here is what let
         // node_versions climb past what history.yaml stored (DB v19 vs v15).
         const publishNote =
           patch.changeNote || `Auto-published on edit (${publishReason})`;
+        let publishedVersion: number;
         try {
-          const result = await safePublishDocument(storage, nodeId, {
-            editedBy: userEmail,
-            note: publishNote,
-          });
-          publishedVersion =
-            result.node.frontmatter.version || publishedVersion;
-          node = result.node;
+          const result = await engineApi.run<{ version: number }>(
+            "context_update",
+            { id: nodeId, ...opInput, publish: true, note: publishNote },
+            await opContext(nestId, userEmail),
+          );
+          publishedVersion = result.version;
         } catch (err) {
           console.error(
             "publishDocument failed (node patch auto-publish)",
@@ -1174,6 +1313,8 @@ export async function updateNode(
           );
           throw err;
         }
+        node = await storage.readDocument(nodeId);
+        await syncNodeTags(nestId, nodeId, currentTags);
         // upsert, not insert: the engine publishes a draft in place (draft N →
         // published N, no version bump), so a governance row may already exist
         // at this version (e.g. an imported draft). A plain insert here hit
@@ -1465,8 +1606,15 @@ export async function deleteNode(
   // under the reviewer (423). Mirrors the edit lock in updateNode.
   await assertNotReviewLocked(nestId, nodeId, userEmail, "deleting");
 
+  // Through the operation, which also regenerates the index — deleting the file
+  // alone left context.yaml still listing the node, so graph-mode reads kept
+  // resolving a document that was gone.
   try {
-    await storage.deleteDocument(nodeId);
+    await engineApi.run(
+      "context_delete",
+      { id: nodeId },
+      await opContext(nestId, userEmail),
+    );
   } catch {
     throw new NotFoundError(`Node not found: ${nodeId}`);
   }
@@ -1480,7 +1628,11 @@ export async function deleteNode(
   // the annotation threads themselves are purged in the transaction below.
   const derivedId = derivedIdOf(nodeId);
   try {
-    await storage.deleteDocument(derivedId);
+    await engineApi.run(
+      "context_delete",
+      { id: derivedId },
+      await opContext(nestId, userEmail),
+    );
     await removeNodeFromTagIndex(nestId, derivedId);
   } catch {
     /* no derived annotations node — nothing to remove */
