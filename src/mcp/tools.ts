@@ -794,24 +794,36 @@ async function runTool(
       // hops mirrors REST POST /context — caller-controlled traversal depth.
       // External LLM callers set this directly, so normalize junk values
       // (negative, fractional, NaN) to a sane non-negative integer.
-      const result = await queryEngine.query(args.query, {
-        hops: normalizeHops(args.hops),
-      });
+      const { documents } = await engineApi.run<{
+        documents: Array<{
+          id: string;
+          title: string;
+          type: string;
+          tags?: string[];
+          body?: string;
+        }>;
+      }>(
+        "context_query",
+        { query: args.query, hops: normalizeHops(args.hops) },
+        await opContext(nestId, userEmail),
+      );
       // Hide nodes the caller can't see (approved-only under stewardship) so the
       // listing doesn't leak restricted titles — same gate as context_search.
       const visibility = await Promise.all(
-        result.documents.map(async (n) => ({
-          node: n,
-          visible: (await resolveLlmBody(ctx, n)) !== null,
+        documents.map(async (d) => ({
+          doc: d,
+          visible:
+            (await resolveLlmBody(ctx, {
+              id: d.id,
+              body: d.body ?? "",
+              frontmatter: { title: d.title },
+            } as ContextNode)) !== null,
         })),
       );
-      const nodes = visibility.filter((e) => e.visible).map((e) => e.node);
+      const nodes = visibility.filter((e) => e.visible).map((e) => e.doc);
       if (!nodes.length) return `No nodes matched: ${args.query}`;
       const list = nodes
-        .map(
-          (n, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}`,
-        )
+        .map((n, i) => `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).join(" ")}`)
         .join("\n\n");
       return `Found ${nodes.length} node(s) for \`${args.query}\`:\n\n${list}`;
     }
