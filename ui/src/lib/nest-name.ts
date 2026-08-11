@@ -11,7 +11,7 @@
 export function nestNameProblem(name: string): string | null {
   if (!name.trim()) return "Name is required";
   if (!/[a-z0-9]/i.test(name)) {
-    return "Name must contain at least one letter or number";
+    return "The URL slug is built from a-z and 0-9, so the name needs at least one of those";
   }
   return null;
 }

@@ -145,7 +145,7 @@ describe("title length bound", () => {
         alice.apiKey,
       );
       expect(res.status).toBe(400);
-      expect(JSON.stringify(res.data)).toMatch(/at least one letter or number/i);
+      expect(JSON.stringify(res.data)).toMatch(/needs at least one of those/i);
     }
 
     // Nothing was created, so the list is unchanged and a later create at the
@@ -168,7 +168,22 @@ describe("title length bound", () => {
       alice.apiKey,
     );
     expect(rename.status).toBe(400);
-    expect(JSON.stringify(rename.data)).toMatch(/at least one letter or number/i);
+    expect(JSON.stringify(rename.data)).toMatch(/needs at least one of those/i);
+  });
+
+  it("refuses an all-non-latin title, naming the a-z0-9 id rule", async () => {
+    // The slug is ASCII, so "日本語のみ" derives nothing and would leave the same
+    // ghost document "###" does. It IS letters, though, so the message points
+    // at the id rule rather than claiming the title has none.
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "日本語のみ", content: "body" },
+      alice.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.data)).toMatch(/built from the title using a-z and 0-9/i);
   });
 
   it("still projects the derived annotations node for an at-cap artifact title", async () => {

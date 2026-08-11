@@ -432,9 +432,9 @@ export function NestView({
     .map((s) => s.trim())
     .filter(Boolean).length;
   const newFolderTooDeep = newFolderDepth > MAX_FOLDER_DEPTH;
-  // The server derives folder ids by slugifying to a-z0-9, so a name with none
-  // of those ("!!!", "...") slugifies away and the starter doc silently lands
-  // in the nest root instead of a folder.
+  // The server derives folder paths by slugifying to a-z0-9, so a name with
+  // none of those ("!!!", "...", or a purely non-Latin name) slugifies away and
+  // the starter doc silently lands in the nest root instead of a folder.
   const newFolderUnusable =
     !!newFolderPath.trim() && !/[a-z0-9]/i.test(newFolderPath);
 
@@ -3596,7 +3596,8 @@ export function NestView({
           )}
           {newFolderUnusable && (
             <p className="text-xs text-destructive">
-              Folder names must contain at least one letter or number.
+              Folder paths are built from a-z and 0-9, so the name needs at least
+              one of those.
             </p>
           )}
           <DialogFooter>

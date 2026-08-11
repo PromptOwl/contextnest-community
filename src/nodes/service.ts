@@ -92,11 +92,16 @@ function assertTitleLength(title: string): void {
  * addresses. The engine's storage guard refuses that id; this raises the same
  * refusal as a 400 with a message a person can act on. Same choke point as
  * assertTitleLength: REST and MCP both route here.
+ *
+ * The slug is ASCII, so an all-CJK/Cyrillic/Arabic title lands here too — it
+ * derived the same empty id. The message names that real constraint rather
+ * than claiming the title has no letters.
  */
 function assertTitleSluggable(title: string): void {
   if (!slugify(title)) {
     throw new ValidationError(
-      "title must contain at least one letter or number"
+      "the document id is built from the title using a-z and 0-9, so the " +
+        "title needs at least one of those"
     );
   }
 }
@@ -129,9 +134,12 @@ function folderToSegments(folder: string): string[] {
   // list means "the nest root" — so the doc lands at nodes/<title> instead, and
   // the next such folder collides with it ("already exists at nodes/overview").
   // An absent folder is still fine; only a name the caller meant is refused.
+  // Folder segments are path components, so the ASCII bound is the same one
+  // assertTitleSluggable explains.
   if (folder.trim() && segments.length === 0) {
     throw new ValidationError(
-      "folder name must contain at least one letter or number",
+      "the folder path is built from the name using a-z and 0-9, so the " +
+        "name needs at least one of those",
     );
   }
   // Callers think in node ids, and every node id starts with "nodes/" — so
