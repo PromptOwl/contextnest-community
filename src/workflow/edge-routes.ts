@@ -188,11 +188,15 @@ export async function assertNoDuplicateEdge(
   type: EdgeTypeRow,
   excludeId?: string,
 ): Promise<void> {
+  // Append the exclusion instead of `(? IS NULL OR id != ?)`: a bare param in
+  // `IS NULL` has no inferable type, and Postgres rejects it with 42P18.
   const row = await db.get(
     `SELECT id FROM edges
-      WHERE nest_id = ? AND from_node = ? AND to_node = ? AND type_id = ?
-        AND (? IS NULL OR id != ?)`,
-    [nestId, fromNode, toNode, type.id, excludeId ?? null, excludeId ?? null],
+      WHERE nest_id = ? AND from_node = ? AND to_node = ? AND type_id = ?` +
+      (excludeId ? " AND id != ?" : ""),
+    excludeId
+      ? [nestId, fromNode, toNode, type.id, excludeId]
+      : [nestId, fromNode, toNode, type.id],
   );
   if (row) {
     throw new ConflictError(
