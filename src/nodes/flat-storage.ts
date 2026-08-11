@@ -3,6 +3,7 @@ import { join, relative, sep } from "path";
 import { NestStorage } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { isSkippedSegment } from "../fs/vault-import.js";
+import { mapBatched } from "../shared/batch.js";
 
 // Engine- and agent-generated files that live alongside documents but are
 // NOT themselves documents. The engine excludes these in structured mode;
@@ -30,9 +31,6 @@ const META_FILES = new Set([
  * off the document id (its path relative to the root), which this discovery
  * produces.
  */
-/** Documents read per parallel batch — see discoverDocuments. */
-const READ_CONCURRENCY = 32;
-
 export class FlatNestStorage extends NestStorage {
   async discoverDocuments(): Promise<ContextNode[]> {
     const root = this.root;
@@ -56,27 +54,21 @@ export class FlatNestStorage extends NestStorage {
       ids.push(rel.replace(/\.md$/, ""));
     }
 
-    // Read in bounded-parallel batches. On a Cloud Storage mount every read is
-    // a network round trip, so reading one document at a time cost one latency
-    // per document — and an import runs this crawl several times over. Ordering
-    // is preserved by folding the batches back in id order.
-    const sorted = ids.sort();
-    const nodes: ContextNode[] = [];
-    for (let i = 0; i < sorted.length; i += READ_CONCURRENCY) {
-      const batch = await Promise.all(
-        sorted.slice(i, i + READ_CONCURRENCY).map(async (id) => {
-          try {
-            return await this.readDocument(id);
-          } catch (err) {
-            // Unreadable / malformed markdown — skip rather than fail the list,
-            // but log so a silently-dropped doc is traceable.
-            console.error("[FlatNestStorage] skipped unreadable doc", id, err);
-            return null;
-          }
-        }),
-      );
-      for (const node of batch) if (node) nodes.push(node);
-    }
-    return nodes;
+    // Read in bounded-parallel batches: on a Cloud Storage mount every read is
+    // a network round trip, so one document at a time cost one latency each —
+    // and an import runs this crawl several times over. mapBatched preserves
+    // input order, so the result stays sorted by id.
+    ids.sort();
+    const read = await mapBatched(ids, async (id) => {
+      try {
+        return await this.readDocument(id);
+      } catch (err) {
+        // Unreadable / malformed markdown — skip rather than fail the list,
+        // but log so a silently-dropped doc is traceable.
+        console.error("[FlatNestStorage] skipped unreadable doc", id, err);
+        return null;
+      }
+    });
+    return read.filter((n): n is ContextNode => n !== null);
   }
 }

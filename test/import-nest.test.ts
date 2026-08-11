@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { existsSync, readdirSync, readFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
   setupTestEnv,
@@ -131,11 +131,17 @@ describe("import folder as nest (upload model)", () => {
     // (32 at a time) so a network-backed vault mount doesn't pay one round trip
     // per document. 80 docs crosses that boundary three times: this catches a
     // batch fold that drops documents or scrambles their order.
+    //
+    // Every third doc is an explicit draft, interleaved rather than grouped, so
+    // the drafts/pending split — which now happens after a batch settles rather
+    // than per doc — has to survive the fold as well.
     const n = 80;
+    const isDraft = (i: number) => i % 3 === 0;
     const files = Array.from({ length: n }, (_, i) =>
       mdFile(
         `wide/doc-${String(i).padStart(3, "0")}.md`,
-        `title: Wide ${String(i).padStart(3, "0")}\ntype: document`,
+        `title: Wide ${String(i).padStart(3, "0")}\ntype: document` +
+          (isDraft(i) ? "\nstatus: draft" : ""),
         `body ${i}`,
       ),
     );
@@ -157,12 +163,78 @@ describe("import folder as nest (upload model)", () => {
       alice.apiKey,
     );
     expect(list.data.nodes).toHaveLength(n);
-    expect(list.data.nodes.every((d: any) => d.status === "published")).toBe(true);
     // Every id present exactly once — a mis-folded batch would duplicate or lose some.
     expect([...new Set(list.data.nodes.map((d: any) => d.id))]).toHaveLength(n);
-    // Discovery order is still sorted by id, which is what phase 1 walks.
+    // Discovery order is still sorted by id, which is what the prep pass walks.
     const ids = list.data.nodes.map((d: any) => d.id);
     expect([...ids].sort()).toEqual(ids);
+    // Each doc kept ITS OWN status: a fold that mixed the two partitions up
+    // would publish a draft (or hold back a publishable doc) without changing
+    // the counts, so assert per id rather than in aggregate.
+    const statusById = new Map(
+      list.data.nodes.map((d: any) => [d.id, d.status]),
+    );
+    for (let i = 0; i < n; i++) {
+      expect(statusById.get(`wide/doc-${String(i).padStart(3, "0")}`)).toBe(
+        isDraft(i) ? "draft" : "published",
+      );
+    }
+  });
+
+  it("re-registering skips tracked docs and picks up new ones across a batch", async () => {
+    // Registration asks ONE query which docs the nest already tracks, then
+    // prepares only the rest — replacing a per-doc lookup. This is the path that
+    // optimisation exists for: a second pass over a nest holding a mix of
+    // already-tracked and brand-new docs, straddling the batch boundary.
+    const n = 50;
+    const files = Array.from({ length: n }, (_, i) =>
+      mdFile(
+        `mixed/old-${String(i).padStart(3, "0")}.md`,
+        `title: Old ${String(i).padStart(3, "0")}\ntype: document`,
+        `body ${i}`,
+      ),
+    );
+    const { data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Mixed", files },
+      alice.apiKey,
+    );
+    const nestId = data.nest.id;
+    expect(data.documents).toBe(n);
+
+    // Land new markdown in the nest the way an out-of-band sync would, then
+    // register again. Total (50 + 30) crosses the batch boundary; the fresh
+    // slice alone does not, so a broken filter shows up as a count mismatch.
+    const added = 30;
+    for (let i = 0; i < added; i++) {
+      const p = join(env.dataDir, "nests", nestId, "mixed", `new-${String(i).padStart(3, "0")}.md`);
+      writeFileSync(
+        p,
+        `---\ntitle: New ${String(i).padStart(3, "0")}\ntype: document\n---\n\nfresh ${i}\n`,
+        "utf-8",
+      );
+    }
+
+    const { registerImportedDocuments } = await import("../src/nodes/service.js");
+    const registered = await registerImportedDocuments(nestId, "alice@test.com");
+    // ONLY the new ones — the 50 already tracked must not register twice.
+    expect(registered).toBe(added);
+
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(list.data.nodes).toHaveLength(n + added);
+    expect([...new Set(list.data.nodes.map((d: any) => d.id))]).toHaveLength(n + added);
+    expect(list.data.nodes.every((d: any) => d.status === "published")).toBe(true);
+
+    // A third pass has nothing left to do — the idempotency the bulk query owns.
+    expect(await registerImportedDocuments(nestId, "alice@test.com")).toBe(0);
   });
 
   it("allows importing an empty folder, then creating a doc in it", async () => {

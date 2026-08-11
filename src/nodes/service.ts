@@ -22,6 +22,7 @@ import {
   ForbiddenError,
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
+import { mapBatched } from "../shared/batch.js";
 import * as versions from "../governance/version-service.js";
 import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
 import {
@@ -991,9 +992,6 @@ async function resetImportedDocForPublish(
   await storage.writeDocument(nodeId, serializeNodeSafe({ ...node, frontmatter: fm }));
 }
 
-/** Import metadata writes issued per parallel batch — see phase 1 below. */
-const IMPORT_WRITE_CONCURRENCY = 32;
-
 /**
  * Register the documents already present in an imported folder.
  *
@@ -1082,12 +1080,10 @@ export async function registerImportedDocuments(
     return { nodeId, content: withMeta.body || "", tags, version, draft };
   };
 
-  for (let i = 0; i < fresh.length; i += IMPORT_WRITE_CONCURRENCY) {
-    const batch = await Promise.all(
-      fresh.slice(i, i + IMPORT_WRITE_CONCURRENCY).map(prepare),
-    );
-    // Partition after the batch settles so drafts/pending keep document order.
-    for (const { draft, ...p } of batch) (draft ? drafts : pending).push(p);
+  // mapBatched preserves input order, so partitioning its result keeps drafts
+  // and pending in document order.
+  for (const { draft, ...p } of await mapBatched(fresh, prepare)) {
+    (draft ? drafts : pending).push(p);
   }
 
   // ── Phase 2: one batch publish — a single checkpoint and index regen for the
