@@ -386,30 +386,42 @@ export function MaturityBoard({
       </NestPageHeader>
 
       {config.dimension === "status" ? (
-        <p className="text-xs text-muted-foreground">
-          Status reflects the governance lifecycle and is read-only here — moving
-          a doc through review happens in the document view. Switch to Folder for
-          a draggable board. Drag a column header to reorder (remembered per nest).
+        <p className="max-w-4xl text-xs text-muted-foreground">
+          Status is <span className="font-medium text-foreground">read-only</span>{" "}
+          here — move a doc through review in the document view. Switch to{" "}
+          <span className="font-medium text-foreground">Folder</span> for a
+          draggable board. Drag a column header to reorder.
         </p>
       ) : config.dimension === "tag" ? (
-        <p className="text-xs text-muted-foreground">
+        <p className="max-w-4xl text-xs text-muted-foreground">
+          Grouped by{" "}
+          <span className="font-medium text-foreground">
+            {config.tagNamespace?.trim()
+              ? `${config.tagNamespace.trim().split(":")[0]}:`
+              : "tag"}
+          </span>{" "}
           {config.tagNamespace?.trim()
-            ? `Grouped by ${config.tagNamespace.trim().split(":")[0]}: tags — only documents carrying one appear in a column. Clear the box to group by every tag instead.`
-            : "Grouped by tag — one column per tag, so a document with several tags appears in each of them. Type a namespace (e.g. stage) to group by stage: values only."}{" "}
-          Cards are read-only here (a document has many tags), but you own the
-          columns: drag a header to reorder, <span className="font-medium">+</span>{" "}
-          to add a tag column, <span className="font-medium">×</span> to remove
-          one. Your layout is remembered per nest.
+            ? "— only documents carrying one show up. Clear the box to group by every tag."
+            : "— one column per tag, so a document with several tags appears in each. Type a namespace (e.g. stage) to group by stage: values only."}{" "}
+          Cards are{" "}
+          <span className="font-medium text-foreground">read-only</span>; drag a
+          header to reorder,{" "}
+          <span className="font-medium text-foreground">+</span> to add a column,{" "}
+          <span className="font-medium text-foreground">×</span> to remove one.
         </p>
       ) : !canEditDocs ? (
-        <p className="text-xs text-muted-foreground">
-          You have read-only access to this nest, so cards can't be moved. Ask
-          the nest owner for write access to rearrange the board.
+        <p className="max-w-4xl text-xs text-muted-foreground">
+          You have{" "}
+          <span className="font-medium text-foreground">read-only</span> access
+          to this nest, so cards can't be moved. Ask the nest owner for write
+          access to rearrange the board.
         </p>
       ) : (
-        <p className="text-xs text-muted-foreground">
-          Drag a card between columns to move it to that folder. Drag a column
-          header to reorder — your order is remembered per nest.
+        <p className="max-w-4xl text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">Drag a card</span>{" "}
+          between columns to move it to that folder.{" "}
+          <span className="font-medium text-foreground">Drag a column header</span>{" "}
+          to reorder.
         </p>
       )}
 

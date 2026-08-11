@@ -86,6 +86,26 @@ function assertTitleLength(title: string): void {
   }
 }
 
+/**
+ * A title of "###", "...", or spaces slugifies to nothing, and the derived id
+ * would be a bare `nodes/` — a ghost at nodes/.md that no list shows and no id
+ * addresses. The engine's storage guard refuses that id; this raises the same
+ * refusal as a 400 with a message a person can act on. Same choke point as
+ * assertTitleLength: REST and MCP both route here.
+ *
+ * The slug is ASCII, so an all-CJK/Cyrillic/Arabic title lands here too — it
+ * derived the same empty id. The message names that real constraint rather
+ * than claiming the title has no letters.
+ */
+function assertTitleSluggable(title: string): void {
+  if (!slugify(title)) {
+    throw new ValidationError(
+      "the document id is built from the title using a-z and 0-9, so the " +
+        "title needs at least one of those"
+    );
+  }
+}
+
 const slugify = (s: string) =>
   s
     .toLowerCase()
@@ -110,6 +130,18 @@ export function isIdUnderFolder(id: string, folder: string): boolean {
  */
 function folderToSegments(folder: string): string[] {
   const segments = folder.split("/").map(slugify).filter(Boolean);
+  // A folder named "!!!" or "..." slugifies away entirely, and an empty segment
+  // list means "the nest root" — so the doc lands at nodes/<title> instead, and
+  // the next such folder collides with it ("already exists at nodes/overview").
+  // An absent folder is still fine; only a name the caller meant is refused.
+  // Folder segments are path components, so the ASCII bound is the same one
+  // assertTitleSluggable explains.
+  if (folder.trim() && segments.length === 0) {
+    throw new ValidationError(
+      "the folder path is built from the name using a-z and 0-9, so the " +
+        "name needs at least one of those",
+    );
+  }
   // Callers think in node ids, and every node id starts with "nodes/" — so
   // `folder: "nodes/signals"` is the natural thing to write. Both call sites
   // below prefix "nodes/" themselves, so an unstripped leading segment lands
@@ -703,6 +735,10 @@ export async function createNode(
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
   assertTitleLength(input.title);
+  // Only when the id is derived from the title — an explicit id makes the title
+  // a label, and a caller that minted its own id has already said where the doc
+  // goes.
+  if (!input.id) assertTitleSluggable(input.title);
   // The id slug is derived, not user-facing: a title within MAX_TITLE_LENGTH
   // can still slugify past the 100-char path-segment bound, so truncate rather
   // than reject. Keeps storage.writeDocument off ENAMETOOLONG without making
@@ -1229,6 +1265,9 @@ export async function updateNode(
         // make those docs unsavable — enforce only on an actual rename.
         if (patch.title !== node.frontmatter.title) {
           assertTitleLength(patch.title);
+          // A rename keeps the id, so nothing is written to nodes/ — but the
+          // title is still what search, wiki links and every header read back.
+          assertTitleSluggable(patch.title);
         }
         node = {
           ...node,

@@ -578,6 +578,13 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
                   label="Categories with no steward"
                   items={signals.unstewardedTags.map((t) => `#${t.name} (${t.count})`)}
                   empty="Every category has a steward."
+                  onSelect={
+                    onOpenTag &&
+                    ((i) => onOpenTag(signals.unstewardedTags[i].name))
+                  }
+                  selectTitle={(i) =>
+                    `Show #${signals.unstewardedTags[i].name} documents`
+                  }
                 />
                 <GapRow
                   label="Bottleneck stewards (≥50% of nodes)"
@@ -794,7 +801,20 @@ function QuerySnippet({ label, value }: { label: string; value: string }) {
   );
 }
 
-function GapRow({ label, items, empty }: { label: string; items: string[]; empty: string }) {
+function GapRow({
+  label,
+  items,
+  empty,
+  onSelect,
+  selectTitle,
+}: {
+  label: string;
+  items: string[];
+  empty: string;
+  /** Makes each item a button — index is into `items`. */
+  onSelect?: (index: number) => void;
+  selectTitle?: (index: number) => string;
+}) {
   return (
     <div>
       <div className="text-xs font-medium text-foreground">{label}</div>
@@ -804,7 +824,18 @@ function GapRow({ label, items, empty }: { label: string; items: string[]; empty
         <ul className="mt-0.5 space-y-0.5">
           {items.slice(0, 8).map((it, i) => (
             <li key={i} className="text-xs text-amber-700 break-all">
-              {it}
+              {onSelect ? (
+                <button
+                  type="button"
+                  onClick={() => onSelect(i)}
+                  title={selectTitle?.(i)}
+                  className="text-left hover:underline"
+                >
+                  {it}
+                </button>
+              ) : (
+                it
+              )}
             </li>
           ))}
           {items.length > 8 && (

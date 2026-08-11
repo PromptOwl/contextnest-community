@@ -23,6 +23,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Loader2, Pencil } from "lucide-react";
 import * as api from "../lib/api";
+import { nestNameProblem } from "../lib/nest-name";
 
 interface RenameNestDialogProps {
   nestId: string;
@@ -91,6 +92,9 @@ export function RenameNestDialog({
   }, [open, nestName, nestDescription]);
 
   const trimmedName = name.trim();
+  // Same rule the create form applies, so a name the server would refuse never
+  // costs a round-trip here either.
+  const nameProblem = nestNameProblem(name);
   const nameChanged =
     nameTouched && trimmedName !== primed.current.name.trim();
   const descChanged =
@@ -98,7 +102,11 @@ export function RenameNestDialog({
   const dirty = nameChanged || descChanged;
 
   const handleSave = async () => {
-    if (!trimmedName || saving) return;
+    if (saving) return;
+    if (nameProblem) {
+      setError(nameProblem);
+      return;
+    }
     if (!dirty) {
       onOpenChange(false);
       return;
@@ -212,7 +220,7 @@ export function RenameNestDialog({
             >
               Cancel
             </Button>
-            <Button type="submit" disabled={saving || !trimmedName || !dirty}>
+            <Button type="submit" disabled={saving || !!nameProblem || !dirty}>
               {saving ? (
                 <>
                   <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />

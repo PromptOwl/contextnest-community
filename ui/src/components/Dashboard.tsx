@@ -10,6 +10,7 @@ import {
 import { ANON_USER_ID } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
 import { relTime, formatServerDate } from "../lib/dates";
+import { nestNameProblem } from "../lib/nest-name";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -300,10 +301,16 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newName.trim()) return;
+    // Say why instead of returning silently — the submit still reaches here
+    // when the browser autofills or the button is driven by Enter.
+    const problem = nestNameProblem(newName);
+    if (problem) {
+      setCreateError(problem);
+      return;
+    }
     setCreateError(null);
     try {
-      await api.createNest(newName, newDesc);
+      await api.createNest(newName.trim(), newDesc.trim());
       setNewName(""); setNewDesc(""); setShowCreate(false);
       fetchNests();
     } catch (e) {
@@ -765,7 +772,9 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                 />
               </div>
               <div className="flex gap-2">
-                <Button type="submit">Create Nest</Button>
+                <Button type="submit" disabled={!!nestNameProblem(newName)}>
+                  Create Nest
+                </Button>
                 <Button type="button" variant="outline" onClick={() => { setShowCreate(false); setCreateError(null); }}>
                   Cancel
                 </Button>
