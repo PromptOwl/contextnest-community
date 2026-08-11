@@ -161,6 +161,45 @@ d("PostgresAdapter conformance", () => {
     expect((rows[0] as any).deleted_by).toBe("b@example.com");
     expect((rows[0] as any).deleted_at).toBe("2026-02-02 00:00:00");
   });
+  it("runs the duplicate-edge check without a typed-parameter error", async () => {
+    // Guards the 42P18 regression: the check used `(? IS NULL OR id != ?)` to
+    // fold in the optional excludeId, and Postgres can't infer a bare param's
+    // type inside IS NULL — so every edge create 500'd on Postgres while
+    // passing on SQLite.
+    const { assertNoDuplicateEdge } = await import(
+      "../src/workflow/edge-routes.js"
+    );
+    const type = { id: "et-1", name: "flow" } as any;
+    await adapter.run(
+      "INSERT INTO nests (id, user_id, name, slug) VALUES (?, ?, ?, ?)",
+      ["n-edge", "u1", "N", "n-edge"],
+    );
+    await adapter.run(
+      `INSERT INTO edge_types
+         (id, nest_id, name, description, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ["et-1", "n-edge", "flow", "", "u1", "t", "t"],
+    );
+
+    // No excludeId, no existing row: this is the create path that threw 42P18.
+    await expect(
+      assertNoDuplicateEdge(adapter, "n-edge", "a", "b", type),
+    ).resolves.toBeUndefined();
+
+    await adapter.run(
+      `INSERT INTO edges
+         (id, nest_id, from_node, to_node, type_id, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["e-1", "n-edge", "a", "b", "et-1", "u1", "t", "t"],
+    );
+    await expect(
+      assertNoDuplicateEdge(adapter, "n-edge", "a", "b", type),
+    ).rejects.toThrow(/already exists/);
+    // Retype path: the row being changed must not count as its own duplicate.
+    await expect(
+      assertNoDuplicateEdge(adapter, "n-edge", "a", "b", type, "e-1"),
+    ).resolves.toBeUndefined();
+  });
 });
 
 function hashStr(s: string): number {
