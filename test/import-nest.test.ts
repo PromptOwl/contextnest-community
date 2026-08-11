@@ -126,6 +126,45 @@ describe("import folder as nest (upload model)", () => {
     expect(list.data.nodes.every((n: any) => n.status === "published")).toBe(true);
   });
 
+  it("registers every doc when the import spans several read/write batches", async () => {
+    // Discovery and the import prep both read/write in bounded-parallel batches
+    // (32 at a time) so a network-backed vault mount doesn't pay one round trip
+    // per document. 80 docs crosses that boundary three times: this catches a
+    // batch fold that drops documents or scrambles their order.
+    const n = 80;
+    const files = Array.from({ length: n }, (_, i) =>
+      mdFile(
+        `wide/doc-${String(i).padStart(3, "0")}.md`,
+        `title: Wide ${String(i).padStart(3, "0")}\ntype: document`,
+        `body ${i}`,
+      ),
+    );
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Wide", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.documents).toBe(n);
+
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${data.nest.id}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(list.data.nodes).toHaveLength(n);
+    expect(list.data.nodes.every((d: any) => d.status === "published")).toBe(true);
+    // Every id present exactly once — a mis-folded batch would duplicate or lose some.
+    expect([...new Set(list.data.nodes.map((d: any) => d.id))]).toHaveLength(n);
+    // Discovery order is still sorted by id, which is what phase 1 walks.
+    const ids = list.data.nodes.map((d: any) => d.id);
+    expect([...ids].sort()).toEqual(ids);
+  });
+
   it("allows importing an empty folder, then creating a doc in it", async () => {
     const { status, data } = await jsonRequest(
       app,

@@ -164,6 +164,23 @@ export async function getCurrentVersion(
   return row?.v || 0;
 }
 
+/**
+ * Every node in a nest that already carries a real (non-system) version row.
+ *
+ * Import only needs the yes/no that getCurrentVersion answers, but asked it per
+ * document — one round trip each before any work began. One scan answers it for
+ * the whole nest, mirroring getApprovedVersions.
+ */
+export async function getTrackedNodeIds(nestId: string): Promise<Set<string>> {
+  const db = getDb();
+  const rows = (await db.all(
+    `SELECT DISTINCT node_id FROM node_versions
+        WHERE nest_id = ? AND author NOT LIKE ?`,
+    [nestId, `${SYSTEM_AUTHOR_PREFIX}%`],
+  )) as Array<{ node_id: string }>;
+  return new Set(rows.map((r) => r.node_id));
+}
+
 // ─── Approved Version ───────────────────────────────────────────────────
 
 export async function getApprovedVersion(

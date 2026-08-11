@@ -30,6 +30,9 @@ const META_FILES = new Set([
  * off the document id (its path relative to the root), which this discovery
  * produces.
  */
+/** Documents read per parallel batch — see discoverDocuments. */
+const READ_CONCURRENCY = 32;
+
 export class FlatNestStorage extends NestStorage {
   async discoverDocuments(): Promise<ContextNode[]> {
     const root = this.root;
@@ -53,15 +56,26 @@ export class FlatNestStorage extends NestStorage {
       ids.push(rel.replace(/\.md$/, ""));
     }
 
+    // Read in bounded-parallel batches. On a Cloud Storage mount every read is
+    // a network round trip, so reading one document at a time cost one latency
+    // per document — and an import runs this crawl several times over. Ordering
+    // is preserved by folding the batches back in id order.
+    const sorted = ids.sort();
     const nodes: ContextNode[] = [];
-    for (const id of ids.sort()) {
-      try {
-        nodes.push(await this.readDocument(id));
-      } catch (err) {
-        // Unreadable / malformed markdown — skip rather than fail the list,
-        // but log so a silently-dropped doc is traceable.
-        console.error("[FlatNestStorage] skipped unreadable doc", id, err);
-      }
+    for (let i = 0; i < sorted.length; i += READ_CONCURRENCY) {
+      const batch = await Promise.all(
+        sorted.slice(i, i + READ_CONCURRENCY).map(async (id) => {
+          try {
+            return await this.readDocument(id);
+          } catch (err) {
+            // Unreadable / malformed markdown — skip rather than fail the list,
+            // but log so a silently-dropped doc is traceable.
+            console.error("[FlatNestStorage] skipped unreadable doc", id, err);
+            return null;
+          }
+        }),
+      );
+      for (const node of batch) if (node) nodes.push(node);
     }
     return nodes;
   }
