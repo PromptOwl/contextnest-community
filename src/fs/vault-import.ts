@@ -1,6 +1,7 @@
 import { rmSync } from "fs";
 import { writeFile, mkdir } from "fs/promises";
 import { join, dirname, isAbsolute } from "path";
+import { mapBatched } from "../shared/batch.js";
 
 /** One file uploaded by the browser's folder picker, path relative to the vault root. */
 export interface ImportedFile {
@@ -47,10 +48,6 @@ function safeSegments(rel: string): string[] | null {
   return segs;
 }
 
-/** Files written per parallel batch — see writeImportedFiles.
- *  NOTE: fixed batch of 32; tune if a huge vault exhausts file handles. */
-const WRITE_CONCURRENCY = 32;
-
 /**
  * Write the files uploaded from a browser folder pick into the nest's own
  * storage under DATA_ROOT, preserving relative structure so document ids stay
@@ -84,18 +81,10 @@ export async function writeImportedFiles(
   const dirs = new Set(targets.map((t) => dirname(t.full)));
   await Promise.all([...dirs].map((d) => mkdir(d, { recursive: true })));
 
-  // Bounded-parallel writes. `written` increments are safe — JS runs them on a
-  // single thread; only the awaited I/O overlaps.
-  let written = 0;
-  for (let i = 0; i < targets.length; i += WRITE_CONCURRENCY) {
-    const batch = targets.slice(i, i + WRITE_CONCURRENCY);
-    await Promise.all(
-      batch.map(async (t) => {
-        await writeFile(t.full, t.content, "utf-8");
-        written++;
-      }),
-    );
-  }
+  // Bounded-parallel writes. A failed write rejects the whole import (the
+  // caller discards the half-written dir), so reaching here means all landed.
+  await mapBatched(targets, (t) => writeFile(t.full, t.content, "utf-8"));
+  const written = targets.length;
 
   console.log(
     `[import] writeImportedFiles: received=${files.length} written=${written} skipped=${skipped.length}`,

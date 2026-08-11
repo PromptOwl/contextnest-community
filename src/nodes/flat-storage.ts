@@ -3,6 +3,7 @@ import { join, relative, sep } from "path";
 import { NestStorage } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { isSkippedSegment } from "../fs/vault-import.js";
+import { mapBatched } from "../shared/batch.js";
 
 // Engine- and agent-generated files that live alongside documents but are
 // NOT themselves documents. The engine excludes these in structured mode;
@@ -53,16 +54,21 @@ export class FlatNestStorage extends NestStorage {
       ids.push(rel.replace(/\.md$/, ""));
     }
 
-    const nodes: ContextNode[] = [];
-    for (const id of ids.sort()) {
+    // Read in bounded-parallel batches: on a Cloud Storage mount every read is
+    // a network round trip, so one document at a time cost one latency each —
+    // and an import runs this crawl several times over. mapBatched preserves
+    // input order, so the result stays sorted by id.
+    ids.sort();
+    const read = await mapBatched(ids, async (id) => {
       try {
-        nodes.push(await this.readDocument(id));
+        return await this.readDocument(id);
       } catch (err) {
         // Unreadable / malformed markdown — skip rather than fail the list,
         // but log so a silently-dropped doc is traceable.
         console.error("[FlatNestStorage] skipped unreadable doc", id, err);
+        return null;
       }
-    }
-    return nodes;
+    });
+    return read.filter((n): n is ContextNode => n !== null);
   }
 }

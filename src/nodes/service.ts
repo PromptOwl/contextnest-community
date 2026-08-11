@@ -22,6 +22,7 @@ import {
   ForbiddenError,
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
+import { mapBatched } from "../shared/batch.js";
 import * as versions from "../governance/version-service.js";
 import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
 import {
@@ -1037,45 +1038,52 @@ export async function registerImportedDocuments(
   const pending: Prepared[] = []; // to publish in the batch below
 
   // ── Phase 1: prep. Per-doc disk work only — no publishing, so the engine
-  // never re-scans the vault between documents.
-  for (let doc of docs) {
-    const nodeId = doc.id;
-    if ((await versions.getCurrentVersion(nestId, nodeId)) > 0) {
-      alreadyTracked++;
-      continue; // already tracked
-    }
+  // never re-scans the vault between documents. One query decides what is
+  // already tracked (it was one per document), and the metadata writes go out
+  // in bounded-parallel batches: on a Cloud Storage mount each write is a
+  // network round trip, so a serial loop cost one latency per document.
+  const tracked = await versions.getTrackedNodeIds(nestId);
+  const fresh = docs.filter((d) => !tracked.has(d.id));
+  alreadyTracked = docs.length - fresh.length;
 
+  const prepare = async (doc: ContextNode): Promise<Prepared & { draft: boolean }> => {
+    const nodeId = doc.id;
     // Author is ALWAYS the importer — the vault's own `author:` names a
     // non-user here, and the mismatch also fabricates a phantom collaborator.
     // Title falls back to the filename. serializeNodeSafe strips undefined
     // frontmatter, which is what lets phase 2 publish straight from disk.
     const title = doc.frontmatter?.title ?? (nodeId.split("/").pop() || nodeId);
-    doc = { ...doc, frontmatter: { ...doc.frontmatter, title, author: userEmail } };
+    const withMeta = {
+      ...doc,
+      frontmatter: { ...doc.frontmatter, title, author: userEmail },
+    };
     try {
-      await storage.writeDocument(nodeId, serializeNodeSafe(doc));
+      await storage.writeDocument(nodeId, serializeNodeSafe(withMeta));
     } catch (err) {
       console.error("import: failed to persist import metadata", nodeId, err);
     }
 
-    const rawTags = Array.isArray(doc.frontmatter?.tags)
-      ? doc.frontmatter.tags
+    const rawTags = Array.isArray(withMeta.frontmatter?.tags)
+      ? withMeta.frontmatter.tags
       : [];
     const tags = rawTags.map((t) => normalizeTag(String(t)));
 
     // Only trust an integer > 0 as the incoming version; junk like "3.011"
     // falls back to 1 (the fresh-publish path replaces it anyway).
-    const fmVersion = Number(doc.frontmatter?.version);
+    const fmVersion = Number(withMeta.frontmatter?.version);
     const version = Number.isInteger(fmVersion) && fmVersion > 0 ? fmVersion : 1;
-    const prepared: Prepared = { nodeId, content: doc.body || "", tags, version };
 
     // Honor the imported governance state: anything EXPLICITLY not
     // published/approved stays unpublished. A status-less doc still publishes.
     const status = explicitFrontmatterStatus(doc.rawContent);
-    if (status && status !== "published" && status !== "approved") {
-      drafts.push(prepared);
-    } else {
-      pending.push(prepared);
-    }
+    const draft = !!status && status !== "published" && status !== "approved";
+    return { nodeId, content: withMeta.body || "", tags, version, draft };
+  };
+
+  // mapBatched preserves input order, so partitioning its result keeps drafts
+  // and pending in document order.
+  for (const { draft, ...p } of await mapBatched(fresh, prepare)) {
+    (draft ? drafts : pending).push(p);
   }
 
   // ── Phase 2: one batch publish — a single checkpoint and index regen for the
