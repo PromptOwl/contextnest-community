@@ -9,8 +9,8 @@ import {
   DocumentNotFoundError,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
-import { rename, mkdir, rm } from "node:fs/promises";
-import { dirname, join, basename } from "node:path";
+import { rename, mkdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
 import {
@@ -22,7 +22,6 @@ import {
   ForbiddenError,
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
-import { mapBatched } from "../shared/batch.js";
 import * as versions from "../governance/version-service.js";
 import { syncNodeTags, removeNodeFromTagIndex } from "../governance/tag-index-service.js";
 import {
@@ -955,12 +954,17 @@ type ImportedDocRecord = {
  * checkpoint re-scans the whole vault (the O(N²) shape this import exists to
  * avoid). Each chunk stages; one `registerImportedDocuments` call afterwards
  * publishes the lot under a single checkpoint.
+ *
+ * Returns what landed and what did not. A file the engine refuses (an unsafe
+ * path) does not fail the import, but the caller has to be able to say so — a
+ * silently dropped file is the same "the failure had nowhere to surface"
+ * problem as a silently failed import, just one file at a time.
  */
 export async function stageImportedFiles(
   nestId: string,
   files: Array<{ path: string; content: string }>,
   userEmail: string
-): Promise<number> {
+): Promise<{ written: number; rejected: string[] }> {
   // `_suggestions` is a vault's OWN staged-suggestion store — derived
   // governance state, not content. Carried in, another vault's copy surfaces as
   // phantom external edits against doc ids that don't resolve here. Dropped
@@ -969,7 +973,7 @@ export async function stageImportedFiles(
   const carried = files.filter(
     (f) => !String(f?.path || "").split(/[\\/]/).includes("_suggestions")
   );
-  if (!carried.length) return 0;
+  if (!carried.length) return { written: 0, rejected: [] };
   const result = await engineApi.run<{
     written?: number;
     failed: Array<{ id?: string; error: string }>;
@@ -980,13 +984,14 @@ export async function stageImportedFiles(
   );
   // A rejected path (traversal, empty) comes back per-file rather than throwing:
   // one bad path shouldn't cost the whole import. It must not pass silently.
-  if (result.failed?.length) {
+  const rejected = (result.failed ?? []).map((f) => f.id ?? "(unnamed)");
+  if (rejected.length) {
     console.warn(
-      `[import] ${result.failed.length} file(s) rejected:`,
-      result.failed.map((f) => `${f.id}: ${f.error}`).join(", ")
+      `[import] ${rejected.length} file(s) rejected:`,
+      (result.failed ?? []).map((f) => `${f.id}: ${f.error}`).join(", ")
     );
   }
-  return result.written ?? 0;
+  return { written: result.written ?? 0, rejected };
 }
 
 /**

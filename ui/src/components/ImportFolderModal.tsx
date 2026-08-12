@@ -281,10 +281,25 @@ export function ImportFolderModal({ isOpen, onClose, onImported }: ImportFolderM
     setProgress(null);
     setError(null);
     try {
-      await api.importNest(name.trim() || folderName, files, (done, total) =>
-        setProgress({ done, total }),
+      const { rejected } = await api.importNest(
+        name.trim() || folderName,
+        files,
+        (done, total) => setProgress({ done, total }),
       );
       onImported();
+      // Some files were refused (an unsafe path). The import succeeded, so
+      // don't fail it — but closing silently would report a clean import of a
+      // folder that is missing documents. Hold the dialog open and say which.
+      if (rejected.length) {
+        setImporting(false);
+        setProgress(null);
+        setError(
+          `Imported, but ${rejected.length} file${rejected.length === 1 ? "" : "s"} ` +
+            `could not be read: ${rejected.slice(0, 5).join(", ")}` +
+            (rejected.length > 5 ? `, and ${rejected.length - 5} more` : ""),
+        );
+        return;
+      }
       handleClose();
     } catch (err: any) {
       console.error("[ImportFolderModal] import failed", err);

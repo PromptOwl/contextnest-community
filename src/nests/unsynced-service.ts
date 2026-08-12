@@ -3,7 +3,7 @@ import { join, relative, resolve } from "path";
 import { config } from "../config.js";
 import { nestStorageRoot } from "../shared/paths.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
-import { importNest, uniqueNestName } from "./service.js";
+import { importNest, uniqueNestName, deleteNest } from "./service.js";
 import { registerImportedDocuments, stageImportedFiles } from "../nodes/service.js";
 import type { ImportedFile } from "../fs/vault-import.js";
 import type { Nest } from "../shared/types.js";
@@ -258,8 +258,18 @@ export async function syncUnsyncedFolder(
   console.log(
     `[unsynced] nest created id=${nest.id} name="${nest.name}" from folder="${folderName}"`,
   );
-  await stageImportedFiles(nest.id, files, callerEmail);
-  const documents = await registerImportedDocuments(nest.id, callerEmail);
+  // The nest row now exists before its content does, so a failure past this
+  // point would strand an empty nest on the dashboard. Registration throws on a
+  // failed vault scan (it used to swallow it and report zero documents), so
+  // that is reachable — take the nest back down and let the caller see why.
+  let documents: number;
+  try {
+    await stageImportedFiles(nest.id, files, callerEmail);
+    documents = await registerImportedDocuments(nest.id, callerEmail);
+  } catch (err) {
+    await deleteNest(nest.id).catch(() => {});
+    throw err;
+  }
   console.log(
     `[unsynced] registered ${documents} document(s) for nest ${nest.id}`,
   );

@@ -682,6 +682,32 @@ describe("imported vault: discovery + registration", () => {
     expect(done.data.documents).toBe(6);
   });
 
+  it("refuses to append chunks to an import that has already been finalized", async () => {
+    // Staging writes straight into vault storage, skipping the node-creation
+    // path and its validation. That is the point mid-upload, but it must not
+    // stay open afterwards as a raw-write door into any nest the caller owns.
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Closed Import", files: [mdFile("a.md", "title: A\nstatus: published", "one")] },
+      alice.apiKey,
+    );
+    expect(first.status).toBe(201);
+    expect(first.data.documents).toBe(1);
+    const nestId = first.data.nest.id;
+
+    const late = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { nestId, files: [mdFile("late.md", "title: Late", "sneaked in")] },
+      alice.apiKey,
+    );
+    expect(late.status).toBe(400);
+    expect(existsSync(join(env.dataDir, "nests", nestId, "late.md"))).toBe(false);
+  });
+
   it("refuses to append chunks to a nest the caller does not own", async () => {
     // A continuation writes files straight into a nest's storage — anything
     // short of owner would let any caller inject documents into someone else's.
@@ -703,6 +729,27 @@ describe("imported vault: discovery + registration", () => {
     );
     expect(res.status).toBe(404);
     expect(existsSync(join(env.dataDir, "nests", nestId, "evil.md"))).toBe(false);
+  });
+
+  it("reports the files it refused instead of counting them as imported", async () => {
+    // A traversal path is skipped, not fatal — but the caller has to be told,
+    // or a partial import reads as a clean one.
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      {
+        name: "Partly Unsafe",
+        files: [
+          mdFile("good.md", "title: Good\nstatus: published", "kept"),
+          mdFile("../escape.md", "title: Escape", "rejected"),
+        ],
+      },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.documents).toBe(1);
+    expect(data.rejected).toEqual(["../escape.md"]);
   });
 
   it("recovers a doc whose imported version chain won't reconstruct", async () => {

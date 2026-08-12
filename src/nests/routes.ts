@@ -244,8 +244,25 @@ nestRoutes.post("/:nestId", async (c) => {
     if (body.finalize) {
       return c.json({ nest, documents: await registerImportedDocuments(target, email) });
     }
+    // Staging writes files straight into vault storage, skipping the node
+    // creation path and its title/id validation and write locks. That is the
+    // point during an upload — the files carry their own paths and frontmatter
+    // — but it should not stay open afterwards as a general raw-write door into
+    // any nest the caller happens to own. Finalizing registers the documents,
+    // so "nothing registered yet" is the upload still being in flight.
+    const registered = (await getDb().get(
+      "SELECT COUNT(*) AS c FROM node_versions WHERE nest_id = ?",
+      [target],
+    )) as { c: number } | undefined;
+    if (Number(registered?.c ?? 0) > 0) {
+      throw new ValidationError(
+        "This nest has already been imported. Start a new import instead of adding files to a finished one.",
+      );
+    }
     console.log(`[import] chunk: nest=${target} files=${files.length}`);
-    return c.json({ written: await stageImportedFiles(target, files, email) });
+    // `rejected` travels back so the browser can tell the user which files were
+    // skipped, rather than reporting a clean import that quietly dropped some.
+    return c.json(await stageImportedFiles(target, files, email));
   }
 
   if (!body.name) {
@@ -258,15 +275,15 @@ nestRoutes.post("/:nestId", async (c) => {
   const email = await resolveCallerEmail(userId);
   const nest = await importNest(userId, body.name);
   try {
-    await stageImportedFiles(nest.id, files, email);
+    const { rejected } = await stageImportedFiles(nest.id, files, email);
     // More chunks are coming — registering now would publish a partial folder.
     if (body.partial) {
-      return c.json({ nest }, 201);
+      return c.json({ nest, rejected }, 201);
     }
     // Seed governance rows for the documents already in the folder so they
     // list as published and edit from their real version (not from scratch).
     const documents = await registerImportedDocuments(nest.id, email);
-    return c.json({ nest, documents }, 201);
+    return c.json({ nest, documents, rejected }, 201);
   } catch (err) {
     // The nest row exists before its content does, so a failed first chunk
     // would otherwise leave an empty nest on the dashboard.

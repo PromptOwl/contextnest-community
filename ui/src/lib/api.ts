@@ -655,12 +655,18 @@ export async function importNest(
   name: string,
   files: ImportedFile[],
   onProgress?: (done: number, total: number) => void,
-): Promise<{ nest: any; documents: number }> {
+): Promise<{ nest: any; documents: number; rejected: string[] }> {
+  // Measured in UTF-8 bytes, which is what actually travels. `String.length`
+  // counts UTF-16 code units: a CJK document encodes to roughly three bytes per
+  // counted character, so sizing by length would build a chunk several times
+  // over budget and walk straight back into the request-size limit this
+  // batching exists to avoid.
+  const encoder = new TextEncoder();
   const chunks: ImportedFile[][] = [];
   let cur: ImportedFile[] = [];
   let curBytes = 0;
   for (const f of files) {
-    const size = f.path.length + (f.content?.length ?? 0);
+    const size = encoder.encode(f.path).length + encoder.encode(f.content ?? "").length;
     // A single file over budget still goes alone rather than being split.
     if (cur.length && curBytes + size > IMPORT_CHUNK_BYTES) {
       chunks.push(cur);
@@ -673,31 +679,40 @@ export async function importNest(
   if (cur.length || !chunks.length) chunks.push(cur);
 
   onProgress?.(0, files.length);
-  const first = await request<{ nest: any; documents?: number }>("/nests/import", {
-    method: "POST",
-    body: JSON.stringify({ name, files: chunks[0], partial: chunks.length > 1 }),
-  });
+  // Files the server refused (an unsafe path), gathered across every chunk so
+  // the caller can report a partial import honestly instead of a clean one.
+  const rejected: string[] = [];
+  const first = await request<{ nest: any; documents?: number; rejected?: string[] }>(
+    "/nests/import",
+    {
+      method: "POST",
+      body: JSON.stringify({ name, files: chunks[0], partial: chunks.length > 1 }),
+    },
+  );
+  rejected.push(...(first.rejected ?? []));
   let done = chunks[0].length;
   onProgress?.(done, files.length);
   // Small folder — the server already registered it in that one call.
   if (chunks.length === 1) {
-    return { nest: first.nest, documents: first.documents ?? 0 };
+    return { nest: first.nest, documents: first.documents ?? 0, rejected };
   }
 
   const nestId = first.nest.id;
   try {
     for (const chunk of chunks.slice(1)) {
-      await request("/nests/import", {
+      const res = await request<{ rejected?: string[] }>("/nests/import", {
         method: "POST",
         body: JSON.stringify({ nestId, files: chunk }),
       });
+      rejected.push(...(res.rejected ?? []));
       done += chunk.length;
       onProgress?.(done, files.length);
     }
-    return await request<{ nest: any; documents: number }>("/nests/import", {
+    const final = await request<{ nest: any; documents: number }>("/nests/import", {
       method: "POST",
       body: JSON.stringify({ nestId, finalize: true }),
     });
+    return { ...final, rejected };
   } catch (err) {
     // A half-uploaded nest is worse than none — it lists as a real nest with
     // silently missing documents. Drop it so a retry starts clean.
