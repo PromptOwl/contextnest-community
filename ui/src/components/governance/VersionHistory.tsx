@@ -108,6 +108,20 @@ function parseChangeNote(changeNote?: string): ParsedNote {
   if (restore) {
     return { restoredFrom: Number(restore[1]) };
   }
+  // Verdict on an out-of-band (direct filesystem) edit. Rejections have no
+  // review request behind them, so the note is the whole record — badge the
+  // verdict, keep the reason on its own line.
+  const ext = changeNote.match(/^External edit (approved|rejected)(?::\s*([\s\S]*))?$/i);
+  if (ext) {
+    const rejected = ext[1].toLowerCase() === "rejected";
+    return {
+      action: {
+        label: rejected ? "External Edit Rejected" : "External Edit Approved",
+        rejected,
+      },
+      note: ext[2]?.trim() || undefined,
+    };
+  }
   const m = changeNote.match(/^(Approved|Rejected)\s+review\s+request\s+(\S+)/i);
   if (m) {
     const rejected = m[1].toLowerCase() === "rejected";

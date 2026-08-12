@@ -26,7 +26,7 @@ import {
   type PendingChange,
   type NestStorage,
 } from "@promptowl/contextnest-engine";
-import { engineCache } from "../nodes/engine.js";
+import { engineCache, engineApi, opContext } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
 import { resolveNestPath } from "../shared/paths.js";
 
@@ -303,6 +303,49 @@ export async function getExternalEditDetail(
   };
 }
 
+/**
+ * Mirror an engine version into the governance `node_versions` row that the
+ * UI's document history reads. Without it a verdict on an external edit is
+ * invisible: history, the approved-version pin and getCurrentVersion all read
+ * SQLite, not history.yaml.
+ */
+async function mirrorVersion(input: {
+  nestId: string;
+  documentId: string;
+  version: number;
+  actor: string;
+  note: string;
+}) {
+  try {
+    const { storage } = await engineCache.get(input.nestId);
+    const node = await storage.readDocument(input.documentId);
+    const { createVersion, setApprovedVersion } = await import(
+      "./version-service.js"
+    );
+    await createVersion({
+      nestId: input.nestId,
+      nodeId: input.documentId,
+      version: input.version,
+      content: node.body || "",
+      author: input.actor,
+      status: "published",
+      tags: (node.frontmatter.tags || []) as string[],
+      changeNote: input.note,
+    });
+    await setApprovedVersion(
+      input.nestId,
+      input.documentId,
+      input.version,
+      input.actor,
+    );
+  } catch (err) {
+    console.error(
+      `[external-edit] failed to mirror version ${input.version} into node_versions for ${input.nestId}/${input.documentId}:`,
+      err,
+    );
+  }
+}
+
 /** Approve a pending external edit — commits the patch as a new version. */
 export async function approveExternalEdit(input: {
   nestId: string;
@@ -336,35 +379,15 @@ export async function approveExternalEdit(input: {
   // approved-version pin would drift behind disk. Mirror the engine
   // entry into SQLite so /versions, getCurrentVersion, and
   // setApprovedVersion all see the external edit.
-  try {
-    const node = await storage.readDocument(input.documentId);
-    const versionNum = result.versionEntry.version;
-    const tags = (node.frontmatter.tags || []) as string[];
-    const { createVersion, setApprovedVersion } = await import(
-      "./version-service.js"
-    );
-    await createVersion({
-      nestId: input.nestId,
-      nodeId: input.documentId,
-      version: versionNum,
-      content: node.body || "",
-      author: input.actor,
-      status: "published",
-      tags,
-      changeNote: input.comment || "External edit approved",
-    });
-    await setApprovedVersion(
-      input.nestId,
-      input.documentId,
-      versionNum,
-      input.actor,
-    );
-  } catch (err) {
-    console.error(
-      `[external-edit] failed to mirror approved version into node_versions for ${input.nestId}/${input.documentId}:`,
-      err,
-    );
-  }
+  await mirrorVersion({
+    nestId: input.nestId,
+    documentId: input.documentId,
+    version: result.versionEntry.version,
+    actor: input.actor,
+    note: input.comment
+      ? `External edit approved: ${input.comment}`
+      : "External edit approved",
+  });
 
   return result;
 }
@@ -403,6 +426,29 @@ export async function rejectExternalEdit(input: {
     const approved = await loadChainHead(storage, input.documentId);
     if (approved) {
       await storage.writeDocument(input.documentId, approved.content);
+
+      // Seal the revert as a version of its own. A rejection otherwise leaves
+      // no trace anywhere the UI reads — the engine archives the suggestion
+      // under _archive/rejected/, but document history is node_versions, and
+      // that never moved. Publishing bumps the engine chain (N → N+1) *and*
+      // refreshes the checksum the drift scanner compares against; the note
+      // carries the reason, the row carries who and when. Content is the head
+      // we just restored, so the version's diff is empty by design.
+      const note = `External edit rejected: ${input.reason}`;
+      const { version } = await engineApi.run<{ version: number }>(
+        "context_publish",
+        { id: input.documentId, note },
+        await opContext(input.nestId, input.actor),
+      );
+      if (version !== approved.version) {
+        await mirrorVersion({
+          nestId: input.nestId,
+          documentId: input.documentId,
+          version,
+          actor: input.actor,
+          note,
+        });
+      }
     }
   } catch (err) {
     console.error(
