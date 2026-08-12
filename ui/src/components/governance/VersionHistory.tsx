@@ -42,9 +42,13 @@ export interface Version {
 }
 
 /**
- * A verdict on an out-of-band (direct filesystem) edit. Approving one commits
- * a version, so it also shows in the list above; rejecting one changes no
- * content and therefore has no version — this is its only record.
+ * A verdict on an out-of-band (direct filesystem) edit.
+ *
+ * Only rejections are rendered here. An approval commits a version, so it
+ * already appears in the list below as a real row — one that carries a diff
+ * and a body — and showing it twice in two different visual treatments reads
+ * as a duplicate rather than as an audit trail. The approve verdicts still
+ * ride along in the API response for anything auditing the log directly.
  */
 export interface ExternalEditVerdict {
   suggestion_id: string;
@@ -60,7 +64,8 @@ interface VersionHistoryProps {
   versions: Version[];
   currentVersion: number;
   approvedVersion?: number | null;
-  /** Verdicts on external edits, oldest first. Rendered newest first. */
+  /** Verdicts on external edits, oldest first. Rejections render newest
+   *  first; approvals are left to their own version row. */
   externalEditVerdicts?: ExternalEditVerdict[];
   loading?: boolean;
   onRestore?: (versionNumber: number) => Promise<void>;
@@ -248,6 +253,11 @@ export function VersionHistory({
       </Card>
     );
   }
+
+  // Newest first, and rejections only — see ExternalEditVerdict above.
+  const rejectedExternalEdits = (externalEditVerdicts ?? [])
+    .filter((v) => v.status === "rejected")
+    .reverse();
 
   const currentVersionStatus = versions.find(
     (v) => v.version === currentVersion,
@@ -464,7 +474,7 @@ export function VersionHistory({
               })()}
             </ScrollArea>
           </div>
-        ) : versions.length === 0 && !externalEditVerdicts?.length ? (
+        ) : versions.length === 0 && rejectedExternalEdits.length === 0 ? (
           <div className="text-center py-4 text-sm text-muted-foreground">
             No version history
           </div>
@@ -473,29 +483,19 @@ export function VersionHistory({
             {/* Verdicts on out-of-band edits. Kept out of the version list
                 because a rejection commits nothing — it has no version to be
                 listed under, and inventing one would renumber the chain. */}
-            {!!externalEditVerdicts?.length && (
+            {!!rejectedExternalEdits.length && (
               <div className="mb-3 space-y-1">
                 <div className="text-xs font-medium text-muted-foreground px-1">
-                  External edits
+                  Rejected external edits
                 </div>
-                {[...externalEditVerdicts].reverse().map((v) => (
+                {rejectedExternalEdits.map((v) => (
                   <div
                     key={v.suggestion_id}
                     className="p-2 rounded border bg-muted/20 space-y-0.5"
                   >
-                    <div
-                      className={`text-xs font-medium flex items-center gap-1 ${
-                        v.status === "rejected"
-                          ? "text-red-700"
-                          : "text-green-700"
-                      }`}
-                    >
-                      {v.status === "rejected" ? (
-                        <XCircle className="h-3 w-3" />
-                      ) : (
-                        <CheckCircle2 className="h-3 w-3" />
-                      )}
-                      External edit {v.status}
+                    <div className="text-xs font-medium flex items-center gap-1 text-red-700">
+                      <XCircle className="h-3 w-3" />
+                      External edit rejected
                     </div>
                     {v.note && (
                       <div className="text-xs text-foreground/80 break-words">

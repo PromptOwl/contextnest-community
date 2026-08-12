@@ -883,6 +883,14 @@ Each version may also include `resolvedBy` + `resolutionStatus`, the steward who
 approved or rejected it, joined from `review_requests` (`node_versions` stores
 the status but not the resolver's email).
 
+`externalEditVerdicts` carries the verdicts on out-of-band (direct filesystem)
+edits, oldest first, read from the engine's append-only chain-event log. They sit
+beside the version list rather than inside it because a **rejection commits no
+content and therefore has no version** — minting one would renumber the chain.
+An approval does commit, so it appears in both: as the version it created, and as
+a verdict here. `note` is the rejection reason, or the approver's comment when
+one was left.
+
 Gated by the same node-level read check as the document itself — `403` when the
 caller can't read the node, which for a public reader means any node without an
 approved version.
@@ -910,6 +918,16 @@ approved version.
       "content": "",
       "resolvedBy": "reviewer@x.com",
       "resolutionStatus": "approved"
+    }
+  ],
+  "externalEditVerdicts": [
+    {
+      "suggestion_id": "20240115T103000-a1b2c3d4",
+      "status": "rejected",
+      "actor": "reviewer@x.com",
+      "at": "2024-01-15T10:34:00.000Z",
+      "note": "not sourced",
+      "source": "out-of-band-edit"
     }
   ]
 }

@@ -184,7 +184,7 @@ describe("external edit verdicts are recorded in document history", () => {
     const before = await history();
     const suggestionId = await stageDrift("\n\nA welcome clarification.\n");
 
-    const { status } = await jsonRequest(
+    const { status, data } = await jsonRequest(
       app,
       "POST",
       `/nests/${nestId}/nodes/${nodeId}/external-edits/${encodeURIComponent(suggestionId)}/approve`,
@@ -192,6 +192,7 @@ describe("external edit verdicts are recorded in document history", () => {
       owner.apiKey,
     );
     expect(status).toBe(200);
+    expect(data.historyRecorded).toBe(true);
 
     const after = await history();
     // An approval DOES change content, so it earns a version.

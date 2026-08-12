@@ -793,6 +793,8 @@ governanceNodeRoutes.post(
         approved: true,
         version: result.versionEntry.version,
         chainEvent: result.chainEvent.event_id,
+        // As on reject: false means the verdict never reached the audit log.
+        historyRecorded: result.historyRecorded,
       });
     } catch (err: any) {
       console.error(

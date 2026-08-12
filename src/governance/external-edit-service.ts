@@ -484,10 +484,12 @@ export async function approveExternalEdit(input: {
     );
   }
 
-  // Same verdict record as a rejection, so history reads both the same way.
-  await recordVerdict(input.nestId, result.chainEvent);
+  // Same verdict record as a rejection, and reported the same way — an
+  // approval whose audit entry did not land must not read as a clean success
+  // either, even though the content change itself is already committed.
+  const historyRecorded = await recordVerdict(input.nestId, result.chainEvent);
 
-  return result;
+  return { ...result, historyRecorded };
 }
 
 /**
