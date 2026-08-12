@@ -53,5 +53,5 @@ Two further behaviours worth calling out:
 - A failed upload deletes the half-filled nest rather than leaving it on the
   dashboard with silently missing documents.
 
-Requires `@promptowl/contextnest-engine` with the `files[]` / `publish` /
+Requires `@promptowl/contextnest-engine` 2.1.0 for the `files[]` / `publish` /
 `discover` inputs on `context_import`.
