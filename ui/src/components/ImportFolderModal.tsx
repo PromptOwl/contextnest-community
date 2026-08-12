@@ -67,22 +67,50 @@ function countImportableDocs(files: ImportedFile[]): number {
   }).length;
 }
 
-/** Walk a FileSystemDirectoryHandle, collecting text files with relative paths. */
+/** Read `items` in bounded-parallel batches. Every collector below used to
+ *  `await` one file read at a time, so scanning a folder took longer than
+ *  uploading it — that serial wait is the delay before an import appears to
+ *  start. Overlapping the reads removes it. */
+async function readBatched<T, R>(
+  items: T[],
+  fn: (item: T) => Promise<R>,
+  size = 32,
+): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(...(await Promise.all(items.slice(i, i + size).map(fn))));
+  }
+  return out;
+}
+
+/** Walk a FileSystemDirectoryHandle, collecting text files with relative paths.
+ *  Directory listing first (sibling dirs walked in parallel), then the reads in
+ *  batches — the walk is cheap, the reads are what cost. */
 async function collectFromHandle(
   dir: any,
   prefix: string,
   out: ImportedFile[],
 ): Promise<void> {
-  for await (const entry of dir.values()) {
-    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (entry.kind === "directory") {
-      if (isSkippedDir(entry.name)) continue;
-      await collectFromHandle(entry, rel, out);
-    } else if (TEXT_FILE.test(entry.name)) {
-      const file = await entry.getFile();
-      out.push({ path: rel, content: await file.text() });
+  const found: Array<{ handle: any; rel: string }> = [];
+  const walk = async (d: any, at: string): Promise<void> => {
+    const subdirs: Array<{ handle: any; rel: string }> = [];
+    for await (const entry of d.values()) {
+      const rel = at ? `${at}/${entry.name}` : entry.name;
+      if (entry.kind === "directory") {
+        if (!isSkippedDir(entry.name)) subdirs.push({ handle: entry, rel });
+      } else if (TEXT_FILE.test(entry.name)) {
+        found.push({ handle: entry, rel });
+      }
     }
-  }
+    await Promise.all(subdirs.map((s) => walk(s.handle, s.rel)));
+  };
+  await walk(dir, prefix);
+  out.push(
+    ...(await readBatched(found, async ({ handle, rel }) => ({
+      path: rel,
+      content: await (await handle.getFile()).text(),
+    }))),
+  );
 }
 
 /** Expand a nest .zip (exported from another host) into the same ImportedFile[]
@@ -100,16 +128,19 @@ async function expandZip(file: File, out: ImportedFile[]): Promise<void> {
 
 /** Collect text files from a webkitdirectory <input> FileList (fallback path). */
 async function collectFromInput(list: FileList): Promise<ImportedFile[]> {
-  const out: ImportedFile[] = [];
+  const keep: Array<{ file: File; rel: string }> = [];
   for (const file of Array.from(list)) {
     // webkitRelativePath = "<chosenFolder>/sub/dir/file.md" — drop the root.
     const parts = file.webkitRelativePath.split("/");
     parts.shift();
     const rel = parts.join("/");
     if (!rel || parts.some(isSkippedDir) || !TEXT_FILE.test(file.name)) continue;
-    out.push({ path: rel, content: await file.text() });
+    keep.push({ file, rel });
   }
-  return out;
+  return readBatched(keep, async ({ file, rel }) => ({
+    path: rel,
+    content: await file.text(),
+  }));
 }
 
 export function ImportFolderModal({ isOpen, onClose, onImported }: ImportFolderModalProps) {
@@ -378,14 +409,14 @@ export function ImportFolderModal({ isOpen, onClose, onImported }: ImportFolderM
           {importing && (
             <div className="space-y-1">
               <Progress
-                value={progress && progress.total > 0
+                value={progress && progress.total > 0 && progress.done < progress.total
                   ? Math.round((progress.done / progress.total) * 100)
                   : undefined}
               />
               <p className="text-xs text-muted-foreground">
-                {progress
-                  ? `Registering ${progress.done} of ${progress.total} documents…`
-                  : "Uploading and preparing…"}
+                {progress && progress.done < progress.total
+                  ? `Uploading ${progress.done} of ${progress.total} files…`
+                  : "Registering documents…"}
               </p>
             </div>
           )}

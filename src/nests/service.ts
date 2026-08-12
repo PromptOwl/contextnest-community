@@ -1,11 +1,6 @@
 import { rmSync, mkdirSync } from "fs";
 import { v4 as uuid } from "uuid";
 import { NestStorage } from "@promptowl/contextnest-engine";
-import {
-  writeImportedFiles,
-  discardImportDir,
-  type ImportedFile,
-} from "../fs/vault-import.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 import { resolveNestPath } from "../shared/paths.js";
@@ -337,46 +332,33 @@ export async function createNest(
 }
 
 /**
- * Import a folder the user picked in their browser as a nest. The browser
- * walks the chosen directory (System folder dialog → showDirectoryPicker /
- * webkitdirectory) and uploads each file's relative path + content; we write
- * them into the nest's own storage under DATA_ROOT. The server never browses
- * its own filesystem, so this works whether or not the server is colocated
- * with the user. The nest is flagged is_imported=1 so it discovers its docs
- * via the flat layout (markdown anywhere, not just nodes/). Governance metadata
- * is seeded on import (registerImportedDocuments) and extended lazily on
- * edit/review, exactly like a default nest.
+ * Create the empty nest a browser folder import will be uploaded into.
+ *
+ * Only the row and the directory: the uploaded files are handed to the engine
+ * (`stageImportedFiles`), which writes them into this nest's storage verbatim.
+ * The server never browses its own filesystem, so import works whether or not
+ * it is colocated with the user, and it arrives in chunks rather than one body.
+ *
+ * The nest is flagged is_imported=1 so it discovers its docs via the flat
+ * layout (markdown anywhere, not just nodes/). Governance metadata is seeded on
+ * import (registerImportedDocuments) and extended lazily on edit/review,
+ * exactly like a default nest.
+ *
+ * A caller whose upload then fails should `deleteNest` this row — a half-filled
+ * nest lists as real with silently missing documents.
  */
-export async function importNest(
-  userId: string,
-  name: string,
-  files: ImportedFile[],
-): Promise<Nest> {
+export async function importNest(userId: string, name: string): Promise<Nest> {
   const nm = (name || "").trim();
   if (!nm) {
     throw new ValidationError("name is required");
-  }
-  if (!Array.isArray(files)) {
-    throw new ValidationError("files are required");
   }
 
   const db = getDb();
   const id = uuid();
   const slug = toSlug(nm);
   const visibility = userId === ANON_USER_ID ? "public" : "private";
-  const dest = resolveNestPath(id);
 
-  // Write the uploaded files before the row exists, so a failed write leaves
-  // no orphan nest.
-  mkdirSync(dest, { recursive: true });
-  try {
-    await writeImportedFiles(dest, files);
-  } catch (err) {
-    console.error("[nests] import write failed", dest, err);
-    discardImportDir(dest);
-    throw new ValidationError("Failed to import folder");
-  }
-
+  mkdirSync(resolveNestPath(id), { recursive: true });
   await db.run(
     "INSERT INTO nests (id, user_id, name, slug, description, visibility, is_imported) VALUES (?, ?, ?, ?, ?, ?, 1)",
     [id, userId, nm, slug, null, visibility],

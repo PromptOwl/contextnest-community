@@ -593,54 +593,105 @@ describe("imported vault: discovery + registration", () => {
     expect(res.status).toBe(400);
   });
 
-  it("streams NDJSON progress with ?stream=1", async () => {
-    const files: FileEntry[] = [
-      mdFile("s1.md", "title: S1", "one"),
-      mdFile("s2.md", "title: S2", "two"),
-    ];
-    const res = await app.request("/nests/import?stream=1", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authed(alice.apiKey) },
-      body: JSON.stringify({ name: "Streamed", files }),
-    });
-    expect(res.status).toBe(200);
-    const lines = (await res.text())
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map((l) => JSON.parse(l));
-    // Progress lines carry the total, and a final `complete` line carries result.
-    expect(lines.some((m) => m.phase === "register" && m.total === 2)).toBe(true);
-    const done = lines.find((m) => m.complete);
-    expect(done?.documents).toBe(2);
-    expect(done?.nest?.id).toBeTruthy();
+  // The browser uploads a large folder in bounded chunks instead of one body:
+  // create-with-first-chunk, append, finalize. Registration must see every
+  // chunk, and must not run until finalize.
+  it("imports a folder uploaded in chunks", async () => {
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      {
+        name: "Chunked",
+        files: [mdFile("c1.md", "title: C1", "one")],
+        partial: true,
+      },
+      alice.apiKey,
+    );
+    expect(first.status).toBe(201);
+    const nestId = first.data.nest.id;
+    // A partial first chunk registers nothing — the folder isn't complete yet.
+    expect(first.data.documents).toBeUndefined();
+
+    const second = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { nestId, files: [mdFile("c2.md", "title: C2", "two"), mdFile("sub/c3.md", "title: C3", "three")] },
+      alice.apiKey,
+    );
+    expect(second.status).toBe(200);
+    expect(second.data.written).toBe(2);
+
+    const done = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { nestId, finalize: true },
+      alice.apiKey,
+    );
+    expect(done.status).toBe(200);
+    // All three chunked docs registered, including the nested one.
+    expect(done.data.documents).toBe(3);
+    expect(existsSync(join(env.dataDir, "nests", nestId, "sub", "c3.md"))).toBe(true);
+
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, alice.apiKey);
+    expect(list.data.nodes.length).toBe(3);
   });
 
-  it("streams progress all the way to 100% when most docs are never batch-published", async () => {
-    // The engine's progress sink only ticks for docs that enter the publish
-    // batch. A mixed import (drafts here, already-tracked docs on a re-run)
-    // would otherwise leave the bar stalled well short of the total.
-    const files: FileEntry[] = [
-      mdFile("p1.md", "title: P1", "publish me"),
-      ...Array.from({ length: 5 }, (_, i) =>
-        mdFile(`d${i}.md`, `title: D${i}\nstatus: draft`, "kept unpublished"),
-      ),
-    ];
-    const res = await app.request("/nests/import?stream=1", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authed(alice.apiKey) },
-      body: JSON.stringify({ name: "Mixed Progress", files }),
-    });
-    const lines = (await res.text())
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map((l) => JSON.parse(l));
-    const ticks = lines.filter((m) => m.phase === "register");
-    expect(ticks.at(-1)).toEqual({ phase: "register", done: 6, total: 6 });
-    // Monotone — a bar that jumps backwards is its own bug.
-    expect(ticks.map((t) => t.done)).toEqual([...ticks.map((t) => t.done)].sort((a, b) => a - b));
-    expect(lines.find((m) => m.complete)?.documents).toBe(6);
+  it("counts docs the batch publish never touches when finalizing a chunked import", async () => {
+    // Drafts never enter the publish batch; they still have to register.
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Chunked Mixed", files: [mdFile("p1.md", "title: P1", "publish me")], partial: true },
+      alice.apiKey,
+    );
+    const nestId = first.data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      {
+        nestId,
+        files: Array.from({ length: 5 }, (_, i) =>
+          mdFile(`d${i}.md`, `title: D${i}\nstatus: draft`, "kept unpublished"),
+        ),
+      },
+      alice.apiKey,
+    );
+    const done = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { nestId, finalize: true },
+      alice.apiKey,
+    );
+    expect(done.data.documents).toBe(6);
+  });
+
+  it("refuses to append chunks to a nest the caller does not own", async () => {
+    // A continuation writes files straight into a nest's storage — anything
+    // short of owner would let any caller inject documents into someone else's.
+    const mallory = await registerUser(app, "mallory@test.com", "Mallory");
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Private Chunked", files: [mdFile("a.md", "title: A", "mine")], partial: true },
+      alice.apiKey,
+    );
+    const nestId = first.data.nest.id;
+    const res = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { nestId, files: [mdFile("evil.md", "title: Evil", "injected")] },
+      mallory.apiKey,
+    );
+    expect(res.status).toBe(404);
+    expect(existsSync(join(env.dataDir, "nests", nestId, "evil.md"))).toBe(false);
   });
 
   it("recovers a doc whose imported version chain won't reconstruct", async () => {

@@ -4,7 +4,7 @@ import { config } from "../config.js";
 import { nestStorageRoot } from "../shared/paths.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { importNest, uniqueNestName } from "./service.js";
-import { registerImportedDocuments } from "../nodes/service.js";
+import { registerImportedDocuments, stageImportedFiles } from "../nodes/service.js";
 import type { ImportedFile } from "../fs/vault-import.js";
 import type { Nest } from "../shared/types.js";
 
@@ -254,10 +254,11 @@ export async function syncUnsyncedFolder(
       `[unsynced] name "${baseName}" already in use, using "${nestName}" instead`,
     );
   }
-  const nest = await importNest(userId, nestName, files);
+  const nest = await importNest(userId, nestName);
   console.log(
     `[unsynced] nest created id=${nest.id} name="${nest.name}" from folder="${folderName}"`,
   );
+  await stageImportedFiles(nest.id, files, callerEmail);
   const documents = await registerImportedDocuments(nest.id, callerEmail);
   console.log(
     `[unsynced] registered ${documents} document(s) for nest ${nest.id}`,

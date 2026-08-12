@@ -633,58 +633,77 @@ export interface ImportedFile {
   content: string;
 }
 
+/** Upload budget per import request. A whole folder in one body hit proxy
+ *  request-size limits (and gave no usable error when it did); ~4MB chunks stay
+ *  well under every hop's ceiling and each one reports its own HTTP status. */
+const IMPORT_CHUNK_BYTES = 4 * 1024 * 1024;
+
 /** Import a folder the user picked in their browser. The browser reads the
  *  folder and uploads each file; the server writes them into the workspace.
  *
- *  When `onProgress` is supplied we hit the `?stream=1` endpoint, which streams
- *  NDJSON progress lines so the caller can render a real progress bar; without
- *  it, the original single JSON response is used. */
+ *  Uploaded in bounded chunks over plain JSON requests, NOT as one body and
+ *  not over an NDJSON stream. The stream had already committed HTTP 200 before
+ *  the import ran, so every failure surfaced as a bare "Import failed" with the
+ *  cause stuck in the server log — and a buffering proxy ate the progress lines
+ *  that were its only reason to exist. Each chunk here fails with a real status
+ *  and a real message.
+ *
+ *  `onProgress` reports files uploaded; reaching `done === total` means the
+ *  upload finished and the server is registering documents (one final call,
+ *  no per-document progress). */
 export async function importNest(
   name: string,
   files: ImportedFile[],
   onProgress?: (done: number, total: number) => void,
 ): Promise<{ nest: any; documents: number }> {
-  if (!onProgress) {
-    return request<{ nest: any; documents: number }>("/nests/import", {
-      method: "POST",
-      body: JSON.stringify({ name, files }),
-    });
-  }
-
-  const res = await fetch(`${API_BASE}/nests/import?stream=1`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, files }),
-    credentials: "include",
-  });
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "");
-    throw new Error(text || `Import failed: ${res.status}`);
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  let result: { nest: any; documents: number } | null = null;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line) continue;
-      const msg = JSON.parse(line);
-      if (msg.error) throw new Error(msg.error);
-      if (msg.phase === "register") onProgress(msg.done, msg.total);
-      if (msg.complete) result = { nest: msg.nest, documents: msg.documents };
+  const chunks: ImportedFile[][] = [];
+  let cur: ImportedFile[] = [];
+  let curBytes = 0;
+  for (const f of files) {
+    const size = f.path.length + (f.content?.length ?? 0);
+    // A single file over budget still goes alone rather than being split.
+    if (cur.length && curBytes + size > IMPORT_CHUNK_BYTES) {
+      chunks.push(cur);
+      cur = [];
+      curBytes = 0;
     }
+    cur.push(f);
+    curBytes += size;
   }
-  if (!result) throw new Error("Import failed");
-  // Streaming path uses raw fetch, so request()'s invalidation hook never ran.
-  invalidateNestsList();
-  return result;
+  if (cur.length || !chunks.length) chunks.push(cur);
+
+  onProgress?.(0, files.length);
+  const first = await request<{ nest: any; documents?: number }>("/nests/import", {
+    method: "POST",
+    body: JSON.stringify({ name, files: chunks[0], partial: chunks.length > 1 }),
+  });
+  let done = chunks[0].length;
+  onProgress?.(done, files.length);
+  // Small folder — the server already registered it in that one call.
+  if (chunks.length === 1) {
+    return { nest: first.nest, documents: first.documents ?? 0 };
+  }
+
+  const nestId = first.nest.id;
+  try {
+    for (const chunk of chunks.slice(1)) {
+      await request("/nests/import", {
+        method: "POST",
+        body: JSON.stringify({ nestId, files: chunk }),
+      });
+      done += chunk.length;
+      onProgress?.(done, files.length);
+    }
+    return await request<{ nest: any; documents: number }>("/nests/import", {
+      method: "POST",
+      body: JSON.stringify({ nestId, finalize: true }),
+    });
+  } catch (err) {
+    // A half-uploaded nest is worse than none — it lists as a real nest with
+    // silently missing documents. Drop it so a retry starts clean.
+    await deleteNest(nestId).catch(() => {});
+    throw err;
+  }
 }
 
 /** A folder under DATA_ROOT that has not been converted to a nest yet. */

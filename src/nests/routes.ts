@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { streamText } from "hono/streaming";
 import type { AuthEnv } from "../auth/middleware.js";
 import { resolveNestPermission, isServerAdminUserId } from "../shared/access.js";
 import {
@@ -21,7 +20,7 @@ import {
   nestPrimeTags,
   setPrimeTags,
 } from "./service.js";
-import { registerImportedDocuments } from "../nodes/service.js";
+import { registerImportedDocuments, stageImportedFiles } from "../nodes/service.js";
 import {
   listUnsyncedFolders,
   syncUnsyncedFolder,
@@ -205,6 +204,15 @@ nestRoutes.post("/", async (c) => {
 // Registered as /:nestId with a literal-"import" branch (see the router-compat
 // note on the unsynced routes below): a static /import sibling would knock the
 // app off RegExpRouter. There is no other POST /nests/:nestId endpoint.
+//
+// Three call shapes, all ordinary JSON (there is deliberately no streaming
+// variant any more — NDJSON progress had already committed a 200 before the
+// work ran, so every real failure reached the UI as a bare "Import failed",
+// and a buffering proxy swallowed the progress lines it existed to deliver):
+//   { name, files, partial: true } → create the nest, write the first chunk
+//   { nestId, files }              → write another chunk into that nest
+//   { nestId, finalize: true }     → register the documents, return the count
+// `{ name, files }` with no flags stays the one-shot import (tests, CLI).
 nestRoutes.post("/:nestId", async (c) => {
   if (c.req.param("nestId") !== "import") {
     throw new NotFoundError("Not found");
@@ -212,50 +220,59 @@ nestRoutes.post("/:nestId", async (c) => {
   const body = await c.req.json<{
     name?: string;
     files?: { path: string; content: string }[];
+    nestId?: string;
+    partial?: boolean;
+    finalize?: boolean;
   }>();
+  const files = Array.isArray(body.files) ? body.files : [];
+  const userId = c.get("userId");
+
+  // Continuation of a chunked upload. Owner-only: these calls write files
+  // straight into a nest's storage, so anything less would let any caller
+  // inject documents into someone else's nest.
+  if (body.nestId) {
+    const target = body.nestId;
+    const nest = await getNest(target);
+    if (
+      !nest ||
+      !nest.is_imported ||
+      (await effectivePermission(target, userId)) !== "owner"
+    ) {
+      throw new NotFoundError("Nest not found");
+    }
+    const email = await resolveCallerEmail(userId);
+    if (body.finalize) {
+      return c.json({ nest, documents: await registerImportedDocuments(target, email) });
+    }
+    console.log(`[import] chunk: nest=${target} files=${files.length}`);
+    return c.json({ written: await stageImportedFiles(target, files, email) });
+  }
+
   if (!body.name) {
     throw new ValidationError("name is required");
   }
-  const files = Array.isArray(body.files) ? body.files : [];
-  const userId = c.get("userId");
   console.log(
-    `[import] request: name=${JSON.stringify(body.name)} files=${files.length}`,
+    `[import] request: name=${JSON.stringify(body.name)} files=${files.length}` +
+      (body.partial ? " (first chunk)" : ""),
   );
-
-  // `?stream=1` streams NDJSON progress so the UI can render a real progress
-  // bar over a large import (register runs one publish per doc). Every other
-  // caller (tests, CLI) gets the original single JSON response below.
-  if (c.req.query("stream") === "1") {
-    const name = body.name;
-    return streamText(c, async (stream) => {
-      try {
-        await stream.writeln(JSON.stringify({ phase: "write" }));
-        const nest = await importNest(userId, name, files);
-        const email = await resolveCallerEmail(userId);
-        const documents = await registerImportedDocuments(
-          nest.id,
-          email,
-          async (done, total) => {
-            await stream.writeln(JSON.stringify({ phase: "register", done, total }));
-          },
-        );
-        await stream.writeln(JSON.stringify({ complete: true, nest, documents }));
-      } catch (err) {
-        await stream.writeln(
-          JSON.stringify({ error: (err as Error)?.message || "Import failed" }),
-        );
-      }
-    });
+  const email = await resolveCallerEmail(userId);
+  const nest = await importNest(userId, body.name);
+  try {
+    await stageImportedFiles(nest.id, files, email);
+    // More chunks are coming — registering now would publish a partial folder.
+    if (body.partial) {
+      return c.json({ nest }, 201);
+    }
+    // Seed governance rows for the documents already in the folder so they
+    // list as published and edit from their real version (not from scratch).
+    const documents = await registerImportedDocuments(nest.id, email);
+    return c.json({ nest, documents }, 201);
+  } catch (err) {
+    // The nest row exists before its content does, so a failed first chunk
+    // would otherwise leave an empty nest on the dashboard.
+    await deleteNest(nest.id).catch(() => {});
+    throw err;
   }
-
-  const nest = await importNest(userId, body.name, files);
-  // Seed governance rows for the documents already in the folder so they
-  // list as published and edit from their real version (not from scratch).
-  const documents = await registerImportedDocuments(
-    nest.id,
-    await resolveCallerEmail(userId),
-  );
-  return c.json({ nest, documents }, 201);
 });
 
 // GET /nests/unsynced — list folders under DATA_ROOT that are candidates for

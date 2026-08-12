@@ -2,12 +2,16 @@
  * serializeNodeSafe: every write of a node that came back from readDocument
  * goes through it. gray-matter's YAML dumper throws
  * "unacceptable kind of an object to dump [object Undefined]" on undefined
- * values — nested ones on any engine, top-level ones on engines before 1.2.1.
- * That is what made move fail for drafts and pending-review docs while
- * published ones (already cleaned by safePublishDocument) moved fine.
+ * values — which is what made move fail for drafts and pending-review docs
+ * while published ones (already cleaned by safePublishDocument) moved fine.
+ *
+ * The engine now strips undefined frontmatter itself, top-level and nested, so
+ * this is belt-and-braces rather than the only thing standing between a draft
+ * and a failed move. It stays because the invariant is ours to hold: every
+ * write is clean regardless of which engine version is installed. Asserting
+ * that the raw engine still throws would just pin us to the old one.
  */
 import { describe, it, expect } from "vitest";
-import { serializeDocument } from "@promptowl/contextnest-engine";
 import { serializeNodeSafe } from "../src/governance/safe-publish.js";
 
 const node = (frontmatter: any) =>
@@ -21,9 +25,6 @@ describe("serializeNodeSafe", () => {
       tags: undefined,
       metadata: { owners: ["*"], schedule: undefined },
     };
-    // Guard rail: raw engine serialization is what blows up on the nested one.
-    expect(() => serializeDocument(node(fm))).toThrow(/unacceptable kind/);
-
     const out = serializeNodeSafe(node(fm));
     expect(out).toContain("title: X");
     expect(out).toContain("owners:");
