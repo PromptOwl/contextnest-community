@@ -12,6 +12,7 @@ import { join } from "path";
 import {
   detectDrift,
   stageSuggestion,
+  ChainEventLog,
   approveSuggestion,
   rejectSuggestion,
   listSuggestions,
@@ -21,12 +22,13 @@ import {
   computeContentHash,
   getChecksumContent,
   type ContextNode,
+  type HashChainEvent,
   type RbacHook,
   type SuggestionMeta,
   type PendingChange,
   type NestStorage,
 } from "@promptowl/contextnest-engine";
-import { engineCache, engineApi, opContext } from "../nodes/engine.js";
+import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
 import { resolveNestPath } from "../shared/paths.js";
 
@@ -303,6 +305,94 @@ export async function getExternalEditDetail(
   };
 }
 
+/** A verdict on an external edit, as document history renders it. */
+export interface ExternalEditVerdict {
+  suggestion_id: string;
+  status: "approved" | "rejected";
+  /** Who approved or rejected it. */
+  actor: string;
+  /** ISO-8601, from the engine's chain event. */
+  at: string;
+  /** Rejection reason, or the approver's comment when they left one. */
+  note?: string;
+  source?: string;
+}
+
+/**
+ * Persist a governance verdict in the engine's append-only chain-event log
+ * (`.versions/chain_events.yaml`). The engine builds these events and returns
+ * them, but writes none — so every verdict on an external edit was lost the
+ * moment the route responded. Best-effort: the edit is already approved or
+ * rejected on disk, so a failed audit write must not fail the request; the
+ * caller is told it did not land rather than being shown a clean success.
+ */
+async function recordVerdict(
+  nestId: string,
+  event: HashChainEvent,
+): Promise<boolean> {
+  try {
+    const { storage } = await engineCache.get(nestId);
+    await new ChainEventLog(storage).append(event);
+    return true;
+  } catch (err) {
+    console.error(
+      `[external-edit] failed to record verdict ${event.event_id} for nest ${nestId}:`,
+      err,
+    );
+    return false;
+  }
+}
+
+/**
+ * Every recorded verdict on a document's external edits, oldest first.
+ *
+ * Read straight off the engine's chain-event log — a rejection changes no
+ * content, so it earns no version, and this is the audit trail rather than
+ * `node_versions`. `suggestion_id` in the metadata is what marks an event as a
+ * verdict on a staged edit (a Czar direct edit shares one of the event types
+ * but carries no suggestion); `rejection_reason` is what separates the two
+ * verdicts, since the engine records a standard-tier rejection as an "altered
+ * to no change" event rather than a rejection type of its own.
+ */
+export async function listExternalEditVerdicts(
+  nestId: string,
+  documentId: string,
+): Promise<ExternalEditVerdict[]> {
+  try {
+    const { storage } = await engineCache.get(nestId);
+    const events = await new ChainEventLog(storage).readByDocument(documentId);
+    return events.flatMap((e) => {
+      const meta = (e.action_metadata || {}) as Record<string, unknown>;
+      if (typeof meta.suggestion_id !== "string") return [];
+      const reason = meta.rejection_reason;
+      const comment = meta.approval_comment;
+      return [
+        {
+          suggestion_id: meta.suggestion_id,
+          status: (typeof reason === "string" ? "rejected" : "approved") as
+            | "approved"
+            | "rejected",
+          actor: e.actor,
+          at: e.timestamp,
+          note:
+            typeof reason === "string"
+              ? reason
+              : typeof comment === "string"
+                ? comment
+                : undefined,
+          source: typeof meta.source === "string" ? meta.source : undefined,
+        },
+      ];
+    });
+  } catch (err) {
+    console.error(
+      `[external-edit] failed to read verdicts for ${nestId}/${documentId}:`,
+      err,
+    );
+    return [];
+  }
+}
+
 /**
  * Mirror an engine version into the governance `node_versions` row that the
  * UI's document history reads. Without it a verdict on an external edit is
@@ -316,34 +406,31 @@ async function mirrorVersion(input: {
   actor: string;
   note: string;
 }) {
-  try {
-    const { storage } = await engineCache.get(input.nestId);
-    const node = await storage.readDocument(input.documentId);
-    const { createVersion, setApprovedVersion } = await import(
-      "./version-service.js"
-    );
-    await createVersion({
-      nestId: input.nestId,
-      nodeId: input.documentId,
-      version: input.version,
-      content: node.body || "",
-      author: input.actor,
-      status: "published",
-      tags: (node.frontmatter.tags || []) as string[],
-      changeNote: input.note,
-    });
-    await setApprovedVersion(
-      input.nestId,
-      input.documentId,
-      input.version,
-      input.actor,
-    );
-  } catch (err) {
-    console.error(
-      `[external-edit] failed to mirror version ${input.version} into node_versions for ${input.nestId}/${input.documentId}:`,
-      err,
-    );
-  }
+  const { storage } = await engineCache.get(input.nestId);
+  const node = await storage.readDocument(input.documentId);
+  const { upsertVersion, setApprovedVersion } = await import(
+    "./version-service.js"
+  );
+  // upsert, not insert: the engine commits a version here, but a governance
+  // row can already exist at that number (an imported nest, a mirror that
+  // failed and is being retried). Insert-only turned that into a UNIQUE
+  // violation that silently dropped the approval from history.
+  await upsertVersion({
+    nestId: input.nestId,
+    nodeId: input.documentId,
+    version: input.version,
+    content: node.body || "",
+    author: input.actor,
+    status: "published",
+    tags: (node.frontmatter.tags || []) as string[],
+    changeNote: input.note,
+  });
+  await setApprovedVersion(
+    input.nestId,
+    input.documentId,
+    input.version,
+    input.actor,
+  );
 }
 
 /** Approve a pending external edit — commits the patch as a new version. */
@@ -378,28 +465,46 @@ export async function approveExternalEdit(input: {
   // governance node_versions row was skipped — UI version history and
   // approved-version pin would drift behind disk. Mirror the engine
   // entry into SQLite so /versions, getCurrentVersion, and
-  // setApprovedVersion all see the external edit.
-  await mirrorVersion({
-    nestId: input.nestId,
-    documentId: input.documentId,
-    version: result.versionEntry.version,
-    actor: input.actor,
-    note: input.comment
-      ? `External edit approved: ${input.comment}`
-      : "External edit approved",
-  });
+  // setApprovedVersion all see the external edit. Best-effort: the engine
+  // already committed, so a failed mirror must not fail the approval.
+  try {
+    await mirrorVersion({
+      nestId: input.nestId,
+      documentId: input.documentId,
+      version: result.versionEntry.version,
+      actor: input.actor,
+      note: input.comment
+        ? `External edit approved: ${input.comment}`
+        : "External edit approved",
+    });
+  } catch (err) {
+    console.error(
+      `[external-edit] failed to mirror approved version into node_versions for ${input.nestId}/${input.documentId}:`,
+      err,
+    );
+  }
+
+  // Same verdict record as a rejection, so history reads both the same way.
+  await recordVerdict(input.nestId, result.chainEvent);
 
   return result;
 }
 
 /**
- * Reject a pending external edit — archives the suggestion and reverts
- * the on-disk file back to the last-approved chain head.
+ * Reject a pending external edit — archives the suggestion, records the
+ * verdict, and reverts the on-disk file back to the last-approved chain head.
  *
  * Without the revert step the file stays drifted, the next scanner tick
  * sees the same proposed_hash, and a fresh suggestion gets re-staged
  * with a new id — making the reject look like it "didn't take". Writing
  * the approved base back clears drift in one shot.
+ *
+ * A rejection changes no content, so it earns no version: the verdict goes to
+ * the engine's chain-event log, and the rejected bytes stay where the engine
+ * already keeps them permanently (`_archive/rejected/`).
+ *
+ * `historyRecorded` reports whether the verdict landed, so a caller is never
+ * told the audit write succeeded when it did not.
  */
 export async function rejectExternalEdit(input: {
   nestId: string;
@@ -419,36 +524,22 @@ export async function rejectExternalEdit(input: {
     reason: input.reason,
   });
 
+  // The verdict itself — who rejected, when, and why — is what the engine
+  // hands back and then forgets: rejectSuggestion builds the chain event but
+  // never writes it, so dropping it here is what left rejections with no
+  // audit trail. Appending costs no version and no new storage: the log is
+  // the engine's own .versions/chain_events.yaml.
+  const historyRecorded = await recordVerdict(input.nestId, result.chainEvent);
+
   // Revert disk to chain head so the drift scanner stops re-staging it.
   // loadChainHead uses the engine's reconstructVersion(latest) — same
-  // base approveSuggestion would have rebuilt against.
+  // base approveSuggestion would have rebuilt against. No publish: those
+  // reconstructed bytes carry the checksum they were published with, so the
+  // restored file already matches and drift clears without a version bump.
   try {
     const approved = await loadChainHead(storage, input.documentId);
     if (approved) {
       await storage.writeDocument(input.documentId, approved.content);
-
-      // Seal the revert as a version of its own. A rejection otherwise leaves
-      // no trace anywhere the UI reads — the engine archives the suggestion
-      // under _archive/rejected/, but document history is node_versions, and
-      // that never moved. Publishing bumps the engine chain (N → N+1) *and*
-      // refreshes the checksum the drift scanner compares against; the note
-      // carries the reason, the row carries who and when. Content is the head
-      // we just restored, so the version's diff is empty by design.
-      const note = `External edit rejected: ${input.reason}`;
-      const { version } = await engineApi.run<{ version: number }>(
-        "context_publish",
-        { id: input.documentId, note },
-        await opContext(input.nestId, input.actor),
-      );
-      if (version !== approved.version) {
-        await mirrorVersion({
-          nestId: input.nestId,
-          documentId: input.documentId,
-          version,
-          actor: input.actor,
-          note,
-        });
-      }
     }
   } catch (err) {
     console.error(
@@ -457,7 +548,7 @@ export async function rejectExternalEdit(input: {
     );
   }
 
-  return result;
+  return { ...result, historyRecorded };
 }
 
 // ─── Background scanner ─────────────────────────────────────────────────

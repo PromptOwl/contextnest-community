@@ -414,6 +414,7 @@ export function NestView({
     versions: Version[];
     approvedVersion: number | null;
     currentVersion: number;
+    externalEditVerdicts?: api.ExternalEditVerdict[];
   }>({ versions: [], approvedVersion: null, currentVersion: 0 });
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);

@@ -205,6 +205,7 @@ export function DocumentEditor({
     versions: any[];
     approvedVersion: number | null;
     currentVersion: number;
+    externalEditVerdicts?: api.ExternalEditVerdict[];
   } | null>(null);
   const [showVersions, setShowVersions] = useState(false);
   // Ever-present inline diff: pick a past version from the "Compare" dropdown

@@ -539,6 +539,13 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
     versions: enriched,
     approvedVersion: approved,
     currentVersion: allVersions[0]?.version || 0,
+    // Verdicts on out-of-band edits. A rejection commits no content, so it has
+    // no version row to hang off — it lives in the engine's chain-event log and
+    // rides alongside the version list rather than inside it.
+    externalEditVerdicts: await externalEdits.listExternalEditVerdicts(
+      nestId,
+      nodeId,
+    ),
   });
 });
 
@@ -825,6 +832,9 @@ governanceNodeRoutes.post(
       return c.json({
         rejected: true,
         chainEvent: result.chainEvent.event_id,
+        // False means the edit was rejected but the audit entry did not land —
+        // the caller is not shown a clean success (server log carries why).
+        historyRecorded: result.historyRecorded,
       });
     } catch (err: any) {
       return c.json({ error: err.message }, 400);

@@ -41,10 +41,27 @@ export interface Version {
   resolutionStatus?: "approved" | "rejected" | string;
 }
 
+/**
+ * A verdict on an out-of-band (direct filesystem) edit. Approving one commits
+ * a version, so it also shows in the list above; rejecting one changes no
+ * content and therefore has no version — this is its only record.
+ */
+export interface ExternalEditVerdict {
+  suggestion_id: string;
+  status: "approved" | "rejected";
+  actor: string;
+  at: string;
+  /** Rejection reason, or the approver's comment when they left one. */
+  note?: string;
+  source?: string;
+}
+
 interface VersionHistoryProps {
   versions: Version[];
   currentVersion: number;
   approvedVersion?: number | null;
+  /** Verdicts on external edits, oldest first. Rendered newest first. */
+  externalEditVerdicts?: ExternalEditVerdict[];
   loading?: boolean;
   onRestore?: (versionNumber: number) => Promise<void>;
   /**
@@ -137,6 +154,7 @@ export function VersionHistory({
   versions,
   currentVersion,
   approvedVersion,
+  externalEditVerdicts,
   loading = false,
   onRestore,
   previewAs = "markdown",
@@ -446,12 +464,57 @@ export function VersionHistory({
               })()}
             </ScrollArea>
           </div>
-        ) : versions.length === 0 ? (
+        ) : versions.length === 0 && !externalEditVerdicts?.length ? (
           <div className="text-center py-4 text-sm text-muted-foreground">
             No version history
           </div>
         ) : (
           <ScrollArea className="h-[60vh] max-h-[480px] pr-2">
+            {/* Verdicts on out-of-band edits. Kept out of the version list
+                because a rejection commits nothing — it has no version to be
+                listed under, and inventing one would renumber the chain. */}
+            {!!externalEditVerdicts?.length && (
+              <div className="mb-3 space-y-1">
+                <div className="text-xs font-medium text-muted-foreground px-1">
+                  External edits
+                </div>
+                {[...externalEditVerdicts].reverse().map((v) => (
+                  <div
+                    key={v.suggestion_id}
+                    className="p-2 rounded border bg-muted/20 space-y-0.5"
+                  >
+                    <div
+                      className={`text-xs font-medium flex items-center gap-1 ${
+                        v.status === "rejected"
+                          ? "text-red-700"
+                          : "text-green-700"
+                      }`}
+                    >
+                      {v.status === "rejected" ? (
+                        <XCircle className="h-3 w-3" />
+                      ) : (
+                        <CheckCircle2 className="h-3 w-3" />
+                      )}
+                      External edit {v.status}
+                    </div>
+                    {v.note && (
+                      <div className="text-xs text-foreground/80 break-words">
+                        {v.note}
+                      </div>
+                    )}
+                    <div className="text-xs text-muted-foreground break-words">
+                      By:{" "}
+                      <span className="font-medium text-foreground/80">
+                        {v.actor}
+                      </span>
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {formatDate(v.at)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="space-y-1">
               {versions.map((version) => {
                 const isApproved = version.version === approvedVersion;
