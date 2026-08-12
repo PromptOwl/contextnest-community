@@ -34,7 +34,17 @@ checkpoint and returns the per-document detail needed for governance rows.
 appeared to begin. Reads are now batched, and sibling directories are walked in
 parallel.
 
-Two behaviours worth calling out:
+**Importing a folder no longer publishes documents that never asked to be
+published.** Previously a file with no `status:` in its frontmatter — an
+ordinary hand-authored note — was published on import and became AI-visible.
+Now only files that explicitly say `published` or `approved` are published;
+everything else is imported as a draft and waits for a human to approve it,
+with `status: draft` written down rather than left implied. Importing a plain
+Obsidian vault therefore yields drafts, not a published nest. Nests exported
+from ContextNest are unaffected: their documents carry an explicit status, so a
+round-trip still comes back published.
+
+Two further behaviours worth calling out:
 
 - An imported vault's `.versions/` history is preserved. A document whose
   version chain will not reconstruct now registers as a draft with its history

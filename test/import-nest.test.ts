@@ -95,8 +95,15 @@ describe("import folder as nest (upload model)", () => {
     // in a single batch. Publishing one-by-one is O(N²) — each publish seals its
     // own checkpoint and every checkpoint re-scans the whole vault — so a
     // per-doc checkpoint count is the regression signal for that loop coming back.
+    // Explicitly published in the source: import only publishes what its author
+    // marked publishable, so a status-less fixture would register 8 drafts and
+    // seal no checkpoint at all — measuring nothing about batching.
     const files = Array.from({ length: 8 }, (_, i) =>
-      mdFile(`batch/doc-${i}.md`, `title: Doc ${i}\ntype: document`, `body ${i}`),
+      mdFile(
+        `batch/doc-${i}.md`,
+        `title: Doc ${i}\ntype: document\nstatus: published`,
+        `body ${i}`,
+      ),
     );
     const { status, data } = await jsonRequest(
       app,
@@ -141,7 +148,7 @@ describe("import folder as nest (upload model)", () => {
       mdFile(
         `wide/doc-${String(i).padStart(3, "0")}.md`,
         `title: Wide ${String(i).padStart(3, "0")}\ntype: document` +
-          (isDraft(i) ? "\nstatus: draft" : ""),
+          (isDraft(i) ? "\nstatus: draft" : "\nstatus: published"),
         `body ${i}`,
       ),
     );
@@ -190,7 +197,7 @@ describe("import folder as nest (upload model)", () => {
     const files = Array.from({ length: n }, (_, i) =>
       mdFile(
         `mixed/old-${String(i).padStart(3, "0")}.md`,
-        `title: Old ${String(i).padStart(3, "0")}\ntype: document`,
+        `title: Old ${String(i).padStart(3, "0")}\ntype: document\nstatus: published`,
         `body ${i}`,
       ),
     );
@@ -212,7 +219,7 @@ describe("import folder as nest (upload model)", () => {
       const p = join(env.dataDir, "nests", nestId, "mixed", `new-${String(i).padStart(3, "0")}.md`);
       writeFileSync(
         p,
-        `---\ntitle: New ${String(i).padStart(3, "0")}\ntype: document\n---\n\nfresh ${i}\n`,
+        `---\ntitle: New ${String(i).padStart(3, "0")}\ntype: document\nstatus: published\n---\n\nfresh ${i}\n`,
         "utf-8",
       );
     }
@@ -315,14 +322,14 @@ describe("imported vault: discovery + registration", () => {
   const files: FileEntry[] = [
     mdFile(
       "checking-approval-history.md",
-      "title: Approval History\ntype: document\ntags: [history]\nversion: 3",
+      "title: Approval History\ntype: document\ntags: [history]\nversion: 3\nstatus: published",
       "approved body",
     ),
     // Numeric title: YAML parses `title: 123` as a number; the API must coerce
     // it to a string so the editor's title.trim() doesn't crash.
     mdFile(
       "engineering/123.md",
-      "title: 123\ntype: document\ntags: [eng]\nversion: 2",
+      "title: 123\ntype: document\ntags: [eng]\nversion: 2\nstatus: published",
       "eng body",
     ),
     // nodes/ exists (structured signal) but holds only meta.
@@ -425,10 +432,11 @@ describe("imported vault: discovery + registration", () => {
     expect(byId["with-fm"]).toBe("Explicit FM Title");
   });
 
-  it("keeps explicitly not-approved docs unpublished, publishes the rest", async () => {
+  it("publishes only what the source marked publishable, holds everything else", async () => {
     const files: FileEntry[] = [
       mdFile("ok.md", "title: Ok\nstatus: published", "publish me"),
-      mdFile("plain.md", "title: Plain", "no status -> publish"),
+      mdFile("appr.md", "title: Appr\nstatus: approved", "approved -> publish"),
+      mdFile("plain.md", "title: Plain", "no status -> held as draft"),
       mdFile("wip.md", "title: Wip\nstatus: draft", "keep draft"),
       mdFile("bad.md", "title: Bad\nstatus: rejected", "keep unpublished"),
       mdFile("old.md", "title: Old\nstatus: superseded", "keep unpublished"),
@@ -445,7 +453,7 @@ describe("imported vault: discovery + registration", () => {
     expect(status).toBe(201);
     // All register (none dropped), even the rejected one that the engine
     // would refuse to publish.
-    expect(data.documents).toBe(7);
+    expect(data.documents).toBe(8);
     const list = await jsonRequest(
       app,
       "GET",
@@ -457,7 +465,10 @@ describe("imported vault: discovery + registration", () => {
       list.data.nodes.map((n: any) => [n.id, n.status]),
     );
     expect(byId["ok"]).toBe("published");
-    expect(byId["plain"]).toBe("published"); // status-less still publishes
+    expect(byId["appr"]).toBe("published"); // approved is publishable too
+    // Publishing is opt-in: a file that states no status has consented to
+    // nothing, so it is held for a human rather than served to an AI.
+    expect(byId["plain"]).toBe("draft");
     expect(byId["wip"]).toBe("draft");
     expect(byId["bad"]).toBe("draft"); // rejected -> kept unpublished, not errored
     expect(byId["old"]).toBe("draft");
