@@ -1,15 +1,9 @@
 /**
  * serializeNodeSafe: every write of a node that came back from readDocument
- * goes through it. gray-matter's YAML dumper throws
- * "unacceptable kind of an object to dump [object Undefined]" on undefined
- * values — which is what made move fail for drafts and pending-review docs
- * while published ones (already cleaned by safePublishDocument) moved fine.
- *
- * The engine now strips undefined frontmatter itself, top-level and nested, so
- * this is belt-and-braces rather than the only thing standing between a draft
- * and a failed move. It stays because the invariant is ours to hold: every
- * write is clean regardless of which engine version is installed. Asserting
- * that the raw engine still throws would just pin us to the old one.
+ * goes through it. gray-matter's YAML dumper throws "unacceptable kind of an
+ * object to dump [object Undefined]" on undefined values, which made move fail
+ * for drafts and pending-review docs. Engine 2.0.0 strips them itself; this
+ * stays as the version-independent guarantee.
  */
 import { describe, it, expect } from "vitest";
 import { serializeNodeSafe } from "../src/governance/safe-publish.js";

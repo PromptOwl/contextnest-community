@@ -385,45 +385,74 @@ export function MaturityBoard({
         </div>
       </NestPageHeader>
 
-      {config.dimension === "status" ? (
-        <p className="max-w-4xl text-xs text-muted-foreground">
-          Status is <span className="font-medium text-foreground">read-only</span>{" "}
-          here — move a doc through review in the document view. Switch to{" "}
-          <span className="font-medium text-foreground">Folder</span> for a
-          draggable board. Drag a column header to reorder.
-        </p>
-      ) : config.dimension === "tag" ? (
-        <p className="max-w-4xl text-xs text-muted-foreground">
-          Grouped by{" "}
-          <span className="font-medium text-foreground">
-            {config.tagNamespace?.trim()
-              ? `${config.tagNamespace.trim().split(":")[0]}:`
-              : "tag"}
-          </span>{" "}
-          {config.tagNamespace?.trim()
-            ? "— only documents carrying one show up. Clear the box to group by every tag."
-            : "— one column per tag, so a document with several tags appears in each. Type a namespace (e.g. stage) to group by stage: values only."}{" "}
-          Cards are{" "}
-          <span className="font-medium text-foreground">read-only</span>; drag a
-          header to reorder,{" "}
-          <span className="font-medium text-foreground">+</span> to add a column,{" "}
-          <span className="font-medium text-foreground">×</span> to remove one.
-        </p>
-      ) : !canEditDocs ? (
-        <p className="max-w-4xl text-xs text-muted-foreground">
-          You have{" "}
-          <span className="font-medium text-foreground">read-only</span> access
-          to this nest, so cards can't be moved. Ask the nest owner for write
-          access to rearrange the board.
-        </p>
-      ) : (
-        <p className="max-w-4xl text-xs text-muted-foreground">
-          <span className="font-medium text-foreground">Drag a card</span>{" "}
-          between columns to move it to that folder.{" "}
-          <span className="font-medium text-foreground">Drag a column header</span>{" "}
-          to reorder.
-        </p>
-      )}
+      <ul className="max-w-2xl list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+        {config.dimension === "status" ? (
+          <>
+            <li>
+              Status is{" "}
+              <span className="font-medium text-foreground">read-only</span>{" "}
+              here — move a doc through review in the document view.
+            </li>
+            <li>
+              Switch to{" "}
+              <span className="font-medium text-foreground">Folder</span> for a
+              draggable board.
+            </li>
+            <li>Drag a column header to reorder.</li>
+          </>
+        ) : config.dimension === "tag" ? (
+          <>
+            <li>
+              Grouped by{" "}
+              <span className="font-medium text-foreground">
+                {config.tagNamespace?.trim()
+                  ? `${config.tagNamespace.trim().split(":")[0]}:`
+                  : "tag"}
+              </span>
+              {config.tagNamespace?.trim()
+                ? " — only documents carrying one show up."
+                : " — one column per tag, so a document with several tags appears in each."}
+            </li>
+            <li>
+              {config.tagNamespace?.trim()
+                ? "Clear the box to group by every tag."
+                : "Type a namespace (e.g. stage) to group by stage: values only."}
+            </li>
+            <li>
+              Cards are{" "}
+              <span className="font-medium text-foreground">read-only</span>;
+              drag a header to reorder.
+            </li>
+            <li>
+              <span className="font-medium text-foreground">+</span> to add a
+              column, <span className="font-medium text-foreground">×</span> to
+              remove one.
+            </li>
+          </>
+        ) : !canEditDocs ? (
+          <>
+            <li>
+              You have{" "}
+              <span className="font-medium text-foreground">read-only</span>{" "}
+              access to this nest, so cards can't be moved.
+            </li>
+            <li>Ask the nest owner for write access to rearrange the board.</li>
+          </>
+        ) : (
+          <>
+            <li>
+              <span className="font-medium text-foreground">Drag a card</span>{" "}
+              between columns to move it to that folder.
+            </li>
+            <li>
+              <span className="font-medium text-foreground">
+                Drag a column header
+              </span>{" "}
+              to reorder.
+            </li>
+          </>
+        )}
+      </ul>
 
       {loading ? (
         <div className="flex items-center gap-2 text-muted-foreground py-12 justify-center">
