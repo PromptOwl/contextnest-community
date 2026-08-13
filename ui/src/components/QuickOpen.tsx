@@ -7,6 +7,8 @@
 import { useEffect, useRef, useState } from "react";
 import { FileText, Loader2, Search } from "lucide-react";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 
 interface QuickOpenProps {
   nestId: string;
@@ -21,6 +23,7 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
   const [searching, setSearching] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const qc = useQueryClient();
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -34,8 +37,9 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
       setSearching(true);
       try {
         const data = query.trim()
-          ? await api.searchNodes(nestId, query.trim())
-          : await api.listNodes(nestId);
+          ? // Search stays uncached — results must reflect the query exactly.
+            await api.searchNodes(nestId, query.trim())
+          : await qc.fetchQuery(reads.nodes(nestId));
         setResults((data.nodes as any[]).slice(0, 8));
         setSelected(0);
       } catch {
@@ -47,7 +51,7 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
     return () => {
       if (debounce.current) clearTimeout(debounce.current);
     };
-  }, [nestId, query]);
+  }, [nestId, query, qc]);
 
   const pick = (i: number) => {
     const r = results[i];

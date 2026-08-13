@@ -354,7 +354,7 @@ nestRoutes.delete("/:nestId/sync", async (c) => {
   if (!body?.name) {
     throw new ValidationError("name is required");
   }
-  deleteUnsyncedFolder(body.name);
+  await deleteUnsyncedFolder(body.name);
   return c.json({ ok: true });
 });
 

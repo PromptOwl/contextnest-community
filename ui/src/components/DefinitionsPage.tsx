@@ -14,6 +14,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NestPageHeader } from "./NestPageHeader";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import type { Definition } from "../lib/api";
 
 interface Props {
@@ -24,6 +26,7 @@ interface Props {
 
 export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
   const [rows, setRows] = useState<Definition[]>([]);
+  const qc = useQueryClient();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   // One shared form for add + edit; editingId null = adding. The id is sent
@@ -38,7 +41,7 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const { definitions } = await api.listDefinitions(nestId);
+      const { definitions } = await qc.fetchQuery(reads.definitions(nestId));
       setRows(definitions);
     } catch (e: any) {
       toast.error(e?.message || "Failed to load definitions");

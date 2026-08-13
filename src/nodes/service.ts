@@ -6,6 +6,7 @@
 import {
   parseDocument,
   normalizeStatus,
+  isRejected,
   DocumentNotFoundError,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
@@ -194,6 +195,17 @@ async function departmentTagFor(userEmail: string): Promise<string | null> {
 // reach the API response OR the MCP result (both share this service).
 function toSafeError(err: unknown, context: string, message: string): AppError {
   if (err instanceof AppError) return err;
+  // The engine refuses to write a document that would stay rejected. That is a
+  // state the caller can act on, not an internal fault, so it keeps its meaning
+  // instead of being flattened into a generic 500 the user cannot interpret.
+  // Matched on the code rather than the class so it survives the error crossing
+  // a module boundary.
+  if ((err as { code?: string })?.code === "REJECTED_DOCUMENT") {
+    console.error(`${context}:`, err);
+    return new ConflictError(
+      "This document is rejected. Change its status before saving.",
+    );
+  }
   console.error(`${context}:`, err);
   return new AppError(500, message);
 }
@@ -1012,12 +1024,55 @@ export async function stageImportedFiles(
  * Idempotent: docs that already carry a version row are excluded. Returns the
  * number newly registered.
  */
+/**
+ * Make a copied-in file's frontmatter agree with the status we just recorded
+ * for it.
+ *
+ * A document the engine could not publish registers as a draft, but the file
+ * carries whatever status its source vault had. One that says `published` on
+ * disk then displays as Draft forever — the badge reads the governance DB
+ * (getDisplayStatus), which never consults frontmatter — with nothing on either
+ * side explaining the contradiction.
+ *
+ * Frontmatter-only, and the checksum covers the body alone, so rewriting this
+ * cannot make the drift scanner see an external edit. Best-effort: the row is
+ * already written, and failing the whole import over a cosmetic mismatch would
+ * be the worse trade.
+ */
+export async function alignOnDiskStatus(
+  nestId: string,
+  documentId: string,
+  status: string,
+): Promise<void> {
+  try {
+    const { storage } = await engineCache.get(nestId);
+    const node = await storage.readDocument(documentId);
+    if (node.frontmatter.status === status) return;
+    await storage.writeDocument(
+      documentId,
+      serializeNodeSafe({
+        ...node,
+        frontmatter: { ...node.frontmatter, status: status as any },
+      }),
+    );
+  } catch (err) {
+    console.warn(
+      `[import] could not align on-disk status for ${nestId}/${documentId}:`,
+      err,
+    );
+  }
+}
+
 export async function registerImportedDocuments(
   nestId: string,
   userEmail: string
 ): Promise<number> {
   const startedAt = Date.now();
   const tracked = await versions.getTrackedNodeIds(nestId);
+  // Registration reconciles the governance DB against what is on disk, and the
+  // files it is registering usually landed there without going through this
+  // process (a folder sync, the CLI, another instance). Read past the cache.
+  (await engineCache.get(nestId)).invalidateDiscovery();
 
   let result: ImportOpResult & { documents?: ImportedDocRecord[] };
   try {
@@ -1056,11 +1111,13 @@ export async function registerImportedDocuments(
       changeNote:
         d.status === "published"
           ? "Imported from existing folder"
-          : "Imported from existing folder (kept unpublished)",
+          : "Imported from existing folder — could not be published, kept as a draft",
       tags,
     });
     if (d.status === "published") {
       await versions.setApprovedVersion(nestId, d.id, d.version, userEmail);
+    } else {
+      await alignOnDiskStatus(nestId, d.id, d.status);
     }
     await syncNodeTags(nestId, d.id, tags);
   }
@@ -1133,6 +1190,20 @@ export async function updateNode(
           frontmatter: { ...node.frontmatter, status: patch.status as any },
         };
         opInput.status = normalizeStatus(patch.status);
+      } else if (isRejected(node)) {
+        // The engine refuses an update that would leave a document rejected —
+        // otherwise a client echoing the current status back would rewrite the
+        // body of a document that stays out of retrieval. Moving it to any
+        // other status is allowed, and opening a rejected document and saving
+        // it IS the intent to revive it. Without this, every save of a rejected
+        // document failed: the editor sends content and tags but no status, so
+        // the guard saw `status: undefined` and threw. Imported vaults carrying
+        // `status: rejected` in frontmatter land here on their first edit.
+        node = {
+          ...node,
+          frontmatter: { ...node.frontmatter, status: "draft" },
+        };
+        opInput.status = "draft";
       }
       if (patch.title) {
         // Grandfathered: docs saved before this bound existed keep their long

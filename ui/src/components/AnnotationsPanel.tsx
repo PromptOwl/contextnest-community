@@ -12,6 +12,8 @@ import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import { formatServerDate } from "../lib/dates";
 
 interface Props {
@@ -65,12 +67,13 @@ export function AnnotationsPanel({
   const [replyFor, setReplyFor] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
   const [busy, setBusy] = useState(false);
+  const qc = useQueryClient();
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLLIElement | null>>({});
 
   const load = async () => {
     try {
-      const { threads } = await api.listAnnotations(nestId, nodeId);
+      const { threads } = await qc.fetchQuery(reads.nodeAnnotations(nestId, nodeId));
       setThreads(threads);
       onThreadsChange?.(threads);
     } catch {

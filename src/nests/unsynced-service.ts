@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, rmSync, statSync, type Dirent } from "fs";
+import { readdirSync, readFileSync, statSync, type Dirent } from "fs";
 import { join, relative, resolve } from "path";
 import { config } from "../config.js";
 import { nestStorageRoot } from "../shared/paths.js";
@@ -7,6 +7,7 @@ import { importNest, uniqueNestName, deleteNest } from "./service.js";
 import { registerImportedDocuments, stageImportedFiles } from "../nodes/service.js";
 import type { ImportedFile } from "../fs/vault-import.js";
 import type { Nest } from "../shared/types.js";
+import { rm } from "fs/promises";
 
 /**
  * A folder under DATA_ROOT that isn't a nest yet — usually dropped in by the
@@ -278,7 +279,7 @@ export async function syncUnsyncedFolder(
   // failure here is non-fatal — the nest is fully built, an orphan source dir
   // just means listUnsyncedFolders will still show it. Log and move on.
   try {
-    rmSync(src, { recursive: true, force: true });
+    await rm(src, { recursive: true, force: true });
     console.log(`[unsynced] removed source folder ${src}`);
   } catch (err) {
     console.error("[unsynced] failed to remove source folder", src, err);
@@ -295,7 +296,7 @@ export async function syncUnsyncedFolder(
  * Only reachable by a server admin (route-gated), so this can't be used to wipe
  * arbitrary disk.
  */
-export function deleteUnsyncedFolder(folderName: string): void {
+export async function deleteUnsyncedFolder(folderName: string): Promise<void> {
   console.log(`[unsynced] delete requested folder="${folderName}"`);
   assertSafeFolderName(folderName);
 
@@ -313,6 +314,6 @@ export function deleteUnsyncedFolder(folderName: string): void {
     throw new ValidationError(`Not a directory: ${folderName}`);
   }
 
-  rmSync(src, { recursive: true, force: true });
+  await rm(src, { recursive: true, force: true });
   console.log(`[unsynced] deleted folder ${src}`);
 }

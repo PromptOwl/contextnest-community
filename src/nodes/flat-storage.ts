@@ -1,4 +1,5 @@
-import { readdirSync, type Dirent } from "fs";
+import { readdir } from "fs/promises";
+import type { Dirent } from "fs";
 import { join, relative, sep } from "path";
 import { NestStorage } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
@@ -36,7 +37,10 @@ export class FlatNestStorage extends NestStorage {
     const root = this.root;
     let entries: Dirent[];
     try {
-      entries = readdirSync(root, { recursive: true, withFileTypes: true });
+      // Async, not readdirSync: on a Cloud Storage mount this crawl is a
+      // network listing per directory level, and the sync call held the event
+      // loop for all of them — freezing every other request on the instance.
+      entries = await readdir(root, { recursive: true, withFileTypes: true });
     } catch (err) {
       console.error("[FlatNestStorage] cannot read folder", root, err);
       return [];

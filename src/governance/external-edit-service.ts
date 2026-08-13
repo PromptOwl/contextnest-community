@@ -207,7 +207,11 @@ export async function scanNestForDrift(
   nestId: string,
   actor: string = "system:scanner",
 ): Promise<{ scanned: number; staged: number }> {
-  const { storage } = await engineCache.get(nestId);
+  const { storage, invalidateDiscovery } = await engineCache.get(nestId);
+  // Edits made outside this process are the whole point of the scan, so it
+  // reads disk directly rather than the cached document set — which by
+  // definition cannot contain a write this server never made.
+  invalidateDiscovery();
   const docs = await storage.discoverDocuments();
   const results = await Promise.all(
     docs.map((doc) => scanDocumentForDriftInternal(nestId, doc.id, actor)),

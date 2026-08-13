@@ -295,6 +295,17 @@ export function VersionHistory({
             v{currentVersion}
           </Badge>
         </CardTitle>
+        {/* A draft with no approved version at all reads as an unexplained
+            "Draft" badge — most visibly on an imported document the engine
+            could not publish, whose file may still say `status: published`
+            while the badge (which reads the governance DB) says otherwise.
+            Say which state it is actually in and how to leave it. */}
+        {currentVersionStatus === "draft" && approvedVersion == null && (
+          <p className="text-xs text-muted-foreground pt-1">
+            Never published — no approved version exists yet. Saving this
+            document publishes it.
+          </p>
+        )}
       </CardHeader>
       <CardContent>
         {previewVersion ? (
