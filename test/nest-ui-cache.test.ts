@@ -189,8 +189,10 @@ describe("write invalidation scope @unit", () => {
         counts: {},
       }),
     );
-    // Seed every entry a nest write might touch.
+    // Seed every entry a nest write might touch. An unseeded key has no cache
+    // state at all, so it reads as "not stale" and would pass vacuously.
     await Promise.all([
+      qc.fetchQuery(reads.nestList()),
       qc.fetchQuery(reads.nodes("n1")),
       qc.fetchQuery(reads.stewards("n1")),
       qc.fetchQuery(reads.connectors("n1")),
@@ -246,6 +248,35 @@ describe("write invalidation scope @unit", () => {
   it("invalidates a document's body when it is saved", async () => {
     await api.updateNode("n1", "nodes/deep/doc", { content: "x" });
     expect(isStale(reads.node("n1", "nodes/deep/doc").queryKey)).toBe(true);
+  });
+
+  // The acceptance criteria name these four explicitly: each must update every
+  // affected list and count with no manual refresh.
+  it("creating a document refreshes the listing and the nest row's counts", async () => {
+    await api.createNode("n1", { title: "New", content: "body" });
+
+    expect(isStale(reads.nodes("n1").queryKey)).toBe(true);
+    // The nests list carries document_count, which the Dashboard totals use.
+    expect(isStale(reads.nestList().queryKey)).toBe(true);
+    expect(isStale(reads.stewards("n1").queryKey)).toBe(false);
+  });
+
+  it("moving a document refreshes the listing that holds both its old and new home", async () => {
+    await api.moveNode("n1", "nodes/deep/doc", "archive");
+
+    // The id changes, so the entry is not patched in place — dropping the whole
+    // listing is what covers the old parent and the new one together.
+    expect(isStale(reads.nodes("n1").queryKey)).toBe(true);
+    expect(isStale(reads.node("n1", "nodes/deep/doc").queryKey)).toBe(true);
+    expect(isStale(reads.nestList().queryKey)).toBe(true);
+  });
+
+  it("deleting a document refreshes the listing and the counts", async () => {
+    await api.deleteNode("n1", "nodes/deep/doc");
+
+    expect(isStale(reads.nodes("n1").queryKey)).toBe(true);
+    expect(isStale(reads.nestList().queryKey)).toBe(true);
+    expect(isStale(reads.connectors("n1").queryKey)).toBe(false);
   });
 
   it("falls back to the whole nest for a path it does not recognise", async () => {
