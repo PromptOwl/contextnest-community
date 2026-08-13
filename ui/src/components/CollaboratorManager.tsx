@@ -28,6 +28,8 @@ import {
 import { Trash2, Loader2, AlertCircle, UserPlus, Users, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { nestQueries } from "../lib/queries";
 import type { Team, TeamMember } from "../lib/api";
 import { isEmailish } from "../lib/utils";
 
@@ -102,6 +104,7 @@ export function CollaboratorManager({
   );
   const [collaborators, setCollaborators] = useState<Collaborator[]>([]);
   const [loading, setLoading] = useState(true);
+  const qc = useQueryClient();
   const [inviteEmail, setInviteEmail] = useState("");
   const [invitePermission, setInvitePermission] =
     useState<Collaborator["permission"]>("read");
@@ -118,7 +121,9 @@ export function CollaboratorManager({
   const loadCollaborators = async () => {
     setLoading(true);
     try {
-      const { collaborators } = await api.listCollaborators(nestId);
+      const { collaborators } = await qc.fetchQuery(
+        nestQueries.collaborators(nestId),
+      );
       setCollaborators(collaborators as Collaborator[]);
     } catch (err: any) {
       setError(err?.message || "Failed to load collaborators");

@@ -3,6 +3,7 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
+import { useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
   FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft,
@@ -66,11 +67,19 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   // Deletion flag being resolved from the inbox, and which dialog it opens.
   const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
   const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
-  const [nests, setNests] = useState<any[]>([]);
+  // Served from the shared read cache: coming back to the dashboard paints the
+  // previous list immediately and revalidates behind it. `isLoading` is true
+  // only on a genuine first load with nothing cached, so the loader below still
+  // appears exactly when it used to and never on a revisit.
+  const {
+    data: nestsData,
+    isLoading: loading,
+    refetch: refetchNests,
+  } = useNests();
+  const nests = nestsData?.nests ?? [];
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [newName, setNewName] = useState("");
@@ -93,7 +102,6 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     typeof window !== "undefined" ? window.location.origin : "http://localhost:3838";
 
   const fetchNests = async () => {
-    setLoading(true);
     // The page loader is gated on the nest list only. The banner stats are
     // derived from that same response (each nest carries document_count), so
     // there is no separate /stats round-trip. /unsynced and /me/work are
@@ -110,14 +118,10 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     // Streams into its own tab like the other extras — never gated behind
     // setLoading, so it can't add to the dashboard's time-to-first-paint.
     void goToDraftsPage(0);
-    try {
-      const nestsData = await api.listNests();
-      setNests(nestsData.nests);
-    } catch (e) {
-      console.error("[Dashboard] fetchNests failed", e);
-    } finally {
-      setLoading(false);
-    }
+    // The list itself comes from the cache. A refetch here is a no-op when a
+    // mutation already invalidated it (the query is refetching anyway) and
+    // joins the in-flight request on mount rather than doubling it.
+    await refetchNests();
   };
 
   // Jump to a page of drafts. Same replace-the-page contract as the work

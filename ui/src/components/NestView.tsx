@@ -4,6 +4,8 @@
  */
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { nestQueries } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
@@ -614,6 +616,8 @@ export function NestView({
   const [moveDest, setMoveDest] = useState("");
   const [movingDoc, setMovingDoc] = useState(false);
 
+  const qc = useQueryClient();
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     // Each request is independently swallowed — if listNodes throws, we must
@@ -622,15 +626,21 @@ export function NestView({
     // dropped the settings update, so toggling stewardship appeared to revert.
     const [nodesData, stewardsData, queueData, deletionData, settingsData, externalData, nestMeta, countsData, feedData] =
       await Promise.all([
-        api.listNodes(nestId).catch((e) => {
+        // The five reads below go through the shared cache (same keys and
+        // invalidation as the hook-based screens) so returning from a document
+        // paints from memory instead of re-fetching. Read imperatively rather
+        // than via hooks to keep each call's own error fallback — a failing
+        // node list must still let the settings response apply, per the note
+        // above.
+        qc.fetchQuery(nestQueries.nodes(nestId)).catch((e) => {
           console.error("[NestView] listNodes failed", nestId, e);
           return { nodes: [] };
         }),
-        api.listStewards(nestId).catch((e) => {
+        qc.fetchQuery(nestQueries.stewards(nestId)).catch((e) => {
           console.error("[NestView] listStewards failed", nestId, e);
           return { stewards: [] };
         }),
-        api.getReviewQueue(nestId).catch((e) => {
+        qc.fetchQuery(nestQueries.reviewQueue(nestId)).catch((e) => {
           console.error("[NestView] getReviewQueue failed", nestId, e);
           toast.error(e?.message || "Failed to load review queue");
           return { requests: [], total: 0 };
@@ -641,7 +651,7 @@ export function NestView({
           console.error("[NestView] getDeletionRequests failed", nestId, e);
           return { requests: [] as api.DeletionRequest[], total: 0 };
         }),
-        api.getNestSettings(nestId).catch((e) => {
+        qc.fetchQuery(nestQueries.settings(nestId)).catch((e) => {
           console.error("[NestView] getNestSettings failed", nestId, e);
           return {
             stewardship_enabled: false,
@@ -654,7 +664,7 @@ export function NestView({
           console.error("[NestView] listExternalEdits failed", nestId, e);
           return { entries: [], total: 0 };
         }),
-        api.getNest(nestId).catch((e) => {
+        qc.fetchQuery(nestQueries.detail(nestId)).catch((e) => {
           console.error("[NestView] getNest failed", nestId, e);
           return null;
         }),
@@ -711,7 +721,7 @@ export function NestView({
     setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
     setLoading(false);
     setInitialLoad(false);
-  }, [nestId]);
+  }, [nestId, qc]);
 
   // Next page of comment activity, appended under the feed. Offset by the
   // rows already shown; a dedupe guard drops any row that slid into the next

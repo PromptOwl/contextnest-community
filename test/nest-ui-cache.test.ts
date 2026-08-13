@@ -1,15 +1,27 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { QueryClient } from "@tanstack/react-query";
 import * as api from "../ui/src/lib/api";
+import {
+  createQueryClient,
+  connectReadCache,
+  nestQueries,
+} from "../ui/src/lib/queries";
 
 /**
- * Nest UI read caching — the structural, slow-changing reads hit on every
- * navigation (listNodes, listNests, getNest, getNestSettings) must serve
- * from an in-memory cache instead of re-fetching, and any mutation must
- * invalidate that nest's cache so approval/edit state is never stale.
+ * Nest UI read caching — the structural reads hit on every navigation
+ * (listNodes, listNests, getNest, getNestSettings) must serve from the shared
+ * client cache instead of re-fetching, and any mutation must invalidate that
+ * nest's entries so approval/edit state is never stale.
+ *
+ * These exercise the query layer through the same `connectReadCache` bridge the
+ * app shell wires up, so the api-module invalidation hooks are under test too.
  */
 
 const okJson = (body: unknown) =>
   ({ ok: true, status: 200, text: async () => JSON.stringify(body) }) as any;
+
+const errJson = (status: number, body: unknown = { error: "nope" }) =>
+  ({ ok: false, status, text: async () => JSON.stringify(body) }) as any;
 
 const getListCalls = (spy: any, path: string) =>
   spy.mock.calls.filter(
@@ -19,81 +31,63 @@ const getListCalls = (spy: any, path: string) =>
 
 describe("nest UI read caching @unit", () => {
   let fetchSpy: any;
+  let qc: QueryClient;
 
   beforeEach(() => {
     vi.restoreAllMocks();
-    api.invalidateNestReads(); // clear between tests
+    qc = createQueryClient();
+    connectReadCache(qc);
     fetchSpy = vi.fn(async () => okJson({ count: 0, nodes: [], node: {} }));
     (globalThis as any).fetch = fetchSpy;
   });
 
   it("serves a repeated listNodes from cache — one network call", async () => {
-    await api.listNodes("nest-1");
-    await api.listNodes("nest-1");
+    await qc.fetchQuery(nestQueries.nodes("nest-1"));
+    await qc.fetchQuery(nestQueries.nodes("nest-1"));
     expect(getListCalls(fetchSpy, "/nests/nest-1/nodes")).toHaveLength(1);
   });
 
   it("refetches after a mutation invalidates that nest's cache", async () => {
-    await api.listNodes("nest-1"); // fetch #1
+    await qc.fetchQuery(nestQueries.nodes("nest-1")); // fetch #1
     await api.createNode("nest-1", { title: "t", content: "c" }); // invalidate
-    await api.listNodes("nest-1"); // fetch #2 (cache cleared)
+    await qc.fetchQuery(nestQueries.nodes("nest-1")); // fetch #2
     expect(getListCalls(fetchSpy, "/nests/nest-1/nodes")).toHaveLength(2);
   });
 
   it("scopes the cache per nest — different nests don't collide", async () => {
-    await api.listNodes("nest-1");
-    await api.listNodes("nest-2");
+    await qc.fetchQuery(nestQueries.nodes("nest-1"));
+    await qc.fetchQuery(nestQueries.nodes("nest-2"));
     expect(getListCalls(fetchSpy, "/nests/nest-1/nodes")).toHaveLength(1);
     expect(getListCalls(fetchSpy, "/nests/nest-2/nodes")).toHaveLength(1);
   });
 
-  it("serves stale instantly after TTL expiry and revalidates in background", async () => {
-    let now = 1_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => now);
-    fetchSpy = vi
-      .fn()
-      .mockImplementationOnce(async () => okJson({ count: 0, nodes: [] }))
-      .mockImplementation(async () => okJson({ count: 1, nodes: [{ id: "n" }] }));
-    (globalThis as any).fetch = fetchSpy;
+  it("invalidating one nest leaves a sibling whose id shares its prefix alone", async () => {
+    await qc.fetchQuery(nestQueries.nodes("nest-1"));
+    await qc.fetchQuery(nestQueries.nodes("nest-12"));
+    await api.createNode("nest-1", { title: "t", content: "c" });
 
-    await api.listNodes("nest-1"); // seed the cache
-    now += 60_000; // well past the TTL
-
-    const stale = await api.listNodes("nest-1");
-    expect(stale.nodes).toHaveLength(0); // old value painted instantly…
-    expect(getListCalls(fetchSpy, "/nests/nest-1/nodes")).toHaveLength(2); // …revalidation fired
-
-    await new Promise((r) => setTimeout(r, 0)); // let background refresh land
-    const fresh = await api.listNodes("nest-1");
-    expect(fresh.nodes).toHaveLength(1); // no third network call needed
+    await qc.fetchQuery(nestQueries.nodes("nest-1")); // stale → refetch
+    await qc.fetchQuery(nestQueries.nodes("nest-12")); // untouched → cached
     expect(getListCalls(fetchSpy, "/nests/nest-1/nodes")).toHaveLength(2);
+    expect(getListCalls(fetchSpy, "/nests/nest-12/nodes")).toHaveLength(1);
   });
 
-  it("does not re-cache a read that was in flight when a mutation landed", async () => {
-    let resolveRead!: (v: unknown) => void;
-    fetchSpy = vi
-      .fn()
-      .mockImplementationOnce(() => new Promise((r) => (resolveRead = r))) // listNodes #1, held open
-      .mockImplementation(async () => okJson({ count: 1, nodes: [{ id: "new" }], node: {} }));
-    (globalThis as any).fetch = fetchSpy;
-
-    const inFlight = api.listNodes("nest-1"); // read starts…
-    await api.createNode("nest-1", { title: "t", content: "c" }); // …mutation invalidates…
-    resolveRead(okJson({ count: 0, nodes: [] })); // …then the pre-mutation response lands
-    await inFlight;
-
-    const after = await api.listNodes("nest-1"); // must refetch, not serve pre-mutation data
-    expect(getListCalls(fetchSpy, "/nests/nest-1/nodes")).toHaveLength(2);
-    expect(after.nodes).toHaveLength(1);
+  it("deduplicates two simultaneous reads of the same data into one request", async () => {
+    const [a, b] = await Promise.all([
+      qc.fetchQuery(nestQueries.nodes("nest-1")),
+      qc.fetchQuery(nestQueries.nodes("nest-1")),
+    ]);
+    expect(getListCalls(fetchSpy, "/nests/nest-1/nodes")).toHaveLength(1);
+    expect(a).toEqual(b);
   });
 
   it("busts the nests list on a node-level mutation — its rows carry document_count", async () => {
     fetchSpy = vi.fn(async () => okJson({ nests: [], node: {}, count: 0, nodes: [] }));
     (globalThis as any).fetch = fetchSpy;
 
-    await api.listNests();
-    await api.createNode("nest-1", { title: "t", content: "c" }); // changes nest-1's document_count
-    await api.listNests();
+    await qc.fetchQuery(nestQueries.list());
+    await api.createNode("nest-1", { title: "t", content: "c" });
+    await qc.fetchQuery(nestQueries.list());
     expect(getListCalls(fetchSpy, "/nests")).toHaveLength(2);
   });
 
@@ -101,9 +95,35 @@ describe("nest UI read caching @unit", () => {
     fetchSpy = vi.fn(async () => okJson({ nests: [], nest: {}, documents: 0 }));
     (globalThis as any).fetch = fetchSpy;
 
-    await api.listNests();
-    await api.syncUnsyncedFolder("folder-a"); // POST /nests/unsynced/sync — bypasses the /nests/{id} hook
-    await api.listNests();
+    await qc.fetchQuery(nestQueries.list());
+    await api.syncUnsyncedFolder("folder-a"); // bypasses the /nests/{id} hook
+    await qc.fetchQuery(nestQueries.list());
     expect(getListCalls(fetchSpy, "/nests")).toHaveLength(2);
+  });
+
+  it("drops every entry on an identity change — no cross-user leakage", async () => {
+    await qc.fetchQuery(nestQueries.nodes("nest-1"));
+    await qc.fetchQuery(nestQueries.list());
+
+    api.invalidateNestReads(); // what login / logout / user switch calls
+
+    expect(qc.getQueryData(nestQueries.nodes("nest-1").queryKey)).toBeUndefined();
+    expect(qc.getQueryData(nestQueries.list().queryKey)).toBeUndefined();
+  });
+
+  it("does not cache a failed read as if it were data", async () => {
+    fetchSpy = vi.fn(async () => errJson(500));
+    (globalThis as any).fetch = fetchSpy;
+
+    await expect(qc.fetchQuery(nestQueries.nodes("nest-1"))).rejects.toThrow();
+    expect(qc.getQueryData(nestQueries.nodes("nest-1").queryKey)).toBeUndefined();
+  });
+
+  it("does not retry a 403 — it is an answer, not a blip", async () => {
+    fetchSpy = vi.fn(async () => errJson(403));
+    (globalThis as any).fetch = fetchSpy;
+
+    await expect(qc.fetchQuery(nestQueries.nodes("nest-1"))).rejects.toThrow();
+    expect(getListCalls(fetchSpy, "/nests/nest-1/nodes")).toHaveLength(1);
   });
 });

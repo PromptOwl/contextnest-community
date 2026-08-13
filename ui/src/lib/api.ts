@@ -93,88 +93,50 @@ async function request<T = any>(
   return data as T;
 }
 
-// ─── Client read cache (structural, slow-changing GETs) ──────────────────
-// The node list / nest / settings get re-fetched on every navigation, which
-// makes the app feel like it "reloads forever" on a large nest. Cache just
-// those structural reads in memory, stale-while-revalidate: a fresh entry is
-// served instantly; an expired entry still paints instantly while a background
-// fetch refreshes it. Any mutation invalidates the nest's reads (handled in
-// request() above) so approval/edit state is never served stale — an
-// invalidated key has no entry at all and the next read blocks on the network.
-// Live document bodies, search, and feeds are intentionally NOT cached — they
-// need freshness.
-const READ_TTL_MS = 30_000;
-type CacheEntry = { data: unknown; ts: number; inflight?: Promise<unknown> };
-const readCache = new Map<string, CacheEntry>();
-// Bumped on every invalidation. A read in flight when a mutation lands must
-// not write its (pre-mutation) response back into the cache — it snapshots
-// this counter at start and only caches if unchanged on completion.
-let cacheGen = 0;
-
-async function cachedRead<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
-  const hit = readCache.get(key);
-  if (hit?.inflight) {
-    // Revalidation already underway — paint stale data if we have any,
-    // otherwise join the in-flight fetch (dedupe).
-    if (hit.data !== undefined) return hit.data as T;
-    return hit.inflight as Promise<T>;
-  }
-  if (hit && Date.now() - hit.ts < READ_TTL_MS) return hit.data as T; // fresh → instant
-  const gen = cacheGen;
-  const inflight = fetcher()
-    .then((data) => {
-      // An invalidation raced this fetch → the response may predate the
-      // mutation; don't cache it (the entry was already dropped).
-      if (gen === cacheGen) readCache.set(key, { data, ts: Date.now() });
-      return data;
-    })
-    .catch((err) => {
-      // Drop only our in-flight marker; keep any prior good value.
-      const cur = readCache.get(key);
-      if (cur?.inflight === inflight) {
-        if (cur.data !== undefined) readCache.set(key, { data: cur.data, ts: cur.ts });
-        else readCache.delete(key);
-      }
-      throw err;
-    });
-  readCache.set(key, { data: hit?.data, ts: hit?.ts ?? 0, inflight });
-  if (hit?.data !== undefined) {
-    // Stale-while-revalidate: serve the expired value now; the fetch above
-    // refreshes in the background (its failure only means the next read
-    // retries, so swallow it here — the caller already has data).
-    void (inflight as Promise<unknown>).catch(() => {});
-    return hit.data as T;
-  }
-  return inflight as Promise<T>;
+// ─── Read-cache invalidation ─────────────────────────────────────────────
+// Reads are cached by the query layer in ./queries, which owns keys, staleness
+// and garbage collection. This module keeps the invalidation hooks, because the
+// events that make data stale are mutations — and every mutation goes through
+// request() below. The dependency only points one way (queries imports api), so
+// the query client registers its invalidators here at startup rather than being
+// imported.
+interface ReadCacheHooks {
+  /** Drop every cached read. For identity changes, where nothing may carry over. */
+  clear(): void;
+  /** Mark one nest's cached reads stale, plus the nests list itself. */
+  invalidateNest(nestId: string): void;
+  /** Mark just the nests list stale. */
+  invalidateList(): void;
 }
 
-/** Drop cached structural reads for a nest (or all when no id). Called
- *  automatically on any successful mutation under /nests/{id} in request();
- *  exported for manual busts and tests. */
+let readCacheHooks: ReadCacheHooks | null = null;
+
+/** Called once from the app shell, after the query client exists. */
+export function registerReadCache(hooks: ReadCacheHooks): void {
+  readCacheHooks = hooks;
+}
+
+/** Drop cached reads for a nest, or ALL cached reads when no id is given.
+ *  Called automatically on any successful mutation under /nests/{id} in
+ *  request(); called with no argument on login, logout and user switch, where
+ *  a permission-filtered response from the previous identity must never be
+ *  served to the next one. */
 export function invalidateNestReads(nestId?: string): void {
-  cacheGen++; // tell in-flight reads not to cache their (pre-mutation) response
   if (!nestId) {
-    readCache.clear();
+    readCacheHooks?.clear();
     return;
-  }
-  const prefix = `/nests/${nestId}`;
-  for (const k of readCache.keys()) {
-    // Exact key or a sub-path — but not a different nest whose id merely
-    // shares this prefix (nest-1 must not clear nest-12).
-    if (k === prefix || k.startsWith(`${prefix}/`)) readCache.delete(k);
   }
   // Node-level mutations change per-nest metadata the list rows carry
   // (document_count, updated_at) — the Dashboard derives its totals from
   // them, so the list must not survive any nest-scoped mutation either.
-  readCache.delete("/nests");
+  readCacheHooks?.invalidateNest(nestId);
 }
 
 /** Drop the cached nests list. Needed by mutations that create a nest but
  *  don't route through request()'s /nests/{id} hook (streaming import,
  *  unsynced-folder sync). */
 function invalidateNestsList(): void {
-  cacheGen++;
-  readCache.delete("/nests");
+  readCacheHooks?.invalidateList();
 }
 
 /** Error thrown by `request` on a non-2xx response, with the parsed body. */
@@ -573,9 +535,7 @@ export interface NestSettings {
 }
 
 export async function getNestSettings(nestId: string) {
-  return cachedRead(`/nests/${nestId}/settings`, () =>
-    request<NestSettings>(`/nests/${nestId}/settings`),
-  );
+  return request<NestSettings>(`/nests/${nestId}/settings`);
 }
 
 export async function updateNestSettings(
@@ -613,7 +573,7 @@ export function isPrimeNode(
 // ─── Nests ──────────────────────────────────────────────────────────────
 
 export async function listNests() {
-  return cachedRead("/nests", () => request<{ nests: any[] }>("/nests"));
+  return request<{ nests: any[] }>("/nests");
 }
 
 export async function createNest(name: string, description?: string) {
@@ -774,16 +734,14 @@ export async function setNestVisibility(
 }
 
 export async function getNest(nestId: string) {
-  return cachedRead(`/nests/${nestId}`, () =>
-    request<{
-      nest: { id: string; name: string; visibility: "private" | "public" };
-      permission: string;
-      // Caller's merged effective roles (collaborator + steward), nest-wide.
-      roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
-      // Caller's own steward rows (scoped). Full roster is admin-only.
-      myStewards?: any[];
-    }>(`/nests/${nestId}`),
-  );
+  return request<{
+    nest: { id: string; name: string; visibility: "private" | "public" };
+    permission: string;
+    // Caller's merged effective roles (collaborator + steward), nest-wide.
+    roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
+    // Caller's own steward rows (scoped). Full roster is admin-only.
+    myStewards?: any[];
+  }>(`/nests/${nestId}`);
 }
 
 // ─── Glossary definitions ──────────────────────────────────────────────
@@ -848,9 +806,7 @@ export async function uploadAsset(nestId: string, file: File) {
 }
 
 export async function listNodes(nestId: string) {
-  return cachedRead(`/nests/${nestId}/nodes`, () =>
-    request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`),
-  );
+  return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
 }
 
 /** Per-node comment (annotation thread) counts for sorting the document list. */

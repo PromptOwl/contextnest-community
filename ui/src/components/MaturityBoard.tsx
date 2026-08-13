@@ -27,6 +27,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { nestQueries } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import { deriveNestCaps } from "../lib/nest-caps";
 import { Button } from "@/components/ui/button";
@@ -119,6 +121,7 @@ export function MaturityBoard({
   onOpenDocument,
 }: Props) {
   const { isAdmin } = useAuth();
+  const qc = useQueryClient();
   const [nodes, setNodes] = useState<BoardNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -159,7 +162,7 @@ export function MaturityBoard({
     setLoading(true);
     setError(null);
     try {
-      const { nodes: raw } = await api.listNodes(nestId);
+      const { nodes: raw } = await qc.fetchQuery(nestQueries.nodes(nestId));
       setNodes(
         (raw as any[]).map((n) => ({
           id: n.id,
@@ -174,7 +177,7 @@ export function MaturityBoard({
     } finally {
       setLoading(false);
     }
-  }, [nestId]);
+  }, [nestId, qc]);
 
   useEffect(() => {
     load();
