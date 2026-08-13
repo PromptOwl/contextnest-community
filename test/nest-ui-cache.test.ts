@@ -199,6 +199,7 @@ describe("write invalidation scope @unit", () => {
       qc.fetchQuery(reads.settings("n1")),
       qc.fetchQuery(reads.commentCounts("n1")),
       qc.fetchQuery(reads.reviewQueue("n1")),
+      qc.fetchQuery(reads.externalEdits("n1")),
       qc.fetchQuery(reads.node("n1", "nodes/deep/doc")),
     ]);
   });
@@ -222,6 +223,24 @@ describe("write invalidation scope @unit", () => {
     expect(isStale(reads.stewards("n1").queryKey)).toBe(false);
   });
 
+  it("approving an external edit invalidates the document it rewrote", async () => {
+    // The suggestion id sits between the node id and the verdict, so the node
+    // id cannot be read off the end of the path. The body must go stale anyway:
+    // approving an external edit is what rewrites it.
+    await api.approveExternalEdit("n1", "nodes/deep/doc", "sug-123");
+
+    expect(isStale(reads.node("n1", "nodes/deep/doc").queryKey)).toBe(true);
+    expect(isStale(reads.externalEdits("n1").queryKey)).toBe(true);
+    expect(isStale(reads.connectors("n1").queryKey)).toBe(false);
+  });
+
+  it("rejecting an external edit invalidates the document it reverted", async () => {
+    await api.rejectExternalEdit("n1", "nodes/deep/doc", "sug-123", "no");
+
+    expect(isStale(reads.node("n1", "nodes/deep/doc").queryKey)).toBe(true);
+    expect(isStale(reads.externalEdits("n1").queryKey)).toBe(true);
+  });
+
   it("approving a document invalidates the review queue it just left", async () => {
     await api.approveNode("n1", "nodes/deep/doc");
 
@@ -230,12 +249,13 @@ describe("write invalidation scope @unit", () => {
     expect(isStale(reads.connectors("n1").queryKey)).toBe(false);
   });
 
-  it("a settings write touches settings only", async () => {
+  it("a settings write also drops the listing — stewardship gates what is visible", async () => {
     await api.updateNestSettings("n1", { stewardship_enabled: true });
 
     expect(isStale(reads.settings("n1").queryKey)).toBe(true);
-    expect(isStale(reads.nodes("n1").queryKey)).toBe(false);
-    expect(isStale(reads.stewards("n1").queryKey)).toBe(false);
+    // filterAccessible returns every node outright while stewardship is off, so
+    // flipping it changes the caller's visible set, not just the settings page.
+    expect(isStale(reads.nodes("n1").queryKey)).toBe(true);
   });
 
   it("a visibility change invalidates the nest subtree — it changes who sees what", async () => {

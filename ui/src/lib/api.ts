@@ -121,13 +121,6 @@ export function invalidateNestReads(nestId?: string): void {
   readCacheHooks?.invalidatePath(`/nests/${nestId}`);
 }
 
-/** Drop the cached nests list. Needed by callers that create or remove a nest
- *  without going through request() — the streaming import reads its own
- *  response body, so the hook there never fires. */
-function invalidateNestsList(): void {
-  readCacheHooks?.invalidatePath("/nests");
-}
-
 /** Error thrown by `request` on a non-2xx response, with the parsed body. */
 export interface ApiError extends Error {
   status?: number;
@@ -695,14 +688,13 @@ export async function listUnsyncedFolders() {
 }
 
 export async function syncUnsyncedFolder(name: string) {
-  const out = await request<{ nest: any; documents: number }>("/nests/unsynced/sync", {
+  // request() invalidates the nests list and the unsynced-folder list on its
+  // own — "unsynced" is not a nest id, so the path falls to the generic /nests
+  // rule (see invalidateForPath).
+  return request<{ nest: any; documents: number }>("/nests/unsynced/sync", {
     method: "POST",
     body: JSON.stringify({ name }),
   });
-  // Two-segment path doesn't match request()'s /nests/{id} list hook, but this
-  // creates a nest — bust the list explicitly.
-  invalidateNestsList();
-  return out;
 }
 
 export async function deleteUnsyncedFolder(name: string) {

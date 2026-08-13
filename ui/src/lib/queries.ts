@@ -184,11 +184,16 @@ const NEST_WRITE_SCOPES: Array<{
   },
   // Governance verdicts. These move a document between queues, write a new
   // version, and land in both the feed and the actor's own inbox.
+  //
+  // No per-document key here, deliberately. An external-edit verdict puts the
+  // suggestion id AFTER the document id (/nodes/{id}/external-edits/{sid}/approve),
+  // so no single capture reads the document id off every path this matches.
+  // `keys.nodes(n)` is the prefix of every document key under the nest, so it
+  // already drops the body — naming one would only risk naming the wrong one.
   {
     match:
       /^\/nodes\/(.+)\/(?:approve|reject|submit-review|revert|external-edits)(?:\/|$)/,
-    affects: (n, m) => [
-      keys.node(n, m[1]),
+    affects: (n) => [
       keys.nodes(n),
       [...keys.nest(n), "review-queue"],
       keys.externalEdits(n),
@@ -238,7 +243,10 @@ const NEST_WRITE_SCOPES: Array<{
     affects: (n) => [keys.collaborators(n), keys.nest(n)],
   },
   { match: /^\/teams/, affects: (n) => [keys.nestTeams(n), keys.teams] },
-  { match: /^\/settings/, affects: (n) => [keys.settings(n)] },
+  // Not just the settings payload: toggling stewardship changes what the access
+  // guard returns (`filterAccessible` returns every node outright while it is
+  // off), so the document listing and everything gated with it change too.
+  { match: /^\/settings/, affects: (n) => [keys.nest(n)] },
   { match: /^\/visibility/, affects: (n) => [keys.nest(n), keys.nestList()] },
   { match: /^\/definitions/, affects: (n) => [keys.definitions(n)] },
   { match: /^\/edges/, affects: (n) => [keys.edges(n), keys.graph(n)] },
