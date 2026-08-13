@@ -48,7 +48,17 @@ async function request<T = any>(
 
   // Some endpoints return empty body (e.g. 204 No Content).
   const text = await res.text();
-  const data = text ? (JSON.parse(text) as any) : ({} as any);
+  // Infrastructure between the browser and the app answers in plain text, not
+  // JSON — Cloud Run's proxy returns a bare "upstream request timeout" on 504,
+  // and load balancers return HTML error pages. Parsing those unguarded threw a
+  // SyntaxError before the !res.ok branch below could report the real status,
+  // so every proxy-level failure surfaced to the user as a JSON parse error.
+  let data: any;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { error: text.slice(0, 200) };
+  }
 
   if (!res.ok) {
     // 401 = the server says we're not logged in. Drop any legacy

@@ -1,0 +1,67 @@
+import { describe, it, expect, beforeEach } from "vitest";
+import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers";
+
+beforeEach(() => setupTestEnv());
+
+/**
+ * Discovery reads every markdown file in the nest, so it is cached per nest
+ * (see DISCOVERY_TTL_MS in src/nodes/engine.ts). The risk a cache adds is
+ * serving a document set that a write already invalidated — that is what these
+ * cover, not the speedup.
+ */
+describe("document discovery cache", () => {
+  it("serves a write made through the API, not the pre-write document set", async () => {
+    const app = await createTestApp("key");
+    const user = await registerUser(app, "cache@example.com");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Cache" }, user.apiKey);
+    const nestId = nest.data.nest.id;
+
+    // Populate the cache.
+    const before = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, user.apiKey);
+    const countBefore = before.data.count;
+
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Fresh Doc", content: "# Fresh Doc\n\nbody" },
+      user.apiKey,
+    );
+
+    // Same TTL window as the read above — only invalidation can make this pass.
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, user.apiKey);
+    expect(after.data.count).toBe(countBefore + 1);
+    expect(after.data.nodes.some((n: any) => n.title === "Fresh Doc")).toBe(true);
+  });
+
+  it("stops listing a document once it is deleted", async () => {
+    const app = await createTestApp("key");
+    const user = await registerUser(app, "cache2@example.com");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Cache2" }, user.apiKey);
+    const nestId = nest.data.nest.id;
+
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Doomed Doc", content: "# Doomed Doc\n\nbody" },
+      user.apiKey,
+    );
+    const nodeId = created.data.node.id;
+
+    // Warm the cache with the document present.
+    const listed = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, user.apiKey);
+    expect(listed.data.nodes.some((n: any) => n.id === nodeId)).toBe(true);
+
+    await jsonRequest(
+      app,
+      "DELETE",
+      `/nests/${nestId}/nodes/${encodeURIComponent(nodeId)}`,
+      undefined,
+      user.apiKey,
+    );
+
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, user.apiKey);
+    expect(after.data.nodes.some((n: any) => n.id === nodeId)).toBe(false);
+  });
+});

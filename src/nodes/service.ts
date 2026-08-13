@@ -1018,6 +1018,10 @@ export async function registerImportedDocuments(
 ): Promise<number> {
   const startedAt = Date.now();
   const tracked = await versions.getTrackedNodeIds(nestId);
+  // Registration reconciles the governance DB against what is on disk, and the
+  // files it is registering usually landed there without going through this
+  // process (a folder sync, the CLI, another instance). Read past the cache.
+  (await engineCache.get(nestId)).invalidateDiscovery();
 
   let result: ImportOpResult & { documents?: ImportedDocRecord[] };
   try {

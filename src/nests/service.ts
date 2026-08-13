@@ -1,4 +1,4 @@
-import { rmSync, mkdirSync } from "fs";
+import { mkdirSync } from "fs";
 import { v4 as uuid } from "uuid";
 import { NestStorage } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
@@ -10,6 +10,7 @@ import { isServerAdminUserId } from "../shared/access.js";
 import { ANON_USER_ID } from "../shared/constants.js";
 import { ValidationError } from "../shared/errors.js";
 import { normalizeTag } from "../governance/tag-index-service.js";
+import { rm } from "fs/promises";
 import type { Nest } from "../shared/types.js";
 
 /**
@@ -619,7 +620,10 @@ export async function deleteNest(nestId: string): Promise<void> {
   // harmless.
   const path = resolveNestPath(nestId);
   try {
-    rmSync(path, { recursive: true, force: true });
+    // Async, not rmSync: on a Cloud Storage mount every unlink is a network
+    // round trip, and the sync call held the event loop for the whole walk —
+    // minutes on a large nest, stalling every other request on the instance.
+    await rm(path, { recursive: true, force: true });
   } catch (err) {
     console.warn(`[nests] failed to remove nest directory ${path}:`, err);
   }
