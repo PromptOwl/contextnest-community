@@ -125,6 +125,42 @@ describe("nest UI read caching @unit", () => {
 });
 
 /**
+ * Editor safety. A document body is the one read that must never be served
+ * from cache to someone about to edit it — an edit has to start from server
+ * truth, or the save races a change it never saw. That guarantee is the
+ * zero staleness on the body query, so it is asserted directly: everything
+ * else in the editor (loading once per document, snapshotting, restoring an
+ * unsaved draft only when its baseVersion still matches) sits on top of it.
+ */
+describe("document body freshness @unit", () => {
+  let qc: QueryClient;
+  let fetchSpy: any;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    qc = createQueryClient();
+    connectReadCache(qc);
+    fetchSpy = vi.fn(async () => okJson({ node: { content: "server" } }));
+    (globalThis as any).fetch = fetchSpy;
+  });
+
+  it("re-reads the body every time — never serves a cached one to an edit", async () => {
+    await qc.fetchQuery(reads.node("n1", "nodes/doc"));
+    await qc.fetchQuery(reads.node("n1", "nodes/doc"));
+    expect(getListCalls(fetchSpy, "/nests/n1/nodes/nodes/doc")).toHaveLength(2);
+  });
+
+  it("lets a read-only viewer opt into a cached body by widening staleness", async () => {
+    // What the wiki-link hover preview does: it renders an excerpt, never an
+    // editable copy, so re-hovering should not refetch.
+    const preview = { ...reads.node("n1", "nodes/doc"), staleTime: 30_000 };
+    await qc.fetchQuery(preview);
+    await qc.fetchQuery(preview);
+    expect(getListCalls(fetchSpy, "/nests/n1/nodes/nodes/doc")).toHaveLength(1);
+  });
+});
+
+/**
  * A write must invalidate what it changed and leave the rest alone. Over-broad
  * invalidation is what made NestView re-fetch all nine of its reads whenever
  * any one document was touched; under-broad invalidation shows the user a value
@@ -205,6 +241,11 @@ describe("write invalidation scope @unit", () => {
 
     expect(isStale(reads.nodes("n1").queryKey)).toBe(true);
     expect(isStale(reads.stewards("n1").queryKey)).toBe(true);
+  });
+
+  it("invalidates a document's body when it is saved", async () => {
+    await api.updateNode("n1", "nodes/deep/doc", { content: "x" });
+    expect(isStale(reads.node("n1", "nodes/deep/doc").queryKey)).toBe(true);
   });
 
   it("falls back to the whole nest for a path it does not recognise", async () => {

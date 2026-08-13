@@ -38,6 +38,9 @@ export const keys = {
   commentCounts: (nestId: string) =>
     [...keys.nest(nestId), "comment-counts"] as const,
   overview: (nestId: string) => [...keys.nest(nestId), "overview"] as const,
+  // Derived from the same /overview response, but a separate entry because it
+  // caches the extracted tag list rather than the raw payload.
+  tags: (nestId: string) => [...keys.nest(nestId), "tags"] as const,
   graph: (nestId: string) => [...keys.nest(nestId), "graph"] as const,
   edgeTypes: (nestId: string) => [...keys.nest(nestId), "edge-types"] as const,
   edges: (nestId: string) => [...keys.nest(nestId), "edges"] as const,
@@ -415,6 +418,13 @@ export const reads = {
       queryKey: keys.overview(nestId),
       queryFn: () => api.getOverview(nestId),
       staleTime: STALE.listing,
+    }),
+  // Tag vocabulary — reference data, and the steward picker reopens often.
+  tags: (nestId: string) =>
+    queryOptions({
+      queryKey: keys.tags(nestId),
+      queryFn: () => api.listTags(nestId),
+      staleTime: STALE.reference,
     }),
   graph: (nestId: string) =>
     queryOptions({

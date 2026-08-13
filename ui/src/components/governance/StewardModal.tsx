@@ -6,7 +6,6 @@
  * picker. The backend rejects a scope+target the same user already holds.
  */
 import React, { useEffect, useState } from "react";
-import * as api from "../../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../../lib/queries";
 import { isEmailish } from "../../lib/utils";
@@ -120,7 +119,7 @@ export function StewardModal({
             const list = Array.isArray(res?.nodes) ? res.nodes : [];
             setNodes(list as Array<{ id: string; title: string }>);
           })
-        : api.listTags(nestId).then((list) => {
+        : qc.fetchQuery(reads.tags(nestId)).then((list) => {
             if (cancelled) return;
             setTags(list);
           });

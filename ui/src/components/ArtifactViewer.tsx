@@ -19,6 +19,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import type { AnnotationThread } from "../lib/api";
 import { extractText, buildAnchor } from "../lib/artifact-text";
 import { Button } from "@/components/ui/button";
@@ -83,6 +85,7 @@ export function ArtifactViewer({
   onBack,
 }: ArtifactViewerProps) {
   const [mode, setMode] = useState<"preview" | "annotate" | "edit">("preview");
+  const qc = useQueryClient();
   const [threads, setThreads] = useState<AnnotationThread[]>([]);
   const [loadingThreads, setLoadingThreads] = useState(true);
   const [extractedText, setExtractedText] = useState<string>("");
@@ -154,7 +157,7 @@ export function ArtifactViewer({
 
   const loadVersions = useCallback(async () => {
     try {
-      setVersionData(await api.getNodeVersions(nestId, nodeId));
+      setVersionData(await qc.fetchQuery(reads.nodeVersions(nestId, nodeId)));
     } catch (e: any) {
       setVersionData(null);
       toast.error(e?.message || "Failed to load version history");
@@ -263,7 +266,7 @@ export function ArtifactViewer({
     if (nodeMeta || nodeLoading) return;
     setNodeLoading(true);
     try {
-      const { node } = await api.getNode(nestId, nodeId);
+      const { node } = await qc.fetchQuery(reads.node(nestId, nodeId));
       const content = node?.content == null ? "" : String(node.content);
       setNodeMeta({
         content,
@@ -325,7 +328,7 @@ export function ArtifactViewer({
   const loadThreads = useCallback(async () => {
     setLoadingThreads(true);
     try {
-      const { threads } = await api.listAnnotations(nestId, nodeId);
+      const { threads } = await qc.fetchQuery(reads.nodeAnnotations(nestId, nodeId));
       setThreads(threads);
     } catch (e: any) {
       toast.error(e?.message || "Failed to load annotations");

@@ -2,6 +2,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -172,6 +174,7 @@ export function DocumentEditor({
   // looking at a real nest the caller can administer.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
+  const qc = useQueryClient();
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
   const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
@@ -591,7 +594,7 @@ export function DocumentEditor({
     let cancelled = false;
     (async () => {
       try {
-        const { nodes } = await api.listNodes(nestId);
+        const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
         if (!cancelled) {
           setNestNodes(
             nodes as Array<{
@@ -695,13 +698,13 @@ export function DocumentEditor({
     (async () => {
       try {
         const [settings, meta] = await Promise.all([
-          api.getNestSettings(nestId).catch(() => ({
+          qc.fetchQuery(reads.settings(nestId)).catch(() => ({
             stewardship_enabled: false,
             allow_self_approve: false,
             prime_only_review: false,
             prime_tags: [] as string[],
           })),
-          api.getNest(nestId).catch(() => null),
+          qc.fetchQuery(reads.nest(nestId)).catch(() => null),
         ]);
         if (cancelled) return;
         setStewardshipEnabled(!!settings.stewardship_enabled);
@@ -730,7 +733,7 @@ export function DocumentEditor({
     let cancelled = false;
     (async () => {
       try {
-        const { stewards } = await api.getNodeStewards(nestId, nodeId);
+        const { stewards } = await qc.fetchQuery(reads.nodeStewards(nestId, nodeId));
         if (cancelled) return;
         const mine = (stewards as any[]).filter(
           (s) => (s.email || "").toLowerCase() === currentEmail,
@@ -749,7 +752,7 @@ export function DocumentEditor({
     if (isNew) return;
     setLoading(true);
     try {
-      const { node } = await api.getNode(nestId, nodeId);
+      const { node } = await qc.fetchQuery(reads.node(nestId, nodeId));
       // Coerce to strings — YAML frontmatter can parse `title: 123` as a
       // number, and `title.trim()` later would throw "trim is not a function".
       const loadedTitle = node?.title == null ? "" : String(node.title);
@@ -815,7 +818,7 @@ export function DocumentEditor({
       return;
     }
     try {
-      setVersionData(await api.getNodeVersions(nestId, nodeId));
+      setVersionData(await qc.fetchQuery(reads.nodeVersions(nestId, nodeId)));
     } catch (e: any) {
       console.error("[DocumentEditor] getNodeVersions failed", nestId, nodeId, e);
       setVersionData(null);
@@ -1158,7 +1161,7 @@ export function DocumentEditor({
     }
     // Resolve target as id, title, or slug.
     try {
-      const { nodes } = await api.listNodes(nestId);
+      const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
       const list = nodes as Array<{ id: string; title: string }>;
       const exact = resolveWikiTarget(list, linkTitle);
       if (exact) {
