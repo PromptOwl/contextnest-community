@@ -1200,6 +1200,8 @@ export async function getNodeVersions(nestId: string, nodeId: string) {
     versions: any[];
     approvedVersion: number | null;
     currentVersion: number;
+    /** Verdicts on out-of-band edits — a rejection commits no version. */
+    externalEditVerdicts?: ExternalEditVerdict[];
   }>(`/nests/${nestId}/nodes/${nodeId}/versions`);
 }
 
@@ -1471,6 +1473,16 @@ export interface PendingChange {
   detected_at: string;
   source: string;
   proposed_hash: string;
+}
+
+/** A resolved external edit, from the engine's chain-event log. */
+export interface ExternalEditVerdict {
+  suggestion_id: string;
+  status: "approved" | "rejected";
+  actor: string;
+  at: string;
+  note?: string;
+  source?: string;
 }
 
 export async function listExternalEdits(nestId: string, refresh = false) {
