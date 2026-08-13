@@ -14,12 +14,18 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { VersionHistory, type Version } from "./VersionHistory";
+import {
+  VersionHistory,
+  type Version,
+  type ExternalEditVerdict,
+} from "./VersionHistory";
 
 export interface VersionHistoryData {
   versions: Version[];
   currentVersion: number;
   approvedVersion: number | null;
+  /** Verdicts on out-of-band edits — a rejection has no version of its own. */
+  externalEditVerdicts?: ExternalEditVerdict[];
 }
 
 interface VersionHistoryModalProps {
@@ -61,6 +67,7 @@ export function VersionHistoryModal({
             versions={versionData.versions}
             currentVersion={versionData.currentVersion}
             approvedVersion={versionData.approvedVersion}
+            externalEditVerdicts={versionData.externalEditVerdicts}
             onRestore={onRestore}
             previewAs={previewAs}
             onView={onView}
