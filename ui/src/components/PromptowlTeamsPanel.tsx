@@ -26,6 +26,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import type { PromptowlSyncResult, PromptowlTeam, Team } from "../lib/api";
 
 /** PromptOwl role → the role the member will get here. Mirrors the server. */
@@ -46,6 +48,7 @@ interface Props {
 
 export function PromptowlTeamsPanel({ localTeams, onImported }: Props) {
   const [teams, setTeams] = useState<PromptowlTeam[]>([]);
+  const qc = useQueryClient();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [disconnected, setDisconnected] = useState(false);
@@ -67,7 +70,7 @@ export function PromptowlTeamsPanel({ localTeams, onImported }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const res = await api.listPromptowlTeams();
+      const res = await qc.fetchQuery(reads.promptowlTeams());
       setTeams(res.teams);
     } catch (err: any) {
       // The PromptOwl token was revoked upstream, or the session lost it.

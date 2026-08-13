@@ -29,7 +29,7 @@ import { Trash2, Loader2, AlertCircle, UserPlus, Users, Share2 } from "lucide-re
 import { toast } from "sonner";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { nestQueries } from "../lib/queries";
+import { reads } from "../lib/queries";
 import type { Team, TeamMember } from "../lib/api";
 import { isEmailish } from "../lib/utils";
 
@@ -122,7 +122,7 @@ export function CollaboratorManager({
     setLoading(true);
     try {
       const { collaborators } = await qc.fetchQuery(
-        nestQueries.collaborators(nestId),
+        reads.collaborators(nestId),
       );
       setCollaborators(collaborators as Collaborator[]);
     } catch (err: any) {
@@ -135,8 +135,8 @@ export function CollaboratorManager({
   const loadTeams = async () => {
     try {
       const [nestTeams, owned] = await Promise.all([
-        api.listNestTeams(nestId),
-        api.listTeams().catch(() => ({ teams: [] as Team[] })),
+        qc.fetchQuery(reads.nestTeams(nestId)),
+        qc.fetchQuery(reads.teamList()).catch(() => ({ teams: [] as Team[] })),
       ]);
       setSharedTeams(nestTeams.teams);
       setMyTeams(owned.teams);

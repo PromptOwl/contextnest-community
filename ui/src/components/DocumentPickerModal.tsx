@@ -10,7 +10,7 @@
 import { useEffect, useMemo, useState } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { nestQueries } from "../lib/queries";
+import { reads } from "../lib/queries";
 import {
   Dialog,
   DialogContent,
@@ -67,7 +67,7 @@ export function DocumentPickerModal({
     (async () => {
       setLoading(true);
       try {
-        const { nodes: list } = await qc.fetchQuery(nestQueries.nodes(nestId));
+        const { nodes: list } = await qc.fetchQuery(reads.nodes(nestId));
         if (!cancelled) setNodes(list as PickerNode[]);
       } catch (err: any) {
         if (!cancelled) setError(err.message);

@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { FileText, Loader2, Search } from "lucide-react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { nestQueries } from "../lib/queries";
+import { reads } from "../lib/queries";
 
 interface QuickOpenProps {
   nestId: string;
@@ -39,7 +39,7 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
         const data = query.trim()
           ? // Search stays uncached — results must reflect the query exactly.
             await api.searchNodes(nestId, query.trim())
-          : await qc.fetchQuery(nestQueries.nodes(nestId));
+          : await qc.fetchQuery(reads.nodes(nestId));
         setResults((data.nodes as any[]).slice(0, 8));
         setSelected(0);
       } catch {

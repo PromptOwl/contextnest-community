@@ -28,7 +28,7 @@ import {
 import { toast } from "sonner";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { nestQueries } from "../lib/queries";
+import { reads } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import { deriveNestCaps } from "../lib/nest-caps";
 import { Button } from "@/components/ui/button";
@@ -162,7 +162,7 @@ export function MaturityBoard({
     setLoading(true);
     setError(null);
     try {
-      const { nodes: raw } = await qc.fetchQuery(nestQueries.nodes(nestId));
+      const { nodes: raw } = await qc.fetchQuery(reads.nodes(nestId));
       setNodes(
         (raw as any[]).map((n) => ({
           id: n.id,

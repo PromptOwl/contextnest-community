@@ -33,6 +33,8 @@ import {
 import { toast } from "sonner";
 import { PromptowlTeamsPanel } from "./PromptowlTeamsPanel";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import type { Team, TeamMember, TeamRole } from "../lib/api";
 import { TEAM_ROLES } from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
@@ -72,6 +74,7 @@ export function TeamsPage({ onBack }: TeamsPageProps) {
   const promptowlSession = promptowlTeamsEnabled && hasPromptowlSession;
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
+  const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [editTarget, setEditTarget] = useState<Team | null>(null);
@@ -81,7 +84,7 @@ export function TeamsPage({ onBack }: TeamsPageProps) {
   const fetchTeams = async () => {
     setError(null);
     try {
-      const res = await api.listTeams();
+      const res = await qc.fetchQuery(reads.teamList());
       setTeams(res.teams);
       // Keep an open edit modal in sync with refetched data.
       setEditTarget((prev) =>

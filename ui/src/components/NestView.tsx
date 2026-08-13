@@ -5,7 +5,7 @@
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
-import { nestQueries } from "../lib/queries";
+import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
@@ -632,26 +632,26 @@ export function NestView({
         // than via hooks to keep each call's own error fallback — a failing
         // node list must still let the settings response apply, per the note
         // above.
-        qc.fetchQuery(nestQueries.nodes(nestId)).catch((e) => {
+        qc.fetchQuery(reads.nodes(nestId)).catch((e) => {
           console.error("[NestView] listNodes failed", nestId, e);
           return { nodes: [] };
         }),
-        qc.fetchQuery(nestQueries.stewards(nestId)).catch((e) => {
+        qc.fetchQuery(reads.stewards(nestId)).catch((e) => {
           console.error("[NestView] listStewards failed", nestId, e);
           return { stewards: [] };
         }),
-        qc.fetchQuery(nestQueries.reviewQueue(nestId)).catch((e) => {
+        qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
           console.error("[NestView] getReviewQueue failed", nestId, e);
           toast.error(e?.message || "Failed to load review queue");
           return { requests: [], total: 0 };
         }),
         // Pending AND declined in one call: pending drives the admin queue,
         // declined is how the person who asked learns the verdict.
-        api.getDeletionRequests(nestId, "all").catch((e) => {
+        qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
           console.error("[NestView] getDeletionRequests failed", nestId, e);
           return { requests: [] as api.DeletionRequest[], total: 0 };
         }),
-        qc.fetchQuery(nestQueries.settings(nestId)).catch((e) => {
+        qc.fetchQuery(reads.settings(nestId)).catch((e) => {
           console.error("[NestView] getNestSettings failed", nestId, e);
           return {
             stewardship_enabled: false,
@@ -660,15 +660,15 @@ export function NestView({
             prime_tags: [] as string[],
           };
         }),
-        api.listExternalEdits(nestId).catch((e) => {
+        qc.fetchQuery(reads.externalEdits(nestId)).catch((e) => {
           console.error("[NestView] listExternalEdits failed", nestId, e);
           return { entries: [], total: 0 };
         }),
-        qc.fetchQuery(nestQueries.detail(nestId)).catch((e) => {
+        qc.fetchQuery(reads.nest(nestId)).catch((e) => {
           console.error("[NestView] getNest failed", nestId, e);
           return null;
         }),
-        api.getCommentCounts(nestId).catch((e) => {
+        qc.fetchQuery(reads.commentCounts(nestId)).catch((e) => {
           console.error("[NestView] getCommentCounts failed", nestId, e);
           return { counts: {} };
         }),
@@ -682,7 +682,7 @@ export function NestView({
         // with the already-filtered changes, using the same (createdAt, id)
         // ordering as the server merge. If reviewable filtering ever moves
         // server-side, collapse this into a single filter=all call.
-        api.getNestFeed(nestId, "comments").catch((e) => {
+        qc.fetchQuery(reads.feed(nestId, "comments")).catch((e) => {
           console.error("[NestView] getNestFeed failed", nestId, e);
           return {
             items: [] as api.FeedItem[],
@@ -1241,7 +1241,7 @@ export function NestView({
   const openVersions = async (node: any) => {
     setVersionNode(node);
     try {
-      const data = await api.getNodeVersions(nestId, node.id);
+      const data = await qc.fetchQuery(reads.nodeVersions(nestId, node.id));
       setVersionData(data);
     } catch (e) {
       console.error("[NestView] getNodeVersions failed", nestId, node?.id, e);
@@ -3940,6 +3940,7 @@ function ReviewDocumentModal({
   onOpenDocument: (nodeId: string) => void;
 }) {
   const [linkError, setLinkError] = useState<string | null>(null);
+  const qc = useQueryClient();
 
   // Resolve `[[Title]]` clicks to a node id and jump straight to that
   // doc. Without this the wiki-link decoration renders but click does
@@ -3960,7 +3961,7 @@ function ReviewDocumentModal({
     try {
       // Full list + shared id/title/slug resolver (same rule as the editor) so
       // a [[nodes/slug]] or slug-form link resolves here too, not title-only.
-      const { nodes } = await api.listNodes(nestId);
+      const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
       const exact = resolveWikiTarget(
         nodes as Array<{ id: string; title: string }>,
         title,

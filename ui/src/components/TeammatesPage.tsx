@@ -3,6 +3,8 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import { parseServerDate } from "../lib/dates";
 import { useAuth } from "../auth/AuthContext";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -42,6 +44,7 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
   const { adminStatus } = useAuth();
   const myEmail = adminStatus?.me?.email?.toLowerCase() ?? null;
   const [teammates, setTeammates] = useState<Teammate[]>([]);
+  const qc = useQueryClient();
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState<"all" | "admin" | "normal">("all");
   const [pendingStewards, setPendingStewards] = useState<string[]>([]);
@@ -78,8 +81,8 @@ export function TeammatesPage({ onBack }: TeammatesPageProps) {
     setLoading(true);
     try {
       const [data, admins] = await Promise.all([
-        api.listTeammates(),
-        api.listSuperAdmins(),
+        qc.fetchQuery(reads.teammates()),
+        qc.fetchQuery(reads.superAdmins()),
       ]);
       setTeammates(data.teammates);
       setPendingStewards(data.pending_stewards || []);

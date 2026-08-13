@@ -3,7 +3,8 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
-import { useNests } from "../lib/queries";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
   FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft,
@@ -77,6 +78,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     refetch: refetchNests,
   } = useNests();
   const nests = nestsData?.nests ?? [];
+  const qc = useQueryClient();
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
@@ -107,12 +109,12 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     // there is no separate /stats round-trip. /unsynced and /me/work are
     // best-effort extras that stream into their own sections as they land —
     // /unsynced is admin-gated (403 for non-admins).
-    api
-      .listUnsyncedFolders()
+    qc
+      .fetchQuery(reads.unsynced())
       .then((d) => setUnsynced(d.folders))
       .catch(() => setUnsynced([]));
-    api
-      .getMyWork()
+    qc
+      .fetchQuery(reads.myWork())
       .then(setWork)
       .catch(() => setWork({ items: [], waiting: [], notifications: [] }));
     // Streams into its own tab like the other extras — never gated behind
@@ -129,7 +131,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const goToDraftsPage = async (offset: number) => {
     setDraftsLoading(true);
     try {
-      const next = await api.getMyDrafts({ offset });
+      const next = await qc.fetchQuery(reads.myDrafts({ offset }));
       setDrafts(next.drafts);
       setDraftsPage(next.pagination);
     } catch (e) {
@@ -145,7 +147,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const goToWorkPage = async (offset: number) => {
     setLoadingMoreWork(true);
     try {
-      const next = await api.getMyWork({ offset });
+      const next = await qc.fetchQuery(reads.myWork({ offset }));
       setWork((prev) => ({
         items: next.items,
         waiting: next.waiting,
@@ -1199,19 +1201,25 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
             if (!open) setRenameTarget(null);
           }}
           onRenamed={(updated) => {
-            // Update the card in place — no refetch needed; nothing else on
-            // the dashboard derives from the name/slug.
-            setNests((prev) =>
-              prev.map((n) =>
-                n.id === updated.id
-                  ? {
-                      ...n,
-                      name: updated.name,
-                      slug: updated.slug,
-                      description: updated.description,
-                    }
-                  : n,
-              ),
+            // Patch the cached row so the card renames instantly. The PATCH
+            // already invalidated the list, so a refetch confirms this behind
+            // the scenes — this is only about not blanking the name meanwhile.
+            qc.setQueryData(reads.nestList().queryKey, (prev) =>
+              prev
+                ? {
+                    ...prev,
+                    nests: prev.nests.map((n: any) =>
+                      n.id === updated.id
+                        ? {
+                            ...n,
+                            name: updated.name,
+                            slug: updated.slug,
+                            description: updated.description,
+                          }
+                        : n,
+                    ),
+                  }
+                : prev,
             );
             setRenameTarget(null);
           }}

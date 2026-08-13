@@ -49,6 +49,8 @@ import {
   Package,
 } from "lucide-react";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import { copyTextWithToast } from "../lib/clipboard";
 import { useAuth } from "../auth/AuthContext";
 
@@ -80,6 +82,7 @@ export function ConnectModal({
   const exportUrl = `${serverUrl}/nests/${nestId}/export?format=markdown`;
 
   const [downloading, setDownloading] = useState(false);
+  const qc = useQueryClient();
   const [downloadingBundle, setDownloadingBundle] = useState(false);
   const [bundleOpen, setBundleOpen] = useState(false);
   const [includeDrafts, setIncludeDrafts] = useState(false);
@@ -119,7 +122,7 @@ export function ConnectModal({
     (async () => {
       setBusy("loading");
       try {
-        const { keys } = await api.listApiKeys();
+        const { keys } = await qc.fetchQuery(reads.apiKeys());
         if (cancelled) return;
         const head = keys[0];
         setHasExistingKey(!!head);

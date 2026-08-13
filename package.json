@@ -52,7 +52,7 @@
     "build:server": "tsup src/index.ts --format esm --dts --clean",
     "build:ui": "vite build --config ui/vite.config.ts",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p ui/tsconfig.json",
     "lint:mcp-schemas": "node scripts/check-mcp-schemas.mjs",
     "test": "vitest run",
     "test:watch": "vitest",

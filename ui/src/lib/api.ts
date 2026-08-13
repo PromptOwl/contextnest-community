@@ -78,18 +78,12 @@ async function request<T = any>(
     err.body = data;
     throw err;
   }
-  // A successful mutation under /nests/{id} changes what the cached structural
-  // reads (node list, nest, settings) would return — drop that nest's read
-  // cache so approval/edit state is never served stale. See cachedRead below.
+  // Every successful mutation invalidates the cached reads its result affects.
+  // Routing that off the request path means a new endpoint is covered the day
+  // it is added, rather than the day someone remembers to register it — the
+  // query layer owns the path-to-key mapping (see invalidateForPath there).
   const method = (options.method ?? "GET").toUpperCase();
-  if (method !== "GET") {
-    const m = path.match(/^\/nests\/([^/?]+)/);
-    if (m) invalidateNestReads(m[1]);
-    // Creating / deleting / renaming a nest changes the nests list itself.
-    if (path === "/nests" || /^\/nests\/[^/?]+$/.test(path)) {
-      invalidateNestsList();
-    }
-  }
+  if (method !== "GET") readCacheHooks?.invalidatePath(path);
   return data as T;
 }
 
@@ -103,10 +97,8 @@ async function request<T = any>(
 interface ReadCacheHooks {
   /** Drop every cached read. For identity changes, where nothing may carry over. */
   clear(): void;
-  /** Mark one nest's cached reads stale, plus the nests list itself. */
-  invalidateNest(nestId: string): void;
-  /** Mark just the nests list stale. */
-  invalidateList(): void;
+  /** Mark stale whatever a mutation to this request path could have changed. */
+  invalidatePath(path: string): void;
 }
 
 let readCacheHooks: ReadCacheHooks | null = null;
@@ -126,17 +118,14 @@ export function invalidateNestReads(nestId?: string): void {
     readCacheHooks?.clear();
     return;
   }
-  // Node-level mutations change per-nest metadata the list rows carry
-  // (document_count, updated_at) — the Dashboard derives its totals from
-  // them, so the list must not survive any nest-scoped mutation either.
-  readCacheHooks?.invalidateNest(nestId);
+  readCacheHooks?.invalidatePath(`/nests/${nestId}`);
 }
 
-/** Drop the cached nests list. Needed by mutations that create a nest but
- *  don't route through request()'s /nests/{id} hook (streaming import,
- *  unsynced-folder sync). */
+/** Drop the cached nests list. Needed by callers that create or remove a nest
+ *  without going through request() — the streaming import reads its own
+ *  response body, so the hook there never fires. */
 function invalidateNestsList(): void {
-  readCacheHooks?.invalidateList();
+  readCacheHooks?.invalidatePath("/nests");
 }
 
 /** Error thrown by `request` on a non-2xx response, with the parsed body. */
