@@ -204,7 +204,12 @@ describe("?format=raw — body, content types, precedence", () => {
       );
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
       if (type !== "artifact") {
-        expect(res.headers.get("content-security-policy")).toBeNull();
+        // Every response now carries the global clickjacking guard, so the
+        // check is that non-artifacts don't pick up the *sandbox* policy —
+        // frame-ancestors alone is expected.
+        const csp = res.headers.get("content-security-policy");
+        expect(csp).toBe("frame-ancestors 'self'");
+        expect(csp).not.toContain("sandbox");
       }
     }
   });
