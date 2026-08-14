@@ -240,7 +240,15 @@ export default function App() {
 
   const requestLogout = useCallback(() => setLogoutConfirm(true), []);
 
+  // Only bound where QuickOpen can actually render. Outside a nest the shortcut
+  // used to flip the flag with nothing mounted to show it, so the panel sprang
+  // open on the next nest you entered — hence the reset on leaving too.
+  const canQuickOpen = view.page === "nest" || view.page === "document";
   useEffect(() => {
+    if (!canQuickOpen) {
+      setShowQuickOpen(false);
+      return;
+    }
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -249,7 +257,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [canQuickOpen]);
 
   const confirmLogout = useCallback(async () => {
     setLogoutPending(true);
