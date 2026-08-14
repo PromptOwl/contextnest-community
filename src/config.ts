@@ -567,6 +567,33 @@ export const config = {
     return ["http://localhost:5173", "http://localhost:3838"];
   },
   /**
+   * Who may frame this server, as a CSP `frame-ancestors` source list.
+   *
+   * Defaults to `'self'`: no other site can embed the UI, which is what stops
+   * a hostile page from framing it invisibly and stealing clicks from a
+   * signed-in operator. Deployments that are *meant* to be embedded name the
+   * embedding origin — e.g. the PromptOwl Data Room iframes this server, so
+   * that install sets `FRAME_ANCESTORS="https://app.promptowl.ai"`.
+   *
+   * Comma-separated; `'self'` is always included. `*` allows any site to frame
+   * this server and disables the protection.
+   *
+   * Note we deliberately do NOT also send `X-Frame-Options` — it only
+   * understands "same origin", so it would block a sibling subdomain that
+   * `frame-ancestors` is configured to allow. Every browser that matters
+   * honours `frame-ancestors`, and it wins where both are present.
+   */
+  get FRAME_ANCESTORS(): string {
+    const raw = process.env.FRAME_ANCESTORS?.trim();
+    if (!raw) return "'self'";
+    if (raw === "*") return "*";
+    const sources = raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return [...new Set(["'self'", ...sources])].join(" ");
+  },
+  /**
    * Max JSON body size in bytes. Prevents DoS via giant payloads.
    * Default: 10 MB. Override via MAX_BODY_BYTES env.
    */

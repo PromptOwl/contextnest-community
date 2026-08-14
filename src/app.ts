@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { LinearRouter } from "hono/router/linear-router";
 import { createMiddleware } from "hono/factory";
 import { cors } from "hono/cors";
+import { mergeFrameAncestors } from "./shared/artifact-sandbox.js";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
@@ -297,6 +298,23 @@ export function createApp(): Hono<AuthEnv> {
       ? cors({ origin: "*" })
       : cors({ origin: corsOrigins, credentials: true }),
   );
+
+  // Clickjacking guard — only the origins in config.FRAME_ANCESTORS may frame
+  // this server. CORS does not cover this: it governs who may *read* our
+  // responses, not who may *embed* us, so without this any site could iframe
+  // the UI invisibly and harvest a signed-in operator's clicks.
+  //
+  // Appended rather than assigned, because artifact responses already ship
+  // their own strict CSP (see shared/artifact-sandbox.ts) — overwriting it
+  // would drop the sandbox that keeps attacker-authored artifact HTML off the
+  // session. Skipped entirely when a handler set frame-ancestors itself.
+  const frameAncestors = `frame-ancestors ${config.FRAME_ANCESTORS}`;
+  app.use("*", async (c, next) => {
+    await next();
+    const existing = c.res.headers.get("Content-Security-Policy");
+    const merged = mergeFrameAncestors(existing, frameAncestors);
+    if (merged !== existing) c.header("Content-Security-Policy", merged);
+  });
 
   // Request body size cap — prevents DoS via giant POST payloads before
   // a handler ever gets to parse JSON. Only applies when Content-Length

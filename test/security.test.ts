@@ -15,6 +15,10 @@ import {
   jsonRequest,
 } from "./helpers";
 import { parseBearerToken } from "../src/auth/keys";
+import {
+  mergeFrameAncestors,
+  ARTIFACT_SANDBOX_CSP,
+} from "../src/shared/artifact-sandbox";
 
 describe("parseBearerToken", () => {
   it("accepts a valid Bearer cnst_ token", () => {
@@ -172,5 +176,58 @@ describe("rate limiting on /auth/login", () => {
       });
       expect(status).toBe(401);
     }
+  });
+});
+
+describe("clickjacking guard (CSP frame-ancestors)", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+
+  beforeEach(() => {
+    env = setupTestEnv();
+  });
+
+  afterEach(() => {
+    delete process.env.FRAME_ANCESTORS;
+    env.cleanup();
+  });
+
+  it("defaults to 'self' — no other site may frame the server", async () => {
+    const app = await createTestApp("key");
+    const res = await app.request("/health");
+    expect(res.headers.get("Content-Security-Policy")).toBe(
+      "frame-ancestors 'self'",
+    );
+  });
+
+  it("allows a configured embedding origin (e.g. the PromptOwl Data Room)", async () => {
+    process.env.FRAME_ANCESTORS = "https://app.promptowl.ai";
+    const app = await createTestApp("key");
+    const res = await app.request("/health");
+    expect(res.headers.get("Content-Security-Policy")).toBe(
+      "frame-ancestors 'self' https://app.promptowl.ai",
+    );
+  });
+});
+
+describe("mergeFrameAncestors", () => {
+  const directive = "frame-ancestors 'self'";
+
+  it("sets the directive when the response has no CSP", () => {
+    expect(mergeFrameAncestors(null, directive)).toBe(directive);
+    expect(mergeFrameAncestors("", directive)).toBe(directive);
+  });
+
+  it("appends without dropping the artifact sandbox policy", () => {
+    const merged = mergeFrameAncestors(ARTIFACT_SANDBOX_CSP, directive);
+    // The sandbox is what keeps attacker-authored artifact HTML off the
+    // session — losing it here would be a silent security regression.
+    expect(merged.startsWith(ARTIFACT_SANDBOX_CSP)).toBe(true);
+    expect(merged).toContain("sandbox allow-scripts");
+    expect(merged).toContain(directive);
+  });
+
+  it("leaves a policy that already sets frame-ancestors alone", () => {
+    const own = "default-src 'none'; frame-ancestors https://example.com";
+    expect(mergeFrameAncestors(own, directive)).toBe(own);
   });
 });

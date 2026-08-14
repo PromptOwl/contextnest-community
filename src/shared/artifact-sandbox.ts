@@ -26,6 +26,24 @@ export const ARTIFACT_SANDBOX_CSP = [
   "form-action 'none'",
 ].join("; ");
 
+/**
+ * Merge a `frame-ancestors` directive into an existing CSP header value.
+ *
+ * The global clickjacking guard (see app.ts) runs on every response, including
+ * artifact ones that already carry ARTIFACT_SANDBOX_CSP. Assigning the header
+ * there would drop the sandbox and put attacker-authored artifact HTML back on
+ * the session, so the guard merges instead. A handler that set its own
+ * frame-ancestors keeps it.
+ */
+export function mergeFrameAncestors(
+  existing: string | null | undefined,
+  directive: string,
+): string {
+  if (!existing) return directive;
+  if (/(^|;)\s*frame-ancestors\b/i.test(existing)) return existing;
+  return `${existing}; ${directive}`;
+}
+
 /** Apply the artifact sandbox trio: strict CSP + nosniff + no referrer. */
 export function applyArtifactSandboxHeaders(c: {
   header: (name: string, value: string) => void;
