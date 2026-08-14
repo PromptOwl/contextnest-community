@@ -515,7 +515,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                               setDeletionTarget(w);
                             }}
                           >
-                            Decline
+                            Reject
                           </Button>
                         </>
                       ) : (
@@ -1233,7 +1233,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           title={
             deletionAction === "delete"
               ? `Delete "${deletionTarget.title}"?`
-              : "Decline this deletion request"
+              : "Reject this deletion request"
           }
           description={`${deletionTarget.requested_by} asked for this: "${deletionTarget.reason ?? ""}". ${
             deletionAction === "delete"
@@ -1241,11 +1241,11 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
               : "The document stays; your note is the record, and the requester is notified."
           }`}
           label={
-            deletionAction === "decline" ? "Why are you declining?" : undefined
+            deletionAction === "decline" ? "Why are you rejecting?" : undefined
           }
           placeholder="e.g. still referenced by onboarding"
           confirmLabel={
-            deletionAction === "delete" ? "Delete document" : "Decline"
+            deletionAction === "delete" ? "Delete document" : "Reject"
           }
           destructive={deletionAction === "delete"}
           onConfirm={

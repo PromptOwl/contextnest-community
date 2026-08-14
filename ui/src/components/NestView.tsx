@@ -1378,7 +1378,7 @@ export function NestView({
 
   const handleDeclineDeletion = async (note: string) => {
     await api.declineDeletionRequest(nestId, resolveTarget!.request.id, note);
-    toast.success("Request declined");
+    toast.success("Request rejected");
     fetchData();
   };
 
@@ -3102,7 +3102,7 @@ export function NestView({
                     Deletion requests
                   </CardTitle>
                   <CardDescription>
-                    Documents flagged as stale. Delete them, or decline with a
+                    Documents flagged as stale. Delete them, or reject with a
                     note.
                   </CardDescription>
                 </CardHeader>
@@ -3136,7 +3136,7 @@ export function NestView({
                           setResolveTarget({ request: r, action: "decline" })
                         }
                       >
-                        Decline
+                        Reject
                       </Button>
                       <Button
                         variant="ghost"
@@ -3851,7 +3851,7 @@ export function NestView({
           open
           onOpenChange={(o) => !o && setDeletionTarget(null)}
           title={`Request deletion of "${deletionTarget.title}"`}
-          description="A nest admin reviews this and either deletes the document or declines with a note. Nothing is removed yet."
+          description="A nest admin reviews this and either deletes the document or rejects with a note. Nothing is removed yet."
           label="Why should it be deleted?"
           placeholder="e.g. superseded by the new runbook"
           confirmLabel="Request deletion"
@@ -3871,7 +3871,7 @@ export function NestView({
           title={
             resolveTarget.action === "delete"
               ? `Delete "${resolveTarget.request.title || resolveTarget.request.nodeId}"?`
-              : "Decline this deletion request"
+              : "Reject this deletion request"
           }
           description={
             resolveTarget.action === "delete"
@@ -3881,12 +3881,12 @@ export function NestView({
           // No label on the delete branch — that dialog is a plain confirm.
           label={
             resolveTarget.action === "decline"
-              ? "Why are you declining?"
+              ? "Why are you rejecting?"
               : undefined
           }
           placeholder="e.g. still referenced by onboarding"
           confirmLabel={
-            resolveTarget.action === "delete" ? "Delete document" : "Decline"
+            resolveTarget.action === "delete" ? "Delete document" : "Reject"
           }
           destructive={resolveTarget.action === "delete"}
           onConfirm={

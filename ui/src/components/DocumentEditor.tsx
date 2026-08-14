@@ -2550,7 +2550,7 @@ export function DocumentEditor({
           description={
             canDeleteDirectly
               ? "This removes the document, its version history, comments and annotations. It cannot be undone."
-              : "A nest admin reviews this and either deletes the document or declines with a note. Nothing is removed yet."
+              : "A nest admin reviews this and either deletes the document or rejects with a note. Nothing is removed yet."
           }
           // Deleting your own work needs no justification; asking for someone
           // else's does.
