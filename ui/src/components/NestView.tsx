@@ -86,6 +86,7 @@ import {
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
+import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
   StewardList, StewardModal,
   ReviewQueue, ReviewActions,
@@ -1757,7 +1758,12 @@ export function NestView({
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>Total Documents</CardDescription>
-            <CardTitle className="text-3xl">{stats.total}</CardTitle>
+            {/* initialLoad, not `loading`: a background refetch keeps the real
+                numbers on screen, and only a cold load — where every stat is
+                still 0 — shows the placeholder. */}
+            <CardTitle className="text-3xl">
+              {initialLoad ? <CountSkeleton className="h-8 w-12" /> : stats.total}
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1773,7 +1779,13 @@ export function NestView({
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription>Pending Review</CardDescription>
-                <CardTitle className="text-3xl text-amber-600">{stats.pending}</CardTitle>
+                <CardTitle className="text-3xl text-amber-600">
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.pending
+                  )}
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1785,7 +1797,13 @@ export function NestView({
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription>AI Ready</CardDescription>
-                <CardTitle className="text-3xl text-green-600">{stats.approved}</CardTitle>
+                <CardTitle className="text-3xl text-green-600">
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.approved
+                  )}
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1798,7 +1816,11 @@ export function NestView({
               <CardHeader className="pb-2">
                 <CardDescription>Review Queue</CardDescription>
                 <CardTitle className="text-3xl text-blue-600">
-                  {stats.reviewable}
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.reviewable
+                  )}
                 </CardTitle>
               </CardHeader>
               <CardContent>

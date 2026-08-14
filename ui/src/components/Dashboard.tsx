@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
   Dialog,
   DialogContent,
@@ -347,14 +348,24 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                 <CopyInline value={serverUrl} />
               </CardDescription>
             </div>
+            {/* On a cold load `nests` is [], and rendering that as 0/0 reads as
+                "your content is gone". Hold a placeholder bar until the counts
+                are real — `loading` is false on a cached revisit, so this never
+                flashes when there's something to show. */}
             <div className="flex gap-6 text-center">
               <div>
-                <div className="text-2xl font-bold">{nests.length}</div>
+                <div className="text-2xl font-bold">
+                  {loading ? <CountSkeleton /> : nests.length}
+                </div>
                 <div className="text-xs text-muted-foreground">Nests</div>
               </div>
               <div>
                 <div className="text-2xl font-bold">
-                  {nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)}
+                  {loading ? (
+                    <CountSkeleton />
+                  ) : (
+                    nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)
+                  )}
                 </div>
                 <div className="text-xs text-muted-foreground">Documents</div>
               </div>
