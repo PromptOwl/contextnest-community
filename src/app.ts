@@ -17,6 +17,7 @@ import {
 import { listMyDrafts } from "./governance/version-service.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
+import { matchDocuments, toSearchHit } from "./nodes/search.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import {
   resolveStewardsForNode,
@@ -72,7 +73,7 @@ import {
   isServerAdminUserId,
   type NestPermission,
 } from "./shared/access.js";
-import { AppError } from "./shared/errors.js";
+import { AppError, ValidationError } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
 import { verifySmtp } from "./notify/email.js";
 import { getDb } from "./db/client.js";
@@ -1381,6 +1382,62 @@ export function createApp(): Hono<AuthEnv> {
       nests: visibleNests.length,
       documents,
       users: usersRow.c,
+    });
+  });
+
+  app.use("/search", flexAuthMiddleware);
+  // GET /search?q=&limit= — the same full-text match as GET /nests/:id/search,
+  // run across every nest the caller can see. Without it a document can only be
+  // found by someone who already knows which nest holds it.
+  app.get("/search", async (c) => {
+    const q = (c.req.query("q") || "").trim();
+    if (!q) throw new ValidationError("q query parameter is required");
+    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 20, 1), 50);
+
+    const userId = c.get("userId");
+    const userEmail = await resolveCallerEmail(userId);
+
+    type SearchHit = ReturnType<typeof toSearchHit> & {
+      nest_id: string;
+      nest_name: string;
+    };
+
+    // Fan out: on a cold discovery cache each nest costs a filesystem (or, on a
+    // bucket-mounted deploy, a network) walk, and serially that adds up with
+    // the caller's nest count. Results stay in nest order, so the cap below is
+    // still deterministic.
+    // ponytail: unbounded fan-out — add a concurrency limit if a caller ever
+    // holds enough nests for the parallel walks to matter.
+    const perNest = await Promise.all(
+      (await listVisibleNests(userId)).map(async (nest): Promise<SearchHit[]> => {
+        try {
+          const { storage } = await engineCache.get(nest.id);
+          const matches = matchDocuments(await storage.discoverDocuments(), q);
+          if (matches.length === 0) return [];
+          // Per-nest stewardship filtering, same call the nest-scoped route
+          // makes — a hit never leaks a doc the caller couldn't open directly.
+          const accessible = await filterAccessible(nest.id, userId, userEmail, matches);
+          return accessible.map((n) => ({
+            ...toSearchHit(n),
+            nest_id: nest.id,
+            nest_name: nest.name ?? nest.id,
+          }));
+        } catch (e) {
+          // One broken nest shouldn't fail the whole search — but log it, or a
+          // nest that stops being searchable does so with no signal at all.
+          console.error("[search] skipped nest", nest.id, e);
+          return [];
+        }
+      }),
+    );
+    const hits = perNest.flat();
+
+    // Scan every nest, then cap: truncating per nest would let the first nests
+    // in creation order crowd out better matches elsewhere.
+    return c.json({
+      query: q,
+      count: hits.length,
+      nodes: hits.slice(0, limit),
     });
   });
 

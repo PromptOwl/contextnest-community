@@ -1123,6 +1123,32 @@ Full-text search.
 { "count": N, "nodes": [{ "id": "...", "title": "...", "tags": [...] }] }
 ```
 
+### GET `/search?q=<term>&limit=20`
+The same match, run across every nest the caller can see — for finding a
+document without knowing which nest holds it. Each hit is stamped with its
+nest, and per-nest stewardship filtering still applies, so results never
+include a document the caller couldn't open directly.
+
+`limit` caps the returned page (default 20, max 50) while `count` reports
+everything found. `400` if `q` is missing.
+```json
+{
+  "query": "onboarding",
+  "count": 2,
+  "nodes": [
+    {
+      "id": "nodes/onboarding-runbook",
+      "title": "Onboarding Runbook",
+      "type": "document",
+      "tags": ["#hr"],
+      "snippet": "how to onboard a...",
+      "nest_id": "nest_abc",
+      "nest_name": "Team Knowledge"
+    }
+  ]
+}
+```
+
 ### POST `/nests/:nestId/context`
 One-call context retrieval for app/agent flows. Returns markdown ready to
 prepend to an LLM prompt, plus a trace + node manifest. **Requires a license**

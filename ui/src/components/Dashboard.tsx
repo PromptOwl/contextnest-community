@@ -7,7 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Search,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
   Dialog,
   DialogContent,
@@ -45,9 +46,11 @@ interface DashboardProps {
     isAnonOwned: boolean,
   ) => void;
   onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
+  /** Opens the cross-nest search palette (the same one Cmd/Ctrl+K opens). */
+  onOpenSearch?: () => void;
 }
 
-export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
+export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const [work, setWork] = useState<{
@@ -347,14 +350,24 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                 <CopyInline value={serverUrl} />
               </CardDescription>
             </div>
+            {/* On a cold load `nests` is [], and rendering that as 0/0 reads as
+                "your content is gone". Hold a placeholder bar until the counts
+                are real — `loading` is false on a cached revisit, so this never
+                flashes when there's something to show. */}
             <div className="flex gap-6 text-center">
               <div>
-                <div className="text-2xl font-bold">{nests.length}</div>
+                <div className="text-2xl font-bold">
+                  {loading ? <CountSkeleton /> : nests.length}
+                </div>
                 <div className="text-xs text-muted-foreground">Nests</div>
               </div>
               <div>
                 <div className="text-2xl font-bold">
-                  {nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)}
+                  {loading ? (
+                    <CountSkeleton />
+                  ) : (
+                    nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)
+                  )}
                 </div>
                 <div className="text-xs text-muted-foreground">Documents</div>
               </div>
@@ -515,7 +528,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                               setDeletionTarget(w);
                             }}
                           >
-                            Decline
+                            Reject
                           </Button>
                         </>
                       ) : (
@@ -736,6 +749,20 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Styled as a field rather than a button: the palette it opens is
+              where you type, and a search box is what people look for. */}
+          {onOpenSearch && (
+            <button
+              type="button"
+              onClick={onOpenSearch}
+              className="flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50"
+              data-testid="global-search-trigger"
+            >
+              <Search className="h-4 w-4" />
+              Search nests &amp; documents
+              <kbd className="ml-2 rounded border px-1 text-[10px]">⌘K</kbd>
+            </button>
+          )}
           <Button variant="outline" onClick={() => setShowImport(true)}>
             <FolderInput className="h-4 w-4 mr-2" />
             Import Folder
@@ -1233,7 +1260,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           title={
             deletionAction === "delete"
               ? `Delete "${deletionTarget.title}"?`
-              : "Decline this deletion request"
+              : "Reject this deletion request"
           }
           description={`${deletionTarget.requested_by} asked for this: "${deletionTarget.reason ?? ""}". ${
             deletionAction === "delete"
@@ -1241,11 +1268,11 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
               : "The document stays; your note is the record, and the requester is notified."
           }`}
           label={
-            deletionAction === "decline" ? "Why are you declining?" : undefined
+            deletionAction === "decline" ? "Why are you rejecting?" : undefined
           }
           placeholder="e.g. still referenced by onboarding"
           confirmLabel={
-            deletionAction === "delete" ? "Delete document" : "Decline"
+            deletionAction === "delete" ? "Delete document" : "Reject"
           }
           destructive={deletionAction === "delete"}
           onConfirm={

@@ -86,6 +86,7 @@ import {
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
+import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
   StewardList, StewardModal,
   ReviewQueue, ReviewActions,
@@ -1378,7 +1379,7 @@ export function NestView({
 
   const handleDeclineDeletion = async (note: string) => {
     await api.declineDeletionRequest(nestId, resolveTarget!.request.id, note);
-    toast.success("Request declined");
+    toast.success("Request rejected");
     fetchData();
   };
 
@@ -1757,7 +1758,12 @@ export function NestView({
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>Total Documents</CardDescription>
-            <CardTitle className="text-3xl">{stats.total}</CardTitle>
+            {/* initialLoad, not `loading`: a background refetch keeps the real
+                numbers on screen, and only a cold load — where every stat is
+                still 0 — shows the placeholder. */}
+            <CardTitle className="text-3xl">
+              {initialLoad ? <CountSkeleton className="h-8 w-12" /> : stats.total}
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1773,7 +1779,13 @@ export function NestView({
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription>Pending Review</CardDescription>
-                <CardTitle className="text-3xl text-amber-600">{stats.pending}</CardTitle>
+                <CardTitle className="text-3xl text-amber-600">
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.pending
+                  )}
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1785,7 +1797,13 @@ export function NestView({
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription>AI Ready</CardDescription>
-                <CardTitle className="text-3xl text-green-600">{stats.approved}</CardTitle>
+                <CardTitle className="text-3xl text-green-600">
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.approved
+                  )}
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1798,7 +1816,11 @@ export function NestView({
               <CardHeader className="pb-2">
                 <CardDescription>Review Queue</CardDescription>
                 <CardTitle className="text-3xl text-blue-600">
-                  {stats.reviewable}
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.reviewable
+                  )}
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -3072,8 +3094,8 @@ export function NestView({
                     Submitted by you — awaiting review
                   </CardTitle>
                   <CardDescription>
-                    Your edits are queued for a reviewer. You can't approve your
-                    own work (separation of duties), but they are pending.
+                    Your edits are awaiting review by another user. You can't
+                    approve your own work due to separation of duties.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-2">
@@ -3102,7 +3124,7 @@ export function NestView({
                     Deletion requests
                   </CardTitle>
                   <CardDescription>
-                    Documents flagged as stale. Delete them, or decline with a
+                    Documents flagged as stale. Delete them, or reject with a
                     note.
                   </CardDescription>
                 </CardHeader>
@@ -3136,7 +3158,7 @@ export function NestView({
                           setResolveTarget({ request: r, action: "decline" })
                         }
                       >
-                        Decline
+                        Reject
                       </Button>
                       <Button
                         variant="ghost"
@@ -3206,10 +3228,9 @@ export function NestView({
             {feedFilter !== "comments" &&
               reviewQueue.length > 0 && reviewableQueue.length === 0 && (
                 <p className="text-xs text-muted-foreground text-center">
-                  {reviewQueue.length} pending review
-                  {reviewQueue.length === 1 ? "" : "s"} in this nest, but
-                  none you can act on — outside your steward scope, or
-                  submitted by you (authors can't approve their own work).
+                  {reviewQueue.length === 1
+                    ? "1 pending review in this nest, but it doesn't require your action — it's either outside your steward scope or was submitted by you."
+                    : `${reviewQueue.length} pending reviews in this nest, but none require your action — they're either outside your steward scope or were submitted by you.`}
                 </p>
               )}
           </TabsContent>
@@ -3851,7 +3872,7 @@ export function NestView({
           open
           onOpenChange={(o) => !o && setDeletionTarget(null)}
           title={`Request deletion of "${deletionTarget.title}"`}
-          description="A nest admin reviews this and either deletes the document or declines with a note. Nothing is removed yet."
+          description="A nest admin reviews this and either deletes the document or rejects with a note. Nothing is removed yet."
           label="Why should it be deleted?"
           placeholder="e.g. superseded by the new runbook"
           confirmLabel="Request deletion"
@@ -3871,7 +3892,7 @@ export function NestView({
           title={
             resolveTarget.action === "delete"
               ? `Delete "${resolveTarget.request.title || resolveTarget.request.nodeId}"?`
-              : "Decline this deletion request"
+              : "Reject this deletion request"
           }
           description={
             resolveTarget.action === "delete"
@@ -3881,12 +3902,12 @@ export function NestView({
           // No label on the delete branch — that dialog is a plain confirm.
           label={
             resolveTarget.action === "decline"
-              ? "Why are you declining?"
+              ? "Why are you rejecting?"
               : undefined
           }
           placeholder="e.g. still referenced by onboarding"
           confirmLabel={
-            resolveTarget.action === "delete" ? "Delete document" : "Decline"
+            resolveTarget.action === "delete" ? "Delete document" : "Reject"
           }
           destructive={resolveTarget.action === "delete"}
           onConfirm={

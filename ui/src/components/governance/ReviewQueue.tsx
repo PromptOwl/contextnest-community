@@ -208,11 +208,14 @@ export function ReviewQueue({
         {rows.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8 text-center">
             <CheckCircle2 className="h-10 w-10 text-green-500 mb-3" />
-            <p className="text-sm font-medium">All caught up!</p>
+            <p className="text-sm font-medium">Nothing needs your review</p>
+            {/* Scoped to THIS card only: the caller's own pending submissions
+                render in a separate card above, so a generic "no pending
+                changes" here would contradict them. */}
             <p className="text-xs text-muted-foreground">
               {feedMode
-                ? "No pending changes or comments"
-                : "No documents awaiting review"}
+                ? "No changes or comments waiting on you"
+                : "No documents awaiting your approval"}
             </p>
           </div>
         ) : (

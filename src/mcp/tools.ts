@@ -357,7 +357,7 @@ export const TOOL_DEFINITIONS = [
     // descriptor here if the operation is ever promoted upstream.
     name: "context_request_deletion",
     description:
-      "Ask for something to be deleted when you can't delete it yourself. Flags a document, a folder (with everything in it), or the whole nest for a nest owner/admin to action. Nothing is removed by this call — it opens a request, and the person who resolves it either deletes the target or declines with a note. Use this instead of context_delete when that returns a permission error, or when the document belongs to someone else.",
+      "Ask for something to be deleted when you can't delete it yourself. Flags a document, a folder (with everything in it), or the whole nest for a nest owner/admin to action. Nothing is removed by this call — it opens a request, and the person who resolves it either deletes the target or rejects it with a note. Use this instead of context_delete when that returns a permission error, or when the document belongs to someone else.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -396,7 +396,7 @@ export const TOOL_DEFINITIONS = [
         status: {
           type: "string",
           description:
-            "pending (default) or declined — declined shows past verdicts and their notes.",
+            '"pending" (default) or "declined" — past rejections and their notes.',
         },
       },
     },
@@ -404,7 +404,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_resolve_deletion",
     description:
-      "Action a deletion request: delete the flagged document/folder/nest, or decline it with a note explaining why it stays. Owner/admin only. Declining tells the requester the verdict; deleting is irreversible.",
+      "Action a deletion request: delete the flagged document/folder/nest, or reject it with a note explaining why it stays. Owner/admin only. Rejecting tells the requester the verdict; deleting is irreversible.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -414,11 +414,12 @@ export const TOOL_DEFINITIONS = [
         },
         action: {
           type: "string",
-          description: '"delete" to honour it, "decline" to keep the target',
+          description:
+            '"delete" to honour it, "decline" to reject it and keep the target',
         },
         note: {
           type: "string",
-          description: "Why you declined. Required when action is decline.",
+          description: 'Why you rejected it. Required when action is "decline".',
         },
       },
       required: ["request_id", "action"],
@@ -1180,7 +1181,7 @@ async function runTool(
           reason,
           baseUrl: ctx.baseUrl,
         });
-        return `Requested deletion of the **entire nest**. A nest owner or admin will delete it or decline.\nRequest id: \`${request.id}\``;
+        return `Requested deletion of the **entire nest**. A nest owner or admin will delete it or reject the request.\nRequest id: \`${request.id}\``;
       }
 
       // Folder — normalized the same way the REST route does, so two people
@@ -1203,7 +1204,7 @@ async function runTool(
           reason,
           baseUrl: ctx.baseUrl,
         });
-        return `Requested deletion of folder **${folder}** (${inside.length} document(s) inside). A nest owner or admin will delete it or decline.\nRequest id: \`${request.id}\``;
+        return `Requested deletion of folder **${folder}** (${inside.length} document(s) inside). A nest owner or admin will delete it or reject the request.\nRequest id: \`${request.id}\``;
       }
 
       // Document — resolved by title or id like every other node tool.
@@ -1222,7 +1223,7 @@ async function runTool(
         reason,
         baseUrl: ctx.baseUrl,
       });
-      return `Requested deletion of **${node.frontmatter.title}**. A nest owner or admin will delete it or decline — nothing is removed yet.\nRequest id: \`${request.id}\``;
+      return `Requested deletion of **${node.frontmatter.title}**. A nest owner or admin will delete it or reject the request — nothing is removed yet.\nRequest id: \`${request.id}\``;
     }
 
     case "context_deletion_queue": {
@@ -1231,14 +1232,14 @@ async function runTool(
       if (requests.length === 0) {
         return status === "pending"
           ? "No deletion requests waiting. All caught up!"
-          : "No declined deletion requests.";
+          : "No rejected deletion requests.";
       }
       const list = requests
         .map((r, i) => {
           const kind = r.targetType === "document" ? "" : `${r.targetType}: `;
           const verdict =
             r.status === "declined"
-              ? `\n   Declined by ${r.resolvedBy}: "${r.resolutionNote}"`
+              ? `\n   Rejected by ${r.resolvedBy}: "${r.resolutionNote}"`
               : "";
           return `${i + 1}. **${kind}${r.title || r.nodeId}**\n   Asked by ${r.requestedBy}: "${r.reason}"\n   Request id: \`${r.id}\`${verdict}`;
         })
@@ -1269,7 +1270,7 @@ async function runTool(
       if (action === "decline") {
         const note = typeof args.note === "string" ? args.note.trim() : "";
         if (!note) {
-          return "note is required when declining — the requester is told why it stays.";
+          return "note is required when rejecting — the requester is told why it stays.";
         }
         await reviews.declineDeletion({
           nestId,
@@ -1278,7 +1279,7 @@ async function runTool(
           note,
           baseUrl: ctx.baseUrl,
         });
-        return `Declined the deletion request for **${label}**. It stays, and ${request.requestedBy} has been told why.`;
+        return `Rejected the deletion request for **${label}**. It stays, and ${request.requestedBy} has been told why.`;
       }
 
       if (request.targetType === "nest") {

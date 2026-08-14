@@ -96,7 +96,7 @@ export function ReasonDialog({
             data-testid="reason-dialog-prior-decline"
           >
             <p className="font-medium">
-              Declined
+              Rejected
               {priorDecline.resolvedBy ? ` by ${priorDecline.resolvedBy}` : ""}
               {formatServerDate(priorDecline.resolvedAt)
                 ? ` · ${formatServerDate(priorDecline.resolvedAt)}`

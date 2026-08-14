@@ -823,7 +823,7 @@ export async function notifyDeletionResolved(params: {
 }): Promise<void> {
   try {
     const { outcome, resolvedBy, note } = params;
-    const verb = outcome === "deleted" ? "deleted" : "declined the deletion of";
+    const verb = outcome === "deleted" ? "deleted" : "rejected the deletion of";
     const line = `${resolvedBy} ${verb} *${params.docTitle}*${note ? ` — "${note}"` : ""}`;
     const recipient = params.requestedBy.toLowerCase();
 
@@ -841,7 +841,7 @@ export async function notifyDeletionResolved(params: {
         params.requestId,
         outcome === "deleted"
           ? `"${params.docTitle}" was deleted by ${resolvedBy} — your request was accepted`
-          : `Your deletion request for "${params.docTitle}" was declined by ${resolvedBy}${note ? ` — "${note}"` : ""}`,
+          : `Your deletion request for "${params.docTitle}" was rejected by ${resolvedBy}${note ? ` — "${note}"` : ""}`,
       );
     }
 
