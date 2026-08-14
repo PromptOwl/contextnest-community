@@ -868,6 +868,26 @@ export async function searchNodes(nestId: string, query: string) {
   );
 }
 
+/** One hit from the cross-nest search — a node plus the nest it lives in. */
+export interface GlobalSearchHit {
+  id: string;
+  title: string;
+  type: string;
+  tags: string[];
+  snippet: string;
+  nest_id: string;
+  nest_name: string;
+}
+
+/** Same full-text match as searchNodes, run across every nest the caller can
+ *  see — so a document can be found without knowing which nest holds it.
+ *  `count` is everything found; `nodes` is capped at `limit`. */
+export async function searchAllNests(query: string, limit = 20) {
+  return request<{ query: string; count: number; nodes: GlobalSearchHit[] }>(
+    `/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+  );
+}
+
 export async function getOverview(nestId: string) {
   return request(`/nests/${nestId}/overview`);
 }

@@ -17,6 +17,7 @@ import {
 import { listMyDrafts } from "./governance/version-service.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
+import { matchDocuments, toSearchHit } from "./nodes/search.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import {
   resolveStewardsForNode,
@@ -72,7 +73,7 @@ import {
   isServerAdminUserId,
   type NestPermission,
 } from "./shared/access.js";
-import { AppError } from "./shared/errors.js";
+import { AppError, ValidationError } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
 import { verifySmtp } from "./notify/email.js";
 import { getDb } from "./db/client.js";
@@ -1381,6 +1382,44 @@ export function createApp(): Hono<AuthEnv> {
       nests: visibleNests.length,
       documents,
       users: usersRow.c,
+    });
+  });
+
+  app.use("/search", flexAuthMiddleware);
+  // GET /search?q=&limit= — the same full-text match as GET /nests/:id/search,
+  // run across every nest the caller can see. Without it a document can only be
+  // found by someone who already knows which nest holds it.
+  app.get("/search", async (c) => {
+    const q = (c.req.query("q") || "").trim();
+    if (!q) throw new ValidationError("q query parameter is required");
+    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 20, 1), 50);
+
+    const userId = c.get("userId");
+    const userEmail = await resolveCallerEmail(userId);
+
+    const hits: any[] = [];
+    for (const nest of await listVisibleNests(userId)) {
+      try {
+        const { storage } = await engineCache.get(nest.id);
+        const matches = matchDocuments(await storage.discoverDocuments(), q);
+        if (matches.length === 0) continue;
+        // Per-nest stewardship filtering, same call the nest-scoped route
+        // makes — a hit never leaks a doc the caller couldn't open directly.
+        const accessible = await filterAccessible(nest.id, userId, userEmail, matches);
+        for (const n of accessible) {
+          hits.push({ ...toSearchHit(n), nest_id: nest.id, nest_name: nest.name ?? nest.id });
+        }
+      } catch {
+        // Nest with a filesystem issue — skip it rather than fail the search.
+      }
+    }
+
+    // Scan every nest, then cap: truncating per nest would let the first nests
+    // in creation order crowd out better matches elsewhere.
+    return c.json({
+      query: q,
+      count: hits.length,
+      nodes: hits.slice(0, limit),
     });
   });
 

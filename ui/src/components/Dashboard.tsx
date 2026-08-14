@@ -7,7 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Search,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -46,9 +46,11 @@ interface DashboardProps {
     isAnonOwned: boolean,
   ) => void;
   onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
+  /** Opens the cross-nest search palette (the same one Cmd/Ctrl+K opens). */
+  onOpenSearch?: () => void;
 }
 
-export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
+export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const [work, setWork] = useState<{
@@ -747,6 +749,20 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Styled as a field rather than a button: the palette it opens is
+              where you type, and a search box is what people look for. */}
+          {onOpenSearch && (
+            <button
+              type="button"
+              onClick={onOpenSearch}
+              className="flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50"
+              data-testid="global-search-trigger"
+            >
+              <Search className="h-4 w-4" />
+              Search nests &amp; documents
+              <kbd className="ml-2 rounded border px-1 text-[10px]">⌘K</kbd>
+            </button>
+          )}
           <Button variant="outline" onClick={() => setShowImport(true)}>
             <FolderInput className="h-4 w-4 mr-2" />
             Import Folder

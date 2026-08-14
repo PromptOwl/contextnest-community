@@ -24,6 +24,7 @@ import { permissionLevel, isPublicReader, resolveNestPermission } from "../share
 import { exportNestBundle } from "../nests/bundle-service.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
 import { listNodesForCaller, RUNNABLE_NODE_TYPES } from "./service.js";
+import { matchDocuments, toSearchHit } from "./search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 
@@ -529,19 +530,7 @@ queryRoutes.get("/search", async (c) => {
   const nestId = c.req.param("nestId")!;
   const { storage } = await engineCache.get(nestId);
   const documents = await storage.discoverDocuments();
-
-  const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
-  const matches = documents.filter((node) => {
-    const haystack = [
-      node.frontmatter.title,
-      node.body || "",
-      node.frontmatter.type || "",
-      ...(node.frontmatter.tags || []),
-    ]
-      .join(" ")
-      .toLowerCase();
-    return terms.every((term) => haystack.includes(term));
-  });
+  const matches = matchDocuments(documents, q);
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
@@ -550,13 +539,7 @@ queryRoutes.get("/search", async (c) => {
   return c.json({
     query: q,
     count: accessible.length,
-    nodes: accessible.map((n) => ({
-      id: n.id,
-      title: n.frontmatter.title,
-      type: n.frontmatter.type || "document",
-      tags: n.frontmatter.tags || [],
-      snippet: (n.body || "").slice(0, 200).replace(/\n/g, " "),
-    })),
+    nodes: accessible.map(toSearchHit),
   });
 });
 
