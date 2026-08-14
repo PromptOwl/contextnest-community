@@ -1397,22 +1397,40 @@ export function createApp(): Hono<AuthEnv> {
     const userId = c.get("userId");
     const userEmail = await resolveCallerEmail(userId);
 
-    const hits: any[] = [];
-    for (const nest of await listVisibleNests(userId)) {
-      try {
-        const { storage } = await engineCache.get(nest.id);
-        const matches = matchDocuments(await storage.discoverDocuments(), q);
-        if (matches.length === 0) continue;
-        // Per-nest stewardship filtering, same call the nest-scoped route
-        // makes — a hit never leaks a doc the caller couldn't open directly.
-        const accessible = await filterAccessible(nest.id, userId, userEmail, matches);
-        for (const n of accessible) {
-          hits.push({ ...toSearchHit(n), nest_id: nest.id, nest_name: nest.name ?? nest.id });
+    type SearchHit = ReturnType<typeof toSearchHit> & {
+      nest_id: string;
+      nest_name: string;
+    };
+
+    // Fan out: on a cold discovery cache each nest costs a filesystem (or, on a
+    // bucket-mounted deploy, a network) walk, and serially that adds up with
+    // the caller's nest count. Results stay in nest order, so the cap below is
+    // still deterministic.
+    // ponytail: unbounded fan-out — add a concurrency limit if a caller ever
+    // holds enough nests for the parallel walks to matter.
+    const perNest = await Promise.all(
+      (await listVisibleNests(userId)).map(async (nest): Promise<SearchHit[]> => {
+        try {
+          const { storage } = await engineCache.get(nest.id);
+          const matches = matchDocuments(await storage.discoverDocuments(), q);
+          if (matches.length === 0) return [];
+          // Per-nest stewardship filtering, same call the nest-scoped route
+          // makes — a hit never leaks a doc the caller couldn't open directly.
+          const accessible = await filterAccessible(nest.id, userId, userEmail, matches);
+          return accessible.map((n) => ({
+            ...toSearchHit(n),
+            nest_id: nest.id,
+            nest_name: nest.name ?? nest.id,
+          }));
+        } catch (e) {
+          // One broken nest shouldn't fail the whole search — but log it, or a
+          // nest that stops being searchable does so with no signal at all.
+          console.error("[search] skipped nest", nest.id, e);
+          return [];
         }
-      } catch {
-        // Nest with a filesystem issue — skip it rather than fail the search.
-      }
-    }
+      }),
+    );
+    const hits = perNest.flat();
 
     // Scan every nest, then cap: truncating per nest would let the first nests
     // in creation order crowd out better matches elsewhere.

@@ -89,15 +89,11 @@ describe("GET /search", () => {
     expect(data.count).toBe(0);
   });
 
-  it("requires q", async () => {
-    const { status } = await jsonRequest(
-      app,
-      "GET",
-      "/search",
-      undefined,
-      owner.apiKey,
-    );
-    expect(status).toBe(400);
+  it("requires q, whitespace included", async () => {
+    for (const path of ["/search", "/search?q=", "/search?q=%20%20"]) {
+      const { status } = await jsonRequest(app, "GET", path, undefined, owner.apiKey);
+      expect(status).toBe(400);
+    }
   });
 
   it("caps the result count at the requested limit", async () => {
@@ -111,5 +107,42 @@ describe("GET /search", () => {
     // count reports everything found; nodes carries the capped page.
     expect(data.count).toBe(2);
     expect(data.nodes).toHaveLength(1);
+  });
+
+  it("clamps a limit outside [1,50] instead of honouring it", async () => {
+    // Above the ceiling: capped at 50, so both hits still come back.
+    const high = await jsonRequest(
+      app,
+      "GET",
+      "/search?q=widget&limit=1000",
+      undefined,
+      owner.apiKey,
+    );
+    expect(high.data.nodes).toHaveLength(2);
+
+    // Zero and junk fall back to the default page size rather than returning
+    // nothing — a search that answers with an empty list is never what a
+    // caller meant by limit=0.
+    for (const limit of ["0", "abc"]) {
+      const { data } = await jsonRequest(
+        app,
+        "GET",
+        `/search?q=widget&limit=${limit}`,
+        undefined,
+        owner.apiKey,
+      );
+      expect(data.nodes).toHaveLength(2);
+    }
+
+    // A negative number is a real number, so it clamps to the floor of 1
+    // rather than falling back to the default.
+    const negative = await jsonRequest(
+      app,
+      "GET",
+      "/search?q=widget&limit=-5",
+      undefined,
+      owner.apiKey,
+    );
+    expect(negative.data.nodes).toHaveLength(1);
   });
 });
