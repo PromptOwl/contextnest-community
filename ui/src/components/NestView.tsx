@@ -3094,8 +3094,8 @@ export function NestView({
                     Submitted by you — awaiting review
                   </CardTitle>
                   <CardDescription>
-                    Your edits are queued for a reviewer. You can't approve your
-                    own work (separation of duties), but they are pending.
+                    Your edits are awaiting review by another user. You can't
+                    approve your own work due to separation of duties.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-2">
@@ -3228,10 +3228,9 @@ export function NestView({
             {feedFilter !== "comments" &&
               reviewQueue.length > 0 && reviewableQueue.length === 0 && (
                 <p className="text-xs text-muted-foreground text-center">
-                  {reviewQueue.length} pending review
-                  {reviewQueue.length === 1 ? "" : "s"} in this nest, but
-                  none you can act on — outside your steward scope, or
-                  submitted by you (authors can't approve their own work).
+                  {reviewQueue.length === 1
+                    ? "1 pending review in this nest, but it doesn't require your action — it's either outside your steward scope or was submitted by you."
+                    : `${reviewQueue.length} pending reviews in this nest, but none require your action — they're either outside your steward scope or were submitted by you.`}
                 </p>
               )}
           </TabsContent>
