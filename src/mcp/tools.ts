@@ -62,8 +62,10 @@ export function normalizeHops(raw: unknown): number {
  * machine callers (`ctx` over MCP, which JSON.parses the catalog shapes) read
  * the structured half.
  *
- * Only the eight operations `ctx` actually drives return the object form:
- * context_list / get / search / query / versions / create / update / delete.
+ * Only the operations `ctx` actually drives return the object form:
+ * context_list / get / search / query / versions / create / update / delete,
+ * plus context_submit_review — which is where `ctx publish` lands on a nest
+ * that publishes through review rather than exposing context_publish.
  *
  * `isError` marks a denial or a not-found. Without it a refusal is a bare
  * prose sentence with no signal at all — indistinguishable, to a machine
@@ -73,7 +75,7 @@ export function normalizeHops(raw: unknown): number {
 export type ToolResult = string | { text: string; data: unknown; isError?: true };
 
 /**
- * A denial / not-found from one of the eight converted tools.
+ * A denial / not-found / failure from one of the converted tools.
  *
  * The prose is passed through UNCHANGED — `isError` is the only thing added,
  * and `data` carries the engine's `{code, message}` error shape (the codes are
@@ -82,7 +84,12 @@ export type ToolResult = string | { text: string; data: unknown; isError?: true 
  */
 function toolError(
   text: string,
-  code: "DOCUMENT_NOT_FOUND" | "DOCUMENT_ALREADY_EXISTS" | "UNAUTHORIZED_ACTION",
+  code:
+    | "DOCUMENT_NOT_FOUND"
+    | "DOCUMENT_ALREADY_EXISTS"
+    | "UNAUTHORIZED_ACTION"
+    | "VERSION_NOT_FOUND"
+    | "INTERNAL",
 ): ToolResult {
   return { text, isError: true, data: { code, message: text } };
 }
@@ -1484,17 +1491,21 @@ async function runTool(
       const node = docs.find(
         (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
       );
-      if (!node) return `Node not found: ${args.title}`;
+      if (!node) return toolError(`Node not found: ${args.title}`, "DOCUMENT_NOT_FOUND");
 
       // Defense-in-depth: submitting a draft for review is an edit-level
       // action — gate it with the same per-node edit check.
       const submitCheck = await stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
       if (!submitCheck.allowed) {
-        return `You don't have permission to submit "${args.title}" for review: ${submitCheck.reason}`;
+        return toolError(
+          `You don't have permission to submit "${args.title}" for review: ${submitCheck.reason}`,
+          "UNAUTHORIZED_ACTION",
+        );
       }
 
       const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
-      if (currentVersion === 0) return `No versions found for "${args.title}"`;
+      if (currentVersion === 0)
+        return toolError(`No versions found for "${args.title}"`, "VERSION_NOT_FOUND");
 
       try {
         const request = await reviews.submitForReview({
@@ -1516,9 +1527,37 @@ async function runTool(
           ? `\n\n**Stewards who can review:**\n${resolved.map((r) => `- ${r.steward.userEmail} (${r.source})`).join("\n")}`
           : "";
 
-        return `Submitted "${args.title}" v${currentVersion} for review (${request.priority} priority).${stewardList}`;
+        return {
+          text: `Submitted "${args.title}" v${currentVersion} for review (${request.priority} priority).${stewardList}`,
+          // No catalog shape to conform to — `context_submit_review` is a
+          // governance-namespace operation and that namespace is declared but
+          // unimplemented in the engine (`api/index.ts`, NAMESPACES). So this
+          // is the review state the handler already computed, and nothing
+          // more: no `version`/`checkpoint` at the top level, because this
+          // operation writes no new version and seals no checkpoint — it
+          // points a review request at the version that already existed.
+          // Built from the same gated values the prose above is built from
+          // (`request`, `resolved`), never re-read past the permission check.
+          data: {
+            id: node.id,
+            submitted: true as const,
+            review: {
+              id: request.id,
+              version: request.version,
+              status: request.status,
+              priority: request.priority,
+              requested_by: request.requestedBy,
+              requested_at: request.requestedAt,
+            },
+            reviewers: resolved.map((r) => r.steward.userEmail),
+          },
+        };
       } catch (err: any) {
-        return `Failed to submit: ${err.message}`;
+        // A submit that threw (most often "a review is already pending") is a
+        // failure, not an answer. Without isError the client would parse this
+        // sentence as a payload and report a contract mismatch instead of the
+        // reason. INTERNAL is the catalog's code for an uncoded throw.
+        return toolError(`Failed to submit: ${err.message}`, "INTERNAL");
       }
     }
 
