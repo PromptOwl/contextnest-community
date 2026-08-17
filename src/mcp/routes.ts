@@ -4,7 +4,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
-import { TOOL_DEFINITIONS, handleToolCall } from "./tools.js";
+import { TOOL_DEFINITIONS, handleToolCall, toCallToolResult } from "./tools.js";
 import { WORKFLOW_TOOL_DEFINITIONS } from "./workflow-tools.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { config } from "../config.js";
@@ -60,7 +60,7 @@ function createMcpServerForNest(
       const engine = await engineCache.get(nestId);
       // Audit logging happens inside handleToolCall (covers per-nest +
       // server-level MCP, and thrown calls).
-      const text = await handleToolCall(tool.name, args, {
+      const out = await handleToolCall(tool.name, args, {
         storage: engine.storage,
         queryEngine: engine.query,
         versionManager: engine.versions,
@@ -69,7 +69,7 @@ function createMcpServerForNest(
         userEmail,
         baseUrl,
       });
-      return { content: [{ type: "text" as const, text }] };
+      return toCallToolResult(out);
     });
   }
 

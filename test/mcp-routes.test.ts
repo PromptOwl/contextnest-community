@@ -411,3 +411,210 @@ describe("MCP tools/call — error handling", () => {
     expect(failed).toBe(true);
   });
 });
+
+// ─── structuredContent (operation-catalog payloads) ───────────────────────
+//
+// The eight tools `ctx` drives now return BOTH halves: the prose in
+// `content` (unchanged — every existing chat client reads only this) and the
+// engine's operation-catalog JSON in `structuredContent`.
+//
+// The prose assertions below are byte-exact on purpose. They are the guard
+// that adding the structured half did not "improve" a single string.
+
+/** tools/call, returning the whole result object (content + structuredContent). */
+async function callToolRaw(
+  name: string,
+  args: Record<string, unknown> = {},
+  id = 700,
+  targetNest: string = nestId,
+): Promise<{
+  content: Array<{ type: string; text: string }>;
+  structuredContent?: any;
+}> {
+  const res = await mcpCall("tools/call", { name, arguments: args }, id, targetNest);
+  expect(res.error).toBeUndefined();
+  return res.result;
+}
+
+describe("MCP tools/call — structuredContent", () => {
+  let sid: string;
+
+  beforeAll(async () => {
+    const created = await jsonRequest(app, "POST", "/nests", {
+      name: "Structured Nest",
+    });
+    sid = created.data.nest.id;
+    const seeded = await jsonRequest(app, "POST", `/nests/${sid}/nodes`, {
+      title: "Pricing Sheet",
+      content: "Enterprise tier is 42.",
+      tags: ["pricing"],
+    });
+    expect(seeded.status).toBe(201);
+  });
+
+  it("context_list: prose unchanged, documents[] alongside it", async () => {
+    const r = await callToolRaw("context_list", {}, 710, sid);
+    expect(r.content).toEqual([
+      { type: "text", text: "1 node(s):\n\n1. **Pricing Sheet** [document]" },
+    ]);
+    expect(r.structuredContent).toEqual({
+      documents: [
+        {
+          id: "nodes/pricing-sheet",
+          title: "Pricing Sheet",
+          type: "document",
+          status: expect.any(String),
+          tags: ["#pricing"],
+        },
+      ],
+    });
+    // Bodies are NOT served here: listNodesForCaller gates which documents
+    // come back, not whether their on-disk text is approved.
+    expect(r.structuredContent.documents[0].body).toBeUndefined();
+  });
+
+  it("context_list: empty result still carries documents: []", async () => {
+    const r = await callToolRaw("context_list", { tag: "nope" }, 711, sid);
+    expect(r.content).toEqual([
+      { type: "text", text: "No nodes found with the given filters." },
+    ]);
+    expect(r.structuredContent).toEqual({ documents: [] });
+  });
+
+  it("context_get: prose unchanged, documentPayload alongside it", async () => {
+    const r = await callToolRaw("context_get", { id: "nodes/pricing-sheet" }, 712, sid);
+    const body = r.structuredContent.body;
+    expect(body).toContain("Enterprise tier is 42.");
+    expect(r.content).toEqual([
+      {
+        type: "text",
+        text: `**Title:** Pricing Sheet\n**Type:** document\n**Tags:** #pricing\n\n---\n\n${body}`,
+      },
+    ]);
+    expect(r.structuredContent.id).toBe("nodes/pricing-sheet");
+    expect(r.structuredContent.frontmatter.title).toBe("Pricing Sheet");
+    expect(r.structuredContent.frontmatter.tags).toEqual(["#pricing"]);
+  });
+
+  it("context_search: prose unchanged, results[] alongside it", async () => {
+    const r = await callToolRaw("context_search", { query: "enterprise" }, 713, sid);
+    const body = r.structuredContent.results[0].body;
+    expect(r.content).toEqual([
+      {
+        type: "text",
+        text: `Found 1 node(s) matching "enterprise":\n\n1. **Pricing Sheet** [document] #pricing\n   ${body.slice(0, 200).replace(/\n/g, " ")}`,
+      },
+    ]);
+    expect(r.structuredContent.results).toHaveLength(1);
+    expect(r.structuredContent.results[0].id).toBe("nodes/pricing-sheet");
+    expect(r.structuredContent.results[0].title).toBe("Pricing Sheet");
+
+    const miss = await callToolRaw("context_search", { query: "nonexistentxyz" }, 714, sid);
+    expect(miss.content).toEqual([
+      { type: "text", text: 'No nodes matched search: "nonexistentxyz"' },
+    ]);
+    expect(miss.structuredContent).toEqual({ results: [] });
+  });
+
+  it("context_query: documents[] + traversal alongside the prose", async () => {
+    const r = await callToolRaw("context_query", { query: "#pricing" }, 715, sid);
+    // Engine auto-index can return empty on a freshly-created vault (see the
+    // plumbing test above), so accept either prose — byte-exact both ways.
+    const docs = r.structuredContent.documents;
+    expect(r.content[0].text).toBe(
+      docs.length
+        ? "Found 1 node(s) for `#pricing`:\n\n1. **Pricing Sheet** [document] #pricing"
+        : "No nodes matched: #pricing",
+    );
+    expect(r.structuredContent.traversal).toEqual({
+      mode: expect.any(String),
+      hops_used: expect.any(Number),
+      nodes_traversed: expect.any(Number),
+    });
+    // source_nodes is deliberately never served — this handler does not gate it.
+    expect(r.structuredContent.source_nodes).toBeUndefined();
+  });
+
+  it("context_create / context_update / context_delete: prose unchanged, {id, version, status, checkpoint}", async () => {
+    const created = await callToolRaw(
+      "context_create",
+      { title: "Widget Spec", content: "First draft." },
+      716,
+      sid,
+    );
+    const status = created.structuredContent.status;
+    expect(created.content).toEqual([
+      {
+        type: "text",
+        text: `Created node: **Widget Spec** (nodes/widget-spec) — status: ${status}`,
+      },
+    ]);
+    expect(created.structuredContent).toEqual({
+      id: "nodes/widget-spec",
+      version: expect.any(Number),
+      status,
+      // No checkpoint concept on this server — writes go live through review.
+      checkpoint: null,
+    });
+
+    const updated = await callToolRaw(
+      "context_update",
+      { title: "Widget Spec", content: "Second draft." },
+      717,
+      sid,
+    );
+    expect(updated.content).toEqual([
+      { type: "text", text: "Updated node: **Widget Spec**" },
+    ]);
+    expect(updated.structuredContent.id).toBe("nodes/widget-spec");
+    expect(updated.structuredContent.version).toBeGreaterThan(
+      created.structuredContent.version,
+    );
+    expect(updated.structuredContent.checkpoint).toBeNull();
+
+    const versions = await callToolRaw(
+      "context_versions",
+      { title: "Widget Spec" },
+      718,
+      sid,
+    );
+    expect(versions.content[0].text).toMatch(/^# Version History: Widget Spec\n/);
+    expect(versions.structuredContent.id).toBe("nodes/widget-spec");
+    expect(versions.structuredContent.versions.length).toBeGreaterThan(0);
+    for (const v of versions.structuredContent.versions) {
+      // Prose and payload must report the same edit, field for field.
+      expect(versions.content[0].text).toContain(
+        `- **v${v.version}** ${v.status}`,
+      );
+      expect(versions.content[0].text).toContain(
+        `by ${v.edited_by} at ${v.edited_at}`,
+      );
+      // No honest equivalent on this server — never faked.
+      expect(v.keyframe).toBeUndefined();
+      expect(v.content_hash).toBeUndefined();
+      expect(v.chain_hash).toBeUndefined();
+    }
+    expect(versions.structuredContent.keyframe_interval).toBeUndefined();
+
+    const deleted = await callToolRaw(
+      "context_delete",
+      { id: "nodes/widget-spec" },
+      719,
+      sid,
+    );
+    expect(deleted.content).toEqual([
+      { type: "text", text: "Deleted node: **Widget Spec** (nodes/widget-spec)" },
+    ]);
+    expect(deleted.structuredContent).toEqual({
+      id: "nodes/widget-spec",
+      title: "Widget Spec",
+      deleted: true,
+    });
+  });
+
+  it("an unconverted tool still returns bare prose and no structuredContent", async () => {
+    const r = await callToolRaw("context_overview", {}, 720, sid);
+    expect(r.content[0].text).toMatch(/^# Vault Overview\n/);
+    expect(r.structuredContent).toBeUndefined();
+  });
+});
