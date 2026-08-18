@@ -564,7 +564,10 @@ describe("MCP tools/call — structuredContent", () => {
       sid,
     );
     expect(updated.content).toEqual([
-      { type: "text", text: "Updated node: **Widget Spec**" },
+      {
+        type: "text",
+        text: `Updated node: **Widget Spec** — v${updated.structuredContent.version}, status: ${updated.structuredContent.status}`,
+      },
     ]);
     expect(updated.structuredContent.id).toBe("nodes/widget-spec");
     expect(updated.structuredContent.version).toBeGreaterThan(

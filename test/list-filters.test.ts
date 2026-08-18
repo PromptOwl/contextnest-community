@@ -188,7 +188,8 @@ describe("approved_only reaches the service from REST and MCP", () => {
     const { handleToolCall } = await import("../src/mcp/tools.js");
     const { engineCache } = await import("../src/nodes/engine.js");
     const { storage, query, versions } = await (engineCache as any).get(nestId);
-    const text = await handleToolCall("context_list", { approved_only: true }, {
+    // context_list returns { text, data } — prose plus the catalog payload.
+    const out = await handleToolCall("context_list", { approved_only: true }, {
       storage,
       queryEngine: query,
       versionManager: versions,
@@ -196,6 +197,6 @@ describe("approved_only reaches the service from REST and MCP", () => {
       userId: alice.userId,
       userEmail: EMAIL,
     } as any);
-    expect(text).toMatch(/node\(s\)/);
+    expect(typeof out === "string" ? out : out.text).toMatch(/node\(s\)/);
   });
 });
