@@ -947,10 +947,25 @@ async function runTool(
         .join("\n");
       return {
         text: `${meta}\n\n---\n\n${body || "(no content)"}`,
-        // `body` is the gated one, not node.body. `raw` is absent: this
-        // server has no include_raw input (Phase 2) and never serialized the
-        // stored bytes here.
-        data: { id: node.id, frontmatter: node.frontmatter, body },
+        // `body` is the gated one, not node.body — under stewardship that is
+        // the APPROVED snapshot, which can be older than the live draft this
+        // frontmatter came from. So the payload carries only the fields the
+        // prose above already reports, none of which claim to describe a
+        // specific version. `version`, `status`, `checksum` and the
+        // timestamps are deliberately absent: they describe the draft, and
+        // pairing them with an approved body would misdescribe it (checksum
+        // would also be a draft hash — see context_versions). `raw` is absent
+        // too: no include_raw input here (Phase 2).
+        data: {
+          id: node.id,
+          frontmatter: {
+            title: node.frontmatter.title,
+            description: node.frontmatter.description,
+            type: node.frontmatter.type || "document",
+            tags: node.frontmatter.tags,
+          },
+          body,
+        },
       };
     }
 

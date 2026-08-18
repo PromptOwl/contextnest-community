@@ -496,6 +496,47 @@ describe("MCP tools/call — structuredContent", () => {
     expect(r.structuredContent.frontmatter.tags).toEqual(["#pricing"]);
   });
 
+  it("context_get: under stewardship the frontmatter never describes the draft", async () => {
+    // The body a gated read returns is the APPROVED snapshot. Live frontmatter
+    // belongs to the pending draft — so version/status/checksum/timestamps must
+    // not ride along beside it, or a machine caller reads them as facts about
+    // the body it just got.
+    const nest = await jsonRequest(app, "POST", "/nests", {
+      name: "Skew Nest",
+    });
+    const gid = nest.data.nest.id;
+    // Self-approve on: the owner's create publishes, giving us an approved v1.
+    await jsonRequest(app, "PATCH", `/nests/${gid}/settings`, {
+      stewardship_enabled: true,
+      allow_self_approve: true,
+    });
+    await jsonRequest(app, "POST", `/nests/${gid}/nodes`, {
+      title: "Gated Doc",
+      content: "APPROVED BODY",
+    });
+    // Self-approve off: the next write stays an unapproved draft on disk.
+    await jsonRequest(app, "PATCH", `/nests/${gid}/settings`, {
+      allow_self_approve: false,
+    });
+    const draft = await callToolRaw(
+      "context_update",
+      { title: "Gated Doc", content: "DRAFT EDIT", tags: ["#leaky"] },
+      730,
+      gid,
+    );
+    // The draft must really exist, or the assertions below pass for the
+    // wrong reason (nothing to skew from).
+    expect(draft.structuredContent.version).toBeGreaterThan(1);
+
+    const r = await callToolRaw("context_get", { title: "Gated Doc" }, 731, gid);
+    expect(r.structuredContent.body).toContain("APPROVED BODY");
+    expect(r.structuredContent.body).not.toContain("DRAFT EDIT");
+    // Only the fields the prose reports, none of which claim a version.
+    for (const k of Object.keys(r.structuredContent.frontmatter)) {
+      expect(["title", "description", "type", "tags"]).toContain(k);
+    }
+  });
+
   it("context_search: prose unchanged, results[] alongside it", async () => {
     const r = await callToolRaw("context_search", { query: "enterprise" }, 713, sid);
     const body = r.structuredContent.results[0].body;
