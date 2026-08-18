@@ -53,6 +53,58 @@ export function normalizeHops(raw: unknown): number {
   return Math.max(0, Math.min(MAX_HOPS, Math.floor(n)));
 }
 
+/**
+ * What a tool handler returns.
+ *
+ * A bare string is prose only — the historical shape, and still what most
+ * tools return. The object form carries the SAME prose plus the operation
+ * catalog's JSON payload, which the route emits as MCP `structuredContent`
+ * next to an unchanged `content` block. Chat clients keep reading the prose;
+ * machine callers (`ctx` over MCP, which JSON.parses the catalog shapes) read
+ * the structured half.
+ *
+ * Only the eight operations `ctx` actually drives return the object form:
+ * context_list / get / search / query / versions / create / update / delete.
+ */
+export type ToolResult = string | { text: string; data: unknown };
+
+/**
+ * Tool return value → MCP CallToolResult. Used by both MCP endpoints
+ * (per-nest routes.ts and server-level server-routes.ts).
+ *
+ * `content` is the prose, byte-identical to what this server has always
+ * emitted — chat clients read nothing else. A handler that also returned a
+ * catalog payload gets it attached as `structuredContent`, which is where a
+ * machine caller looks.
+ */
+export function toCallToolResult(out: ToolResult) {
+  if (typeof out === "string") {
+    return { content: [{ type: "text" as const, text: out }] };
+  }
+  return {
+    content: [{ type: "text" as const, text: out.text }],
+    structuredContent: out.data as Record<string, unknown>,
+  };
+}
+
+/**
+ * A ContextNode plus its ALREADY-GATED body → the catalog's `nodeSummary`
+ * (engine api/core.ts). Callers MUST pass the body that `resolveLlmBody`
+ * returned for this node, never `node.body` — that is the ungated on-disk
+ * text, which under stewardship is the unapproved draft.
+ */
+function summarizeNode(node: ContextNode, body: string | null) {
+  return {
+    id: node.id,
+    title: node.frontmatter.title,
+    description: node.frontmatter.description,
+    type: node.frontmatter.type || "document",
+    status: node.frontmatter.status || "draft",
+    tags: node.frontmatter.tags,
+    body: body ?? undefined,
+  };
+}
+
 export interface McpToolContext {
   storage: NestStorage;
   queryEngine: GraphQueryEngine;
@@ -619,7 +671,7 @@ export async function handleToolCall(
   toolName: string,
   args: Record<string, any>,
   ctx: McpToolContext,
-): Promise<string> {
+): Promise<ToolResult> {
   const started = Date.now();
   let status = 200;
   try {
@@ -698,7 +750,7 @@ async function runTool(
   toolName: string,
   args: Record<string, any>,
   ctx: McpToolContext,
-): Promise<string> {
+): Promise<ToolResult> {
   const { storage, queryEngine, versionManager, nestId, userId, userEmail } = ctx;
 
   switch (toolName) {
@@ -771,14 +823,26 @@ async function runTool(
           .toLowerCase();
         return terms.every((t: string) => hay.includes(t));
       });
-      if (!matches.length) return `No nodes matched search: "${args.query}"`;
+      if (!matches.length)
+        return {
+          text: `No nodes matched search: "${args.query}"`,
+          data: { results: [] },
+        };
       const results = matches
         .map(
           ({ node: n, body }, i) =>
             `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}\n   ${(body || "").slice(0, 200).replace(/\n/g, " ")}`,
         )
         .join("\n\n");
-      return `Found ${matches.length} node(s) matching "${args.query}":\n\n${results}`;
+      return {
+        text: `Found ${matches.length} node(s) matching "${args.query}":\n\n${results}`,
+        // Same gated bodies the prose is built from — `resolveLlmBody`
+        // already refused everything this caller may not read. No `score`:
+        // this is a term-containment filter, not a ranked search.
+        data: {
+          results: matches.map(({ node: n, body }) => summarizeNode(n, body)),
+        },
+      };
     }
 
     case "context_table_query": {
@@ -800,14 +864,19 @@ async function runTool(
       // hops mirrors REST POST /context — caller-controlled traversal depth.
       // External LLM callers set this directly, so normalize junk values
       // (negative, fractional, NaN) to a sane non-negative integer.
-      const { documents } = await engineApi.run<{
+      // Traversal stats describe the engine's walk and are true regardless of
+      // which documents survive the visibility filter below.
+      const { documents, traversal } = await engineApi.run<{
         documents: Array<{
           id: string;
           title: string;
+          description?: string;
           type: string;
+          status?: string;
           tags?: string[];
           body?: string;
         }>;
+        traversal?: { mode: string; hops_used: number; nodes_traversed: number };
       }>(
         "context_query",
         { query: args.query, hops: normalizeHops(args.hops) },
@@ -818,20 +887,34 @@ async function runTool(
       const visibility = await Promise.all(
         documents.map(async (d) => ({
           doc: d,
-          visible:
-            (await resolveLlmBody(ctx, {
-              id: d.id,
-              body: d.body ?? "",
-              frontmatter: { title: d.title },
-            } as ContextNode)) !== null,
+          body: await resolveLlmBody(ctx, {
+            id: d.id,
+            body: d.body ?? "",
+            frontmatter: { title: d.title },
+          } as ContextNode),
         })),
       );
-      const nodes = visibility.filter((e) => e.visible).map((e) => e.doc);
-      if (!nodes.length) return `No nodes matched: ${args.query}`;
+      const visible = visibility.filter((e) => e.body !== null);
+      const nodes = visible.map((e) => e.doc);
+      if (!nodes.length)
+        return {
+          text: `No nodes matched: ${args.query}`,
+          data: { documents: [], traversal },
+        };
       const list = nodes
         .map((n, i) => `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).join(" ")}`)
         .join("\n\n");
-      return `Found ${nodes.length} node(s) for \`${args.query}\`:\n\n${list}`;
+      return {
+        text: `Found ${nodes.length} node(s) for \`${args.query}\`:\n\n${list}`,
+        // The engine already hands back catalog `nodeSummary` shapes — only
+        // `body` is swapped for the gated one resolveLlmBody returned.
+        // `source_nodes` is deliberately absent: this handler never gates
+        // them, so serving them would hand out content the prose refuses.
+        data: {
+          documents: visible.map((e) => ({ ...e.doc, body: e.body ?? undefined })),
+          traversal,
+        },
+      };
     }
 
     case "context_get": {
@@ -862,7 +945,28 @@ async function runTool(
       ]
         .filter(Boolean)
         .join("\n");
-      return `${meta}\n\n---\n\n${body || "(no content)"}`;
+      return {
+        text: `${meta}\n\n---\n\n${body || "(no content)"}`,
+        // `body` is the gated one, not node.body — under stewardship that is
+        // the APPROVED snapshot, which can be older than the live draft this
+        // frontmatter came from. So the payload carries only the fields the
+        // prose above already reports, none of which claim to describe a
+        // specific version. `version`, `status`, `checksum` and the
+        // timestamps are deliberately absent: they describe the draft, and
+        // pairing them with an approved body would misdescribe it (checksum
+        // would also be a draft hash — see context_versions). `raw` is absent
+        // too: no include_raw input here (Phase 2).
+        data: {
+          id: node.id,
+          frontmatter: {
+            title: node.frontmatter.title,
+            description: node.frontmatter.description,
+            type: node.frontmatter.type || "document",
+            tags: node.frontmatter.tags,
+          },
+          body,
+        },
+      };
     }
 
     case "context_list": {
@@ -875,11 +979,24 @@ async function runTool(
         approvedOnly: args.approved_only === true,
         limit: args.limit || 50,
       });
-      if (!nodes.length) return "No nodes found with the given filters.";
+      // No `body`: listNodesForCaller gates WHICH documents come back, but
+      // the `content` it carries is the latest on-disk text — under
+      // stewardship that is the unapproved draft resolveLlmBody would refuse.
+      // The catalog makes body optional; omitting it is the honest read.
+      const documents = nodes.map((n) => ({
+        id: n.id,
+        title: n.title,
+        description: n.description,
+        type: n.type || "document",
+        status: n.status || "draft",
+        tags: n.tags,
+      }));
+      if (!nodes.length)
+        return { text: "No nodes found with the given filters.", data: { documents } };
       const list = nodes
         .map((n, i) => `${i + 1}. **${n.title}** [${n.type}]`)
         .join("\n");
-      return `${nodes.length} node(s):\n\n${list}`;
+      return { text: `${nodes.length} node(s):\n\n${list}`, data: { documents } };
     }
 
     case "context_resolve": {
@@ -1017,7 +1134,7 @@ async function runTool(
         if (twin) {
           return `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`;
         }
-        const { node } = await createNode(
+        const { node, version } = await createNode(
           nestId,
           {
             title: args.title,
@@ -1029,7 +1146,17 @@ async function runTool(
           },
           userEmail,
         );
-        return `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`;
+        return {
+          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`,
+          // checkpoint is null by construction: this server seals nothing —
+          // a write becomes live through steward review, not a checkpoint.
+          data: {
+            id: node.id,
+            version,
+            status: node.frontmatter.status,
+            checkpoint: null,
+          },
+        };
       });
     }
 
@@ -1063,7 +1190,16 @@ async function runTool(
         },
         userEmail,
       );
-      return `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}`;
+      return {
+        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}`,
+        // checkpoint null — see context_create.
+        data: {
+          id: updated.id,
+          version,
+          status: updated.frontmatter.status,
+          checkpoint: null,
+        },
+      };
     }
 
     case "context_delete": {
@@ -1079,7 +1215,14 @@ async function runTool(
         return `You don't have permission to delete "${node.frontmatter.title}": ${deleteCheck.reason}\n\nUse context_request_deletion to ask a nest owner/admin to delete it, with a reason.`;
       }
       await deleteNode(nestId, node.id, userEmail);
-      return `Deleted node: **${node.frontmatter.title}** (${node.id})`;
+      return {
+        text: `Deleted node: **${node.frontmatter.title}** (${node.id})`,
+        data: {
+          id: node.id,
+          title: node.frontmatter.title,
+          deleted: true as const,
+        },
+      };
     }
 
     case "context_move": {
@@ -1454,7 +1597,10 @@ async function runTool(
       const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
 
       if (allVersions.length === 0) {
-        return `No version history for "${args.title}".`;
+        return {
+          text: `No version history for "${args.title}".`,
+          data: { id: node.id, approved_version: approved ?? null, versions: [] },
+        };
       }
 
       const list = allVersions
@@ -1464,7 +1610,29 @@ async function runTool(
         )
         .join("\n");
 
-      return `# Version History: ${args.title}\n**Current:** v${allVersions[0]?.version || 0} | **AI-active:** ${approved ? `v${approved}` : "none"}\n\n${list}`;
+      return {
+        text: `# Version History: ${args.title}\n**Current:** v${allVersions[0]?.version || 0} | **AI-active:** ${approved ? `v${approved}` : "none"}\n\n${list}`,
+        // Five catalog fields have no equivalent here and are omitted rather
+        // than faked: `keyframe_interval` and `keyframe` (content lives on
+        // disk — there is no keyframe+diff model), `chain_hash` (integrity is
+        // server-side, not a per-version chain), `content_hash` (the column
+        // exists but is conflict-detection state this tool has never served,
+        // and it is ungated), and `published_at` (a version carries a
+        // lifecycle status, not a publish timestamp). `status` and
+        // `approved_version` are the community equivalent — the same two
+        // facts the prose above reports.
+        data: {
+          id: node.id,
+          approved_version: approved ?? null,
+          versions: allVersions.map((v) => ({
+            version: v.version,
+            status: v.status,
+            edited_by: v.editedBy,
+            edited_at: v.editedAt,
+            note: v.changeNote,
+          })),
+        },
+      };
     }
 
     case "context_assign_steward": {

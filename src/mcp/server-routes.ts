@@ -46,7 +46,7 @@ import {
   getSuspensionReason,
   getCurrentLicense,
 } from "../auth/license.js";
-import { handleToolCall } from "./tools.js";
+import { handleToolCall, toCallToolResult, type ToolResult } from "./tools.js";
 import type { Nest } from "../shared/types.js";
 
 // Server-level tools that mutate. The top-level /mcp route carries no
@@ -347,7 +347,7 @@ async function handleServerToolCall(
   userEmail: string,
   nestScope: string | null,
   baseUrl: string,
-): Promise<string> {
+): Promise<ToolResult> {
   if (toolName === "nest_index") {
     const nests = await buildNestIndex(userId, nestScope);
     if (!nests.length) return "No nests accessible with these credentials.";
@@ -437,7 +437,7 @@ function createServerMcp(
       shape[key] = field;
     }
     server.tool(tool.name, tool.description, shape, async (args) => {
-      const text = await handleServerToolCall(
+      const out = await handleServerToolCall(
         tool.name,
         args,
         userId,
@@ -445,7 +445,7 @@ function createServerMcp(
         nestScope,
         baseUrl,
       );
-      return { content: [{ type: "text" as const, text }] };
+      return toCallToolResult(out);
     });
   }
   return server;
