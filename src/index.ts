@@ -176,6 +176,7 @@ async function main() {
     POST /nests/:id/query        Selector query
     POST /nests/:id/context      One-call context retrieval
     GET  /nests/:id/search?q=    Full-text search
+    GET  /search?q=              Search every nest you can see
     POST /nests/:id/publish      Bulk publish
     POST /nests/:id/mcp          MCP endpoint
     GET  /health                 Health check

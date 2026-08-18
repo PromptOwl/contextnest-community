@@ -41,10 +41,32 @@ export interface Version {
   resolutionStatus?: "approved" | "rejected" | string;
 }
 
+/**
+ * A verdict on an out-of-band (direct filesystem) edit.
+ *
+ * Only rejections are rendered here. An approval commits a version, so it
+ * already appears in the list below as a real row — one that carries a diff
+ * and a body — and showing it twice in two different visual treatments reads
+ * as a duplicate rather than as an audit trail. The approve verdicts still
+ * ride along in the API response for anything auditing the log directly.
+ */
+export interface ExternalEditVerdict {
+  suggestion_id: string;
+  status: "approved" | "rejected";
+  actor: string;
+  at: string;
+  /** Rejection reason, or the approver's comment when they left one. */
+  note?: string;
+  source?: string;
+}
+
 interface VersionHistoryProps {
   versions: Version[];
   currentVersion: number;
   approvedVersion?: number | null;
+  /** Verdicts on external edits, oldest first. Rejections render newest
+   *  first; approvals are left to their own version row. */
+  externalEditVerdicts?: ExternalEditVerdict[];
   loading?: boolean;
   onRestore?: (versionNumber: number) => Promise<void>;
   /**
@@ -108,6 +130,20 @@ function parseChangeNote(changeNote?: string): ParsedNote {
   if (restore) {
     return { restoredFrom: Number(restore[1]) };
   }
+  // Verdict on an out-of-band (direct filesystem) edit. Rejections have no
+  // review request behind them, so the note is the whole record — badge the
+  // verdict, keep the reason on its own line.
+  const ext = changeNote.match(/^External edit (approved|rejected)(?::\s*([\s\S]*))?$/i);
+  if (ext) {
+    const rejected = ext[1].toLowerCase() === "rejected";
+    return {
+      action: {
+        label: rejected ? "External Edit Rejected" : "External Edit Approved",
+        rejected,
+      },
+      note: ext[2]?.trim() || undefined,
+    };
+  }
   const m = changeNote.match(/^(Approved|Rejected)\s+review\s+request\s+(\S+)/i);
   if (m) {
     const rejected = m[1].toLowerCase() === "rejected";
@@ -123,6 +159,7 @@ export function VersionHistory({
   versions,
   currentVersion,
   approvedVersion,
+  externalEditVerdicts,
   loading = false,
   onRestore,
   previewAs = "markdown",
@@ -217,6 +254,11 @@ export function VersionHistory({
     );
   }
 
+  // Newest first, and rejections only — see ExternalEditVerdict above.
+  const rejectedExternalEdits = (externalEditVerdicts ?? [])
+    .filter((v) => v.status === "rejected")
+    .reverse();
+
   const currentVersionStatus = versions.find(
     (v) => v.version === currentVersion,
   )?.status;
@@ -253,6 +295,17 @@ export function VersionHistory({
             v{currentVersion}
           </Badge>
         </CardTitle>
+        {/* A draft with no approved version at all reads as an unexplained
+            "Draft" badge — most visibly on an imported document the engine
+            could not publish, whose file may still say `status: published`
+            while the badge (which reads the governance DB) says otherwise.
+            Say which state it is actually in and how to leave it. */}
+        {currentVersionStatus === "draft" && approvedVersion == null && (
+          <p className="text-xs text-muted-foreground pt-1">
+            Never published — no approved version exists yet. Saving this
+            document publishes it.
+          </p>
+        )}
       </CardHeader>
       <CardContent>
         {previewVersion ? (
@@ -432,12 +485,47 @@ export function VersionHistory({
               })()}
             </ScrollArea>
           </div>
-        ) : versions.length === 0 ? (
+        ) : versions.length === 0 && rejectedExternalEdits.length === 0 ? (
           <div className="text-center py-4 text-sm text-muted-foreground">
             No version history
           </div>
         ) : (
           <ScrollArea className="h-[60vh] max-h-[480px] pr-2">
+            {/* Verdicts on out-of-band edits. Kept out of the version list
+                because a rejection commits nothing — it has no version to be
+                listed under, and inventing one would renumber the chain. */}
+            {!!rejectedExternalEdits.length && (
+              <div className="mb-3 space-y-1">
+                <div className="text-xs font-medium text-muted-foreground px-1">
+                  Rejected external edits
+                </div>
+                {rejectedExternalEdits.map((v) => (
+                  <div
+                    key={v.suggestion_id}
+                    className="p-2 rounded border bg-muted/20 space-y-0.5"
+                  >
+                    <div className="text-xs font-medium flex items-center gap-1 text-red-700">
+                      <XCircle className="h-3 w-3" />
+                      External edit rejected
+                    </div>
+                    {v.note && (
+                      <div className="text-xs text-foreground/80 break-words">
+                        {v.note}
+                      </div>
+                    )}
+                    <div className="text-xs text-muted-foreground break-words">
+                      By:{" "}
+                      <span className="font-medium text-foreground/80">
+                        {v.actor}
+                      </span>
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {formatDate(v.at)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="space-y-1">
               {versions.map((version) => {
                 const isApproved = version.version === approvedVersion;

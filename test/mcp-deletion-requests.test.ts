@@ -159,7 +159,7 @@ describe("MCP: deletion requests", () => {
       action: "decline",
       note: "still referenced by onboarding",
     });
-    expect(out).toContain("Declined");
+    expect(out).toContain("Rejected");
     expect(await callTool(owner.apiKey, "context_list", {})).toContain("Stale Doc");
 
     // Declined verdicts stay listed with their note; nothing is pending.

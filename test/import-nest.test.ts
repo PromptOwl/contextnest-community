@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { existsSync, readdirSync } from "fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
   setupTestEnv,
@@ -90,6 +90,160 @@ describe("import folder as nest (upload model)", () => {
     expect(existsSync(dataNestDir)).toBe(false);
   });
 
+  it("publishes the whole batch under ONE checkpoint, not one per document", async () => {
+    // The import registers docs through the engine's `context_import` operation
+    // in a single batch. Publishing one-by-one is O(N²) — each publish seals its
+    // own checkpoint and every checkpoint re-scans the whole vault — so a
+    // per-doc checkpoint count is the regression signal for that loop coming back.
+    // Explicitly published in the source: import only publishes what its author
+    // marked publishable, so a status-less fixture would register 8 drafts and
+    // seal no checkpoint at all — measuring nothing about batching.
+    const files = Array.from({ length: 8 }, (_, i) =>
+      mdFile(
+        `batch/doc-${i}.md`,
+        `title: Doc ${i}\ntype: document\nstatus: published`,
+        `body ${i}`,
+      ),
+    );
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Batched", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.documents).toBe(8);
+
+    const history = readFileSync(
+      join(env.dataDir, "nests", data.nest.id, ".versions", "context_history.yaml"),
+      "utf-8",
+    );
+    expect(history.match(/^\s*- checkpoint:/gm) ?? []).toHaveLength(1);
+
+    // Every doc is genuinely published, not just cheaply counted.
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${data.nest.id}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(list.data.nodes).toHaveLength(8);
+    expect(list.data.nodes.every((n: any) => n.status === "published")).toBe(true);
+  });
+
+  it("registers every doc when the import spans several read/write batches", async () => {
+    // Discovery and the import prep both read/write in bounded-parallel batches
+    // (32 at a time) so a network-backed vault mount doesn't pay one round trip
+    // per document. 80 docs crosses that boundary three times: this catches a
+    // batch fold that drops documents or scrambles their order.
+    //
+    // Every third doc is an explicit draft, interleaved rather than grouped, so
+    // the drafts/pending split — which now happens after a batch settles rather
+    // than per doc — has to survive the fold as well.
+    const n = 80;
+    const isDraft = (i: number) => i % 3 === 0;
+    const files = Array.from({ length: n }, (_, i) =>
+      mdFile(
+        `wide/doc-${String(i).padStart(3, "0")}.md`,
+        `title: Wide ${String(i).padStart(3, "0")}\ntype: document` +
+          (isDraft(i) ? "\nstatus: draft" : "\nstatus: published"),
+        `body ${i}`,
+      ),
+    );
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Wide", files },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.documents).toBe(n);
+
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${data.nest.id}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(list.data.nodes).toHaveLength(n);
+    // Every id present exactly once — a mis-folded batch would duplicate or lose some.
+    expect([...new Set(list.data.nodes.map((d: any) => d.id))]).toHaveLength(n);
+    // Discovery order is still sorted by id, which is what the prep pass walks.
+    const ids = list.data.nodes.map((d: any) => d.id);
+    expect([...ids].sort()).toEqual(ids);
+    // Each doc kept ITS OWN status: a fold that mixed the two partitions up
+    // would publish a draft (or hold back a publishable doc) without changing
+    // the counts, so assert per id rather than in aggregate.
+    const statusById = new Map(
+      list.data.nodes.map((d: any) => [d.id, d.status]),
+    );
+    for (let i = 0; i < n; i++) {
+      expect(statusById.get(`wide/doc-${String(i).padStart(3, "0")}`)).toBe(
+        isDraft(i) ? "draft" : "published",
+      );
+    }
+  });
+
+  it("re-registering skips tracked docs and picks up new ones across a batch", async () => {
+    // Registration asks ONE query which docs the nest already tracks, then
+    // prepares only the rest — replacing a per-doc lookup. This is the path that
+    // optimisation exists for: a second pass over a nest holding a mix of
+    // already-tracked and brand-new docs, straddling the batch boundary.
+    const n = 50;
+    const files = Array.from({ length: n }, (_, i) =>
+      mdFile(
+        `mixed/old-${String(i).padStart(3, "0")}.md`,
+        `title: Old ${String(i).padStart(3, "0")}\ntype: document\nstatus: published`,
+        `body ${i}`,
+      ),
+    );
+    const { data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Mixed", files },
+      alice.apiKey,
+    );
+    const nestId = data.nest.id;
+    expect(data.documents).toBe(n);
+
+    // Land new markdown in the nest the way an out-of-band sync would, then
+    // register again. Total (50 + 30) crosses the batch boundary; the fresh
+    // slice alone does not, so a broken filter shows up as a count mismatch.
+    const added = 30;
+    for (let i = 0; i < added; i++) {
+      const p = join(env.dataDir, "nests", nestId, "mixed", `new-${String(i).padStart(3, "0")}.md`);
+      writeFileSync(
+        p,
+        `---\ntitle: New ${String(i).padStart(3, "0")}\ntype: document\nstatus: published\n---\n\nfresh ${i}\n`,
+        "utf-8",
+      );
+    }
+
+    const { registerImportedDocuments } = await import("../src/nodes/service.js");
+    const registered = await registerImportedDocuments(nestId, "alice@test.com");
+    // ONLY the new ones — the 50 already tracked must not register twice.
+    expect(registered).toBe(added);
+
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(list.data.nodes).toHaveLength(n + added);
+    expect([...new Set(list.data.nodes.map((d: any) => d.id))]).toHaveLength(n + added);
+    expect(list.data.nodes.every((d: any) => d.status === "published")).toBe(true);
+
+    // A third pass has nothing left to do — the idempotency the bulk query owns.
+    expect(await registerImportedDocuments(nestId, "alice@test.com")).toBe(0);
+  });
+
   it("allows importing an empty folder, then creating a doc in it", async () => {
     const { status, data } = await jsonRequest(
       app,
@@ -168,14 +322,14 @@ describe("imported vault: discovery + registration", () => {
   const files: FileEntry[] = [
     mdFile(
       "checking-approval-history.md",
-      "title: Approval History\ntype: document\ntags: [history]\nversion: 3",
+      "title: Approval History\ntype: document\ntags: [history]\nversion: 3\nstatus: published",
       "approved body",
     ),
     // Numeric title: YAML parses `title: 123` as a number; the API must coerce
     // it to a string so the editor's title.trim() doesn't crash.
     mdFile(
       "engineering/123.md",
-      "title: 123\ntype: document\ntags: [eng]\nversion: 2",
+      "title: 123\ntype: document\ntags: [eng]\nversion: 2\nstatus: published",
       "eng body",
     ),
     // nodes/ exists (structured signal) but holds only meta.
@@ -278,10 +432,11 @@ describe("imported vault: discovery + registration", () => {
     expect(byId["with-fm"]).toBe("Explicit FM Title");
   });
 
-  it("keeps explicitly not-approved docs unpublished, publishes the rest", async () => {
+  it("publishes only what the source marked publishable, holds everything else", async () => {
     const files: FileEntry[] = [
       mdFile("ok.md", "title: Ok\nstatus: published", "publish me"),
-      mdFile("plain.md", "title: Plain", "no status -> publish"),
+      mdFile("appr.md", "title: Appr\nstatus: approved", "approved -> publish"),
+      mdFile("plain.md", "title: Plain", "no status -> held as draft"),
       mdFile("wip.md", "title: Wip\nstatus: draft", "keep draft"),
       mdFile("bad.md", "title: Bad\nstatus: rejected", "keep unpublished"),
       mdFile("old.md", "title: Old\nstatus: superseded", "keep unpublished"),
@@ -298,7 +453,7 @@ describe("imported vault: discovery + registration", () => {
     expect(status).toBe(201);
     // All register (none dropped), even the rejected one that the engine
     // would refuse to publish.
-    expect(data.documents).toBe(7);
+    expect(data.documents).toBe(8);
     const list = await jsonRequest(
       app,
       "GET",
@@ -310,7 +465,10 @@ describe("imported vault: discovery + registration", () => {
       list.data.nodes.map((n: any) => [n.id, n.status]),
     );
     expect(byId["ok"]).toBe("published");
-    expect(byId["plain"]).toBe("published"); // status-less still publishes
+    expect(byId["appr"]).toBe("published"); // approved is publishable too
+    // Publishing is opt-in: a file that states no status has consented to
+    // nothing, so it is held for a human rather than served to an AI.
+    expect(byId["plain"]).toBe("draft");
     expect(byId["wip"]).toBe("draft");
     expect(byId["bad"]).toBe("draft"); // rejected -> kept unpublished, not errored
     expect(byId["old"]).toBe("draft");
@@ -446,27 +604,152 @@ describe("imported vault: discovery + registration", () => {
     expect(res.status).toBe(400);
   });
 
-  it("streams NDJSON progress with ?stream=1", async () => {
-    const files: FileEntry[] = [
-      mdFile("s1.md", "title: S1", "one"),
-      mdFile("s2.md", "title: S2", "two"),
-    ];
-    const res = await app.request("/nests/import?stream=1", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authed(alice.apiKey) },
-      body: JSON.stringify({ name: "Streamed", files }),
-    });
-    expect(res.status).toBe(200);
-    const lines = (await res.text())
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map((l) => JSON.parse(l));
-    // Progress lines carry the total, and a final `complete` line carries result.
-    expect(lines.some((m) => m.phase === "register" && m.total === 2)).toBe(true);
-    const done = lines.find((m) => m.complete);
-    expect(done?.documents).toBe(2);
-    expect(done?.nest?.id).toBeTruthy();
+  // The browser uploads a large folder in bounded chunks instead of one body:
+  // create-with-first-chunk, append, finalize. Registration must see every
+  // chunk, and must not run until finalize.
+  it("imports a folder uploaded in chunks", async () => {
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      {
+        name: "Chunked",
+        files: [mdFile("c1.md", "title: C1", "one")],
+        partial: true,
+      },
+      alice.apiKey,
+    );
+    expect(first.status).toBe(201);
+    const nestId = first.data.nest.id;
+    // A partial first chunk registers nothing — the folder isn't complete yet.
+    expect(first.data.documents).toBeUndefined();
+
+    const second = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { nestId, files: [mdFile("c2.md", "title: C2", "two"), mdFile("sub/c3.md", "title: C3", "three")] },
+      alice.apiKey,
+    );
+    expect(second.status).toBe(200);
+    expect(second.data.written).toBe(2);
+
+    const done = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { nestId, finalize: true },
+      alice.apiKey,
+    );
+    expect(done.status).toBe(200);
+    // All three chunked docs registered, including the nested one.
+    expect(done.data.documents).toBe(3);
+    expect(existsSync(join(env.dataDir, "nests", nestId, "sub", "c3.md"))).toBe(true);
+
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, alice.apiKey);
+    expect(list.data.nodes.length).toBe(3);
+  });
+
+  it("counts docs the batch publish never touches when finalizing a chunked import", async () => {
+    // Drafts never enter the publish batch; they still have to register.
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Chunked Mixed", files: [mdFile("p1.md", "title: P1", "publish me")], partial: true },
+      alice.apiKey,
+    );
+    const nestId = first.data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      {
+        nestId,
+        files: Array.from({ length: 5 }, (_, i) =>
+          mdFile(`d${i}.md`, `title: D${i}\nstatus: draft`, "kept unpublished"),
+        ),
+      },
+      alice.apiKey,
+    );
+    const done = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { nestId, finalize: true },
+      alice.apiKey,
+    );
+    expect(done.data.documents).toBe(6);
+  });
+
+  it("refuses to append chunks to an import that has already been finalized", async () => {
+    // Staging writes straight into vault storage, skipping the node-creation
+    // path and its validation. That is the point mid-upload, but it must not
+    // stay open afterwards as a raw-write door into any nest the caller owns.
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Closed Import", files: [mdFile("a.md", "title: A\nstatus: published", "one")] },
+      alice.apiKey,
+    );
+    expect(first.status).toBe(201);
+    expect(first.data.documents).toBe(1);
+    const nestId = first.data.nest.id;
+
+    const late = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { nestId, files: [mdFile("late.md", "title: Late", "sneaked in")] },
+      alice.apiKey,
+    );
+    expect(late.status).toBe(400);
+    expect(existsSync(join(env.dataDir, "nests", nestId, "late.md"))).toBe(false);
+  });
+
+  it("refuses to append chunks to a nest the caller does not own", async () => {
+    // A continuation writes files straight into a nest's storage — anything
+    // short of owner would let any caller inject documents into someone else's.
+    const mallory = await registerUser(app, "mallory@test.com", "Mallory");
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { name: "Private Chunked", files: [mdFile("a.md", "title: A", "mine")], partial: true },
+      alice.apiKey,
+    );
+    const nestId = first.data.nest.id;
+    const res = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      { nestId, files: [mdFile("evil.md", "title: Evil", "injected")] },
+      mallory.apiKey,
+    );
+    expect(res.status).toBe(404);
+    expect(existsSync(join(env.dataDir, "nests", nestId, "evil.md"))).toBe(false);
+  });
+
+  it("reports the files it refused instead of counting them as imported", async () => {
+    // A traversal path is skipped, not fatal — but the caller has to be told,
+    // or a partial import reads as a clean one.
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      "/nests/import",
+      {
+        name: "Partly Unsafe",
+        files: [
+          mdFile("good.md", "title: Good\nstatus: published", "kept"),
+          mdFile("../escape.md", "title: Escape", "rejected"),
+        ],
+      },
+      alice.apiKey,
+    );
+    expect(status).toBe(201);
+    expect(data.documents).toBe(1);
+    expect(data.rejected).toEqual(["../escape.md"]);
   });
 
   it("recovers a doc whose imported version chain won't reconstruct", async () => {

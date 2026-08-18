@@ -4,6 +4,8 @@
  */
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
@@ -84,6 +86,7 @@ import {
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
+import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
   StewardList, StewardModal,
   ReviewQueue, ReviewActions,
@@ -414,6 +417,7 @@ export function NestView({
     versions: Version[];
     approvedVersion: number | null;
     currentVersion: number;
+    externalEditVerdicts?: api.ExternalEditVerdict[];
   }>({ versions: [], approvedVersion: null, currentVersion: 0 });
   const [showAssignSteward, setShowAssignSteward] = useState(false);
   const [showConnect, setShowConnect] = useState(false);
@@ -432,13 +436,18 @@ export function NestView({
     .map((s) => s.trim())
     .filter(Boolean).length;
   const newFolderTooDeep = newFolderDepth > MAX_FOLDER_DEPTH;
+  // The server derives folder paths by slugifying to a-z0-9, so a name with
+  // none of those ("!!!", "...", or a purely non-Latin name) slugifies away and
+  // the starter doc silently lands in the nest root instead of a folder.
+  const newFolderUnusable =
+    !!newFolderPath.trim() && !/[a-z0-9]/i.test(newFolderPath);
 
   const createFolder = async () => {
     const folder = newFolderPath.trim().replace(/^\/+|\/+$/g, "");
     if (!folder) return;
-    // Block deeper than the server allows before the round-trip, so the user
+    // Block what the server would reject before the round-trip, so the user
     // gets the reason inline instead of a swallowed 400.
-    if (newFolderTooDeep) return;
+    if (newFolderTooDeep || newFolderUnusable) return;
     setCreatingFolder(true);
     try {
       // Folders are path-derived — seed one with a starter node so it appears
@@ -472,10 +481,11 @@ export function NestView({
   const [folderFilter, setFolderFilter] = useState<string | null>(
     initialFolder ?? null,
   );
-  // A folder breadcrumb click arrives pre-scoped, and the folder-scoped list
-  // lives on Documents — Overview would hide the scope entirely.
+  // A folder breadcrumb or tag chip click arrives pre-scoped, and both filtered
+  // lists live on Documents — Overview would hide the scope entirely.
   const [activeTab, setActiveTabState] = useState(
-    initialTab ?? (initialFolder ? "documents" : "overview"),
+    initialTab ??
+      (initialFolder || initialTags?.length ? "documents" : "overview"),
   );
   // Wrapper so every tab change — the tab strip, and the Overview folder
   // clicks that jump to Documents — mirrors into ?tab= via App.
@@ -608,6 +618,8 @@ export function NestView({
   const [moveDest, setMoveDest] = useState("");
   const [movingDoc, setMovingDoc] = useState(false);
 
+  const qc = useQueryClient();
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     // Each request is independently swallowed — if listNodes throws, we must
@@ -616,26 +628,32 @@ export function NestView({
     // dropped the settings update, so toggling stewardship appeared to revert.
     const [nodesData, stewardsData, queueData, deletionData, settingsData, externalData, nestMeta, countsData, feedData] =
       await Promise.all([
-        api.listNodes(nestId).catch((e) => {
+        // The five reads below go through the shared cache (same keys and
+        // invalidation as the hook-based screens) so returning from a document
+        // paints from memory instead of re-fetching. Read imperatively rather
+        // than via hooks to keep each call's own error fallback — a failing
+        // node list must still let the settings response apply, per the note
+        // above.
+        qc.fetchQuery(reads.nodes(nestId)).catch((e) => {
           console.error("[NestView] listNodes failed", nestId, e);
           return { nodes: [] };
         }),
-        api.listStewards(nestId).catch((e) => {
+        qc.fetchQuery(reads.stewards(nestId)).catch((e) => {
           console.error("[NestView] listStewards failed", nestId, e);
           return { stewards: [] };
         }),
-        api.getReviewQueue(nestId).catch((e) => {
+        qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
           console.error("[NestView] getReviewQueue failed", nestId, e);
           toast.error(e?.message || "Failed to load review queue");
           return { requests: [], total: 0 };
         }),
         // Pending AND declined in one call: pending drives the admin queue,
         // declined is how the person who asked learns the verdict.
-        api.getDeletionRequests(nestId, "all").catch((e) => {
+        qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
           console.error("[NestView] getDeletionRequests failed", nestId, e);
           return { requests: [] as api.DeletionRequest[], total: 0 };
         }),
-        api.getNestSettings(nestId).catch((e) => {
+        qc.fetchQuery(reads.settings(nestId)).catch((e) => {
           console.error("[NestView] getNestSettings failed", nestId, e);
           return {
             stewardship_enabled: false,
@@ -644,15 +662,15 @@ export function NestView({
             prime_tags: [] as string[],
           };
         }),
-        api.listExternalEdits(nestId).catch((e) => {
+        qc.fetchQuery(reads.externalEdits(nestId)).catch((e) => {
           console.error("[NestView] listExternalEdits failed", nestId, e);
           return { entries: [], total: 0 };
         }),
-        api.getNest(nestId).catch((e) => {
+        qc.fetchQuery(reads.nest(nestId)).catch((e) => {
           console.error("[NestView] getNest failed", nestId, e);
           return null;
         }),
-        api.getCommentCounts(nestId).catch((e) => {
+        qc.fetchQuery(reads.commentCounts(nestId)).catch((e) => {
           console.error("[NestView] getCommentCounts failed", nestId, e);
           return { counts: {} };
         }),
@@ -666,7 +684,7 @@ export function NestView({
         // with the already-filtered changes, using the same (createdAt, id)
         // ordering as the server merge. If reviewable filtering ever moves
         // server-side, collapse this into a single filter=all call.
-        api.getNestFeed(nestId, "comments").catch((e) => {
+        qc.fetchQuery(reads.feed(nestId, "comments")).catch((e) => {
           console.error("[NestView] getNestFeed failed", nestId, e);
           return {
             items: [] as api.FeedItem[],
@@ -705,7 +723,7 @@ export function NestView({
     setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
     setLoading(false);
     setInitialLoad(false);
-  }, [nestId]);
+  }, [nestId, qc]);
 
   // Next page of comment activity, appended under the feed. Offset by the
   // rows already shown; a dedupe guard drops any row that slid into the next
@@ -1225,7 +1243,7 @@ export function NestView({
   const openVersions = async (node: any) => {
     setVersionNode(node);
     try {
-      const data = await api.getNodeVersions(nestId, node.id);
+      const data = await qc.fetchQuery(reads.nodeVersions(nestId, node.id));
       setVersionData(data);
     } catch (e) {
       console.error("[NestView] getNodeVersions failed", nestId, node?.id, e);
@@ -1361,7 +1379,7 @@ export function NestView({
 
   const handleDeclineDeletion = async (note: string) => {
     await api.declineDeletionRequest(nestId, resolveTarget!.request.id, note);
-    toast.success("Request declined");
+    toast.success("Request rejected");
     fetchData();
   };
 
@@ -1740,7 +1758,12 @@ export function NestView({
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>Total Documents</CardDescription>
-            <CardTitle className="text-3xl">{stats.total}</CardTitle>
+            {/* initialLoad, not `loading`: a background refetch keeps the real
+                numbers on screen, and only a cold load — where every stat is
+                still 0 — shows the placeholder. */}
+            <CardTitle className="text-3xl">
+              {initialLoad ? <CountSkeleton className="h-8 w-12" /> : stats.total}
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1756,7 +1779,13 @@ export function NestView({
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription>Pending Review</CardDescription>
-                <CardTitle className="text-3xl text-amber-600">{stats.pending}</CardTitle>
+                <CardTitle className="text-3xl text-amber-600">
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.pending
+                  )}
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1768,7 +1797,13 @@ export function NestView({
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription>AI Ready</CardDescription>
-                <CardTitle className="text-3xl text-green-600">{stats.approved}</CardTitle>
+                <CardTitle className="text-3xl text-green-600">
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.approved
+                  )}
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1781,7 +1816,11 @@ export function NestView({
               <CardHeader className="pb-2">
                 <CardDescription>Review Queue</CardDescription>
                 <CardTitle className="text-3xl text-blue-600">
-                  {stats.reviewable}
+                  {initialLoad ? (
+                    <CountSkeleton className="h-8 w-12" />
+                  ) : (
+                    stats.reviewable
+                  )}
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -3055,8 +3094,8 @@ export function NestView({
                     Submitted by you — awaiting review
                   </CardTitle>
                   <CardDescription>
-                    Your edits are queued for a reviewer. You can't approve your
-                    own work (separation of duties), but they are pending.
+                    Your edits are awaiting review by another user. You can't
+                    approve your own work due to separation of duties.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-2">
@@ -3085,7 +3124,7 @@ export function NestView({
                     Deletion requests
                   </CardTitle>
                   <CardDescription>
-                    Documents flagged as stale. Delete them, or decline with a
+                    Documents flagged as stale. Delete them, or reject with a
                     note.
                   </CardDescription>
                 </CardHeader>
@@ -3119,7 +3158,7 @@ export function NestView({
                           setResolveTarget({ request: r, action: "decline" })
                         }
                       >
-                        Decline
+                        Reject
                       </Button>
                       <Button
                         variant="ghost"
@@ -3189,10 +3228,9 @@ export function NestView({
             {feedFilter !== "comments" &&
               reviewQueue.length > 0 && reviewableQueue.length === 0 && (
                 <p className="text-xs text-muted-foreground text-center">
-                  {reviewQueue.length} pending review
-                  {reviewQueue.length === 1 ? "" : "s"} in this nest, but
-                  none you can act on — outside your steward scope, or
-                  submitted by you (authors can't approve their own work).
+                  {reviewQueue.length === 1
+                    ? "1 pending review in this nest, but it doesn't require your action — it's either outside your steward scope or was submitted by you."
+                    : `${reviewQueue.length} pending reviews in this nest, but none require your action — they're either outside your steward scope or were submitted by you.`}
                 </p>
               )}
           </TabsContent>
@@ -3588,13 +3626,24 @@ export function NestView({
               level{newFolderDepth - MAX_FOLDER_DEPTH === 1 ? "" : "s"}.
             </p>
           )}
+          {newFolderUnusable && (
+            <p className="text-xs text-destructive">
+              Folder paths are built from a-z and 0-9, so the name needs at least
+              one of those.
+            </p>
+          )}
           <DialogFooter>
             <Button variant="ghost" onClick={() => setShowNewFolder(false)}>
               Cancel
             </Button>
             <Button
               onClick={() => void createFolder()}
-              disabled={creatingFolder || !newFolderPath.trim() || newFolderTooDeep}
+              disabled={
+                creatingFolder ||
+                !newFolderPath.trim() ||
+                newFolderTooDeep ||
+                newFolderUnusable
+              }
             >
               {creatingFolder ? (
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -3823,7 +3872,7 @@ export function NestView({
           open
           onOpenChange={(o) => !o && setDeletionTarget(null)}
           title={`Request deletion of "${deletionTarget.title}"`}
-          description="A nest admin reviews this and either deletes the document or declines with a note. Nothing is removed yet."
+          description="A nest admin reviews this and either deletes the document or rejects with a note. Nothing is removed yet."
           label="Why should it be deleted?"
           placeholder="e.g. superseded by the new runbook"
           confirmLabel="Request deletion"
@@ -3843,7 +3892,7 @@ export function NestView({
           title={
             resolveTarget.action === "delete"
               ? `Delete "${resolveTarget.request.title || resolveTarget.request.nodeId}"?`
-              : "Decline this deletion request"
+              : "Reject this deletion request"
           }
           description={
             resolveTarget.action === "delete"
@@ -3853,12 +3902,12 @@ export function NestView({
           // No label on the delete branch — that dialog is a plain confirm.
           label={
             resolveTarget.action === "decline"
-              ? "Why are you declining?"
+              ? "Why are you rejecting?"
               : undefined
           }
           placeholder="e.g. still referenced by onboarding"
           confirmLabel={
-            resolveTarget.action === "delete" ? "Delete document" : "Decline"
+            resolveTarget.action === "delete" ? "Delete document" : "Reject"
           }
           destructive={resolveTarget.action === "delete"}
           onConfirm={
@@ -3913,6 +3962,7 @@ function ReviewDocumentModal({
   onOpenDocument: (nodeId: string) => void;
 }) {
   const [linkError, setLinkError] = useState<string | null>(null);
+  const qc = useQueryClient();
 
   // Resolve `[[Title]]` clicks to a node id and jump straight to that
   // doc. Without this the wiki-link decoration renders but click does
@@ -3933,7 +3983,7 @@ function ReviewDocumentModal({
     try {
       // Full list + shared id/title/slug resolver (same rule as the editor) so
       // a [[nodes/slug]] or slug-form link resolves here too, not title-only.
-      const { nodes } = await api.listNodes(nestId);
+      const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
       const exact = resolveWikiTarget(
         nodes as Array<{ id: string; title: string }>,
         title,

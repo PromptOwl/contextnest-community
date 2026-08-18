@@ -9,6 +9,8 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import {
   Dialog,
   DialogContent,
@@ -50,6 +52,7 @@ export function DocumentPickerModal({
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const qc = useQueryClient();
 
   // Always preload the full list on open so users see something
   // immediately. Search refines via server FTS once they type.
@@ -64,7 +67,7 @@ export function DocumentPickerModal({
     (async () => {
       setLoading(true);
       try {
-        const { nodes: list } = await api.listNodes(nestId);
+        const { nodes: list } = await qc.fetchQuery(reads.nodes(nestId));
         if (!cancelled) setNodes(list as PickerNode[]);
       } catch (err: any) {
         if (!cancelled) setError(err.message);
@@ -75,7 +78,7 @@ export function DocumentPickerModal({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, nestId]);
+  }, [isOpen, nestId, qc]);
 
   // Debounced server search on query. When cleared, drop the search
   // results so the preloaded full list shows again.

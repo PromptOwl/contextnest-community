@@ -3,13 +3,16 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Search,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
 import { relTime, formatServerDate } from "../lib/dates";
+import { nestNameProblem } from "../lib/nest-name";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
@@ -18,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
   Dialog,
   DialogContent,
@@ -42,9 +46,11 @@ interface DashboardProps {
     isAnonOwned: boolean,
   ) => void;
   onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
+  /** Opens the cross-nest search palette (the same one Cmd/Ctrl+K opens). */
+  onOpenSearch?: () => void;
 }
 
-export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
+export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const [work, setWork] = useState<{
@@ -65,11 +71,20 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   // Deletion flag being resolved from the inbox, and which dialog it opens.
   const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
   const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
-  const [nests, setNests] = useState<any[]>([]);
+  // Served from the shared read cache: coming back to the dashboard paints the
+  // previous list immediately and revalidates behind it. `isLoading` is true
+  // only on a genuine first load with nothing cached, so the loader below still
+  // appears exactly when it used to and never on a revisit.
+  const {
+    data: nestsData,
+    isLoading: loading,
+    refetch: refetchNests,
+  } = useNests();
+  const nests = nestsData?.nests ?? [];
+  const qc = useQueryClient();
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [newName, setNewName] = useState("");
@@ -92,31 +107,26 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
     typeof window !== "undefined" ? window.location.origin : "http://localhost:3838";
 
   const fetchNests = async () => {
-    setLoading(true);
     // The page loader is gated on the nest list only. The banner stats are
     // derived from that same response (each nest carries document_count), so
     // there is no separate /stats round-trip. /unsynced and /me/work are
     // best-effort extras that stream into their own sections as they land —
     // /unsynced is admin-gated (403 for non-admins).
-    api
-      .listUnsyncedFolders()
+    qc
+      .fetchQuery(reads.unsynced())
       .then((d) => setUnsynced(d.folders))
       .catch(() => setUnsynced([]));
-    api
-      .getMyWork()
+    qc
+      .fetchQuery(reads.myWork())
       .then(setWork)
       .catch(() => setWork({ items: [], waiting: [], notifications: [] }));
     // Streams into its own tab like the other extras — never gated behind
     // setLoading, so it can't add to the dashboard's time-to-first-paint.
     void goToDraftsPage(0);
-    try {
-      const nestsData = await api.listNests();
-      setNests(nestsData.nests);
-    } catch (e) {
-      console.error("[Dashboard] fetchNests failed", e);
-    } finally {
-      setLoading(false);
-    }
+    // The list itself comes from the cache. A refetch here is a no-op when a
+    // mutation already invalidated it (the query is refetching anyway) and
+    // joins the in-flight request on mount rather than doubling it.
+    await refetchNests();
   };
 
   // Jump to a page of drafts. Same replace-the-page contract as the work
@@ -124,7 +134,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const goToDraftsPage = async (offset: number) => {
     setDraftsLoading(true);
     try {
-      const next = await api.getMyDrafts({ offset });
+      const next = await qc.fetchQuery(reads.myDrafts({ offset }));
       setDrafts(next.drafts);
       setDraftsPage(next.pagination);
     } catch (e) {
@@ -140,7 +150,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
   const goToWorkPage = async (offset: number) => {
     setLoadingMoreWork(true);
     try {
-      const next = await api.getMyWork({ offset });
+      const next = await qc.fetchQuery(reads.myWork({ offset }));
       setWork((prev) => ({
         items: next.items,
         waiting: next.waiting,
@@ -300,10 +310,16 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newName.trim()) return;
+    // Say why instead of returning silently — the submit still reaches here
+    // when the browser autofills or the button is driven by Enter.
+    const problem = nestNameProblem(newName);
+    if (problem) {
+      setCreateError(problem);
+      return;
+    }
     setCreateError(null);
     try {
-      await api.createNest(newName, newDesc);
+      await api.createNest(newName.trim(), newDesc.trim());
       setNewName(""); setNewDesc(""); setShowCreate(false);
       fetchNests();
     } catch (e) {
@@ -334,14 +350,24 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                 <CopyInline value={serverUrl} />
               </CardDescription>
             </div>
+            {/* On a cold load `nests` is [], and rendering that as 0/0 reads as
+                "your content is gone". Hold a placeholder bar until the counts
+                are real — `loading` is false on a cached revisit, so this never
+                flashes when there's something to show. */}
             <div className="flex gap-6 text-center">
               <div>
-                <div className="text-2xl font-bold">{nests.length}</div>
+                <div className="text-2xl font-bold">
+                  {loading ? <CountSkeleton /> : nests.length}
+                </div>
                 <div className="text-xs text-muted-foreground">Nests</div>
               </div>
               <div>
                 <div className="text-2xl font-bold">
-                  {nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)}
+                  {loading ? (
+                    <CountSkeleton />
+                  ) : (
+                    nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)
+                  )}
                 </div>
                 <div className="text-xs text-muted-foreground">Documents</div>
               </div>
@@ -502,7 +528,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                               setDeletionTarget(w);
                             }}
                           >
-                            Decline
+                            Reject
                           </Button>
                         </>
                       ) : (
@@ -723,6 +749,20 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* Styled as a field rather than a button: the palette it opens is
+              where you type, and a search box is what people look for. */}
+          {onOpenSearch && (
+            <button
+              type="button"
+              onClick={onOpenSearch}
+              className="flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50"
+              data-testid="global-search-trigger"
+            >
+              <Search className="h-4 w-4" />
+              Search nests &amp; documents
+              <kbd className="ml-2 rounded border px-1 text-[10px]">⌘K</kbd>
+            </button>
+          )}
           <Button variant="outline" onClick={() => setShowImport(true)}>
             <FolderInput className="h-4 w-4 mr-2" />
             Import Folder
@@ -765,7 +805,9 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
                 />
               </div>
               <div className="flex gap-2">
-                <Button type="submit">Create Nest</Button>
+                <Button type="submit" disabled={!!nestNameProblem(newName)}>
+                  Create Nest
+                </Button>
                 <Button type="button" variant="outline" onClick={() => { setShowCreate(false); setCreateError(null); }}>
                   Cancel
                 </Button>
@@ -1186,19 +1228,25 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
             if (!open) setRenameTarget(null);
           }}
           onRenamed={(updated) => {
-            // Update the card in place — no refetch needed; nothing else on
-            // the dashboard derives from the name/slug.
-            setNests((prev) =>
-              prev.map((n) =>
-                n.id === updated.id
-                  ? {
-                      ...n,
-                      name: updated.name,
-                      slug: updated.slug,
-                      description: updated.description,
-                    }
-                  : n,
-              ),
+            // Patch the cached row so the card renames instantly. The PATCH
+            // already invalidated the list, so a refetch confirms this behind
+            // the scenes — this is only about not blanking the name meanwhile.
+            qc.setQueryData(reads.nestList().queryKey, (prev) =>
+              prev
+                ? {
+                    ...prev,
+                    nests: prev.nests.map((n: any) =>
+                      n.id === updated.id
+                        ? {
+                            ...n,
+                            name: updated.name,
+                            slug: updated.slug,
+                            description: updated.description,
+                          }
+                        : n,
+                    ),
+                  }
+                : prev,
             );
             setRenameTarget(null);
           }}
@@ -1212,7 +1260,7 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
           title={
             deletionAction === "delete"
               ? `Delete "${deletionTarget.title}"?`
-              : "Decline this deletion request"
+              : "Reject this deletion request"
           }
           description={`${deletionTarget.requested_by} asked for this: "${deletionTarget.reason ?? ""}". ${
             deletionAction === "delete"
@@ -1220,11 +1268,11 @@ export function Dashboard({ onSelectNest, onOpenReview }: DashboardProps) {
               : "The document stays; your note is the record, and the requester is notified."
           }`}
           label={
-            deletionAction === "decline" ? "Why are you declining?" : undefined
+            deletionAction === "decline" ? "Why are you rejecting?" : undefined
           }
           placeholder="e.g. still referenced by onboarding"
           confirmLabel={
-            deletionAction === "delete" ? "Delete document" : "Decline"
+            deletionAction === "delete" ? "Delete document" : "Reject"
           }
           destructive={deletionAction === "delete"}
           onConfirm={

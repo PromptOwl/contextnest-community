@@ -174,6 +174,37 @@ export async function assertNoFlowCycle(
   }
 }
 
+/**
+ * One edge per (from, to, type): a repeat carries no extra meaning and its wire
+ * draws exactly on top of the original, so the canvas shows one line where two
+ * exist. Runs inside the caller's tx (same BEGIN IMMEDIATE as the INSERT) so two
+ * concurrent creates can't both pass. `excludeId` skips the row being retyped.
+ */
+export async function assertNoDuplicateEdge(
+  db: Querier,
+  nestId: string,
+  fromNode: string,
+  toNode: string,
+  type: EdgeTypeRow,
+  excludeId?: string,
+): Promise<void> {
+  // Append the exclusion instead of `(? IS NULL OR id != ?)`: a bare param in
+  // `IS NULL` has no inferable type, and Postgres rejects it with 42P18.
+  const row = await db.get(
+    `SELECT id FROM edges
+      WHERE nest_id = ? AND from_node = ? AND to_node = ? AND type_id = ?` +
+      (excludeId ? " AND id != ?" : ""),
+    excludeId
+      ? [nestId, fromNode, toNode, type.id, excludeId]
+      : [nestId, fromNode, toNode, type.id],
+  );
+  if (row) {
+    throw new ConflictError(
+      `a "${type.name}" connection from "${fromNode}" to "${toNode}" already exists`,
+    );
+  }
+}
+
 export const edgeRoutes = new Hono<AuthEnv>();
 // Gate every route on the feature flag PER ROUTE, not via `use("*", …)`: this
 // router mounts under `/nests/:nestId/edges`, and a wildcard middleware there
@@ -272,6 +303,7 @@ edgeRoutes.post("/", requireWorkflowPlane, async (c) => {
   // creates can't each pass the DAG guard against the pre-request graph and
   // both land, closing a cycle.
   await db.transaction(async (tx) => {
+    await assertNoDuplicateEdge(tx, nestId, fromNode, toNode, type);
     if (type.is_flow) {
       await assertNoFlowCycle(tx, nestId, fromNode, toNode);
     }
@@ -305,6 +337,8 @@ edgeRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
     "SELECT * FROM edge_types WHERE id = ?",
     [row.type_id],
   )) as EdgeTypeRow;
+  const wasFlow = !!type.is_flow;
+  let retype: EdgeTypeRow | null = null;
   if (typeof body.type === "string" && body.type.trim()) {
     const next = (await db.get(
       "SELECT * FROM edge_types WHERE nest_id = ? AND (id = ? OR LOWER(name) = LOWER(?))",
@@ -315,10 +349,10 @@ edgeRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
         `unknown edge type "${body.type}" — define it in the registry first`,
       );
     }
-    // Becoming a flow edge can close a cycle the old type couldn't.
-    if (next.is_flow && !type.is_flow) {
-      await assertNoFlowCycle(db, nestId, row.from_node, row.to_node);
-    }
+    // Checked below, inside the tx that carries the UPDATE — two concurrent
+    // retypes onto the same (from, to, type) would otherwise both pass against
+    // the pre-request graph and land the duplicate this guard exists to stop.
+    if (next.id !== type.id) retype = next;
     type = next;
   }
 
@@ -334,11 +368,20 @@ edgeRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
     stored = v.stored;
   }
 
-  await db.run(
-    `UPDATE edges SET type_id = ?, condition_mode = ?, condition = ?, updated_at = ?
-      WHERE id = ?`,
-    [type.id, mode, stored, new Date().toISOString(), id],
-  );
+  await db.transaction(async (tx) => {
+    if (retype) {
+      await assertNoDuplicateEdge(tx, nestId, row.from_node, row.to_node, retype, id);
+      // Becoming a flow edge can close a cycle the old type couldn't.
+      if (retype.is_flow && !wasFlow) {
+        await assertNoFlowCycle(tx, nestId, row.from_node, row.to_node);
+      }
+    }
+    await tx.run(
+      `UPDATE edges SET type_id = ?, condition_mode = ?, condition = ?, updated_at = ?
+        WHERE id = ?`,
+      [type.id, mode, stored, new Date().toISOString(), id],
+    );
+  });
   const updated = (await db.get("SELECT * FROM edges WHERE id = ?", [id])) as EdgeRow;
   return c.json({ edge: toResponse(updated, type) });
 });

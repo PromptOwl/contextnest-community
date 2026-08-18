@@ -8,7 +8,7 @@ import { getDb } from "../db/client.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { canUserAccess } from "./stewardship-service.js";
 import { isPublicReader } from "../shared/access.js";
-import { getApprovedVersion } from "./version-service.js";
+import { getApprovedVersion, getApprovedVersions } from "./version-service.js";
 import {
   resolveNodeGrant,
   listUserGrants,
@@ -68,15 +68,14 @@ export async function filterAccessible<T extends { id: string }>(
   userId: string,
   userEmail: string,
   nodes: T[],
+  /** Approved versions already read by the caller, to avoid a second scan. */
+  approvedVersions?: Map<string, number>,
 ): Promise<T[]> {
   if (await isPublicReader(nestId, userId)) {
-    const filtered: T[] = [];
-    for (const n of nodes) {
-      if ((await getApprovedVersion(nestId, n.id)) !== null) {
-        filtered.push(n);
-      }
-    }
-    return filtered;
+    // One scan of the nest, not a sequential lookup per node — and none at all
+    // when the caller has already read the map for its own use.
+    const approved = approvedVersions ?? (await getApprovedVersions(nestId));
+    return nodes.filter((n) => approved.has(n.id));
   }
   if (!(await isStewardshipEnabled(nestId))) return nodes;
   const grants = await listUserGrants(nestId, userId);

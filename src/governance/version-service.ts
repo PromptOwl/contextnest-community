@@ -164,6 +164,23 @@ export async function getCurrentVersion(
   return row?.v || 0;
 }
 
+/**
+ * Every node in a nest that already carries a real (non-system) version row.
+ *
+ * Import only needs the yes/no that getCurrentVersion answers, but asked it per
+ * document — one round trip each before any work began. One scan answers it for
+ * the whole nest, mirroring getApprovedVersions.
+ */
+export async function getTrackedNodeIds(nestId: string): Promise<Set<string>> {
+  const db = getDb();
+  const rows = (await db.all(
+    `SELECT DISTINCT node_id FROM node_versions
+        WHERE nest_id = ? AND author NOT LIKE ?`,
+    [nestId, `${SYSTEM_AUTHOR_PREFIX}%`],
+  )) as Array<{ node_id: string }>;
+  return new Set(rows.map((r) => r.node_id));
+}
+
 // ─── Approved Version ───────────────────────────────────────────────────
 
 export async function getApprovedVersion(
@@ -176,6 +193,26 @@ export async function getApprovedVersion(
     [nestId, nodeId],
   )) as { approved_version: number } | undefined;
   return row?.approved_version ?? null;
+}
+
+/**
+ * Every node's approved version in one nest, keyed by node id.
+ *
+ * The per-node lookup above run in a loop is what listing a public nest used to
+ * do — once to decide which nodes are visible at all, then again to fetch each
+ * one's body — so a 500-node nest paid 1000 sequential round trips. Scanning the
+ * nest once mirrors resolveAuthorship, and avoids an IN list long enough to hit
+ * SQLite's bound-parameter ceiling.
+ */
+export async function getApprovedVersions(
+  nestId: string,
+): Promise<Map<string, number>> {
+  const db = getDb();
+  const rows = (await db.all(
+    "SELECT node_id, approved_version FROM approved_versions WHERE nest_id = ?",
+    [nestId],
+  )) as Array<{ node_id: string; approved_version: number }>;
+  return new Map(rows.map((r) => [r.node_id, r.approved_version]));
 }
 
 export async function setApprovedVersion(

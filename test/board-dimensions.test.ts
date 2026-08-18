@@ -6,10 +6,12 @@ import {
   buildColumns,
   groupByColumn,
   planMove,
+  resolveConfig,
   STATUS_ORDER,
   UNCATEGORIZED,
   type BoardNode,
   type BoardConfig,
+  type BoardSettings,
 } from "../ui/src/lib/board-dimensions";
 
 const node = (over: Partial<BoardNode> & { id: string }): BoardNode => ({
@@ -180,6 +182,7 @@ describe("status columns", () => {
       "approved",
       "published",
       "rejected",
+      "external_edit_pending",
     ]);
     expect(cols.map((c) => c.label)).toEqual([
       "Draft",
@@ -187,7 +190,13 @@ describe("status columns", () => {
       "Approved",
       "Published",
       "Rejected",
+      "External Edit",
     ]);
+  });
+  it("spaces out a status heading it has no label for", () => {
+    const cfg: BoardConfig = { dimension: "status" };
+    const cols = buildColumns([node({ id: "a", status: "awaiting_sync" })], cfg);
+    expect(cols.map((c) => c.label)).toEqual(["awaiting sync"]);
   });
   it("carries no status the server cannot produce", () => {
     // These three were columns that could never fill; pending_review and
@@ -289,5 +298,85 @@ describe("planMove", () => {
     const cfg: BoardConfig = { dimension: "folder" };
     const plan = planMove(node({ id: "gtm/foo" }), "gtm", cfg);
     expect(plan.kind).toBe("unsupported");
+  });
+});
+
+describe("hidden columns (curated tag columns)", () => {
+  const cfg = (over: Partial<BoardConfig> = {}): BoardConfig => ({
+    dimension: "tag",
+    tagNamespace: "",
+    ...over,
+  });
+  const nodes = [
+    node({ id: "a", tags: ["draft"] }),
+    node({ id: "b", tags: ["review"] }),
+    node({ id: "c", tags: ["draft", "review"] }),
+  ];
+
+  it("omits a hidden column from the board", () => {
+    const cols = buildColumns(nodes, cfg({ hiddenColumns: ["review"] }));
+    expect(cols.map((c) => c.key)).toContain("draft");
+    expect(cols.map((c) => c.key)).not.toContain("review");
+  });
+
+  it("routes a card whose only column is hidden to Uncategorized, but keeps a card that still has a shown column", () => {
+    const { byColumn } = groupByColumn(nodes, cfg({ hiddenColumns: ["review"] }));
+    expect(byColumn[UNCATEGORIZED].map((n) => n.id)).toEqual(["b"]);
+    expect(byColumn["draft"].map((n) => n.id)).toEqual(["a", "c"]);
+  });
+
+  it("shows an added, empty column via columnOrder (add a tag with no cards yet)", () => {
+    const cols = buildColumns(
+      nodes,
+      cfg({ columnOrder: ["draft", "shipped", "review"] }),
+    );
+    expect(cols.map((c) => c.key)).toEqual(["draft", "shipped", "review"]);
+  });
+
+  it("drops a hidden key from columnOrder; its orphaned cards go to Uncategorized", () => {
+    const cols = buildColumns(
+      nodes,
+      cfg({ columnOrder: ["draft", "review"], hiddenColumns: ["review"] }),
+    );
+    // review column gone; doc `b` (only tagged review) surfaces in Uncategorized.
+    expect(cols.map((c) => c.key)).toEqual(["draft", UNCATEGORIZED]);
+  });
+});
+
+describe("resolveConfig", () => {
+  const settings = (over: Partial<BoardSettings> = {}): BoardSettings => ({
+    dimension: "folder",
+    tagNamespace: "",
+    layouts: {
+      status: { columnOrder: ["approved", "draft"] },
+      folder: { columnOrder: ["gtm"] },
+      "tag:stage": { columnOrder: ["ship"], hiddenColumns: ["old"] },
+    },
+    ...over,
+  });
+
+  it("uses only the active dimension's layout", () => {
+    // The bug: a status reorder leaked onto the folder board, which then
+    // rendered phantom "Draft"/"Approved" columns.
+    expect(resolveConfig(settings()).columnOrder).toEqual(["gtm"]);
+    expect(resolveConfig(settings({ dimension: "status" })).columnOrder).toEqual(
+      ["approved", "draft"],
+    );
+  });
+
+  it("keys tag layouts by namespace", () => {
+    const s = settings({ dimension: "tag", tagNamespace: "stage" });
+    expect(resolveConfig(s).columnOrder).toEqual(["ship"]);
+    expect(resolveConfig(s).hiddenColumns).toEqual(["old"]);
+    // A different namespace is a different column vocabulary — no layout yet.
+    const other = settings({ dimension: "tag", tagNamespace: "team" });
+    expect(resolveConfig(other).columnOrder).toBeUndefined();
+    expect(resolveConfig(other).hiddenColumns).toBeUndefined();
+  });
+
+  it("falls back to the lifecycle order for an un-reordered status board", () => {
+    expect(
+      resolveConfig({ dimension: "status", layouts: {} }).columnOrder,
+    ).toEqual(STATUS_ORDER);
   });
 });
