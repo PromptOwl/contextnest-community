@@ -430,6 +430,7 @@ async function callToolRaw(
 ): Promise<{
   content: Array<{ type: string; text: string }>;
   structuredContent?: any;
+  isError?: boolean;
 }> {
   const res = await mcpCall("tools/call", { name, arguments: args }, id, targetNest);
   expect(res.error).toBeUndefined();
@@ -660,5 +661,148 @@ describe("MCP tools/call — structuredContent", () => {
     const r = await callToolRaw("context_overview", {}, 720, sid);
     expect(r.content[0].text).toMatch(/^# Vault Overview\n/);
     expect(r.structuredContent).toBeUndefined();
+  });
+});
+
+// ─── addressing a node by id ──────────────────────────────────────────────
+//
+// `ctx` addresses nodes by id (`nodes/gtm/deals/win-loss-log`), never by
+// title. context_update and context_versions used to REQUIRE title and had no
+// id property at all, so `ctx update` / `ctx history` failed schema validation
+// before reaching a handler. Both now take id | title, resolved through the
+// same `resolveTargetNode` context_delete and context_move already use.
+
+describe("MCP tools/call — id or title addressing", () => {
+  let aid: string;
+
+  beforeAll(async () => {
+    const created = await jsonRequest(app, "POST", "/nests", {
+      name: "Addressing Nest",
+    });
+    aid = created.data.nest.id;
+    const seeded = await jsonRequest(app, "POST", `/nests/${aid}/nodes`, {
+      title: "Win Loss Log",
+      content: "Round one.",
+      folder: "gtm/deals",
+    });
+    expect(seeded.status).toBe(201);
+  });
+
+  it("context_update: by id, the way ctx addresses it", async () => {
+    const r = await callToolRaw(
+      "context_update",
+      { id: "nodes/gtm/deals/win-loss-log", content: "Round two." },
+      730,
+      aid,
+    );
+    expect(r.content).toEqual([
+      {
+        type: "text",
+        text: `Updated node: **Win Loss Log** — v${r.structuredContent.version}, status: ${r.structuredContent.status}`,
+      },
+    ]);
+    expect(r.structuredContent.id).toBe("nodes/gtm/deals/win-loss-log");
+    expect(r.isError).toBeUndefined();
+
+    const body = await callToolRaw(
+      "context_get",
+      { id: "nodes/gtm/deals/win-loss-log" },
+      731,
+      aid,
+    );
+    expect(body.structuredContent.body).toContain("Round two.");
+  });
+
+  it("context_update: by title, unchanged", async () => {
+    const r = await callToolRaw(
+      "context_update",
+      { title: "Win Loss Log", append: "Round three." },
+      732,
+      aid,
+    );
+    expect(r.content).toEqual([
+      {
+        type: "text",
+        text: `Updated node: **Win Loss Log** — v${r.structuredContent.version}, status: ${r.structuredContent.status}`,
+      },
+    ]);
+    expect(r.structuredContent.id).toBe("nodes/gtm/deals/win-loss-log");
+  });
+
+  it("context_versions: by id and by title reach the same history", async () => {
+    const byId = await callToolRaw(
+      "context_versions",
+      { id: "nodes/gtm/deals/win-loss-log" },
+      733,
+      aid,
+    );
+    // No args.title on an id-addressed call — the heading falls back to the
+    // resolved node's own title rather than rendering "undefined".
+    expect(byId.content[0].text).toMatch(/^# Version History: Win Loss Log\n/);
+    expect(byId.structuredContent.id).toBe("nodes/gtm/deals/win-loss-log");
+    expect(byId.structuredContent.versions.length).toBeGreaterThan(0);
+
+    const byTitle = await callToolRaw(
+      "context_versions",
+      { title: "Win Loss Log" },
+      734,
+      aid,
+    );
+    expect(byTitle.content).toEqual(byId.content);
+    expect(byTitle.structuredContent).toEqual(byId.structuredContent);
+
+    // Both sent: the id wins the resolution, so the heading must name the
+    // document it resolved, not the title that was ignored.
+    const both = await callToolRaw(
+      "context_versions",
+      { id: "nodes/gtm/deals/win-loss-log", title: "Some Other Doc" },
+      737,
+      aid,
+    );
+    expect(both.content).toEqual(byId.content);
+  });
+
+  it("a miss is machine-detectable: isError + {code, message}, prose unchanged", async () => {
+    const r = await callToolRaw(
+      "context_update",
+      { id: "nodes/does-not-exist", content: "x" },
+      735,
+      aid,
+    );
+    expect(r.content).toEqual([
+      { type: "text", text: "Node not found: nodes/does-not-exist" },
+    ]);
+    expect(r.isError).toBe(true);
+    expect(r.structuredContent).toEqual({
+      code: "DOCUMENT_NOT_FOUND",
+      message: "Node not found: nodes/does-not-exist",
+    });
+  });
+
+  it("an id cannot traverse out of the nest", async () => {
+    // readDocument is join(nestRoot, id + ".md") with no containment of its
+    // own, so a `../` id would edit another tenant's file. Refused as a miss.
+    const r = await callToolRaw(
+      "context_update",
+      { id: "../../etc/passwd", content: "x" },
+      736,
+      aid,
+    );
+    expect(r.content).toEqual([
+      { type: "text", text: "Node not found: ../../etc/passwd" },
+    ]);
+    expect(r.isError).toBe(true);
+  });
+
+  it("context_get: a miss is flagged too — the resolver throws, it never returns null", async () => {
+    const r = await callToolRaw("context_get", { title: "Ghost Doc" }, 738, aid);
+    expect(r.content).toEqual([
+      { type: "text", text: "Node not found: Ghost Doc" },
+    ]);
+    expect(r.isError).toBe(true);
+    expect(r.structuredContent).toEqual({
+      code: "DOCUMENT_NOT_FOUND",
+      message: "Node not found: Ghost Doc",
+    });
   });
 });

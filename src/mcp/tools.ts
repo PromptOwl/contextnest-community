@@ -36,6 +36,7 @@ import {
 import { deleteNest } from "../nests/service.js";
 import { listThreads } from "../annotations/service.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
 import { logTraceEvent } from "../telemetry/trace-log.js";
 import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
 
@@ -65,8 +66,28 @@ export function normalizeHops(raw: unknown): number {
  *
  * Only the eight operations `ctx` actually drives return the object form:
  * context_list / get / search / query / versions / create / update / delete.
+ *
+ * `isError` marks a denial or a not-found. Without it a refusal is a bare
+ * prose sentence with no signal at all — indistinguishable, to a machine
+ * caller, from a successful empty result ("denied" reads as "no documents").
+ * Set it via `toolError`, never by hand.
  */
-export type ToolResult = string | { text: string; data: unknown };
+export type ToolResult = string | { text: string; data: unknown; isError?: true };
+
+/**
+ * A denial / not-found from one of the eight converted tools.
+ *
+ * The prose is passed through UNCHANGED — `isError` is the only thing added,
+ * and `data` carries the engine's `{code, message}` error shape (the codes are
+ * `ERROR_CODES` in `@promptowl/contextnest-engine/api`) so `ctx` can map the
+ * result back to a typed engine error instead of string-matching the sentence.
+ */
+function toolError(
+  text: string,
+  code: "DOCUMENT_NOT_FOUND" | "DOCUMENT_ALREADY_EXISTS" | "UNAUTHORIZED_ACTION",
+): ToolResult {
+  return { text, isError: true, data: { code, message: text } };
+}
 
 /**
  * Tool return value → MCP CallToolResult. Used by both MCP endpoints
@@ -84,6 +105,7 @@ export function toCallToolResult(out: ToolResult) {
   return {
     content: [{ type: "text" as const, text: out.text }],
     structuredContent: out.data as Record<string, unknown>,
+    ...(out.isError ? { isError: true } : {}),
   };
 }
 
@@ -313,6 +335,11 @@ export const TOOL_DEFINITIONS = [
           type: "string",
           description: "Title of node to update (selects it; does not rename)",
         },
+        id: {
+          type: "string",
+          description:
+            'Node id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two nodes share a title or the title is unknown.',
+        },
         content: {
           type: "string",
           description: "New content (replaces)",
@@ -333,7 +360,10 @@ export const TOOL_DEFINITIONS = [
           description: "Why this changed — recorded in version history",
         },
       },
-      required: ["title"],
+      // Neither is required alone — one of them is (the engine catalog's
+      // `.refine(id || title)`, which JSON Schema can't express here).
+      // `title` was required, which made this tool unreachable for `ctx`:
+      // it addresses nodes by id and never sends a title.
     },
   },
   {
@@ -548,8 +578,13 @@ export const TOOL_DEFINITIONS = [
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Title of the node" },
+        id: {
+          type: "string",
+          description:
+            'Node id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two nodes share a title or the title is unknown.',
+        },
       },
-      required: ["title"],
+      // One of id or title — see context_update.
     },
   },
   {
@@ -696,15 +731,17 @@ export async function handleToolCall(
  * Resolve the node a title-or-id tool is aimed at. Returns the node, or the
  * message to hand back to the caller when it can't be resolved — the tools
  * here answer in prose, not exceptions, so a miss reads as an answer rather
- * than a JSON-RPC error. Shared by the id-rewriting tools (delete, move) so
- * both accept the same two ways of naming a document.
+ * than a JSON-RPC error. Shared by every node-addressing tool (delete, move,
+ * update, versions) so they all accept the same two ways of naming a document
+ * — which is also what the engine's operation catalog specifies (`id | title`,
+ * `api/index.js`), and what `ctx` sends: it addresses nodes by id.
  *
  * An ambiguous title REFUSES rather than picking one. Titles are not unique —
- * the same title in two folders is two different documents — and these tools
- * delete or relocate what they resolve. Guessing would mean an agent silently
- * destroying the wrong document with no error to notice and no way back.
- * context_update guesses because a wrong edit is recoverable from history;
- * a wrong delete is not.
+ * the same title in two folders is two different documents. Guessing would
+ * mean an agent silently acting on the wrong document with no error to notice.
+ * (context_update used to guess here, on the grounds that a wrong edit is
+ * recoverable from history. It now refuses like the rest: the message names
+ * the candidate ids, which is a better answer than a coin flip.)
  */
 async function resolveTargetNode(
   storage: NestStorage,
@@ -717,7 +754,14 @@ async function resolveTargetNode(
   // vault to find one the caller already named.
   if (args.id) {
     try {
-      return await storage.readDocument(args.id);
+      // SECURITY: readDocument is join(nestRoot, id + ".md") with NO
+      // containment, so an id is a filesystem path — `../otherNest/nodes/x`
+      // reads (and for the write tools below, edits or deletes) another
+      // tenant's file. REST funnels every :nodeId through this same guard in
+      // app.ts; MCP never did, so the id branch was uncontained for
+      // context_delete/context_move too. Inside the try on purpose: a bad id
+      // answers "Node not found" in prose like every other miss here.
+      return await storage.readDocument(assertSafeNodeId(args.id));
     } catch {
       return `Node not found: ${args.id}`;
     }
@@ -930,11 +974,25 @@ async function runTool(
           userEmail,
         );
       } catch {
-        return `Node not found: ${args.title || args.id}`;
+        // getNodeForCaller THROWS on a miss and on a denied id alike — both
+        // answer "Node not found" so probing ids can't map a governed nest.
+        // Flagging here is the only place it can be flagged: the call never
+        // returns a falsy node, so a post-call guard would be dead code.
+        return toolError(
+          `Node not found: ${args.title || args.id}`,
+          "DOCUMENT_NOT_FOUND",
+        );
       }
       const body = await resolveLlmBody(ctx, node);
       if (body === null) {
-        return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;
+        // Covers both halves of resolveLlmBody's null: the caller may not read
+        // this node, or it has no approved version. Either way the content is
+        // withheld — UNAUTHORIZED_ACTION is the catalog code for "refused",
+        // and telling the two apart would leak which one it was.
+        return toolError(
+          `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`,
+          "UNAUTHORIZED_ACTION",
+        );
       }
       const meta = [
         `**Title:** ${node.frontmatter.title}`,
@@ -1117,7 +1175,10 @@ async function runTool(
       // (the MCP transport is always POST), so this per-tool check is what
       // keeps creation locked to write+ collaborators and nest-scope editors.
       if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
-        return "You don't have permission to create documents in this nest.";
+        return toolError(
+          "You don't have permission to create documents in this nest.",
+          "UNAUTHORIZED_ACTION",
+        );
       }
       // Refuse a title already used ANYWHERE in the vault, not just in the
       // requested folder: every title-addressed tool here resolves by title, so
@@ -1132,7 +1193,10 @@ async function runTool(
           (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
         );
         if (twin) {
-          return `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`;
+          return toolError(
+            `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`,
+            "DOCUMENT_ALREADY_EXISTS",
+          );
         }
         const { node, version } = await createNode(
           nestId,
@@ -1161,17 +1225,22 @@ async function runTool(
     }
 
     case "context_update": {
-      // MCP resolves doc by title; service operates on id.
-      const docs = await storage.discoverDocuments();
-      const node = docs.find(
-        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
-      );
-      if (!node) return `Node not found: ${args.title}`;
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // What the caller called it. Mirrors resolveTargetNode's precedence: an
+      // id wins, so a title sent alongside one was ignored and must not be
+      // echoed back as if it named the document. Title-only echoes verbatim.
+      const label = args.id ? node.frontmatter.title : args.title;
       // Defense-in-depth: same per-node edit check REST resolves, so editing
-      // stays gated regardless of the /mcp middleware.
+      // stays gated regardless of the /mcp middleware. Unchanged by accepting
+      // an id: resolution reaches the same nest-scoped documents either way,
+      // and this gate runs on the resolved node, not on how it was named.
       const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
       if (!editCheck.allowed) {
-        return `You don't have permission to edit "${args.title}": ${editCheck.reason}`;
+        return toolError(
+          `You don't have permission to edit "${label}": ${editCheck.reason}`,
+          "UNAUTHORIZED_ACTION",
+        );
       }
       // updateNode replaces tags; this tool's contract is "Tags to add", so
       // merge against the current set here rather than in the service.
@@ -1204,7 +1273,7 @@ async function runTool(
 
     case "context_delete": {
       const node = await resolveTargetNode(storage, args);
-      if (typeof node === "string") return node;
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
       // PRIMARY write gate — the /mcp transport admits read-tier callers, so
       // this per-tool check is the only thing standing between a viewer and a
       // deleted document. Delete is at least as privileged as edit, so it
@@ -1212,7 +1281,10 @@ async function runTool(
       const deleteCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
       if (!deleteCheck.allowed) {
         // Dead end otherwise — point at the request path the UI offers here.
-        return `You don't have permission to delete "${node.frontmatter.title}": ${deleteCheck.reason}\n\nUse context_request_deletion to ask a nest owner/admin to delete it, with a reason.`;
+        return toolError(
+          `You don't have permission to delete "${node.frontmatter.title}": ${deleteCheck.reason}\n\nUse context_request_deletion to ask a nest owner/admin to delete it, with a reason.`,
+          "UNAUTHORIZED_ACTION",
+        );
       }
       await deleteNode(nestId, node.id, userEmail);
       return {
@@ -1587,18 +1659,17 @@ async function runTool(
     }
 
     case "context_versions": {
-      const docs = await storage.discoverDocuments();
-      const node = docs.find(
-        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
-      );
-      if (!node) return `Node not found: ${args.title}`;
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // See context_update: an id wins over a title sent with it.
+      const label = args.id ? node.frontmatter.title : args.title;
 
       const allVersions = await versions.getVersions(ctx.nestId, node.id);
       const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
 
       if (allVersions.length === 0) {
         return {
-          text: `No version history for "${args.title}".`,
+          text: `No version history for "${label}".`,
           data: { id: node.id, approved_version: approved ?? null, versions: [] },
         };
       }
@@ -1611,7 +1682,7 @@ async function runTool(
         .join("\n");
 
       return {
-        text: `# Version History: ${args.title}\n**Current:** v${allVersions[0]?.version || 0} | **AI-active:** ${approved ? `v${approved}` : "none"}\n\n${list}`,
+        text: `# Version History: ${label}\n**Current:** v${allVersions[0]?.version || 0} | **AI-active:** ${approved ? `v${approved}` : "none"}\n\n${list}`,
         // Five catalog fields have no equivalent here and are omitted rather
         // than faked: `keyframe_interval` and `keyframe` (content lives on
         // disk — there is no keyframe+diff model), `chain_hash` (integrity is

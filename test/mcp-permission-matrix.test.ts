@@ -242,6 +242,27 @@ describe("context_create — write gate per role", () => {
     });
     expect(text).toMatch(/don't have permission to create/i);
   });
+
+  // A denial used to be a bare prose sentence with isError unset — to a
+  // machine caller indistinguishable from a successful empty result. The
+  // prose is unchanged; isError and the {code, message} payload are the
+  // machine-readable half.
+  it("the denial is machine-detectable, prose byte-identical", async () => {
+    const denied = "You don't have permission to create documents in this nest.";
+    const { body } = await mcpCall(
+      reader.apiKey,
+      "tools/call",
+      { name: "context_create", arguments: { title: "Sneak Two", content: "nope" } },
+      101,
+    );
+    expect(body.error).toBeUndefined();
+    expect(body.result.content).toEqual([{ type: "text", text: denied }]);
+    expect(body.result.isError).toBe(true);
+    expect(body.result.structuredContent).toEqual({
+      code: "UNAUTHORIZED_ACTION",
+      message: denied,
+    });
+  });
 });
 
 describe("context_delete — write gate per role", () => {
