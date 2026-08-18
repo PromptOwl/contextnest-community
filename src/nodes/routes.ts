@@ -41,6 +41,7 @@ import {
   moveNode,
   deleteNode,
   listNodesForCaller,
+  getNodeForCaller,
   resolveAuthorship,
   toNodeResponse,
   bodyOnly,
@@ -91,11 +92,28 @@ function rawNodeBody(c: any, response: any, storedRaw: string | undefined) {
   });
 }
 
-// GET /nests/:nestId/nodes
+// GET /nests/:nestId/nodes?type=&tag=&status=&limit=
+//
+// The filters the service and the MCP tool have always supported were simply
+// never wired up here, so REST callers fetched the whole nest and filtered
+// client-side — paying the per-node governance enrichment for every document
+// they then threw away. `limit` in particular now cuts that work server-side.
 nodeRoutes.get("/", async (c) => {
   const nestId = c.req.param("nestId")!;
   const userId = c.get("userId");
-  const nodes = await listNodesForCaller(nestId, userId);
+  const q = c.req.query();
+  const limit = q.limit ? parseInt(q.limit, 10) : undefined;
+  const nodes = await listNodesForCaller(nestId, userId, {
+    ...(q.type ? { type: q.type } : {}),
+    ...(q.tag ? { tag: q.tag } : {}),
+    ...(q.status ? { status: q.status } : {}),
+    // Lets an owner preview what making the nest public would expose.
+    ...(q.approved_only === "1" || q.approved_only === "true"
+      ? { approvedOnly: true }
+      : {}),
+    // Ignore junk rather than 400 — a bad ?limit should not fail a listing.
+    ...(limit !== undefined && Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+  });
   return c.json({ count: nodes.length, nodes });
 });
 
@@ -322,23 +340,18 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
-  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
-    return c.json(
-      { error: "Access denied — no steward assignment for this node" },
-      403,
-    );
-  }
-
-  let node;
-  try {
-    // verifyChecksum=true triggers drift detection on read; on drift the
-    // engine returns the last-approved canonical body with pendingChange
-    // attached (hootie-inbox-spec §4.2). We then stage the drift as a
-    // suggestion so the next pendingChange lookup resolves a real id.
-    node = await storage.readDocument(nodeId, { verifyChecksum: true });
-  } catch {
-    throw new NotFoundError(`Node not found: ${nodeId}`);
-  }
+  // Shared read: resolves, gates, and asks the engine to verify the checksum so
+  // drift surfaces as pendingChange (last-approved content returned in place of
+  // the live bytes, hootie-inbox-spec §4.2). Staging the drift as a suggestion
+  // stays here — it is what makes the next pendingChange lookup resolve a real
+  // id, and only this surface does it.
+  let node = await getNodeForCaller(
+    nestId,
+    { id: nodeId },
+    userId,
+    userEmail,
+    { verifyChecksum: true },
+  );
   if (node.pendingChange) {
     try {
       await scanDocumentForDrift(nestId, nodeId, userEmail || "system:read");

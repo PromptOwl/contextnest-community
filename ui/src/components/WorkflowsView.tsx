@@ -241,6 +241,18 @@ function EdgesPanel({ nestId }: { nestId: string }) {
 
   const addRow = async () => {
     if (!nFrom.trim() || !nTo.trim() || !nType) return;
+    const dup = edges.find(
+      (e) =>
+        e.from_node === nFrom.trim() &&
+        e.to_node === nTo.trim() &&
+        e.type.name === nType,
+    );
+    if (dup) {
+      setError(
+        `${labelOf(dup.from_node)} → ${labelOf(dup.to_node)} is already connected with "${nType}".`,
+      );
+      return;
+    }
     setSaving(true);
     try {
       const condition =
@@ -1536,12 +1548,33 @@ function CanvasPanel({ nestId }: { nestId: string }) {
     return { x: side === "out" ? p.x + CARD_W : p.x, y: p.y + CARD_H / 2 };
   };
 
-  const wirePath = (from: string, to: string) => {
+  // `bow` pushes the curve's midpoint this many px off the straight run — how
+  // parallel edges (same pair, different type) stay individually readable
+  // instead of stacking into one wire with overprinted labels. Control points
+  // move 4/3 × bow because a cubic's midpoint travels 3/4 of that.
+  const wirePath = (from: string, to: string, bow = 0) => {
     const a = portOf(from, "out");
     const b = portOf(to, "in");
     const dx = Math.max(40, (b.x - a.x) / 2);
-    return `M${a.x},${a.y} C${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`;
+    const k = (bow * 4) / 3;
+    return `M${a.x},${a.y} C${a.x + dx},${a.y + k} ${b.x - dx},${b.y + k} ${b.x},${b.y}`;
   };
+
+  // Edge id → its bow, fanned symmetrically around the direct line.
+  const bowOf = new Map<string, number>();
+  {
+    const byPair = new Map<string, WorkflowEdge[]>();
+    for (const e of edges) {
+      const key = `${e.from_node} ${e.to_node}`;
+      const list = byPair.get(key) ?? [];
+      list.push(e);
+      byPair.set(key, list);
+    }
+    for (const list of byPair.values()) {
+      if (list.length < 2) continue;
+      list.forEach((e, i) => bowOf.set(e.id, (i - (list.length - 1) / 2) * 34));
+    }
+  }
 
   const edgeColor = (e: WorkflowEdge) =>
     e.type.color || (e.type.is_flow ? "#34a853" : "#94a3b8");
@@ -1569,6 +1602,22 @@ function CanvasPanel({ nestId }: { nestId: string }) {
 
   const saveEdge = async () => {
     if (!selEdge) return;
+    const self = edges.find((e) => e.id === selEdge);
+    const clash =
+      self &&
+      edges.find(
+        (e) =>
+          e.id !== selEdge &&
+          e.from_node === self.from_node &&
+          e.to_node === self.to_node &&
+          e.type.name === eType,
+      );
+    if (clash) {
+      setError(
+        `${labelOf(clash.from_node)} → ${labelOf(clash.to_node)} is already connected with "${eType}".`,
+      );
+      return;
+    }
     setSaving(true);
     try {
       await updateEdge(nestId, selEdge, {
@@ -1603,6 +1652,18 @@ function CanvasPanel({ nestId }: { nestId: string }) {
     if (from === to) return;
     const flowType = types.find((t) => t.is_flow)?.name ?? types[0]?.name;
     if (!flowType) return;
+    // Catch the duplicate here rather than on the server 409: the loaded edges
+    // answer it, and this side knows the document titles the canvas shows.
+    const dup = edges.find(
+      (e) => e.from_node === from && e.to_node === to && e.type.name === flowType,
+    );
+    if (dup) {
+      setError(
+        `${labelOf(from)} → ${labelOf(to)} is already connected with "${flowType}".`,
+      );
+      selectEdge(dup);
+      return;
+    }
     try {
       const created = await createEdge(nestId, {
         from_node: from,
@@ -1701,11 +1762,15 @@ function CanvasPanel({ nestId }: { nestId: string }) {
 
               {edges.map((e) => {
                 if (!placed.has(e.from_node) || !placed.has(e.to_node)) return null;
-                const d = wirePath(e.from_node, e.to_node);
+                const bow = bowOf.get(e.id) ?? 0;
+                const d = wirePath(e.from_node, e.to_node, bow);
                 const color = edgeColor(e);
                 const mid = {
                   x: (portOf(e.from_node, "out").x + portOf(e.to_node, "in").x) / 2,
-                  y: (portOf(e.from_node, "out").y + portOf(e.to_node, "in").y) / 2 - 7,
+                  y:
+                    (portOf(e.from_node, "out").y + portOf(e.to_node, "in").y) / 2 +
+                    bow -
+                    7,
                 };
                 let condText = "";
                 if (e.condition_mode === "nl" && e.condition) condText = `“${e.condition}”`;

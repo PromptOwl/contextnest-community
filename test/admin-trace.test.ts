@@ -94,15 +94,18 @@ describe("GET /admin/trace", () => {
       userId: user.userId,
       userEmail: user.email,
     } as any;
+    // context_search, because it still reads ctx.storage directly — which is
+    // what the injected throw above hooks. context_overview used to and no
+    // longer does; the tool here is only a vehicle for "a tool threw".
     await expect(
-      handleToolCall("context_overview", {}, throwingCtx),
+      handleToolCall("context_search", { query: "anything" }, throwingCtx),
     ).rejects.toThrow("boom");
     // Trace write is fire-and-forget — let the microtask/insert flush.
     await new Promise((r) => setTimeout(r, 100));
     const res = await jsonRequest(app, "GET", "/admin/trace?kind=mcp", undefined, admin.apiKey);
     const row = res.data.events.find((e: any) => e.nest_id === "throw-nest");
     expect(row).toBeTruthy();
-    expect(row.tool).toBe("context_overview");
+    expect(row.tool).toBe("context_search");
     expect(row.status).toBe(500);
   });
 

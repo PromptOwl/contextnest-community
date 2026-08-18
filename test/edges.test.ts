@@ -67,6 +67,29 @@ describe("edge creation + validation", () => {
     expect(res.data.edge.type.is_flow).toBe(true);
   });
 
+  it("rejects an identical (from, to, type) edge with a 409", async () => {
+    // alpha→beta/next was created above; the repeat would draw on top of it.
+    const dup = await mkEdge({
+      from_node: "nodes/alpha",
+      to_node: "nodes/beta",
+      type: "next",
+    });
+    expect(dup.status).toBe(409);
+    expect(dup.data.error).toContain("already exists");
+
+    // Same pair, different type is a distinct connection — still allowed.
+    const other = await mkEdge({
+      from_node: "nodes/alpha",
+      to_node: "nodes/beta",
+      type: "owned-by",
+    });
+    expect(other.status).toBe(201);
+    await jsonRequest(
+      app, "DELETE", `/nests/${nestId}/edges/${other.data.edge.id}`,
+      undefined, owner.apiKey,
+    );
+  });
+
   it("rejects unknown type and unknown nodes with 400s", async () => {
     const badType = await mkEdge({
       from_node: "nodes/alpha",

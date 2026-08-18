@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { LinearRouter } from "hono/router/linear-router";
 import { createMiddleware } from "hono/factory";
 import { cors } from "hono/cors";
+import { mergeFrameAncestors } from "./shared/artifact-sandbox.js";
 import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
@@ -16,6 +17,7 @@ import {
 import { listMyDrafts } from "./governance/version-service.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
+import { matchDocuments, toSearchHit } from "./nodes/search.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import {
   resolveStewardsForNode,
@@ -71,7 +73,7 @@ import {
   isServerAdminUserId,
   type NestPermission,
 } from "./shared/access.js";
-import { AppError } from "./shared/errors.js";
+import { AppError, ValidationError } from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
 import { verifySmtp } from "./notify/email.js";
 import { getDb } from "./db/client.js";
@@ -297,6 +299,23 @@ export function createApp(): Hono<AuthEnv> {
       ? cors({ origin: "*" })
       : cors({ origin: corsOrigins, credentials: true }),
   );
+
+  // Clickjacking guard — only the origins in config.FRAME_ANCESTORS may frame
+  // this server. CORS does not cover this: it governs who may *read* our
+  // responses, not who may *embed* us, so without this any site could iframe
+  // the UI invisibly and harvest a signed-in operator's clicks.
+  //
+  // Appended rather than assigned, because artifact responses already ship
+  // their own strict CSP (see shared/artifact-sandbox.ts) — overwriting it
+  // would drop the sandbox that keeps attacker-authored artifact HTML off the
+  // session. Skipped entirely when a handler set frame-ancestors itself.
+  const frameAncestors = `frame-ancestors ${config.FRAME_ANCESTORS}`;
+  app.use("*", async (c, next) => {
+    await next();
+    const existing = c.res.headers.get("Content-Security-Policy");
+    const merged = mergeFrameAncestors(existing, frameAncestors);
+    if (merged !== existing) c.header("Content-Security-Policy", merged);
+  });
 
   // Request body size cap — prevents DoS via giant POST payloads before
   // a handler ever gets to parse JSON. Only applies when Content-Length
@@ -1366,6 +1385,62 @@ export function createApp(): Hono<AuthEnv> {
     });
   });
 
+  app.use("/search", flexAuthMiddleware);
+  // GET /search?q=&limit= — the same full-text match as GET /nests/:id/search,
+  // run across every nest the caller can see. Without it a document can only be
+  // found by someone who already knows which nest holds it.
+  app.get("/search", async (c) => {
+    const q = (c.req.query("q") || "").trim();
+    if (!q) throw new ValidationError("q query parameter is required");
+    const limit = Math.min(Math.max(Number(c.req.query("limit")) || 20, 1), 50);
+
+    const userId = c.get("userId");
+    const userEmail = await resolveCallerEmail(userId);
+
+    type SearchHit = ReturnType<typeof toSearchHit> & {
+      nest_id: string;
+      nest_name: string;
+    };
+
+    // Fan out: on a cold discovery cache each nest costs a filesystem (or, on a
+    // bucket-mounted deploy, a network) walk, and serially that adds up with
+    // the caller's nest count. Results stay in nest order, so the cap below is
+    // still deterministic.
+    // ponytail: unbounded fan-out — add a concurrency limit if a caller ever
+    // holds enough nests for the parallel walks to matter.
+    const perNest = await Promise.all(
+      (await listVisibleNests(userId)).map(async (nest): Promise<SearchHit[]> => {
+        try {
+          const { storage } = await engineCache.get(nest.id);
+          const matches = matchDocuments(await storage.discoverDocuments(), q);
+          if (matches.length === 0) return [];
+          // Per-nest stewardship filtering, same call the nest-scoped route
+          // makes — a hit never leaks a doc the caller couldn't open directly.
+          const accessible = await filterAccessible(nest.id, userId, userEmail, matches);
+          return accessible.map((n) => ({
+            ...toSearchHit(n),
+            nest_id: nest.id,
+            nest_name: nest.name ?? nest.id,
+          }));
+        } catch (e) {
+          // One broken nest shouldn't fail the whole search — but log it, or a
+          // nest that stops being searchable does so with no signal at all.
+          console.error("[search] skipped nest", nest.id, e);
+          return [];
+        }
+      }),
+    );
+    const hits = perNest.flat();
+
+    // Scan every nest, then cap: truncating per nest would let the first nests
+    // in creation order crowd out better matches elsewhere.
+    return c.json({
+      query: q,
+      count: hits.length,
+      nodes: hits.slice(0, limit),
+    });
+  });
+
   // === Runner-facing run detail routes (turing) ===
   app.use("/runs/*", flexAuthMiddleware);
   app.route("/runs", runDetailRoutes);
@@ -1868,6 +1943,14 @@ export function createApp(): Hono<AuthEnv> {
 
   app.route("/nests", nestsApp);
 
+  // /.well-known/* — discovery namespace, never an SPA route. Must 404 ahead
+  // of the catch-all below: OAuth/OIDC discovery clients JSON.parse the body
+  // unconditionally, so answering with the index.html shell crashes them with
+  // `Unexpected token '<', "<!DOCTYPE "...` instead of falling back cleanly.
+  // This server authenticates with Bearer cnst_ keys, not OAuth — no metadata
+  // to serve, so 404 is the correct answer.
+  app.all("/.well-known/*", (c) => c.json({ error: "Not found" }, 404));
+
   // ─── Dashboard UI (static files served from the bundled dist/web3 dir) ──
   // Hashed asset files are content-addressed — safe to cache forever.
   app.use(
@@ -1881,14 +1964,38 @@ export function createApp(): Hono<AuthEnv> {
   // index.html is NOT hashed and points at the current bundle — it must never
   // be cached, or a browser keeps loading a stale bundle after every deploy
   // (the workflow-plane UI "not showing up" bug). Always revalidate.
+  //
+  // The shell is served ONLY to browser document navigations. Anything else
+  // reaching here is a miss, not an SPA route: a mistyped API path, a discovery
+  // fetch, curl, or an /assets/* file that serveStatic above couldn't find and
+  // passed through. Those callers parse what they get, so a 200 HTML page turns
+  // a plain 404 into a confusing failure elsewhere (JSON.parse on "<!DOCTYPE",
+  // or a <script> tag executing the shell). Give them JSON 404 instead.
+  //
+  // Sec-Fetch-Mode is sent by every current browser on navigation; the Accept
+  // sniff is the fallback for older ones. Non-browser clients send neither
+  // (the MCP SDK's discovery fetch sets no Accept header at all).
+  const isDocumentNavigation = (c: { req: { header(n: string): string | undefined } }) =>
+    c.req.header("Sec-Fetch-Mode") === "navigate" ||
+    (c.req.header("Accept") || "").includes("text/html");
+
   app.get(
     "*",
+    async (c, next) => {
+      if (isDocumentNavigation(c)) return next();
+      return c.json({ error: "Not found" }, 404);
+    },
     serveStatic({
       root: UI_DIR_REL,
       path: "index.html",
       onFound: (_p, c) => c.header("Cache-Control", "no-cache"),
     }),
   );
+
+  // Non-GET requests that matched no route (POST to a mistyped endpoint, the
+  // OAuth /register probe) skip the catch-all above and land on Hono's default
+  // 404, which is plain text. Same reasoning — answer in JSON.
+  app.notFound((c) => c.json({ error: "Not found" }, 404));
 
   // Error handler — translate common low-level errors into messages
   // the UI can show as-is so users don't see "Internal server error"

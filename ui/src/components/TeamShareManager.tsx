@@ -18,6 +18,8 @@ import {
 import { Users, Trash2, Loader2, AlertCircle, Share2 } from "lucide-react";
 import { toast } from "sonner";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import type { Team, TeamMember } from "../lib/api";
 
 interface SharedTeam {
@@ -36,6 +38,7 @@ export function TeamShareManager({ nestId, onChanged }: TeamShareManagerProps) {
   const [myTeams, setMyTeams] = useState<Team[]>([]);
   const [selected, setSelected] = useState<string>("");
   const [loading, setLoading] = useState(true);
+  const qc = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,10 +47,10 @@ export function TeamShareManager({ nestId, onChanged }: TeamShareManagerProps) {
     setError(null);
     try {
       const [nestTeams, owned] = await Promise.all([
-        api.listNestTeams(nestId),
+        qc.fetchQuery(reads.nestTeams(nestId)),
         // The caller may not own any teams; a failure here shouldn't blank the
         // shared list, so swallow it into an empty picker.
-        api.listTeams().catch(() => ({ teams: [] as Team[] })),
+        qc.fetchQuery(reads.teamList()).catch(() => ({ teams: [] as Team[] })),
       ]);
       setShared(nestTeams.teams);
       setMyTeams(owned.teams);

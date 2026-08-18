@@ -48,7 +48,17 @@ async function request<T = any>(
 
   // Some endpoints return empty body (e.g. 204 No Content).
   const text = await res.text();
-  const data = text ? (JSON.parse(text) as any) : ({} as any);
+  // Infrastructure between the browser and the app answers in plain text, not
+  // JSON — Cloud Run's proxy returns a bare "upstream request timeout" on 504,
+  // and load balancers return HTML error pages. Parsing those unguarded threw a
+  // SyntaxError before the !res.ok branch below could report the real status,
+  // so every proxy-level failure surfaced to the user as a JSON parse error.
+  let data: any;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { error: text.slice(0, 200) };
+  }
 
   if (!res.ok) {
     // 401 = the server says we're not logged in. Drop any legacy
@@ -68,103 +78,47 @@ async function request<T = any>(
     err.body = data;
     throw err;
   }
-  // A successful mutation under /nests/{id} changes what the cached structural
-  // reads (node list, nest, settings) would return — drop that nest's read
-  // cache so approval/edit state is never served stale. See cachedRead below.
+  // Every successful mutation invalidates the cached reads its result affects.
+  // Routing that off the request path means a new endpoint is covered the day
+  // it is added, rather than the day someone remembers to register it — the
+  // query layer owns the path-to-key mapping (see invalidateForPath there).
   const method = (options.method ?? "GET").toUpperCase();
-  if (method !== "GET") {
-    const m = path.match(/^\/nests\/([^/?]+)/);
-    if (m) invalidateNestReads(m[1]);
-    // Creating / deleting / renaming a nest changes the nests list itself.
-    if (path === "/nests" || /^\/nests\/[^/?]+$/.test(path)) {
-      invalidateNestsList();
-    }
-  }
+  if (method !== "GET") readCacheHooks?.invalidatePath(path);
   return data as T;
 }
 
-// ─── Client read cache (structural, slow-changing GETs) ──────────────────
-// The node list / nest / settings get re-fetched on every navigation, which
-// makes the app feel like it "reloads forever" on a large nest. Cache just
-// those structural reads in memory, stale-while-revalidate: a fresh entry is
-// served instantly; an expired entry still paints instantly while a background
-// fetch refreshes it. Any mutation invalidates the nest's reads (handled in
-// request() above) so approval/edit state is never served stale — an
-// invalidated key has no entry at all and the next read blocks on the network.
-// Live document bodies, search, and feeds are intentionally NOT cached — they
-// need freshness.
-const READ_TTL_MS = 30_000;
-type CacheEntry = { data: unknown; ts: number; inflight?: Promise<unknown> };
-const readCache = new Map<string, CacheEntry>();
-// Bumped on every invalidation. A read in flight when a mutation lands must
-// not write its (pre-mutation) response back into the cache — it snapshots
-// this counter at start and only caches if unchanged on completion.
-let cacheGen = 0;
-
-async function cachedRead<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
-  const hit = readCache.get(key);
-  if (hit?.inflight) {
-    // Revalidation already underway — paint stale data if we have any,
-    // otherwise join the in-flight fetch (dedupe).
-    if (hit.data !== undefined) return hit.data as T;
-    return hit.inflight as Promise<T>;
-  }
-  if (hit && Date.now() - hit.ts < READ_TTL_MS) return hit.data as T; // fresh → instant
-  const gen = cacheGen;
-  const inflight = fetcher()
-    .then((data) => {
-      // An invalidation raced this fetch → the response may predate the
-      // mutation; don't cache it (the entry was already dropped).
-      if (gen === cacheGen) readCache.set(key, { data, ts: Date.now() });
-      return data;
-    })
-    .catch((err) => {
-      // Drop only our in-flight marker; keep any prior good value.
-      const cur = readCache.get(key);
-      if (cur?.inflight === inflight) {
-        if (cur.data !== undefined) readCache.set(key, { data: cur.data, ts: cur.ts });
-        else readCache.delete(key);
-      }
-      throw err;
-    });
-  readCache.set(key, { data: hit?.data, ts: hit?.ts ?? 0, inflight });
-  if (hit?.data !== undefined) {
-    // Stale-while-revalidate: serve the expired value now; the fetch above
-    // refreshes in the background (its failure only means the next read
-    // retries, so swallow it here — the caller already has data).
-    void (inflight as Promise<unknown>).catch(() => {});
-    return hit.data as T;
-  }
-  return inflight as Promise<T>;
+// ─── Read-cache invalidation ─────────────────────────────────────────────
+// Reads are cached by the query layer in ./queries, which owns keys, staleness
+// and garbage collection. This module keeps the invalidation hooks, because the
+// events that make data stale are mutations — and every mutation goes through
+// request() below. The dependency only points one way (queries imports api), so
+// the query client registers its invalidators here at startup rather than being
+// imported.
+interface ReadCacheHooks {
+  /** Drop every cached read. For identity changes, where nothing may carry over. */
+  clear(): void;
+  /** Mark stale whatever a mutation to this request path could have changed. */
+  invalidatePath(path: string): void;
 }
 
-/** Drop cached structural reads for a nest (or all when no id). Called
- *  automatically on any successful mutation under /nests/{id} in request();
- *  exported for manual busts and tests. */
+let readCacheHooks: ReadCacheHooks | null = null;
+
+/** Called once from the app shell, after the query client exists. */
+export function registerReadCache(hooks: ReadCacheHooks): void {
+  readCacheHooks = hooks;
+}
+
+/** Drop cached reads for a nest, or ALL cached reads when no id is given.
+ *  Called automatically on any successful mutation under /nests/{id} in
+ *  request(); called with no argument on login, logout and user switch, where
+ *  a permission-filtered response from the previous identity must never be
+ *  served to the next one. */
 export function invalidateNestReads(nestId?: string): void {
-  cacheGen++; // tell in-flight reads not to cache their (pre-mutation) response
   if (!nestId) {
-    readCache.clear();
+    readCacheHooks?.clear();
     return;
   }
-  const prefix = `/nests/${nestId}`;
-  for (const k of readCache.keys()) {
-    // Exact key or a sub-path — but not a different nest whose id merely
-    // shares this prefix (nest-1 must not clear nest-12).
-    if (k === prefix || k.startsWith(`${prefix}/`)) readCache.delete(k);
-  }
-  // Node-level mutations change per-nest metadata the list rows carry
-  // (document_count, updated_at) — the Dashboard derives its totals from
-  // them, so the list must not survive any nest-scoped mutation either.
-  readCache.delete("/nests");
-}
-
-/** Drop the cached nests list. Needed by mutations that create a nest but
- *  don't route through request()'s /nests/{id} hook (streaming import,
- *  unsynced-folder sync). */
-function invalidateNestsList(): void {
-  cacheGen++;
-  readCache.delete("/nests");
+  readCacheHooks?.invalidatePath(`/nests/${nestId}`);
 }
 
 /** Error thrown by `request` on a non-2xx response, with the parsed body. */
@@ -563,9 +517,7 @@ export interface NestSettings {
 }
 
 export async function getNestSettings(nestId: string) {
-  return cachedRead(`/nests/${nestId}/settings`, () =>
-    request<NestSettings>(`/nests/${nestId}/settings`),
-  );
+  return request<NestSettings>(`/nests/${nestId}/settings`);
 }
 
 export async function updateNestSettings(
@@ -603,7 +555,7 @@ export function isPrimeNode(
 // ─── Nests ──────────────────────────────────────────────────────────────
 
 export async function listNests() {
-  return cachedRead("/nests", () => request<{ nests: any[] }>("/nests"));
+  return request<{ nests: any[] }>("/nests");
 }
 
 export async function createNest(name: string, description?: string) {
@@ -633,58 +585,92 @@ export interface ImportedFile {
   content: string;
 }
 
+/** Upload budget per import request. A whole folder in one body hit proxy
+ *  request-size limits (and gave no usable error when it did); ~4MB chunks stay
+ *  well under every hop's ceiling and each one reports its own HTTP status. */
+const IMPORT_CHUNK_BYTES = 4 * 1024 * 1024;
+
 /** Import a folder the user picked in their browser. The browser reads the
  *  folder and uploads each file; the server writes them into the workspace.
  *
- *  When `onProgress` is supplied we hit the `?stream=1` endpoint, which streams
- *  NDJSON progress lines so the caller can render a real progress bar; without
- *  it, the original single JSON response is used. */
+ *  Uploaded in bounded chunks over plain JSON requests, NOT as one body and
+ *  not over an NDJSON stream. The stream had already committed HTTP 200 before
+ *  the import ran, so every failure surfaced as a bare "Import failed" with the
+ *  cause stuck in the server log — and a buffering proxy ate the progress lines
+ *  that were its only reason to exist. Each chunk here fails with a real status
+ *  and a real message.
+ *
+ *  `onProgress` reports files uploaded; reaching `done === total` means the
+ *  upload finished and the server is registering documents (one final call,
+ *  no per-document progress). */
 export async function importNest(
   name: string,
   files: ImportedFile[],
   onProgress?: (done: number, total: number) => void,
-): Promise<{ nest: any; documents: number }> {
-  if (!onProgress) {
-    return request<{ nest: any; documents: number }>("/nests/import", {
-      method: "POST",
-      body: JSON.stringify({ name, files }),
-    });
-  }
-
-  const res = await fetch(`${API_BASE}/nests/import?stream=1`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, files }),
-    credentials: "include",
-  });
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "");
-    throw new Error(text || `Import failed: ${res.status}`);
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  let result: { nest: any; documents: number } | null = null;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line) continue;
-      const msg = JSON.parse(line);
-      if (msg.error) throw new Error(msg.error);
-      if (msg.phase === "register") onProgress(msg.done, msg.total);
-      if (msg.complete) result = { nest: msg.nest, documents: msg.documents };
+): Promise<{ nest: any; documents: number; rejected: string[] }> {
+  // Measured in UTF-8 bytes, which is what actually travels. `String.length`
+  // counts UTF-16 code units: a CJK document encodes to roughly three bytes per
+  // counted character, so sizing by length would build a chunk several times
+  // over budget and walk straight back into the request-size limit this
+  // batching exists to avoid.
+  const encoder = new TextEncoder();
+  const chunks: ImportedFile[][] = [];
+  let cur: ImportedFile[] = [];
+  let curBytes = 0;
+  for (const f of files) {
+    const size = encoder.encode(f.path).length + encoder.encode(f.content ?? "").length;
+    // A single file over budget still goes alone rather than being split.
+    if (cur.length && curBytes + size > IMPORT_CHUNK_BYTES) {
+      chunks.push(cur);
+      cur = [];
+      curBytes = 0;
     }
+    cur.push(f);
+    curBytes += size;
   }
-  if (!result) throw new Error("Import failed");
-  // Streaming path uses raw fetch, so request()'s invalidation hook never ran.
-  invalidateNestsList();
-  return result;
+  if (cur.length || !chunks.length) chunks.push(cur);
+
+  onProgress?.(0, files.length);
+  // Files the server refused (an unsafe path), gathered across every chunk so
+  // the caller can report a partial import honestly instead of a clean one.
+  const rejected: string[] = [];
+  const first = await request<{ nest: any; documents?: number; rejected?: string[] }>(
+    "/nests/import",
+    {
+      method: "POST",
+      body: JSON.stringify({ name, files: chunks[0], partial: chunks.length > 1 }),
+    },
+  );
+  rejected.push(...(first.rejected ?? []));
+  let done = chunks[0].length;
+  onProgress?.(done, files.length);
+  // Small folder — the server already registered it in that one call.
+  if (chunks.length === 1) {
+    return { nest: first.nest, documents: first.documents ?? 0, rejected };
+  }
+
+  const nestId = first.nest.id;
+  try {
+    for (const chunk of chunks.slice(1)) {
+      const res = await request<{ rejected?: string[] }>("/nests/import", {
+        method: "POST",
+        body: JSON.stringify({ nestId, files: chunk }),
+      });
+      rejected.push(...(res.rejected ?? []));
+      done += chunk.length;
+      onProgress?.(done, files.length);
+    }
+    const final = await request<{ nest: any; documents: number }>("/nests/import", {
+      method: "POST",
+      body: JSON.stringify({ nestId, finalize: true }),
+    });
+    return { ...final, rejected };
+  } catch (err) {
+    // A half-uploaded nest is worse than none — it lists as a real nest with
+    // silently missing documents. Drop it so a retry starts clean.
+    await deleteNest(nestId).catch(() => {});
+    throw err;
+  }
 }
 
 /** A folder under DATA_ROOT that has not been converted to a nest yet. */
@@ -702,14 +688,13 @@ export async function listUnsyncedFolders() {
 }
 
 export async function syncUnsyncedFolder(name: string) {
-  const out = await request<{ nest: any; documents: number }>("/nests/unsynced/sync", {
+  // request() invalidates the nests list and the unsynced-folder list on its
+  // own — "unsynced" is not a nest id, so the path falls to the generic /nests
+  // rule (see invalidateForPath).
+  return request<{ nest: any; documents: number }>("/nests/unsynced/sync", {
     method: "POST",
     body: JSON.stringify({ name }),
   });
-  // Two-segment path doesn't match request()'s /nests/{id} list hook, but this
-  // creates a nest — bust the list explicitly.
-  invalidateNestsList();
-  return out;
 }
 
 export async function deleteUnsyncedFolder(name: string) {
@@ -730,16 +715,14 @@ export async function setNestVisibility(
 }
 
 export async function getNest(nestId: string) {
-  return cachedRead(`/nests/${nestId}`, () =>
-    request<{
-      nest: { id: string; name: string; visibility: "private" | "public" };
-      permission: string;
-      // Caller's merged effective roles (collaborator + steward), nest-wide.
-      roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
-      // Caller's own steward rows (scoped). Full roster is admin-only.
-      myStewards?: any[];
-    }>(`/nests/${nestId}`),
-  );
+  return request<{
+    nest: { id: string; name: string; visibility: "private" | "public" };
+    permission: string;
+    // Caller's merged effective roles (collaborator + steward), nest-wide.
+    roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;
+    // Caller's own steward rows (scoped). Full roster is admin-only.
+    myStewards?: any[];
+  }>(`/nests/${nestId}`);
 }
 
 // ─── Glossary definitions ──────────────────────────────────────────────
@@ -804,9 +787,7 @@ export async function uploadAsset(nestId: string, file: File) {
 }
 
 export async function listNodes(nestId: string) {
-  return cachedRead(`/nests/${nestId}/nodes`, () =>
-    request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`),
-  );
+  return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
 }
 
 /** Per-node comment (annotation thread) counts for sorting the document list. */
@@ -884,6 +865,26 @@ export async function moveNode(nestId: string, nodeId: string, folder: string) {
 export async function searchNodes(nestId: string, query: string) {
   return request<{ count: number; nodes: any[] }>(
     `/nests/${nestId}/search?q=${encodeURIComponent(query)}`,
+  );
+}
+
+/** One hit from the cross-nest search — a node plus the nest it lives in. */
+export interface GlobalSearchHit {
+  id: string;
+  title: string;
+  type: string;
+  tags: string[];
+  snippet: string;
+  nest_id: string;
+  nest_name: string;
+}
+
+/** Same full-text match as searchNodes, run across every nest the caller can
+ *  see — so a document can be found without knowing which nest holds it.
+ *  `count` is everything found; `nodes` is capped at `limit`. */
+export async function searchAllNests(query: string, limit = 20) {
+  return request<{ query: string; count: number; nodes: GlobalSearchHit[] }>(
+    `/search?q=${encodeURIComponent(query)}&limit=${limit}`,
   );
 }
 
@@ -1211,6 +1212,8 @@ export async function getNodeVersions(nestId: string, nodeId: string) {
     versions: any[];
     approvedVersion: number | null;
     currentVersion: number;
+    /** Verdicts on out-of-band edits — a rejection commits no version. */
+    externalEditVerdicts?: ExternalEditVerdict[];
   }>(`/nests/${nestId}/nodes/${nodeId}/versions`);
 }
 
@@ -1482,6 +1485,16 @@ export interface PendingChange {
   detected_at: string;
   source: string;
   proposed_hash: string;
+}
+
+/** A resolved external edit, from the engine's chain-event log. */
+export interface ExternalEditVerdict {
+  suggestion_id: string;
+  status: "approved" | "rejected";
+  actor: string;
+  at: string;
+  note?: string;
+  source?: string;
 }
 
 export async function listExternalEdits(nestId: string, refresh = false) {

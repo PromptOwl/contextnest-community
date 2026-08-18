@@ -194,7 +194,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import * as api from "../../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../../lib/queries";
 import { WikiLink, clearWikiExistsCache } from "./extensions/WikiLink";
 import { CodeBlock } from "./extensions/CodeBlock";
 import { tableExtensions } from "./extensions/Table";
@@ -274,6 +275,7 @@ export const MarkdownEditor = forwardRef<
   // flips the doc to read-only — gives the user a true preview of what
   // a reader will see without having to leave the editor.
   const [previewing, setPreviewing] = useState(false);
+  const qc = useQueryClient();
   const effectiveEditable = editable && !previewing;
 
   // `[[` autocomplete state. Opens when the user types an unclosed
@@ -449,7 +451,7 @@ export const MarkdownEditor = forwardRef<
           ? async (target) => {
               // Match target as id, title, or slug.
               try {
-                const { nodes } = await api.listNodes(nestId);
+                const { nodes } = await qc.fetchQuery(reads.nodes(nestId));
                 const list = nodes as Array<{ id: string; title: string }>;
                 const lower = target.toLowerCase();
                 const bareSlug = slugFromNodeId(target).toLowerCase();
@@ -697,7 +699,7 @@ export const MarkdownEditor = forwardRef<
     let cancelled = false;
     (async () => {
       try {
-        const res = await api.listNodes(nestId);
+        const res = await qc.fetchQuery(reads.nodes(nestId));
         if (cancelled) return;
         wikiNodesRef.current =
           (res.nodes as Array<{ id: string; title: string }>) || [];
@@ -857,7 +859,13 @@ export const MarkdownEditor = forwardRef<
           return;
         }
         try {
-          const { node } = await api.getNode(nestId, id);
+          // A hover preview, not an edit: overriding the document staleness
+          // (0, so an edit always starts from server truth) lets re-hovering
+          // the same link read from cache instead of refetching the body.
+          const { node } = await qc.fetchQuery({
+            ...reads.node(nestId, id),
+            staleTime: 30_000,
+          });
           const content = ((node?.content as string) || "")
             .replace(/```[\s\S]*?```/g, "")
             .replace(/[#>*`_~|-]/g, "")

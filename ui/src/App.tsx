@@ -11,7 +11,10 @@ import { WorkflowsView } from "./components/WorkflowsView";
 import { GuidePage } from "./components/GuidePage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
-import { QuickOpen } from "./components/QuickOpen";
+import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "./lib/queries";
+import { ANON_USER_ID } from "./lib/constants";
 import { deriveNestCaps } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText } from "lucide-react";
@@ -240,7 +243,41 @@ export default function App() {
 
   const requestLogout = useCallback(() => setLogoutConfirm(true), []);
 
+  const qc = useQueryClient();
+  // A search hit names its nest but says nothing about the caller's standing in
+  // it, which both the nest and document views need. Read that off the cached
+  // nest list (already loaded by the dashboard behind the palette) rather than
+  // shipping permission reasoning through the search response.
+  const openSearchHit = useCallback(
+    async (result: QuickOpenResult) => {
+      const list = await qc.fetchQuery(reads.nestList()).catch(() => null);
+      const nestId = result.kind === "nest" ? result.id : result.nest_id!;
+      const nest = (list as any)?.nests?.find((n: any) => n.id === nestId);
+      const caps = {
+        isOwner: nest?.is_owner ?? false,
+        isAnonOwned: nest?.user_id === ANON_USER_ID,
+      };
+      const nestName = result.kind === "nest" ? result.title : result.nest_name!;
+      setView(
+        result.kind === "nest"
+          ? { page: "nest", nestId, nestName, ...caps }
+          : { page: "document", nestId, nestName, nodeId: result.id, ...caps },
+      );
+    },
+    [qc],
+  );
+
+  // Only bound where QuickOpen can actually render — inside a nest (scoped to
+  // it) or on the dashboard (across every nest). Anywhere else the shortcut
+  // used to flip the flag with nothing mounted to show it, so the panel sprang
+  // open on the next nest you entered — hence the reset on leaving too.
+  const canQuickOpen =
+    view.page === "nest" || view.page === "document" || view.page === "dashboard";
   useEffect(() => {
+    if (!canQuickOpen) {
+      setShowQuickOpen(false);
+      return;
+    }
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -249,7 +286,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [canQuickOpen]);
 
   const confirmLogout = useCallback(async () => {
     setLogoutPending(true);
@@ -683,6 +720,17 @@ export default function App() {
             }}
           />
         )}
+
+      {/* Dashboard palette: no nestId, so it searches every nest. */}
+      {showQuickOpen && view.page === "dashboard" && (
+        <QuickOpen
+          onClose={() => setShowQuickOpen(false)}
+          onSelect={(_id, result) => {
+            setShowQuickOpen(false);
+            void openSearchHit(result);
+          }}
+        />
+      )}
     </>
   );
 
@@ -696,6 +744,11 @@ export default function App() {
     );
   }
 
+  // Board columns are fixed-width and scroll sideways, so the 6xl shell forces
+  // horizontal scrolling long before the viewport runs out. Widen the whole
+  // shell (header, tabs, main, footer) on that page so they stay aligned.
+  const shellWidth = view.page === "board" ? "max-w-[1800px]" : "max-w-6xl";
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -703,7 +756,7 @@ export default function App() {
         {/* The divider sits under the top row, not under the tabs — the tab
             row reads as part of the page below it, not a second bar. */}
         <div className="border-b border-border">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+        <div className={`${shellWidth} mx-auto px-4 py-3 flex items-center justify-between`}>
           <button
             onClick={() => setView({ page: "dashboard" })}
             className="flex items-center gap-2 hover:opacity-80"
@@ -803,7 +856,7 @@ export default function App() {
             Nest context is read straight off the view: every page in
             NEST_VIEWS carries the same nestId/nestName/isOwner/isAnonOwned. */}
         {isNestScoped(view) && (
-          <div className="max-w-6xl mx-auto px-4 py-2 overflow-x-auto">
+          <div className={`${shellWidth} mx-auto px-4 py-2 overflow-x-auto`}>
             <Tabs
               value={view.page}
               onValueChange={(page) =>
@@ -840,9 +893,10 @@ export default function App() {
       {/* Content */}
       {/* <main> owns page padding for every view — page roots must not add
           their own md:py-*, or one section sits lower than the next. */}
-      <main className="max-w-6xl mx-auto px-4 py-4">
+      <main className={`${shellWidth} mx-auto px-4 py-4`}>
         {view.page === "dashboard" && (
           <Dashboard
+            onOpenSearch={() => setShowQuickOpen(true)}
             onSelectNest={(id, name, isOwner, isAnonOwned) =>
               setView({
                 page: "nest",
@@ -1119,7 +1173,7 @@ export default function App() {
         )}
       </main>
 
-      <footer className="max-w-6xl mx-auto px-4 py-4 text-xs text-muted-foreground text-center">
+      <footer className={`${shellWidth} mx-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
         ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
       </footer>
 

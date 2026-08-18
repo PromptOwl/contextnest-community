@@ -1,12 +1,13 @@
-import { readdirSync, readFileSync, rmSync, statSync, type Dirent } from "fs";
+import { readdirSync, readFileSync, statSync, type Dirent } from "fs";
 import { join, relative, resolve } from "path";
 import { config } from "../config.js";
 import { nestStorageRoot } from "../shared/paths.js";
 import { ValidationError, NotFoundError } from "../shared/errors.js";
-import { importNest, uniqueNestName } from "./service.js";
-import { registerImportedDocuments } from "../nodes/service.js";
+import { importNest, uniqueNestName, deleteNest } from "./service.js";
+import { registerImportedDocuments, stageImportedFiles } from "../nodes/service.js";
 import type { ImportedFile } from "../fs/vault-import.js";
 import type { Nest } from "../shared/types.js";
+import { rm } from "fs/promises";
 
 /**
  * A folder under DATA_ROOT that isn't a nest yet — usually dropped in by the
@@ -254,11 +255,22 @@ export async function syncUnsyncedFolder(
       `[unsynced] name "${baseName}" already in use, using "${nestName}" instead`,
     );
   }
-  const nest = await importNest(userId, nestName, files);
+  const nest = await importNest(userId, nestName);
   console.log(
     `[unsynced] nest created id=${nest.id} name="${nest.name}" from folder="${folderName}"`,
   );
-  const documents = await registerImportedDocuments(nest.id, callerEmail);
+  // The nest row now exists before its content does, so a failure past this
+  // point would strand an empty nest on the dashboard. Registration throws on a
+  // failed vault scan (it used to swallow it and report zero documents), so
+  // that is reachable — take the nest back down and let the caller see why.
+  let documents: number;
+  try {
+    await stageImportedFiles(nest.id, files, callerEmail);
+    documents = await registerImportedDocuments(nest.id, callerEmail);
+  } catch (err) {
+    await deleteNest(nest.id).catch(() => {});
+    throw err;
+  }
   console.log(
     `[unsynced] registered ${documents} document(s) for nest ${nest.id}`,
   );
@@ -267,7 +279,7 @@ export async function syncUnsyncedFolder(
   // failure here is non-fatal — the nest is fully built, an orphan source dir
   // just means listUnsyncedFolders will still show it. Log and move on.
   try {
-    rmSync(src, { recursive: true, force: true });
+    await rm(src, { recursive: true, force: true });
     console.log(`[unsynced] removed source folder ${src}`);
   } catch (err) {
     console.error("[unsynced] failed to remove source folder", src, err);
@@ -284,7 +296,7 @@ export async function syncUnsyncedFolder(
  * Only reachable by a server admin (route-gated), so this can't be used to wipe
  * arbitrary disk.
  */
-export function deleteUnsyncedFolder(folderName: string): void {
+export async function deleteUnsyncedFolder(folderName: string): Promise<void> {
   console.log(`[unsynced] delete requested folder="${folderName}"`);
   assertSafeFolderName(folderName);
 
@@ -302,6 +314,6 @@ export function deleteUnsyncedFolder(folderName: string): void {
     throw new ValidationError(`Not a directory: ${folderName}`);
   }
 
-  rmSync(src, { recursive: true, force: true });
+  await rm(src, { recursive: true, force: true });
   console.log(`[unsynced] deleted folder ${src}`);
 }

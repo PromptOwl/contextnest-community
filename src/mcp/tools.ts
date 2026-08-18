@@ -14,6 +14,7 @@ import {
   permissionLevel,
 } from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { queryTableNode } from "../tables/query.js";
 import {
@@ -29,6 +30,7 @@ import {
   deleteFolder,
   moveNode,
   listNodesForCallerByEmail,
+  getNodeForCaller,
   isIdUnderFolder,
 } from "../nodes/service.js";
 import { deleteNest } from "../nests/service.js";
@@ -213,12 +215,25 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_list",
     description:
-      "Browse vault contents with optional type, tag, or limit filters.",
+      "Browse vault contents with optional type, tag, status, or limit filters.",
     inputSchema: {
       type: "object" as const,
       properties: {
         type: { type: "string", description: "Filter by node type" },
-        tag: { type: "string", description: "Filter by tag" },
+        tag: {
+          type: "string",
+          description: "Filter by tag (leading # optional, case-insensitive)",
+        },
+        status: {
+          type: "string",
+          description:
+            "Filter by status: draft | pending_review | approved | published | rejected. Aliases normalized. Unlike the CLI and the OSS server, retired nodes stay in this listing whether or not you ask — here they are unpublished documents their stewards may still act on.",
+        },
+        approved_only: {
+          type: "boolean",
+          description:
+            "Return only nodes with an approved version, each served at that version rather than the live file — the view a public nest gives a stranger.",
+        },
         limit: { type: "number", description: "Max nodes to return" },
       },
     },
@@ -309,13 +324,16 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_update",
     description:
-      "Update an existing node — append, replace content, add tags.",
+      "Update an existing node — replace or append content, set tags, move it through its lifecycle. Whether the edit publishes is decided by this nest's stewardship rules, not by the caller.",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: {
+          // Selects the node; it does NOT rename it. Titles are unique here
+          // precisely so MCP callers can address a document this way. Renaming
+          // is not reachable from this tool.
           type: "string",
-          description: "Title of node to update",
+          description: "Title of node to update (selects it; does not rename)",
         },
         id: {
           type: "string",
@@ -332,7 +350,15 @@ export const TOOL_DEFINITIONS = [
           items: { type: "string" },
           description: "Tags to add",
         },
-        scope: { type: "string", description: "New scope" },
+        status: {
+          type: "string",
+          description:
+            "New lifecycle status: draft | pending_review | approved | published | rejected. Aliases are normalized.",
+        },
+        changeNote: {
+          type: "string",
+          description: "Why this changed — recorded in version history",
+        },
       },
       // Neither is required alone — one of them is (the engine catalog's
       // `.refine(id || title)`, which JSON Schema can't express here).
@@ -413,7 +439,7 @@ export const TOOL_DEFINITIONS = [
     // descriptor here if the operation is ever promoted upstream.
     name: "context_request_deletion",
     description:
-      "Ask for something to be deleted when you can't delete it yourself. Flags a document, a folder (with everything in it), or the whole nest for a nest owner/admin to action. Nothing is removed by this call — it opens a request, and the person who resolves it either deletes the target or declines with a note. Use this instead of context_delete when that returns a permission error, or when the document belongs to someone else.",
+      "Ask for something to be deleted when you can't delete it yourself. Flags a document, a folder (with everything in it), or the whole nest for a nest owner/admin to action. Nothing is removed by this call — it opens a request, and the person who resolves it either deletes the target or rejects it with a note. Use this instead of context_delete when that returns a permission error, or when the document belongs to someone else.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -452,7 +478,7 @@ export const TOOL_DEFINITIONS = [
         status: {
           type: "string",
           description:
-            "pending (default) or declined — declined shows past verdicts and their notes.",
+            '"pending" (default) or "declined" — past rejections and their notes.',
         },
       },
     },
@@ -460,7 +486,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_resolve_deletion",
     description:
-      "Action a deletion request: delete the flagged document/folder/nest, or decline it with a note explaining why it stays. Owner/admin only. Declining tells the requester the verdict; deleting is irreversible.",
+      "Action a deletion request: delete the flagged document/folder/nest, or reject it with a note explaining why it stays. Owner/admin only. Rejecting tells the requester the verdict; deleting is irreversible.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -470,11 +496,12 @@ export const TOOL_DEFINITIONS = [
         },
         action: {
           type: "string",
-          description: '"delete" to honour it, "decline" to keep the target',
+          description:
+            '"delete" to honour it, "decline" to reject it and keep the target',
         },
         note: {
           type: "string",
-          description: "Why you declined. Required when action is decline.",
+          description: 'Why you rejected it. Required when action is "decline".',
         },
       },
       required: ["request_id", "action"],
@@ -772,30 +799,51 @@ async function runTool(
 
   switch (toolName) {
     case "context_init": {
-      const content = await storage.readContextMd();
-      if (!content)
+      const { context_md } = await engineApi.run<{ context_md: string | null }>(
+        "context_init",
+        {},
+        await opContext(nestId, userEmail),
+      );
+      if (!context_md)
         return "No CONTEXT.md found. Use context_overview to see what's available.";
-      return `# Vault Instructions (CONTEXT.md)\n\n${content}`;
+      return `# Vault Instructions (CONTEXT.md)\n\n${context_md}`;
     }
 
     case "context_overview": {
-      const docs = await storage.discoverDocuments();
+      // Counts come from the engine, which sees the whole vault; the NODE LIST
+      // must not. This tool used to dump every node's title, tags and a body
+      // excerpt straight from discoverDocuments with no gate at all — the same
+      // hole resolveLlmBody closed for context_get and context_search, still
+      // open here. Route the listing through the caller-gated path instead.
+      const { total } = await engineApi.run<{ total: number }>(
+        "context_init",
+        {},
+        await opContext(nestId, userEmail),
+      );
+
+      const visible = await listNodesForCallerByEmail(nestId, userEmail, {});
       const types: Record<string, number> = {};
       const tags: Record<string, number> = {};
-      for (const n of docs) {
-        const t = n.frontmatter.type || "document";
-        types[t] = (types[t] || 0) + 1;
-        for (const tag of n.frontmatter.tags || []) tags[tag] = (tags[tag] || 0) + 1;
+      for (const n of visible) {
+        types[n.type] = (types[n.type] || 0) + 1;
+        for (const tag of n.tags || []) tags[tag] = (tags[tag] || 0) + 1;
       }
-      const typeList = Object.entries(types).sort((a, b) => b[1] - a[1]).map(([t, c]) => `  ${t}: ${c}`).join("\n");
-      const tagList = Object.entries(tags).sort((a, b) => b[1] - a[1]).map(([t, c]) => `  ${t}: ${c}`).join("\n");
-      const nodeList = docs
+      const fmt = (counts: Record<string, number>) =>
+        Object.entries(counts)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, c]) => `  ${k}: ${c}`)
+          .join("\n");
+      const nodeList = visible
         .map(
           (n, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).slice(0, 4).join(" ")}\n   ${(n.body || "").slice(0, 120).replace(/\n/g, " ")}`,
+            `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).slice(0, 4).join(" ")}\n   ${(n.content || "").slice(0, 120).replace(/\n/g, " ")}`,
         )
         .join("\n\n");
-      return `# Vault Overview\n**Total nodes:** ${docs.length}\n\n## Types\n${typeList}\n\n## Tags\n${tagList}\n\n## All Nodes\n\n${nodeList}`;
+      // Say so when governance is hiding things, rather than quietly reporting
+      // a smaller vault than the one that exists.
+      const withheld = total - visible.length;
+      const note = withheld > 0 ? `\n_${withheld} node(s) not visible to you._\n` : "";
+      return `# Vault Overview\n**Total nodes:** ${visible.length}\n${note}\n## Types\n${fmt(types)}\n\n## Tags\n${fmt(tags)}\n\n## All Nodes\n\n${nodeList}`;
     }
 
     case "context_search": {
@@ -860,59 +908,73 @@ async function runTool(
       // hops mirrors REST POST /context — caller-controlled traversal depth.
       // External LLM callers set this directly, so normalize junk values
       // (negative, fractional, NaN) to a sane non-negative integer.
-      const result = await queryEngine.query(args.query, {
-        hops: normalizeHops(args.hops),
-      });
+      // Traversal stats describe the engine's walk and are true regardless of
+      // which documents survive the visibility filter below.
+      const { documents, traversal } = await engineApi.run<{
+        documents: Array<{
+          id: string;
+          title: string;
+          description?: string;
+          type: string;
+          status?: string;
+          tags?: string[];
+          body?: string;
+        }>;
+        traversal?: { mode: string; hops_used: number; nodes_traversed: number };
+      }>(
+        "context_query",
+        { query: args.query, hops: normalizeHops(args.hops) },
+        await opContext(nestId, userEmail),
+      );
       // Hide nodes the caller can't see (approved-only under stewardship) so the
       // listing doesn't leak restricted titles — same gate as context_search.
       const visibility = await Promise.all(
-        result.documents.map(async (n) => ({
-          node: n,
-          body: await resolveLlmBody(ctx, n),
+        documents.map(async (d) => ({
+          doc: d,
+          body: await resolveLlmBody(ctx, {
+            id: d.id,
+            body: d.body ?? "",
+            frontmatter: { title: d.title },
+          } as ContextNode),
         })),
       );
       const visible = visibility.filter((e) => e.body !== null);
-      const nodes = visible.map((e) => e.node);
-      // Traversal stats describe the engine's walk and are true regardless of
-      // which nodes survived the visibility filter below.
-      const traversal = {
-        mode: result.mode,
-        hops_used: result.hopsUsed,
-        nodes_traversed: result.nodesTraversed,
-      };
+      const nodes = visible.map((e) => e.doc);
       if (!nodes.length)
         return {
           text: `No nodes matched: ${args.query}`,
           data: { documents: [], traversal },
         };
       const list = nodes
-        .map(
-          (n, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}`,
-        )
+        .map((n, i) => `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).join(" ")}`)
         .join("\n\n");
       return {
         text: `Found ${nodes.length} node(s) for \`${args.query}\`:\n\n${list}`,
+        // The engine already hands back catalog `nodeSummary` shapes — only
+        // `body` is swapped for the gated one resolveLlmBody returned.
         // `source_nodes` is deliberately absent: this handler never gates
-        // result.sourceNodes, so serving them structurally would hand out
-        // content the prose path refuses.
+        // them, so serving them would hand out content the prose refuses.
         data: {
-          documents: visible.map((e) => summarizeNode(e.node, e.body)),
+          documents: visible.map((e) => ({ ...e.doc, body: e.body ?? undefined })),
           traversal,
         },
       };
     }
 
     case "context_get": {
-      const docs = await storage.discoverDocuments();
-      let node: ContextNode | undefined;
-      if (args.title) {
-        node = docs.find(
-          (n) =>
-            n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+      // Shared read. This used to load and parse EVERY file in the vault to
+      // find one node — an id lookup is a direct read, and only a title needs
+      // to search.
+      let node: ContextNode;
+      try {
+        node = await getNodeForCaller(
+          nestId,
+          args.title ? { title: args.title } : { id: args.id },
+          ctx.userId,
+          userEmail,
         );
-      } else if (args.id) {
-        node = docs.find((n) => n.id === args.id);
+      } catch {
+        return `Node not found: ${args.title || args.id}`;
       }
       if (!node)
         return toolError(
@@ -941,10 +1003,25 @@ async function runTool(
         .join("\n");
       return {
         text: `${meta}\n\n---\n\n${body || "(no content)"}`,
-        // `body` is the gated one, not node.body. `raw` is absent: this
-        // server has no include_raw input (Phase 2) and never serialized the
-        // stored bytes here.
-        data: { id: node.id, frontmatter: node.frontmatter, body },
+        // `body` is the gated one, not node.body — under stewardship that is
+        // the APPROVED snapshot, which can be older than the live draft this
+        // frontmatter came from. So the payload carries only the fields the
+        // prose above already reports, none of which claim to describe a
+        // specific version. `version`, `status`, `checksum` and the
+        // timestamps are deliberately absent: they describe the draft, and
+        // pairing them with an approved body would misdescribe it (checksum
+        // would also be a draft hash — see context_versions). `raw` is absent
+        // too: no include_raw input here (Phase 2).
+        data: {
+          id: node.id,
+          frontmatter: {
+            title: node.frontmatter.title,
+            description: node.frontmatter.description,
+            type: node.frontmatter.type || "document",
+            tags: node.frontmatter.tags,
+          },
+          body,
+        },
       };
     }
 
@@ -954,6 +1031,8 @@ async function runTool(
       const nodes = await listNodesForCallerByEmail(nestId, userEmail, {
         type: args.type,
         tag: args.tag,
+        status: args.status,
+        approvedOnly: args.approved_only === true,
         limit: args.limit || 50,
       });
       // No `body`: listNodesForCaller gates WHICH documents come back, but
@@ -1160,18 +1239,25 @@ async function runTool(
           "UNAUTHORIZED_ACTION",
         );
       }
+      // updateNode replaces tags; this tool's contract is "Tags to add", so
+      // merge against the current set here rather than in the service.
+      const mergedTags = args.tags
+        ? [...new Set([...(node.frontmatter.tags || []), ...args.tags])]
+        : undefined;
       const { node: updated, version } = await updateNode(
         nestId,
         node.id,
         {
           content: args.content,
           append: args.append,
-          tags: args.tags,
+          tags: mergedTags,
+          status: args.status,
+          changeNote: args.changeNote,
         },
         userEmail,
       );
       return {
-        text: `Updated node: **${updated.frontmatter.title}**`,
+        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}`,
         // checkpoint null — see context_create.
         data: {
           id: updated.id,
@@ -1307,7 +1393,7 @@ async function runTool(
           reason,
           baseUrl: ctx.baseUrl,
         });
-        return `Requested deletion of the **entire nest**. A nest owner or admin will delete it or decline.\nRequest id: \`${request.id}\``;
+        return `Requested deletion of the **entire nest**. A nest owner or admin will delete it or reject the request.\nRequest id: \`${request.id}\``;
       }
 
       // Folder — normalized the same way the REST route does, so two people
@@ -1330,7 +1416,7 @@ async function runTool(
           reason,
           baseUrl: ctx.baseUrl,
         });
-        return `Requested deletion of folder **${folder}** (${inside.length} document(s) inside). A nest owner or admin will delete it or decline.\nRequest id: \`${request.id}\``;
+        return `Requested deletion of folder **${folder}** (${inside.length} document(s) inside). A nest owner or admin will delete it or reject the request.\nRequest id: \`${request.id}\``;
       }
 
       // Document — resolved by title or id like every other node tool.
@@ -1349,7 +1435,7 @@ async function runTool(
         reason,
         baseUrl: ctx.baseUrl,
       });
-      return `Requested deletion of **${node.frontmatter.title}**. A nest owner or admin will delete it or decline — nothing is removed yet.\nRequest id: \`${request.id}\``;
+      return `Requested deletion of **${node.frontmatter.title}**. A nest owner or admin will delete it or reject the request — nothing is removed yet.\nRequest id: \`${request.id}\``;
     }
 
     case "context_deletion_queue": {
@@ -1358,14 +1444,14 @@ async function runTool(
       if (requests.length === 0) {
         return status === "pending"
           ? "No deletion requests waiting. All caught up!"
-          : "No declined deletion requests.";
+          : "No rejected deletion requests.";
       }
       const list = requests
         .map((r, i) => {
           const kind = r.targetType === "document" ? "" : `${r.targetType}: `;
           const verdict =
             r.status === "declined"
-              ? `\n   Declined by ${r.resolvedBy}: "${r.resolutionNote}"`
+              ? `\n   Rejected by ${r.resolvedBy}: "${r.resolutionNote}"`
               : "";
           return `${i + 1}. **${kind}${r.title || r.nodeId}**\n   Asked by ${r.requestedBy}: "${r.reason}"\n   Request id: \`${r.id}\`${verdict}`;
         })
@@ -1396,7 +1482,7 @@ async function runTool(
       if (action === "decline") {
         const note = typeof args.note === "string" ? args.note.trim() : "";
         if (!note) {
-          return "note is required when declining — the requester is told why it stays.";
+          return "note is required when rejecting — the requester is told why it stays.";
         }
         await reviews.declineDeletion({
           nestId,
@@ -1405,7 +1491,7 @@ async function runTool(
           note,
           baseUrl: ctx.baseUrl,
         });
-        return `Declined the deletion request for **${label}**. It stays, and ${request.requestedBy} has been told why.`;
+        return `Rejected the deletion request for **${label}**. It stays, and ${request.requestedBy} has been told why.`;
       }
 
       if (request.targetType === "nest") {

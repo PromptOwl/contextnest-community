@@ -93,7 +93,7 @@ const STATUS_META: Record<
   },
   deletion_declined: {
     subjectWord: "kept",
-    label: "Deletion declined",
+    label: "Deletion rejected",
     color: "#d97706",
   },
   deletion_deleted: {
@@ -230,19 +230,19 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
     detailsHeader: "Document details",
     linkLabel: "Review the request",
     lineT: (x) =>
-      `${x.title} has been flagged for deletion${x.byT}${x.noteT}. Delete it or decline the request from the nest.`,
+      `${x.title} has been flagged for deletion${x.byT}${x.noteT}. Delete it or reject the request from the nest.`,
     lineH: (x) =>
-      `${x.doc} has been flagged for deletion${x.byH}${x.noteH}. Delete it or decline the request from the nest.`,
+      `${x.doc} has been flagged for deletion${x.byH}${x.noteH}. Delete it or reject the request from the nest.`,
     rows: governanceRows,
   },
   deletion_declined: {
-    heading: (x) => `Your deletion request for ${x.title} was declined`,
+    heading: (x) => `Your deletion request for ${x.title} was rejected`,
     detailsHeader: "Document details",
     linkLabel: "Open document",
     lineT: (x) =>
-      `Your request to delete ${x.title} was declined${x.byT}${x.noteT}. The document stays.`,
+      `Your request to delete ${x.title} was rejected${x.byT}${x.noteT}. The document stays.`,
     lineH: (x) =>
-      `Your request to delete ${x.doc} was declined${x.byH}${x.noteH}. The document stays.`,
+      `Your request to delete ${x.doc} was rejected${x.byH}${x.noteH}. The document stays.`,
     rows: governanceRows,
   },
   deletion_deleted: {

@@ -6,7 +6,8 @@
  * picker. The backend rejects a scope+target the same user already holds.
  */
 import React, { useEffect, useState } from "react";
-import * as api from "../../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../../lib/queries";
 import { isEmailish } from "../../lib/utils";
 import {
   Dialog,
@@ -93,6 +94,7 @@ export function StewardModal({
   const [nodes, setNodes] = useState<Array<{ id: string; title: string }>>([]);
   const [tags, setTags] = useState<string[]>([]);
   const [optionsLoading, setOptionsLoading] = useState(false);
+  const qc = useQueryClient();
 
   // Seed fields from the steward (edit) or reset to defaults (assign).
   useEffect(() => {
@@ -112,12 +114,12 @@ export function StewardModal({
     setOptionsLoading(true);
     const fetcher =
       scope === "document"
-        ? api.listNodes(nestId).then((res) => {
+        ? qc.fetchQuery(reads.nodes(nestId)).then((res) => {
             if (cancelled) return;
             const list = Array.isArray(res?.nodes) ? res.nodes : [];
             setNodes(list as Array<{ id: string; title: string }>);
           })
-        : api.listTags(nestId).then((list) => {
+        : qc.fetchQuery(reads.tags(nestId)).then((list) => {
             if (cancelled) return;
             setTags(list);
           });
