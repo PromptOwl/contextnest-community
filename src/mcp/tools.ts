@@ -1227,9 +1227,10 @@ async function runTool(
     case "context_update": {
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
-      // What the caller called it — an id-addressed call has no args.title,
-      // and a title-addressed one must read back byte-identical prose.
-      const label = args.title ?? node.frontmatter.title;
+      // What the caller called it. Mirrors resolveTargetNode's precedence: an
+      // id wins, so a title sent alongside one was ignored and must not be
+      // echoed back as if it named the document. Title-only echoes verbatim.
+      const label = args.id ? node.frontmatter.title : args.title;
       // Defense-in-depth: same per-node edit check REST resolves, so editing
       // stays gated regardless of the /mcp middleware. Unchanged by accepting
       // an id: resolution reaches the same nest-scoped documents either way,
@@ -1660,7 +1661,8 @@ async function runTool(
     case "context_versions": {
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
-      const label = args.title ?? node.frontmatter.title;
+      // See context_update: an id wins over a title sent with it.
+      const label = args.id ? node.frontmatter.title : args.title;
 
       const allVersions = await versions.getVersions(ctx.nestId, node.id);
       const approved = await versions.getApprovedVersion(ctx.nestId, node.id);

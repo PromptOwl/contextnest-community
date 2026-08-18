@@ -750,6 +750,16 @@ describe("MCP tools/call — id or title addressing", () => {
     );
     expect(byTitle.content).toEqual(byId.content);
     expect(byTitle.structuredContent).toEqual(byId.structuredContent);
+
+    // Both sent: the id wins the resolution, so the heading must name the
+    // document it resolved, not the title that was ignored.
+    const both = await callToolRaw(
+      "context_versions",
+      { id: "nodes/gtm/deals/win-loss-log", title: "Some Other Doc" },
+      737,
+      aid,
+    );
+    expect(both.content).toEqual(byId.content);
   });
 
   it("a miss is machine-detectable: isError + {code, message}, prose unchanged", async () => {
@@ -785,7 +795,7 @@ describe("MCP tools/call — id or title addressing", () => {
   });
 
   it("context_get: a miss is flagged too — the resolver throws, it never returns null", async () => {
-    const r = await callToolRaw("context_get", { title: "Ghost Doc" }, 737, aid);
+    const r = await callToolRaw("context_get", { title: "Ghost Doc" }, 738, aid);
     expect(r.content).toEqual([
       { type: "text", text: "Node not found: Ghost Doc" },
     ]);
