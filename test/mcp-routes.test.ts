@@ -696,7 +696,10 @@ describe("MCP tools/call — id or title addressing", () => {
       aid,
     );
     expect(r.content).toEqual([
-      { type: "text", text: "Updated node: **Win Loss Log**" },
+      {
+        type: "text",
+        text: `Updated node: **Win Loss Log** — v${r.structuredContent.version}, status: ${r.structuredContent.status}`,
+      },
     ]);
     expect(r.structuredContent.id).toBe("nodes/gtm/deals/win-loss-log");
     expect(r.isError).toBeUndefined();
@@ -718,7 +721,10 @@ describe("MCP tools/call — id or title addressing", () => {
       aid,
     );
     expect(r.content).toEqual([
-      { type: "text", text: "Updated node: **Win Loss Log**" },
+      {
+        type: "text",
+        text: `Updated node: **Win Loss Log** — v${r.structuredContent.version}, status: ${r.structuredContent.status}`,
+      },
     ]);
     expect(r.structuredContent.id).toBe("nodes/gtm/deals/win-loss-log");
   });
@@ -776,5 +782,17 @@ describe("MCP tools/call — id or title addressing", () => {
       { type: "text", text: "Node not found: ../../etc/passwd" },
     ]);
     expect(r.isError).toBe(true);
+  });
+
+  it("context_get: a miss is flagged too — the resolver throws, it never returns null", async () => {
+    const r = await callToolRaw("context_get", { title: "Ghost Doc" }, 737, aid);
+    expect(r.content).toEqual([
+      { type: "text", text: "Node not found: Ghost Doc" },
+    ]);
+    expect(r.isError).toBe(true);
+    expect(r.structuredContent).toEqual({
+      code: "DOCUMENT_NOT_FOUND",
+      message: "Node not found: Ghost Doc",
+    });
   });
 });

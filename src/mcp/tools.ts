@@ -974,13 +974,15 @@ async function runTool(
           userEmail,
         );
       } catch {
-        return `Node not found: ${args.title || args.id}`;
-      }
-      if (!node)
+        // getNodeForCaller THROWS on a miss and on a denied id alike — both
+        // answer "Node not found" so probing ids can't map a governed nest.
+        // Flagging here is the only place it can be flagged: the call never
+        // returns a falsy node, so a post-call guard would be dead code.
         return toolError(
           `Node not found: ${args.title || args.id}`,
           "DOCUMENT_NOT_FOUND",
         );
+      }
       const body = await resolveLlmBody(ctx, node);
       if (body === null) {
         // Covers both halves of resolveLlmBody's null: the caller may not read
