@@ -806,3 +806,97 @@ describe("MCP tools/call — id or title addressing", () => {
     });
   });
 });
+
+// ─── context_submit_review ────────────────────────────────────────────────
+//
+// Where `ctx publish` lands on a nest that publishes through review: it finds
+// no context_publish advertised, so it routes to context_submit_review and
+// prints "submitted, NOT published". That only works if this tool answers in
+// the structured channel — a prose-only reply makes the client report a
+// contract mismatch, so the feature is inert without it.
+//
+// There is no operation-catalog shape to conform to (governance is an
+// unimplemented namespace in the engine), so the payload is exactly the
+// review state this handler already computes.
+
+describe("MCP tools/call — context_submit_review", () => {
+  let rid: string;
+
+  beforeAll(async () => {
+    const created = await jsonRequest(app, "POST", "/nests", {
+      name: "Review Nest",
+    });
+    rid = created.data.nest.id;
+    // A steward, so the reviewers[] half of the payload is exercised against a
+    // non-empty roster rather than passing vacuously.
+    const steward = await jsonRequest(app, "POST", `/nests/${rid}/stewards`, {
+      scope: "nest",
+      email: "jane@acme.com",
+      role: "reviewer",
+    });
+    expect(steward.status).toBe(201);
+    const seeded = await jsonRequest(app, "POST", `/nests/${rid}/nodes`, {
+      title: "Launch Plan",
+      content: "Ship on Friday.",
+    });
+    expect(seeded.status).toBe(201);
+  });
+
+  it("prose unchanged, review state alongside it", async () => {
+    const r = await callToolRaw("context_submit_review", { title: "Launch Plan" }, 740, rid);
+    const d = r.structuredContent;
+
+    // Byte-exact prose — the guard that adding the structured half changed
+    // not one character of what a chat client reads.
+    expect(r.content).toEqual([
+      {
+        type: "text",
+        text:
+          'Submitted "Launch Plan" v1 for review (normal priority).' +
+          "\n\n**Stewards who can review:**\n- jane@acme.com (nest-level steward)",
+      },
+    ]);
+    expect(r.isError).toBeUndefined();
+
+    expect(d).toEqual({
+      id: "nodes/launch-plan",
+      submitted: true,
+      review: {
+        id: expect.any(String),
+        version: 1,
+        status: "pending",
+        priority: "normal",
+        requested_by: expect.any(String),
+        requested_at: expect.any(String),
+      },
+      // Same gated array the steward line above is rendered from.
+      reviewers: ["jane@acme.com"],
+    });
+    // Never faked: this operation writes no version and seals no checkpoint —
+    // it points a review request at the version that already existed.
+    expect(d.version).toBeUndefined();
+    expect(d.checkpoint).toBeUndefined();
+  });
+
+  it("a second submit fails loudly rather than reading as a payload", async () => {
+    const r = await callToolRaw("context_submit_review", { title: "Launch Plan" }, 741, rid);
+    expect(r.content).toEqual([
+      { type: "text", text: "Failed to submit: A review is already pending for this node" },
+    ]);
+    expect(r.isError).toBe(true);
+    expect(r.structuredContent).toEqual({
+      code: "INTERNAL",
+      message: "Failed to submit: A review is already pending for this node",
+    });
+  });
+
+  it("a miss is machine-detectable: isError + {code, message}, prose unchanged", async () => {
+    const r = await callToolRaw("context_submit_review", { title: "No Such Node" }, 742, rid);
+    expect(r.content).toEqual([{ type: "text", text: "Node not found: No Such Node" }]);
+    expect(r.isError).toBe(true);
+    expect(r.structuredContent).toEqual({
+      code: "DOCUMENT_NOT_FOUND",
+      message: "Node not found: No Such Node",
+    });
+  });
+});
