@@ -15,7 +15,7 @@ ContextNest Community Edition is a self-hosted server that lets you:
 - Export a nest as a portable bundle and re-import it on another self-hosted host
 - Apply stewardship workflows — draft, pending review, approved
 - Share nests with collaborators or publish them read-only to the public
-- Serve approved context to AI agents via MCP, HTTP, or CLI
+- Serve approved context to AI agents via MCP or HTTP
 - Sync with the PromptOwl hosted platform for multi-user collaboration
 
 The server runs locally or on your own infrastructure. Your PromptOwl account handles authentication, entitlement, and governance metadata.
@@ -34,11 +34,6 @@ npx @promptowl/contextnest-community
 ```
 
 The server listens on `http://localhost:3838` by default. Without a valid license the server still runs and serves reads, but write actions return `503` until you activate. See [CONFIGURATION.md](./CONFIGURATION.md) for all environment variables (port, auth mode, storage, telemetry).
-
-> **Optional:** scaffold a local nest with the open-source CLI before connecting:
-> ```bash
-> npx @promptowl/contextnest-cli init
-> ```
 
 ## License setup
 

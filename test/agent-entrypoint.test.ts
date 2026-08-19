@@ -81,8 +81,6 @@ describe("GET /llms.txt — public agent manual", () => {
     expect(text).toContain("hops");
     expect(text).toContain("Skip logic");
     expect(text).toContain("/mcp");
-    expect(text).toContain("ctx push");
-    expect(text).toContain("@promptowl/contextnest-cli");
   });
 });
 
