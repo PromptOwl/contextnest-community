@@ -68,6 +68,7 @@ const HISTORICAL_MIGRATIONS = [
   "032_deletion_requests",
   "033_deletion_request_targets",
   "034_versions_author_status_index",
+  "035_publish",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -330,6 +331,36 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_grants_unique
       ON grants(nest_id, target_type, target, user_id);
     CREATE INDEX IF NOT EXISTS idx_grants_user ON grants(nest_id, user_id);
+
+    CREATE TABLE IF NOT EXISTS publish (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      access_mode TEXT NOT NULL DEFAULT 'public'
+        CHECK(access_mode IN ('public','email','code','invite')),
+      code_hash TEXT,
+      comments_enabled INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT,
+      revoked_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_slug ON publish(slug);
+    CREATE INDEX IF NOT EXISTS idx_publish_nest ON publish(nest_id, node_id);
+
+    CREATE TABLE IF NOT EXISTS access_grant (
+      id TEXT PRIMARY KEY,
+      publish_id TEXT NOT NULL REFERENCES publish(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK(kind IN ('invite','link','session','view')),
+      email TEXT,
+      token_hash TEXT,
+      expires_at TEXT,
+      used_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_access_grant_publish ON access_grant(publish_id, kind);
+    CREATE INDEX IF NOT EXISTS idx_access_grant_token ON access_grant(token_hash);
 
     CREATE TABLE IF NOT EXISTS teams (
       id TEXT PRIMARY KEY,

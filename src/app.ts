@@ -7,6 +7,8 @@ import { authRoutes } from "./auth/routes.js";
 import { nestRoutes } from "./nests/routes.js";
 import { sharingRoutes } from "./nests/sharing-routes.js";
 import { grantRoutes } from "./nests/grant-routes.js";
+import { publishRoutes } from "./nests/publish-routes.js";
+import { publishRenderRoutes } from "./nests/publish-render-routes.js";
 import { nestTeamRoutes } from "./nests/nest-team-routes.js";
 import { teamRoutes } from "./governance/team-routes.js";
 import { listVisibleNests, nestAllowsSelfApprove } from "./nests/service.js";
@@ -1452,6 +1454,10 @@ export function createApp(): Hono<AuthEnv> {
   // === Agent entry point: /llms.txt (public manual), /index (person nest
   // index), /mcp (server-level MCP). See src/mcp/server-routes.ts. ===
   app.route("/llms.txt", llmsTxtRoutes);
+  // Public published-document surface. Mounted BEFORE the SPA catch-all and
+  // OUTSIDE the /nests auth chain so /p/<slug> is reachable with no account
+  // (public mode) or behind its own gate (email/code/invite).
+  app.route("/p", publishRenderRoutes);
   app.use("/index", flexAuthWithPromptowlTicket);
   app.route("/index", nestIndexRoutes);
   app.use("/mcp", flexAuthWithPromptowlTicket);
@@ -1928,6 +1934,10 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);
+  // "publications" (not "/publish") — POST /:nestId/publish is already taken by
+  // the nest-snapshot endpoint in query-routes. These manage per-document
+  // public links; the public render surface is the top-level /p route above.
+  nestsApp.route("/:nestId/publications", publishRoutes);
   nestsApp.route("/:nestId/teams", nestTeamRoutes);
   nestsApp.route("/:nestId/edge-types", edgeTypeRoutes);
   nestsApp.route("/:nestId/edges", edgeRoutes);

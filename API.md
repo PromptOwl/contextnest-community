@@ -1341,6 +1341,38 @@ Publishes the nest (snapshots + index).
 
 ---
 
+## 8c. Publish links — public hosting of a single document
+
+Expose ONE document as a standalone page at a stable, unguessable
+`/p/<slug>` URL. Distinct from nest visibility (whole-nest read) and from
+grants (authenticated per-user sharing). Managing publish links is owner/admin
+only. Access modes: `public` (no auth), `code` (shared passcode), `email`
+(viewer enters an email → one-time magic link → access logged), `invite`
+(same, but only allow-listed emails get a link). Every served view is logged;
+links are revocable and can carry `expires_at`.
+
+### POST `/nests/:nestId/publications` (owner/admin)
+Body: `{ node_id, access_mode?: "public"|"email"|"code"|"invite",
+comments_enabled?: bool, code?: string (code mode), allowlist?: string[]
+(invite mode), expires_at?: ISO }`. → `201 { publish, link }`.
+
+### GET `/nests/:nestId/publications` (owner/admin)
+List this nest's publish links with their `link` URLs.
+
+### GET `/nests/:nestId/publications/:id/views` (owner/admin)
+The access log — `{ count, views: [{ email, created_at }] }`.
+
+### DELETE `/nests/:nestId/publications/:id` (owner/admin)
+Revoke — the link 404s immediately.
+
+### Public render surface (no auth chain)
+- `GET /p/:slug` — the document (public) or a gate form (email/code/invite).
+  Document bodies are served under the strict artifact sandbox (opaque origin).
+- `POST /p/:slug/gate` — submit a code (unlock) or an email (send magic link).
+- `GET /p/:slug/verify?token=` — consume a magic link → set session cookie → open.
+
+---
+
 ## 9b. Workflow plane ("turing")
 
 **Feature-flagged — every route below `404`s unless `FEATURE_WORKFLOW_PLANE=true`** (Settings → Workflow plane). Typed edges, an edge-type registry, and governed runs. Full contract in [`WORKFLOW_PLANE.md`](./WORKFLOW_PLANE.md). Reads are read-tier, mutations write-tier via the standard nest gate.
