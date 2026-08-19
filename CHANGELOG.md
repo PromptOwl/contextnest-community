@@ -1,5 +1,140 @@
 # @promptowl/contextnest-community
 
+## 1.16.0
+
+### Minor Changes
+
+- 10fc217: Hand folder import to the engine, and upload it in batches instead of a stream.
+
+  Importing a folder failed with a bare "Import failed" and no reason, and spent a
+  long time apparently doing nothing before it started. Three separate causes.
+
+  **The failures had nowhere to surface.** Import streamed NDJSON progress over
+  `POST /nests/import?stream=1`, which commits HTTP 200 _before_ any of the work
+  runs. Every real failure therefore arrived as a successful response carrying an
+  error line the client often never reached, and a buffering proxy would swallow
+  the progress lines the stream existed to deliver in the first place. The
+  streaming endpoint is gone. The upload now goes up in ~4MB chunks as ordinary
+  JSON requests, each with a real status code and a real message — which also
+  keeps a large folder under the request-size limits a single body was hitting.
+  `registerImportedDocuments` used to `return 0` when the vault scan failed, which
+  reported a broken vault as a successful import of an empty folder; it now
+  throws.
+
+  **The server did the engine's job, twice.** Import scanned the vault itself, then
+  rewrote every document to stamp the importing user as `author`, and only then
+  asked the engine to publish — which rewrites each document again. On a
+  Cloud Storage mount that is two extra network round trips per document before
+  publishing has even started. The engine's `context_import` now owns the whole
+  flow: the community server writes nothing to the vault, it hands files to the
+  engine (`files[]`), stages each chunk without publishing, and makes one
+  `discover` call at the end that scans, stamps, publishes under a single
+  checkpoint and returns the per-document detail needed for governance rows.
+
+  **The browser read files one at a time.** Scanning a picked folder awaited each
+  `file.text()` in sequence, which is the delay users saw _before_ an import
+  appeared to begin. Reads are now batched, and sibling directories are walked in
+  parallel.
+
+  **Importing a folder no longer publishes documents that never asked to be
+  published.** Previously a file with no `status:` in its frontmatter — an
+  ordinary hand-authored note — was published on import and became AI-visible.
+  Now only files that explicitly say `published` or `approved` are published;
+  everything else is imported as a draft and waits for a human to approve it,
+  with `status: draft` written down rather than left implied. Importing a plain
+  Obsidian vault therefore yields drafts, not a published nest. Nests exported
+  from ContextNest are unaffected: their documents carry an explicit status, so a
+  round-trip still comes back published.
+
+  Two further behaviours worth calling out:
+
+  - An imported vault's `.versions/` history is preserved. A document whose
+    version chain will not reconstruct now registers as a draft with its history
+    intact, instead of having that history deleted so it could be republished from
+    a fresh keyframe.
+  - A failed upload deletes the half-filled nest rather than leaving it on the
+    dashboard with silently missing documents.
+
+  Requires `@promptowl/contextnest-engine` 2.1.0 for the `files[]` / `publish` /
+  `discover` inputs on `context_import`.
+
+- Converge the MCP and REST surfaces on the engine's operation catalog, cache the UI's reads, and make the board and dashboard usable at scale.
+
+  ### MCP & engine convergence
+
+  - **`structuredContent` on the eight tools `ctx` drives** (`src/mcp/tools.ts`, `src/mcp/routes.ts`, `src/mcp/server-routes.ts`) — tool results now carry a machine-readable payload alongside the prose, so a client no longer has to parse a human sentence to learn what happened. A conformance test pins every emitted shape to the engine's operation catalog (`test/mcp-catalog-conformance.test.ts`), so a drift between this server and the engine fails the suite instead of reaching a client.
+  - **Denials and misses are errors, not prose** (`src/mcp/tools.ts`) — a permission denial and `context_get`'s not-found now set `isError`, which an agent can act on; previously both arrived as an ordinary successful result whose text happened to say no.
+  - **`context_update` and `context_versions` accept `id`** (`src/mcp/tools.ts`) — an agent that already holds a node id no longer has to round-trip through a title, and a call that sends both echoes the resolved title rather than the one it guessed with.
+  - **`context_get` stops pairing draft frontmatter with an approved body** (`src/mcp/tools.ts`) — the two came from different reads, so a document mid-review could be returned describing itself as a draft while carrying approved content.
+  - **`context_overview` respects stewardship** (`src/mcp/tools.ts`, `test/overview-access.test.ts`) — the overview listed nodes the caller had no read grant on.
+  - **Create, update, read, list and query run through the engine** (`src/nodes/service.ts`, `src/nodes/engine.ts`, `src/mcp/tools.ts`) — the community server no longer keeps its own copies of these operations. Document creation, updates, single-node reads, browsing and selector queries all go through the engine's canonical ops, which is what keeps the CLI, MCP and REST surfaces answering the same way. Requires `@promptowl/contextnest-engine` 2.1.0.
+
+  ### Search & performance
+
+  - **Search nests and documents from the dashboard** (`src/nodes/search.ts`, `src/app.ts`, `ui/src/components/QuickOpen.tsx`, `ui/src/lib/nest-search.ts`) — quick-open used to work only inside a nest; it now spans every nest the caller can read, and is no longer armed on pages where there is nothing to open. The cross-nest search fans out instead of walking nests in sequence, and logs the nests it had to skip rather than silently returning short results.
+  - **A shared read cache for the UI** (`ui/src/lib/queries.ts`, `ui/src/lib/query-provider.tsx`, `ui/src/lib/api.ts`) — navigating back and forth re-fetched everything. Every structural GET and every document body now goes through one cache, with writes invalidating only the scope they touched (`test/nest-ui-cache.test.ts`).
+  - **Discovery is cached and nest deletes are async** (`src/nodes/service.ts`, `test/discovery-cache.test.ts`) — a vault scan per request was the floor on every read; deleting a large nest no longer holds the request open.
+  - **Import publishes in one batch** (`src/nodes/service.ts`, `src/shared/batch.ts`) — importing a folder paid one engine round trip per document. Publishing is batched behind a single shared helper, and a throw mid-batch no longer wipes healthy history.
+  - **Filter the node listing over REST** (`src/nodes/query-routes.ts`, `test/list-filters.test.ts`) — the client was fetching a whole nest to show a filtered slice of it.
+
+  ### Security
+
+  - **CSP `frame-ancestors` clickjacking guard** (`src/app.ts`, `src/config.ts`, `src/shared/artifact-sandbox.ts`) — responses now carry a frame-ancestors policy, configurable for deployments that legitimately embed the UI, and served artifacts are sandboxed.
+  - **Unmatched routes return a JSON 404** (`src/app.ts`, `test/spa-fallback-404.test.ts`) — the SPA fallback answered every unmatched path with the HTML shell, which broke MCP remote auth discovery: a client asking for a JSON discovery document got a page of markup and no way to tell it had missed.
+
+  ### Board & workspace
+
+  - **Reorderable, remembered board columns** (`ui/src/components/MaturityBoard.tsx`, `ui/src/lib/board-dimensions.ts`) — column order survives a reload, tag columns can be added and removed, and layout is scoped to the dimension it was arranged for instead of leaking across status/folder/tag views.
+  - **The board uses the page width** (`ui/src/components/NestPageHeader.tsx`, `ui/src/components/MaturityBoard.tsx`) — the shell was narrow enough to force horizontal scrolling with columns to spare, and the external-edit status column was unlabelled.
+  - **Helper text reads as points, not paragraphs** (`ui/src/components/MaturityBoard.tsx`, `ui/src/components/WorkflowsView.tsx`) — long continuous lines are split one point per line.
+  - **Unloaded stats show a skeleton, not `0`** (`ui/src/components/ui/count-skeleton.tsx`, `ui/src/components/Dashboard.tsx`) — a dashboard mid-load claimed the user had nothing.
+
+  ### Governance & documents
+
+  - **"Reject" is the word for every negative verdict** (`ui/src/components/governance/ReasonDialog.tsx`, `ui/src/components/governance/ReviewQueue.tsx`) — "Decline" and "Reject" were used for the same action in different places. The review queue's empty state is also scoped to the reader's own review work, so an empty queue no longer reads as though the nest has nothing pending.
+  - **`PATCH` on tags replaces instead of merging** (`src/nodes/service.ts`, `test/node-tag-removal.test.ts`) — a removed tag reappeared as soon as the document was reopened, because the write merged the incoming list into the stored one.
+  - **Names are validated before they are submitted** (`ui/src/lib/nest-name.ts`, `src/nodes/service.ts`, `test/node-title-length.test.ts`) — a nest, folder or document title consisting only of punctuation is refused at the form rather than accepted and rendered blank.
+  - **Rejected and unpublishable imported documents unstick** (`src/nodes/service.ts`, `test/rejected-node-edit.test.ts`) — a document whose version chain would not reconstruct could not be edited back into a publishable state.
+  - **The vault re-indexes on delete, and approvals publish through the engine** (`src/nodes/service.ts`, `test/delete-reindex.test.ts`) — a deleted document lingered in query results until the next full scan.
+  - **The approved-only view is reachable** (`src/nodes/service.ts`) — and approved versions are scanned once rather than per document.
+
+  ### Fixes
+
+  - Duplicate workflow edges are refused, and parallel wires between the same two nodes fan out instead of drawing on top of each other (`src/workflow/edge-routes.ts`, `ui/src/components/WorkflowsView.tsx`).
+  - Coverage-gap tags in the ontology graph are clickable (`ui/src/components/OntologyGraphView.tsx`).
+  - Duplicate Postgres connections are no longer opened per request (`test/db-postgres.test.ts`).
+  - Notification digest batching windows widened so a burst stays one digest instead of fragmenting (`src/notify/email-render.ts`, `test/notify-digest.test.ts`).
+
+### Patch Changes
+
+- 1857c24: Record the verdict when an external edit is approved or rejected.
+
+  Rejecting a direct filesystem edit left no trace. The document's history showed
+  the approval of such an edit — the engine commits a version for it, and the
+  server mirrors that into `node_versions`, which is what the history panel reads —
+  but a rejection commits nothing, so the reviewer, the time and the reason were
+  unrecoverable from the audit trail.
+
+  The record already existed and was being discarded. `approveSuggestion` and
+  `rejectSuggestion` each build a chain event carrying the acting reviewer, a
+  timestamp, and the rejection reason or approval comment, return it, and persist
+  nothing; this server read only the event id for its response. The verdict is now
+  appended to the engine's own append-only chain-event log, so it survives without
+  a new table, a migration, or a version number.
+
+  A rejection still mints no version — it changes no content, and numbering one
+  would renumber the chain for an event that never touched the document.
+
+  `GET /nests/:nestId/nodes/:nodeId/versions` gains `externalEditVerdicts`
+  alongside `versions`, and the version-history panel lists rejected external edits
+  above the versions. The approve and reject endpoints now return
+  `historyRecorded`, so a verdict that failed to reach the audit log is not
+  reported as a clean success.
+
+  The rejected content itself is unchanged: the engine keeps it permanently under
+  `_archive/rejected/`. Surfacing that diff in the UI needs a read API the engine
+  does not expose yet.
+
 ## 1.15.0
 
 ### Minor Changes
