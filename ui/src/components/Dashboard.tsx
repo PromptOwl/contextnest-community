@@ -7,7 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Search,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Search,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
@@ -375,7 +375,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
           </div>
         </CardHeader>
         <CardContent className="pt-0">
-          <div className="grid md:grid-cols-3 gap-3 text-xs">
+          <div className="grid md:grid-cols-2 gap-3 text-xs">
             <ClientHint
               icon={<Bot className="h-4 w-4" />}
               title="Hootie"
@@ -385,12 +385,6 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
               icon={<Monitor className="h-4 w-4" />}
               title="Claude Desktop"
               desc="Add MCP endpoint per nest via Connect button"
-            />
-            <ClientHint
-              icon={<Terminal className="h-4 w-4" />}
-              title="CLI"
-              desc={`ctx push --server ${serverUrl}`}
-              mono
             />
           </div>
         </CardContent>
