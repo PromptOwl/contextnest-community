@@ -122,8 +122,17 @@ export async function filterAccessible<T extends { id: string }>(
     const approved = approvedVersions ?? (await getApprovedVersions(nestId));
     return nodes.filter((n) => approved.has(n.id));
   }
-  if (!(await isStewardshipEnabled(nestId))) return nodes;
   const grants = await listUserGrants(nestId, userId);
+  if (!(await isStewardshipEnabled(nestId))) {
+    // Stewardship off is open read for MEMBERS. A doc/folder grantee reaches
+    // this nest with no nest-wide permission at all, so returning everything
+    // would hand them the whole vault off a single shared document — narrow to
+    // what their grants cover. The permission lookup only runs for grantees,
+    // so members still pay one indexed query and nothing more.
+    if (grants.length === 0) return nodes;
+    if ((await resolveNestPermission(nestId, userId)) !== "none") return nodes;
+    return nodes.filter((n) => grantCoversNode(grants, n.id));
+  }
   const accessible: T[] = [];
   for (const n of nodes) {
     if (
