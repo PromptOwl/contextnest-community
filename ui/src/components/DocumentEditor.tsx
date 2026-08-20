@@ -35,6 +35,7 @@ import {
   Table2,
   Pencil,
   Users,
+  Share2,
   Link as LinkIcon,
   History,
   Code2,
@@ -60,6 +61,7 @@ import { TableViewer } from "./TableViewer";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { ShareTargetDialog } from "./ShareTargetDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
   buildTextIndex,
@@ -174,6 +176,9 @@ export function DocumentEditor({
   // looking at a real nest the caller can administer.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
+  // Share THIS document with one person (a grant), as opposed to the whole
+  // nest above. Same owner/admin gate the /grants routes enforce.
+  const [showShareDoc, setShowShareDoc] = useState(false);
   const qc = useQueryClient();
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
@@ -1470,6 +1475,15 @@ export function DocumentEditor({
               });
             // Below admin only: this opens the REQUEST dialog, not a delete.
             // Admins delete from the nest list — this page has never carried a
+            // Share THIS doc first — it's the narrower, more common ask.
+            // Meaningless on an unsaved doc: there's no node id to grant on.
+            if (canShare && !isNew)
+              moreActions.push({
+                label: "Share this document",
+                icon: Share2,
+                testId: "document-editor-share-doc",
+                onSelect: () => setShowShareDoc(true),
+              });
             // real delete. Hidden once a flag is already pending.
             // One Delete entry: the author (and the admin/owner tier) deletes
             // outright, everyone else raises a request. Hidden below that tier
@@ -2587,6 +2601,15 @@ export function DocumentEditor({
                to reload here. The nest list re-reads on next visit. */
           }}
         />
+      {showShareDoc && (
+        <ShareTargetDialog
+          nestId={nestId}
+          targetType="document"
+          target={nodeId}
+          label={title || nodeId}
+          onClose={() => setShowShareDoc(false)}
+        />
+      )}
       )}
       {leaveIntent && (
         <Dialog open onOpenChange={() => setLeaveIntent(null)}>

@@ -22,7 +22,7 @@ import {
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
-  Activity,
+  Activity, Share2,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
@@ -62,6 +62,7 @@ export function NodeTypeIcon({
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
 import { deriveNestCaps } from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
@@ -239,6 +240,10 @@ export function NestView({
   // Folder pending deletion (admin) or a deletion request (everyone else).
   const [folderTarget, setFolderTarget] = useState<
     { path: string; label: string; total: number } | null
+  >(null);
+  // Folder being shared with one person (a grant, not a collaborator).
+  const [shareFolder, setShareFolder] = useState<
+    { path: string; label: string } | null
   >(null);
   // Non-owner asking for the whole nest to be deleted.
   const [nestFlagOpen, setNestFlagOpen] = useState(false);
@@ -622,11 +627,23 @@ export function NestView({
 
   const fetchData = useCallback(async () => {
     setLoading(true);
+    // Nest meta first, because it says WHICH of the reads below the caller may
+    // even make. Someone who reached this nest through a share grant on one
+    // document (or one folder) is allowed the nest itself and their nodes, and
+    // nothing else — every governance read 404s for them. Firing them anyway
+    // cost seven pointless round-trips and surfaced the review queue's failure
+    // as a "Nest not found" toast on a page that had loaded fine.
+    const nestMeta = await qc.fetchQuery(reads.nest(nestId)).catch((e) => {
+      console.error("[NestView] getNest failed", nestId, e);
+      return null;
+    });
+    const grantOnly = !!(nestMeta as any)?.grant_only;
     // Each request is independently swallowed — if listNodes throws, we must
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, deletionData, settingsData, externalData, nestMeta, countsData, feedData] =
+    const empty = <T,>(v: T) => Promise.resolve(v);
+    const [nodesData, stewardsData, queueData, deletionData, settingsData, externalData, countsData, feedData] =
       await Promise.all([
         // The five reads below go through the shared cache (same keys and
         // invalidation as the hook-based screens) so returning from a document
@@ -638,42 +655,55 @@ export function NestView({
           console.error("[NestView] listNodes failed", nestId, e);
           return { nodes: [] };
         }),
-        qc.fetchQuery(reads.stewards(nestId)).catch((e) => {
-          console.error("[NestView] listStewards failed", nestId, e);
-          return { stewards: [] };
-        }),
-        qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
-          console.error("[NestView] getReviewQueue failed", nestId, e);
-          toast.error(e?.message || "Failed to load review queue");
-          return { requests: [], total: 0 };
-        }),
+        grantOnly
+          ? empty({ stewards: [] as Steward[] })
+          : qc.fetchQuery(reads.stewards(nestId)).catch((e) => {
+              console.error("[NestView] listStewards failed", nestId, e);
+              return { stewards: [] };
+            }),
+        grantOnly
+          ? empty({ requests: [], total: 0 })
+          : qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
+              console.error("[NestView] getReviewQueue failed", nestId, e);
+              toast.error(e?.message || "Failed to load review queue");
+              return { requests: [], total: 0 };
+            }),
         // Pending AND declined in one call: pending drives the admin queue,
         // declined is how the person who asked learns the verdict.
-        qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
-          console.error("[NestView] getDeletionRequests failed", nestId, e);
-          return { requests: [] as api.DeletionRequest[], total: 0 };
-        }),
-        qc.fetchQuery(reads.settings(nestId)).catch((e) => {
-          console.error("[NestView] getNestSettings failed", nestId, e);
-          return {
-            stewardship_enabled: false,
-            allow_self_approve: false,
-            prime_only_review: false,
-            prime_tags: [] as string[],
-          };
-        }),
-        qc.fetchQuery(reads.externalEdits(nestId)).catch((e) => {
-          console.error("[NestView] listExternalEdits failed", nestId, e);
-          return { entries: [], total: 0 };
-        }),
-        qc.fetchQuery(reads.nest(nestId)).catch((e) => {
-          console.error("[NestView] getNest failed", nestId, e);
-          return null;
-        }),
-        qc.fetchQuery(reads.commentCounts(nestId)).catch((e) => {
-          console.error("[NestView] getCommentCounts failed", nestId, e);
-          return { counts: {} };
-        }),
+        grantOnly
+          ? empty({ requests: [] as api.DeletionRequest[], total: 0 })
+          : qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
+              console.error("[NestView] getDeletionRequests failed", nestId, e);
+              return { requests: [] as api.DeletionRequest[], total: 0 };
+            }),
+        grantOnly
+          ? empty({
+              stewardship_enabled: false,
+              allow_self_approve: false,
+              prime_only_review: false,
+              prime_tags: [] as string[],
+            })
+          : qc.fetchQuery(reads.settings(nestId)).catch((e) => {
+              console.error("[NestView] getNestSettings failed", nestId, e);
+              return {
+                stewardship_enabled: false,
+                allow_self_approve: false,
+                prime_only_review: false,
+                prime_tags: [] as string[],
+              };
+            }),
+        grantOnly
+          ? empty({ entries: [], total: 0 })
+          : qc.fetchQuery(reads.externalEdits(nestId)).catch((e) => {
+              console.error("[NestView] listExternalEdits failed", nestId, e);
+              return { entries: [], total: 0 };
+            }),
+        grantOnly
+          ? empty({ counts: {} as Record<string, number> })
+          : qc.fetchQuery(reads.commentCounts(nestId)).catch((e) => {
+              console.error("[NestView] getCommentCounts failed", nestId, e);
+              return { counts: {} };
+            }),
         // Comment side of the activity feed — deliberately NOT filter=all.
         // The server's change items are the RAW pending set, but this view
         // renders reviewableQueue: the review-queue response post-filtered
@@ -684,13 +714,18 @@ export function NestView({
         // with the already-filtered changes, using the same (createdAt, id)
         // ordering as the server merge. If reviewable filtering ever moves
         // server-side, collapse this into a single filter=all call.
-        qc.fetchQuery(reads.feed(nestId, "comments")).catch((e) => {
-          console.error("[NestView] getNestFeed failed", nestId, e);
-          return {
-            items: [] as api.FeedItem[],
-            counts: { changes: 0, comments: 0 },
-          };
-        }),
+        grantOnly
+          ? empty({
+              items: [] as api.FeedItem[],
+              counts: { changes: 0, comments: 0 },
+            })
+          : qc.fetchQuery(reads.feed(nestId, "comments")).catch((e) => {
+              console.error("[NestView] getNestFeed failed", nestId, e);
+              return {
+                items: [] as api.FeedItem[],
+                counts: { changes: 0, comments: 0 },
+              };
+            }),
       ]);
     setCommentCounts(countsData.counts);
     setNodes(nodesData.nodes);
@@ -2961,6 +2996,26 @@ export function NestView({
                                 className={`rounded p-0.5 opacity-0 group-hover/fh:opacity-100 ${
                                   canManage
                                     ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                            {/* Share the folder with one person — they reach
+                                everything under it and nothing else in the
+                                nest. Owner/admin only, matching /grants. */}
+                            {canManage && (
+                              <button
+                                type="button"
+                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
+                                title={`Share ${prettyFolderPath(node.path)} with someone`}
+                                data-testid={`share-folder-${node.path}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setShareFolder({
+                                    path: node.path,
+                                    label: prettyFolderPath(node.path),
+                                  });
+                                }}
+                              >
+                                <Share2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                                     : "text-muted-foreground hover:text-primary hover:bg-primary/10"
                                 }`}
                                 title={
@@ -3552,6 +3607,15 @@ export function NestView({
           onChanged={(next) => {
             setShowSettings(false);
             // Flip the governance UI (Pending/AI Ready/Review Queue tiles,
+      {shareFolder && (
+        <ShareTargetDialog
+          nestId={nestId}
+          targetType="folder"
+          target={shareFolder.path}
+          label={shareFolder.label}
+          onClose={() => setShareFolder(null)}
+        />
+      )}
             // Stewards tab, etc.) instantly instead of waiting for the full
             // refetch to land — then reconcile counts in the background.
             setStewardshipEnabled(next.stewardshipEnabled);

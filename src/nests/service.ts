@@ -453,8 +453,16 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
   // dashboard — an admin only sees nests actually shared with them (below),
   // plus their own and the public/anonymous commons (listNests/listPublicNests).
   // Shared = collaborator grant OR active steward assignment (matched by
-  // email, since steward rows may predate the account) OR membership of a team
-  // shared onto the nest. Independent paths to a nest the user doesn't own.
+  // email, since steward rows may predate the account) OR a share grant on one
+  // document/folder OR membership of a team shared onto the nest. Independent
+  // paths to a nest the user doesn't own.
+  //
+  // Share grants join in here so a person shared ONE document finds it by
+  // logging in instead of needing the direct link someone sent them — the nest
+  // is listed, and every read past the card stays scoped to their grants
+  // (middleware in app.ts + listNodesForCaller). Deliberately NOT added to
+  // listVisibleNests: that feeds the work inbox and stats, where a nest-wide
+  // review queue would surface documents the grantee cannot read.
   const direct = (await db.all(
     `SELECT DISTINCT n.* FROM nests n
        LEFT JOIN nest_collaborators nc
@@ -463,10 +471,12 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
        LEFT JOIN stewards s
          ON s.nest_id = n.id AND s.is_active = 1
         AND LOWER(s.user_email) = LOWER(u.email)
+       LEFT JOIN grants g
+         ON g.nest_id = n.id AND g.user_id = ?
        WHERE n.user_id != ?
-         AND (nc.user_id IS NOT NULL OR s.id IS NOT NULL)
+         AND (nc.user_id IS NOT NULL OR s.id IS NOT NULL OR g.id IS NOT NULL)
        ORDER BY n.created_at DESC`,
-    [userId, userId, userId],
+    [userId, userId, userId, userId],
   )) as Nest[];
 
   // Fold in team-shared nests, deduped by id. Re-sort newest-first so the

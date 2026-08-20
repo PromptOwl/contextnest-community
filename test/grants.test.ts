@@ -219,6 +219,80 @@ describe("grants under stewardship (governed nest)", () => {
 
     const read = await jsonRequest(app, "GET", `/nests/${govNest}/nodes/nodes/gov-shared`, undefined, guest.apiKey);
     expect(read.status).toBe(200);
+// Being shared something is worthless if you can't find it. A grantee has no
+// nest-wide permission, so the nest must still be listed for them — as a
+// viewer of their slice, never describing the parts they can't see.
+describe("discovery — the grantee finds the nest by logging in", () => {
+  it("the shared nest appears in the grantee's own nest list", async () => {
+    const res = await jsonRequest(app, "GET", "/nests", undefined, guest.apiKey);
+    expect(res.status).toBe(200);
+    const card = res.data.nests.find((n: any) => n.id === nestId);
+    expect(card).toBeTruthy();
+    expect(card.permission).toBe("read");
+    expect(card.is_owner).toBe(false);
+    expect(card.roles).toEqual(["viewer"]);
+    expect(card.owner_email).toBe(owner.email);
+  });
+
+  it("the grantee can open the nest detail page", async () => {
+    // Regression: the middleware admitted a grantee, then GET /nests/:id
+    // 404'd them because they hold no nest-wide permission — the nest they
+    // were just shared into reported "Nest not found".
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, guest.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.nest.id).toBe(nestId);
+    expect(res.data.permission).toBe("read");
+    expect(res.data.grant_only).toBe(true);
+    expect(res.data.roles).toEqual(["viewer"]);
+    expect(res.data.myStewards).toEqual([]);
+  });
+
+  it("read access still buys no nest-wide power", async () => {
+    // Reporting a grantee as a reader inside the nest routes must not become
+    // authority. Denial can come from the middleware (404 — these paths are
+    // not on the grantee's allow-list at all) or the handler (403); what
+    // matters is that none of it succeeds.
+    for (const [method, path, body] of [
+      ["PATCH", `/nests/${nestId}`, { name: "Hijacked" }],
+      ["DELETE", `/nests/${nestId}`, undefined],
+      ["PATCH", `/nests/${nestId}/settings`, { stewardship_enabled: false }],
+      ["GET", `/nests/${nestId}/stewards`, undefined],
+      ["GET", `/nests/${nestId}/collaborators`, undefined],
+    ] as const) {
+      const res = await jsonRequest(app, method, path, body as any, guest.apiKey);
+      expect([403, 404]).toContain(res.status);
+    }
+  });
+
+  it("the card counts the grantee's slice, not the nest", async () => {
+    // guest holds one document grant; outsider holds a folder grant over the
+    // two deals. Neither may learn how big the nest really is.
+    const asGuest = await jsonRequest(app, "GET", "/nests", undefined, guest.apiKey);
+    const guestCard = asGuest.data.nests.find((n: any) => n.id === nestId);
+    expect(guestCard.document_count).toBe(1);
+
+    const asOutsider = await jsonRequest(app, "GET", "/nests", undefined, outsider.apiKey);
+    const outsiderCard = asOutsider.data.nests.find((n: any) => n.id === nestId);
+    expect(outsiderCard.document_count).toBe(2);
+  });
+
+  it("the card does not leak the nest's people", async () => {
+    const res = await jsonRequest(app, "GET", "/nests", undefined, guest.apiKey);
+    const card = res.data.nests.find((n: any) => n.id === nestId);
+    expect(card.collaborator_emails).toEqual([]);
+    expect(card.steward_emails).toEqual([]);
+    expect(card.collaborator_count).toBe(0);
+    expect(card.steward_count).toBe(0);
+  });
+
+  it("a user with no grant still doesn't see the nest at all", async () => {
+    resetAuthRateLimit();
+    const stranger = await registerUser(app, "stranger@acme.com", "Stranger");
+    const res = await jsonRequest(app, "GET", "/nests", undefined, stranger.apiKey);
+    expect(res.data.nests.map((n: any) => n.id)).not.toContain(nestId);
+  });
+});
+
     expect(read.data.node.content).toContain("gov shared");
 
     const list = await jsonRequest(app, "GET", `/nests/${govNest}/nodes`, undefined, guest.apiKey);
@@ -228,6 +302,11 @@ describe("grants under stewardship (governed nest)", () => {
 
   it("read grantee can SEARCH and get CONTEXT, scoped to their grant (not 404)", async () => {
     // Retrieval routes were 404 for grant-only callers before they were added
+
+  it("and drops the nest off the grantee's list", async () => {
+    const res = await jsonRequest(app, "GET", "/nests", undefined, guest.apiKey);
+    expect(res.data.nests.map((n: any) => n.id)).not.toContain(nestId);
+  });
     // to the grant middleware allow-list; results self-scope via filterAccessible.
     const search = await jsonRequest(app, "GET", `/nests/${govNest}/search?q=gov`, undefined, guest.apiKey);
     expect(search.status).toBe(200);

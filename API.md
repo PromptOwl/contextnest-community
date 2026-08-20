@@ -304,7 +304,45 @@ Removing a collaborator stays admin-only.
 
 ---
 
-## 3a. Teams (group sharing)
+## 3a. Share grants (one document / one folder)
+
+A **grant** gives one person access to a **single document** or **everything under one folder**, without making them a nest-wide collaborator. Access only — a grant is not stewardship and confers no approval rights.
+
+Resolution: a grant covers a node when the node id equals `target` or sits under `target + "/"`. `write` outranks `read` when several grants overlap. A grantee with no nest-wide permission sees **only** the nodes their grants cover — `GET /nests/:id/nodes` is filtered to them.
+
+**Discovery.** A grantee finds the nest by logging in: it is listed in `GET /nests`, and `GET /nests/:id` returns it, both with `permission: "read"`, `roles: ["viewer"]`, and `grant_only: true`. The list card is scoped to their slice, not the nest — `document_count` counts only the documents their grants cover, and `collaborator_*` / `steward_*` come back empty, so being shared one document never reveals how large the nest is or who else works in it. Grant-only nests deliberately do **not** enter the work inbox or `/stats`: those are governance surfaces over documents the grantee can't read.
+
+The nest routes report a grantee as a `read` caller so the nest resolves instead of 404ing, but this buys no authority: rename, delete, import, and settings-write still require `owner`/`admin`, and the remaining nest paths (`/settings`, `/stewards`, `/collaborators`, `/review-queue`, `/feed`, …) are not on the grantee's middleware allow-list at all — they answer `404`. A grantee's reachable surface is exactly: `GET /nests/:id`, `GET /nests/:id/nodes` (filtered), the granted nodes themselves, and the read-query routes (`/query`, `/search`, `/context`, `/export`), each scoped to their grants. Note `resolveNestPermission` still returns `none` for them — that is what routes them into the per-node grant checks.
+
+Managing grants is **owner / nest admin / server admin** (`canManageStewards` — same authority as the steward roster). Everyone else gets `403`.
+
+### GET `/nests/:nestId/grants`
+```json
+{ "count": 1, "grants": [{ "id": "...", "target_type": "document", "target": "nodes/win-loss-log", "user_id": "...", "email": "guest@x.com", "role": "read", "granted_by": "owner@x.com", "created_at": "..." }] }
+```
+The whole nest's sharing roster, annotated with the grantee's email.
+
+### POST `/nests/:nestId/grants`
+```json
+{ "target_type": "document", "target": "nodes/win-loss-log", "email": "guest@x.com", "role": "read" }
+```
+- `target_type` ∈ `document` / `folder`; `role` ∈ `read` / `write` (default `read`).
+- `target` is a node id (`nodes/win-loss-log`) or a folder prefix (`nodes/gtm/deals`).
+- A folder target must name a **subfolder**: a bare `nodes` root would match every node and silently share the whole nest → `400`.
+- Re-granting the same `(target_type, target, user)` updates the role rather than duplicating.
+- Auto-creates a placeholder user (`is_invited = 1`) if the email is unknown, same as collaborator invites.
+- `201 { grant }`.
+
+### DELETE `/nests/:nestId/grants/:id`
+`{ "deleted": true }`, or `404` if the grant isn't in this nest.
+
+Moving a document carries its **document** grants to the new id; deleting it drops them. **Folder** grants pin to a path, so a moved document leaves one share and joins another. Grants do not travel in a nest export bundle.
+
+Agent equivalent: the `context_grant` MCP tool takes the same four fields in one call (see §MCP and `/llms.txt`). In the UI: **Share this document** on a document's ⋯ menu, and the share icon on a folder row in the nest view.
+
+---
+
+## 3b. Teams (group sharing)
 
 A **team** is a reusable, owner-managed group of users. Each member carries a
 **role** (`admin` / `editor` / `viewer`) set on the membership and applied
