@@ -10,6 +10,7 @@ import { matchesFilters } from "../lib/node-filter";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
+import { folderGrantTarget } from "../lib/folder-target";
 import { parseServerDate, formatServerDate } from "../lib/dates";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -507,6 +508,15 @@ export function NestView({
     const rel = id.startsWith("nodes/") ? id.slice(6) : id;
     const slash = rel.lastIndexOf("/");
     return slash > 0 ? rel.slice(0, slash) : "";
+  };
+
+  /** Node-id prefix for a folder share — see lib/folder-target.ts. */
+  const shareTargetForFolder = (folderPath: string): string => {
+    const inside = nodes.find((n) => {
+      const f = folderOfNode(n.id || "");
+      return f === folderPath || f.startsWith(`${folderPath}/`);
+    });
+    return folderGrantTarget(folderPath, inside?.id ?? null);
   };
 
   const openFolderInDocuments = (folder: string) => {
@@ -3008,8 +3018,13 @@ export function NestView({
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setShareFolder({
-                                    path: node.path,
-                                    label: prettyFolderPath(node.path),
+                                    // The row's own label, not the whole path:
+                                    // an imported nest's paths can be long and
+                                    // id-prefixed, which made the title
+                                    // unreadable. The exact target is shown in
+                                    // the dialog body instead.
+                                    path: shareTargetForFolder(node.path),
+                                    label: node.label || prettyFolder(node.name),
                                   });
                                 }}
                               >

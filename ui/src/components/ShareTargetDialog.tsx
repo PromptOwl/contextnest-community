@@ -126,11 +126,15 @@ export function ShareTargetDialog({
 
   return (
     <Dialog open onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[520px]">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Icon className="h-4 w-4" />
-            <span className="truncate">Share {targetType}: {label}</span>
+      <DialogContent className="sm:max-w-[540px]">
+        <DialogHeader className="min-w-0">
+          {/* min-w-0 + truncate on the label: a long or id-prefixed folder name
+              must shorten rather than force the dialog wider than its box. */}
+          <DialogTitle className="flex items-center gap-2 min-w-0">
+            <Icon className="h-4 w-4 shrink-0" />
+            <span className="truncate">
+              Share {targetType === "folder" ? "folder" : "document"}: {label}
+            </span>
           </DialogTitle>
           <DialogDescription>
             {targetType === "folder" ? (
@@ -147,6 +151,11 @@ export function ShareTargetDialog({
               </>
             )}
           </DialogDescription>
+          {/* The exact thing being shared, in full. break-all so a long id
+              wraps inside the dialog instead of stretching it. */}
+          <code className="mt-1 block rounded bg-muted px-2 py-1 text-[11px] text-muted-foreground break-all">
+            {target}
+          </code>
         </DialogHeader>
 
         <div className="space-y-4 py-1">
@@ -165,10 +174,14 @@ export function ShareTargetDialog({
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 disabled={busy}
-                className="flex-1"
+                className="flex-1 min-w-0"
                 data-testid="share-target-email"
               />
-              <Button type="submit" disabled={busy || !email.trim()}>
+              <Button
+                type="submit"
+                disabled={busy || !email.trim()}
+                className="shrink-0"
+              >
                 {busy ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
@@ -185,8 +198,10 @@ export function ShareTargetDialog({
             </p>
           </form>
 
-          <div className="rounded-lg border p-4 space-y-2">
-            <Label className="text-sm font-medium">Shared with</Label>
+          <div className="rounded-lg border p-4 space-y-2 max-h-[40vh] overflow-y-auto">
+            <Label className="text-sm font-medium">
+              Shared with{grants.length > 0 ? ` (${grants.length})` : ""}
+            </Label>
             {loading ? (
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
             ) : grants.length === 0 ? (
@@ -195,7 +210,7 @@ export function ShareTargetDialog({
                 already see it.
               </p>
             ) : (
-              <div className="space-y-1">
+              <div className="divide-y divide-border">
                 {grants.map((g) => (
                   <div key={g.id} className="flex items-center gap-2 py-1.5">
                     <span className="flex-1 min-w-0 truncate text-sm">
