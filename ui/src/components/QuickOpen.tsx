@@ -24,6 +24,31 @@ export interface QuickOpenResult {
   nest_name?: string;
   /** Nest rows only — the nest's own description, shown as the subtitle. */
   description?: string | null;
+  /** Document rows from a search — body text around the match. */
+  snippet?: string;
+}
+
+/** Split a snippet on the query terms so the matching text can be marked.
+ *  Terms are escaped — a query is user text, not a regex. */
+function highlight(text: string, query: string) {
+  const terms = query.trim().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return text;
+  const re = new RegExp(
+    `(${terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`,
+    "gi",
+  );
+  const lower = terms.map((t) => t.toLowerCase());
+  return text
+    .split(re)
+    .map((part, i) =>
+      part && lower.includes(part.toLowerCase()) ? (
+        <mark key={i} className="bg-yellow-200 dark:bg-yellow-700/60 rounded-sm px-0.5">
+          {part}
+        </mark>
+      ) : (
+        part
+      ),
+    );
 }
 
 interface QuickOpenProps {
@@ -167,37 +192,49 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
               <button
                 key={`${r.kind}:${r.nest_id ?? ""}${r.id}`}
                 type="button"
-                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm ${
+                className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm ${
                   i === selected ? "bg-muted" : "hover:bg-muted/50"
                 }`}
                 onMouseEnter={() => setSelected(i)}
                 onClick={() => pick(i)}
               >
                 {r.kind === "nest" ? (
-                  <Database className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <Database className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
                 ) : (
-                  <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <FileText className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
                 )}
-                <span className="truncate font-medium">{r.title}</span>
-                {/* Right-hand column says where the row goes: a nest row opens
-                    the nest, a document row names the nest it lives in (the
-                    same title can exist in several). */}
-                {r.kind === "nest" ? (
-                  <span className="ml-auto text-xs text-muted-foreground shrink-0">
-                    Nest
-                  </span>
-                ) : r.nest_name ? (
-                  <span className="ml-auto truncate text-xs text-muted-foreground shrink-0">
-                    {r.nest_name}
-                  </span>
-                ) : (
-                  r.tags &&
-                  r.tags.length > 0 && (
-                    <span className="ml-auto truncate text-xs text-muted-foreground">
-                      {r.tags.slice(0, 3).join(" ")}
-                    </span>
-                  )
-                )}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-medium">{r.title}</span>
+                    {/* Right-hand column says where the row goes: a nest row
+                        opens the nest, a document row names the nest it lives
+                        in (the same title can exist in several). */}
+                    {r.kind === "nest" ? (
+                      <span className="ml-auto text-xs text-muted-foreground shrink-0">
+                        Nest
+                      </span>
+                    ) : r.nest_name ? (
+                      <span className="ml-auto truncate text-xs text-muted-foreground shrink-0">
+                        {r.nest_name}
+                      </span>
+                    ) : (
+                      r.tags &&
+                      r.tags.length > 0 && (
+                        <span className="ml-auto truncate text-xs text-muted-foreground">
+                          {r.tags.slice(0, 3).join(" ")}
+                        </span>
+                      )
+                    )}
+                  </div>
+                  {/* Why this row matched: body text around the hit. Only for
+                      searched document rows — an empty query has nothing to
+                      highlight, and nest rows carry their own description. */}
+                  {r.kind === "node" && r.snippet && query.trim() && (
+                    <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                      {highlight(r.snippet, query)}
+                    </div>
+                  )}
+                </div>
               </button>
             ))
           )}

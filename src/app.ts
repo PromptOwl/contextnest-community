@@ -1418,7 +1418,7 @@ export function createApp(): Hono<AuthEnv> {
           // makes — a hit never leaks a doc the caller couldn't open directly.
           const accessible = await filterAccessible(nest.id, userId, userEmail, matches);
           return accessible.map((n) => ({
-            ...toSearchHit(n),
+            ...toSearchHit(n, q),
             nest_id: nest.id,
             nest_name: nest.name ?? nest.id,
           }));

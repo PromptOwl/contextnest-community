@@ -66,6 +66,26 @@ describe("GET /search", () => {
     );
   });
 
+  it("snippets a deep body match around the term, not the head of the body", async () => {
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestA}/nodes`,
+      { title: "Long Note", content: `${"filler ".repeat(100)}gizmo tail` },
+      owner.apiKey,
+    );
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      "/search?q=gizmo",
+      undefined,
+      owner.apiKey,
+    );
+    expect(data.count).toBe(1);
+    expect(data.nodes[0].snippet).toContain("gizmo");
+    expect(data.nodes[0].snippet.length).toBeLessThanOrEqual(201);
+  });
+
   it("matches title, body and tags with every term required", async () => {
     const { data } = await jsonRequest(
       app,
