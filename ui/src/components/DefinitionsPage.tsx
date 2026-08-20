@@ -4,8 +4,12 @@
  * anything here is also pullable in real time via
  * GET /nests/:id/definitions?term=… (see the Connect docs).
  *
- * Writes are server-gated to write-tier; read-only viewers see the table
- * and get a toast if they try to edit.
+ * Writes are write-tier server-side (the nest middleware bumps non-GET here to
+ * "write"), so a viewer — a read collaborator, a public reader, a share
+ * grantee, or a steward without a write collaborator row — cannot define or
+ * remove a term. They get the table read-only: no form, no row actions. The
+ * page used to render the whole editor for them and answer with a toast on
+ * save, which offered an action that was never theirs to take.
  */
 import { useCallback, useEffect, useState } from "react";
 import { Loader2, Plus, Trash2, Pencil } from "lucide-react";
@@ -13,6 +17,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NestPageHeader } from "./NestPageHeader";
+import { deriveNestCaps } from "../lib/nest-caps";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
@@ -28,6 +33,11 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
   const [rows, setRows] = useState<Definition[]>([]);
   const qc = useQueryClient();
   const [loading, setLoading] = useState(true);
+  // Write-tier only — matches the server gate exactly. Derived from the same
+  // nest read every other nest screen uses, so the rule lives in nest-caps
+  // rather than being guessed again here. Defaults to false: until the nest
+  // read lands, show the read-only view rather than an editor that may vanish.
+  const [canWrite, setCanWrite] = useState(false);
   const [saving, setSaving] = useState(false);
   // One shared form for add + edit; editingId null = adding. The id is sent
   // as editing_id on save so a rename replaces that exact row server-side
@@ -49,6 +59,37 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
       setLoading(false);
     }
   }, [nestId]);
+
+  useEffect(() => {
+    // Guarded: this page is rendered without a key, so nestId can change while
+    // it stays mounted. A slow response for the previous nest must not land
+    // after the effect re-ran and grant (or withhold) the wrong nest's
+    // affordances.
+    let ignore = false;
+    // Cached alongside the nest screens, so this is usually free.
+    qc.fetchQuery(reads.nest(nestId))
+      .then((meta: any) => {
+        if (ignore) return;
+        const caps = deriveNestCaps({
+          roles: meta?.roles ?? [],
+          permission: meta?.permission ?? null,
+          myStewards: meta?.myStewards ?? [],
+          isOwner: meta?.permission === "owner",
+          isAdmin: meta?.permission === "admin",
+        });
+        // Definitions sit at write-tier, NOT the looser canEditDocs: the
+        // steward-editor bypass in app.ts covers /nodes routes only, so a
+        // nest-scope editor steward without a write collaborator row is
+        // refused here by the server too.
+        setCanWrite(caps.canManage || caps.collabCanWrite);
+      })
+      .catch(() => {
+        if (!ignore) setCanWrite(false);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [nestId, qc]);
 
   useEffect(() => {
     load();
@@ -115,7 +156,8 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
         </code>
       </p>
 
-      {/* Add / edit form */}
+      {/* Add / edit form — write-tier only. */}
+      {canWrite && (
       <div className="border border-border rounded-lg bg-card p-3 space-y-2">
         <div className="grid gap-2 sm:grid-cols-[1fr_1fr]">
           <Input
@@ -156,6 +198,7 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
           </Button>
         </div>
       </div>
+      )}
 
       {/* The ontology table */}
       <div className="border border-border rounded-lg overflow-x-auto">
@@ -181,7 +224,9 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
             {!loading && rows.length === 0 && (
               <tr>
                 <td colSpan={5} className="px-3 py-8 text-center text-muted-foreground">
-                  No terms defined yet. Give your nest a shared vocabulary.
+                  {canWrite
+                    ? "No terms defined yet. Give your nest a shared vocabulary."
+                    : "No terms defined yet."}
                 </td>
               </tr>
             )}
@@ -204,22 +249,26 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
                   {d.defined_by}
                 </td>
                 <td className="whitespace-nowrap text-right">
-                  <button
-                    type="button"
-                    aria-label={`Edit ${d.term}`}
-                    onClick={() => startEdit(d)}
-                    className="p-1 rounded hover:bg-accent mr-1"
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`Delete ${d.term}`}
-                    onClick={() => remove(d)}
-                    className="p-1 rounded hover:bg-accent text-red-600"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  {canWrite && (
+                    <>
+                      <button
+                        type="button"
+                        aria-label={`Edit ${d.term}`}
+                        onClick={() => startEdit(d)}
+                        className="p-1 rounded hover:bg-accent mr-1"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Delete ${d.term}`}
+                        onClick={() => remove(d)}
+                        className="p-1 rounded hover:bg-accent text-red-600"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </>
+                  )}
                 </td>
               </tr>
             ))}

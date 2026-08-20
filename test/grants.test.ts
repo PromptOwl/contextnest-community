@@ -118,6 +118,19 @@ describe("document grant — access is scoped to exactly that doc", () => {
     expect(res.status).toBe(403);
   });
 
+  it("a READ grantee cannot even request the document's deletion", async () => {
+    // Being shown something is not standing to propose destroying it. Must run
+    // before the write upgrade below, which legitimately earns that right.
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/shared-one/request-deletion`,
+      { reason: "don't want it" },
+      guest.apiKey,
+    );
+    expect(res.status).toBe(403);
+  });
+
   it("upgrading to write lets guest edit that doc", async () => {
     await jsonRequest(
       app,
@@ -143,6 +156,48 @@ describe("document grant — access is scoped to exactly that doc", () => {
       guest.apiKey,
     );
     expect(sib.status).toBe(404);
+  });
+
+  it("the node read reports the caller's grant so the UI can tell write from read", async () => {
+    // A grant is access, not stewardship: it shows up in neither the nest
+    // permission (a grantee always reads as "read") nor the per-node steward
+    // roles. Without this field the client showed a write grantee a read-only
+    // editor for the very document they were granted write on.
+    const single = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/shared-one`,
+      undefined,
+      guest.apiKey,
+    );
+    expect(single.data.node.myGrant).toBe("write");
+
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, guest.apiKey);
+    const row = list.data.nodes.find((n: any) => n.id === "nodes/shared-one");
+    expect(row.myGrant).toBe("write");
+  });
+
+  it("a WRITE grantee may request that document's deletion", async () => {
+    // A write grant is edit rights on that document, which is exactly the
+    // standing the deletion gate asks for — scoped to it, nothing else.
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/shared-one/request-deletion`,
+      { reason: "superseded" },
+      guest.apiKey,
+    );
+    expect(res.status).toBe(201);
+    // Clean up so the later revoke test isn't reading a flagged node.
+    const roster = await jsonRequest(app, "GET", `/nests/${nestId}/deletion-requests`, undefined, owner.apiKey);
+    const req = roster.data.requests.find((r: any) => r.nodeId === "nodes/shared-one");
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${req.id}/decline`,
+      { note: "keeping it" },
+      owner.apiKey,
+    );
   });
 
   it("guest cannot reach nest management (settings/grants)", async () => {
@@ -183,6 +238,80 @@ describe("folder grant — covers everything under the prefix", () => {
   });
 });
 
+// Being shared something is worthless if you can't find it. A grantee has no
+// nest-wide permission, so the nest must still be listed for them — as a
+// viewer of their slice, never describing the parts they can't see.
+describe("discovery — the grantee finds the nest by logging in", () => {
+  it("the shared nest appears in the grantee's own nest list", async () => {
+    const res = await jsonRequest(app, "GET", "/nests", undefined, guest.apiKey);
+    expect(res.status).toBe(200);
+    const card = res.data.nests.find((n: any) => n.id === nestId);
+    expect(card).toBeTruthy();
+    expect(card.permission).toBe("read");
+    expect(card.is_owner).toBe(false);
+    expect(card.roles).toEqual(["viewer"]);
+    expect(card.owner_email).toBe(owner.email);
+  });
+
+  it("the grantee can open the nest detail page", async () => {
+    // Regression: the middleware admitted a grantee, then GET /nests/:id
+    // 404'd them because they hold no nest-wide permission — the nest they
+    // were just shared into reported "Nest not found".
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}`, undefined, guest.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.data.nest.id).toBe(nestId);
+    expect(res.data.permission).toBe("read");
+    expect(res.data.grant_only).toBe(true);
+    expect(res.data.roles).toEqual(["viewer"]);
+    expect(res.data.myStewards).toEqual([]);
+  });
+
+  it("read access still buys no nest-wide power", async () => {
+    // Reporting a grantee as a reader inside the nest routes must not become
+    // authority. Denial can come from the middleware (404 — these paths are
+    // not on the grantee's allow-list at all) or the handler (403); what
+    // matters is that none of it succeeds.
+    for (const [method, path, body] of [
+      ["PATCH", `/nests/${nestId}`, { name: "Hijacked" }],
+      ["DELETE", `/nests/${nestId}`, undefined],
+      ["PATCH", `/nests/${nestId}/settings`, { stewardship_enabled: false }],
+      ["GET", `/nests/${nestId}/stewards`, undefined],
+      ["GET", `/nests/${nestId}/collaborators`, undefined],
+    ] as const) {
+      const res = await jsonRequest(app, method, path, body as any, guest.apiKey);
+      expect([403, 404]).toContain(res.status);
+    }
+  });
+
+  it("the card counts the grantee's slice, not the nest", async () => {
+    // guest holds one document grant; outsider holds a folder grant over the
+    // two deals. Neither may learn how big the nest really is.
+    const asGuest = await jsonRequest(app, "GET", "/nests", undefined, guest.apiKey);
+    const guestCard = asGuest.data.nests.find((n: any) => n.id === nestId);
+    expect(guestCard.document_count).toBe(1);
+
+    const asOutsider = await jsonRequest(app, "GET", "/nests", undefined, outsider.apiKey);
+    const outsiderCard = asOutsider.data.nests.find((n: any) => n.id === nestId);
+    expect(outsiderCard.document_count).toBe(2);
+  });
+
+  it("the card does not leak the nest's people", async () => {
+    const res = await jsonRequest(app, "GET", "/nests", undefined, guest.apiKey);
+    const card = res.data.nests.find((n: any) => n.id === nestId);
+    expect(card.collaborator_emails).toEqual([]);
+    expect(card.steward_emails).toEqual([]);
+    expect(card.collaborator_count).toBe(0);
+    expect(card.steward_count).toBe(0);
+  });
+
+  it("a user with no grant still doesn't see the nest at all", async () => {
+    resetAuthRateLimit();
+    const stranger = await registerUser(app, "stranger@acme.com", "Stranger");
+    const res = await jsonRequest(app, "GET", "/nests", undefined, stranger.apiKey);
+    expect(res.data.nests.map((n: any) => n.id)).not.toContain(nestId);
+  });
+});
+
 describe("revoking", () => {
   it("deleting the grant removes access", async () => {
     const roster = await jsonRequest(app, "GET", `/nests/${nestId}/grants`, undefined, owner.apiKey);
@@ -191,6 +320,11 @@ describe("revoking", () => {
     expect(del.status).toBe(200);
     const read = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/shared-one`, undefined, guest.apiKey);
     expect(read.status).toBe(404);
+  });
+
+  it("and drops the nest off the grantee's list", async () => {
+    const res = await jsonRequest(app, "GET", "/nests", undefined, guest.apiKey);
+    expect(res.data.nests.map((n: any) => n.id)).not.toContain(nestId);
   });
 });
 

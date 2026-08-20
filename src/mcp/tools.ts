@@ -8,7 +8,7 @@ import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
-import { canReadNode } from "../governance/access-guard.js";
+import { canReadNode, canRequestDeletion } from "../governance/access-guard.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -1395,6 +1395,11 @@ async function runTool(
 
       // Whole nest.
       if (args.nest === true) {
+        if (
+          !(await canRequestDeletion({ nestId, userId, userEmail, nodeId: "" }))
+        ) {
+          return "Only an editor, a nest admin, or the nest owner can request the deletion of a nest.";
+        }
         const request = await reviews.requestDeletion({
           nestId,
           nodeId: nestId,
@@ -1409,6 +1414,11 @@ async function runTool(
       // Folder — normalized the same way the REST route does, so two people
       // flagging "gtm/deals" and "/nodes/gtm/deals/" collide on one request.
       if (typeof args.folder === "string" && args.folder.trim()) {
+        if (
+          !(await canRequestDeletion({ nestId, userId, userEmail, nodeId: "" }))
+        ) {
+          return "Only an editor, a nest admin, or the nest owner can request the deletion of a folder.";
+        }
         const folder = args.folder
           .trim()
           .replace(/^\/+|\/+$/g, "")
@@ -1432,10 +1442,21 @@ async function runTool(
       // Document — resolved by title or id like every other node tool.
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return node;
-      // Read gate: you may flag anything you can see. That is the point —
-      // whoever notices dead content usually can't delete it.
+      // Read gate first, so a caller who can't see the node learns nothing
+      // beyond "not found"; then the editor gate (see canRequestDeletion —
+      // proposing a deletion is an editor's act, not a reader's).
       if (!(await canReadNode(nestId, node.id, userId, userEmail))) {
         return `Node not found: ${node.id}`;
+      }
+      if (
+        !(await canRequestDeletion({
+          nestId,
+          userId,
+          userEmail,
+          nodeId: node.id,
+        }))
+      ) {
+        return "Only an editor, a nest admin, or the nest owner can request the deletion of a document.";
       }
       const request = await reviews.requestDeletion({
         nestId,

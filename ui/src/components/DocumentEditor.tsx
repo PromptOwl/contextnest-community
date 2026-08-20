@@ -35,6 +35,7 @@ import {
   Table2,
   Pencil,
   Users,
+  Share2,
   Link as LinkIcon,
   History,
   Code2,
@@ -60,6 +61,7 @@ import { TableViewer } from "./TableViewer";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { ShareTargetDialog } from "./ShareTargetDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
   buildTextIndex,
@@ -174,10 +176,20 @@ export function DocumentEditor({
   // looking at a real nest the caller can administer.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
+  // Share THIS document with one person (a grant), as opposed to the whole
+  // nest above. Same owner/admin gate the /grants routes enforce.
+  const [showShareDoc, setShowShareDoc] = useState(false);
   const qc = useQueryClient();
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
   const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
+  // Caller's share grant on THIS document (server-resolved on GET /nodes/:id).
+  // A grant is access, not stewardship: it appears in neither `permission` (a
+  // grantee always reads as "read" at nest level, whatever their grant says)
+  // nor `myNodeRoles`. Without it a write grantee got a read-only editor for
+  // the very document they were granted write on.
+  const [myGrant, setMyGrant] = useState<"read" | "write" | null>(null);
+  const grantCanWrite = myGrant === "write";
   // Caller's nest-wide scoped steward rows (from GET /nests/:id). Needed for
   // NEW docs, where there's no node yet to resolve a per-node role against.
   const [myStewards, setMyStewards] = useState<
@@ -254,7 +266,7 @@ export function DocumentEditor({
     myStewards.some((s) => s.role === "editor" && s.scope === "nest");
   const isViewOnly = isNew
     ? !canAuthorNew
-    : isReadOnly && myNodeRoles.length === 0;
+    : isReadOnly && myNodeRoles.length === 0 && !grantCanWrite;
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
   // default. Everyone else goes through the request path. The server still
@@ -270,6 +282,17 @@ export function DocumentEditor({
     permission === "owner" ||
     permission === "admin" ||
     authoredByMe;
+  // Even ASKING for a deletion is an editor's act — a viewer of any kind (a
+  // read collaborator, a viewer steward, a read share grantee) doesn't get the
+  // action at all. Mirrors canRequestDeletion on the server, which refuses
+  // them; hiding it means nobody clicks through a 403 for a request they were
+  // never allowed to make.
+  const canRequestDeletion =
+    canDeleteDirectly ||
+    permission === "write" ||
+    grantCanWrite ||
+    myNodeRoles.includes("editor") ||
+    myStewards.some((s) => s.role === "editor" && s.scope === "nest");
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDeletionModal, setShowDeletionModal] = useState(false);
   // Latest deletion flag on this doc. Pending hides the request button (a
@@ -784,6 +807,7 @@ export function DocumentEditor({
         ((node as any)?.pendingReviewBy as string | null | undefined) ?? null,
       );
       setDeletionRequest(((node as any)?.deletionRequest ?? null) as api.DeletionRequest | null);
+      setMyGrant((((node as any)?.myGrant ?? null) as "read" | "write" | null));
       initialSnapshotRef.current = {
         title: loadedTitle,
         content: loadedContent,
@@ -1460,6 +1484,15 @@ export function DocumentEditor({
                   );
                 },
               });
+            // Share THIS doc first — it's the narrower, more common ask.
+            // Meaningless on an unsaved doc: there's no node id to grant on.
+            if (canShare && !isNew)
+              moreActions.push({
+                label: "Share this document",
+                icon: Share2,
+                testId: "document-editor-share-doc",
+                onSelect: () => setShowShareDoc(true),
+              });
             if (canShare)
               moreActions.push({
                 label: "Share nest",
@@ -1474,7 +1507,7 @@ export function DocumentEditor({
             // One Delete entry: the author (and the admin/owner tier) deletes
             // outright, everyone else raises a request. Hidden below that tier
             // once a flag is already open.
-            if (!isNew && (canDeleteDirectly || !deletionRequested))
+            if (!isNew && canRequestDeletion && (canDeleteDirectly || !deletionRequested))
               moreActions.push({
                 label: "Delete",
                 icon: Trash2,
@@ -2577,6 +2610,15 @@ export function DocumentEditor({
         onSelect={handleDocLinkInsert}
       />
 
+      {showShareDoc && (
+        <ShareTargetDialog
+          nestId={nestId}
+          targetType="document"
+          target={nodeId}
+          label={title || nodeId}
+          onClose={() => setShowShareDoc(false)}
+        />
+      )}
       {showShare && (
         <ShareNestDialog
           nestId={nestId}

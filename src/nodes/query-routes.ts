@@ -24,7 +24,7 @@ import { permissionLevel, isPublicReader, resolveNestPermission } from "../share
 import { exportNestBundle } from "../nests/bundle-service.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
 import { listNodesForCaller, RUNNABLE_NODE_TYPES } from "./service.js";
-import { matchDocuments, toSearchHit } from "./search.js";
+import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 
@@ -529,8 +529,7 @@ queryRoutes.get("/search", async (c) => {
 
   const nestId = c.req.param("nestId")!;
   const { storage } = await engineCache.get(nestId);
-  const documents = await storage.discoverDocuments();
-  const matches = matchDocuments(documents, q);
+  const matches = matchDocuments(await discoverForSearch(storage), q);
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);

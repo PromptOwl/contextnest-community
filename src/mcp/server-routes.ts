@@ -582,6 +582,11 @@ Streamable HTTP, stateless. Two endpoints:
   (new document in a writable nest; a \`folder\` path creates the folder).
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, full toolset including writes and
   governance (create/update, submit/approve/reject, stewards, sharing).
+  Sharing a slice is one call: \`context_grant\` with
+  \`{ "email", "target_type": "document" | "folder", "target", "role": "read" | "write" }\`
+  — \`target\` is a node id (\`nodes/win-loss-log\`) or a folder prefix
+  (\`nodes/gtm/deals\`). The recipient reaches exactly that document, or
+  everything under that folder, and nothing else in the nest. Owner/admin only.
 
 Claude Code / Cursor / VS Code connect natively via HTTP with the
 \`Authorization: Bearer\` header. Claude Desktop needs the mcp-remote bridge:

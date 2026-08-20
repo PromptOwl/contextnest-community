@@ -14,6 +14,18 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchNests } from "../lib/nest-search";
 
+/**
+ * Document rows the palette lists, and the page size it asks the server for.
+ *
+ * 20 is the server's default page size for `/search` (its ceiling is 50) — a
+ * deliberate stop short of that, not the most a request could carry. Eight rows
+ * used to hide the rest with no way to reach it; 20 scrolls comfortably, and
+ * since results are ranked title-first, rows past that are progressively weaker
+ * matches. A broad query is answered by typing more, not by paging further —
+ * which is what the "Showing X of Y" line below the list says out loud.
+ */
+const DOC_ROWS = 20;
+
 export interface QuickOpenResult {
   /** "nest" rows open the nest itself; "node" rows open a document. */
   kind: "nest" | "node";
@@ -63,6 +75,9 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
   const [results, setResults] = useState<QuickOpenResult[]>([]);
   const [selected, setSelected] = useState(0);
   const [searching, setSearching] = useState(false);
+  /** Everything the server matched, so the list can admit what it is hiding —
+   *  it shows the top few, and silently truncating reads as "no more matches". */
+  const [totalDocs, setTotalDocs] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const qc = useQueryClient();
@@ -81,6 +96,7 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
       const q = query.trim();
       if (global && !q) {
         setResults([]);
+        setTotalDocs(0);
         return;
       }
       setSearching(true);
@@ -100,26 +116,34 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
               .catch((): QuickOpenResult[] => []),
             // Search stays uncached — results must reflect the query exactly.
             api
-              .searchAllNests(q)
-              .then((d) =>
-                d.nodes.map((n): QuickOpenResult => ({ ...n, kind: "node" })),
-              )
-              .catch(() => []),
+              .searchAllNests(q, DOC_ROWS)
+              .then((d) => {
+                setTotalDocs(d.count);
+                return d.nodes.map(
+                  (n): QuickOpenResult => ({ ...n, kind: "node" }),
+                );
+              })
+              .catch(() => {
+                setTotalDocs(0);
+                return [];
+              }),
           ]);
-          setResults([...nests.slice(0, 4), ...docs.slice(0, 8)]);
+          setResults([...nests.slice(0, 4), ...docs.slice(0, DOC_ROWS)]);
         } else {
           const data = q
             ? await api.searchNodes(nestId!, q)
             : await qc.fetchQuery(reads.nodes(nestId!));
+          setTotalDocs(data.nodes.length);
           setResults(
             (data.nodes as QuickOpenResult[])
-              .slice(0, 8)
+              .slice(0, DOC_ROWS)
               .map((n) => ({ ...n, kind: "node" as const })),
           );
         }
         setSelected(0);
       } catch {
         setResults([]);
+        setTotalDocs(0);
       } finally {
         setSearching(false);
       }
@@ -133,6 +157,8 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
     const r = results[i];
     if (r) onSelect(r.id, r);
   };
+
+  const shownDocs = results.filter((r) => r.kind === "node").length;
 
   return (
     <div
@@ -239,6 +265,14 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
             ))
           )}
         </div>
+        {/* Say when the list is a page, not the answer — best matches lead, so
+            the rest are narrowed away by typing more, not by scrolling. */}
+        {shownDocs > 0 && totalDocs > shownDocs && (
+          <div className="border-t px-3 py-2 text-xs text-muted-foreground">
+            Showing {shownDocs} of {totalDocs} matching documents — keep typing
+            to narrow.
+          </div>
+        )}
       </div>
     </div>
   );

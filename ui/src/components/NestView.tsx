@@ -10,6 +10,7 @@ import { matchesFilters } from "../lib/node-filter";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
+import { folderGrantTarget } from "../lib/folder-target";
 import { parseServerDate, formatServerDate } from "../lib/dates";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -22,7 +23,7 @@ import {
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
-  Activity,
+  Activity, Share2,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
@@ -62,6 +63,7 @@ export function NodeTypeIcon({
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
 import { deriveNestCaps } from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
@@ -239,6 +241,10 @@ export function NestView({
   // Folder pending deletion (admin) or a deletion request (everyone else).
   const [folderTarget, setFolderTarget] = useState<
     { path: string; label: string; total: number } | null
+  >(null);
+  // Folder being shared with one person (a grant, not a collaborator).
+  const [shareFolder, setShareFolder] = useState<
+    { path: string; label: string } | null
   >(null);
   // Non-owner asking for the whole nest to be deleted.
   const [nestFlagOpen, setNestFlagOpen] = useState(false);
@@ -504,6 +510,15 @@ export function NestView({
     return slash > 0 ? rel.slice(0, slash) : "";
   };
 
+  /** Node-id prefix for a folder share — see lib/folder-target.ts. */
+  const shareTargetForFolder = (folderPath: string): string => {
+    const inside = nodes.find((n) => {
+      const f = folderOfNode(n.id || "");
+      return f === folderPath || f.startsWith(`${folderPath}/`);
+    });
+    return folderGrantTarget(folderPath, inside?.id ?? null);
+  };
+
   const openFolderInDocuments = (folder: string) => {
     setFolderFilter(folder);
     setActiveTab("documents");
@@ -622,11 +637,23 @@ export function NestView({
 
   const fetchData = useCallback(async () => {
     setLoading(true);
+    // Nest meta first, because it says WHICH of the reads below the caller may
+    // even make. Someone who reached this nest through a share grant on one
+    // document (or one folder) is allowed the nest itself and their nodes, and
+    // nothing else — every governance read 404s for them. Firing them anyway
+    // cost seven pointless round-trips and surfaced the review queue's failure
+    // as a "Nest not found" toast on a page that had loaded fine.
+    const nestMeta = await qc.fetchQuery(reads.nest(nestId)).catch((e) => {
+      console.error("[NestView] getNest failed", nestId, e);
+      return null;
+    });
+    const grantOnly = !!(nestMeta as any)?.grant_only;
     // Each request is independently swallowed — if listNodes throws, we must
     // still apply stewardshipEnabled from the settings response. Previously a
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
-    const [nodesData, stewardsData, queueData, deletionData, settingsData, externalData, nestMeta, countsData, feedData] =
+    const empty = <T,>(v: T) => Promise.resolve(v);
+    const [nodesData, stewardsData, queueData, deletionData, settingsData, externalData, countsData, feedData] =
       await Promise.all([
         // The five reads below go through the shared cache (same keys and
         // invalidation as the hook-based screens) so returning from a document
@@ -638,42 +665,55 @@ export function NestView({
           console.error("[NestView] listNodes failed", nestId, e);
           return { nodes: [] };
         }),
-        qc.fetchQuery(reads.stewards(nestId)).catch((e) => {
-          console.error("[NestView] listStewards failed", nestId, e);
-          return { stewards: [] };
-        }),
-        qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
-          console.error("[NestView] getReviewQueue failed", nestId, e);
-          toast.error(e?.message || "Failed to load review queue");
-          return { requests: [], total: 0 };
-        }),
+        grantOnly
+          ? empty({ stewards: [] as Steward[] })
+          : qc.fetchQuery(reads.stewards(nestId)).catch((e) => {
+              console.error("[NestView] listStewards failed", nestId, e);
+              return { stewards: [] };
+            }),
+        grantOnly
+          ? empty({ requests: [], total: 0 })
+          : qc.fetchQuery(reads.reviewQueue(nestId)).catch((e) => {
+              console.error("[NestView] getReviewQueue failed", nestId, e);
+              toast.error(e?.message || "Failed to load review queue");
+              return { requests: [], total: 0 };
+            }),
         // Pending AND declined in one call: pending drives the admin queue,
         // declined is how the person who asked learns the verdict.
-        qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
-          console.error("[NestView] getDeletionRequests failed", nestId, e);
-          return { requests: [] as api.DeletionRequest[], total: 0 };
-        }),
-        qc.fetchQuery(reads.settings(nestId)).catch((e) => {
-          console.error("[NestView] getNestSettings failed", nestId, e);
-          return {
-            stewardship_enabled: false,
-            allow_self_approve: false,
-            prime_only_review: false,
-            prime_tags: [] as string[],
-          };
-        }),
-        qc.fetchQuery(reads.externalEdits(nestId)).catch((e) => {
-          console.error("[NestView] listExternalEdits failed", nestId, e);
-          return { entries: [], total: 0 };
-        }),
-        qc.fetchQuery(reads.nest(nestId)).catch((e) => {
-          console.error("[NestView] getNest failed", nestId, e);
-          return null;
-        }),
-        qc.fetchQuery(reads.commentCounts(nestId)).catch((e) => {
-          console.error("[NestView] getCommentCounts failed", nestId, e);
-          return { counts: {} };
-        }),
+        grantOnly
+          ? empty({ requests: [] as api.DeletionRequest[], total: 0 })
+          : qc.fetchQuery(reads.deletionRequests(nestId, "all")).catch((e) => {
+              console.error("[NestView] getDeletionRequests failed", nestId, e);
+              return { requests: [] as api.DeletionRequest[], total: 0 };
+            }),
+        grantOnly
+          ? empty({
+              stewardship_enabled: false,
+              allow_self_approve: false,
+              prime_only_review: false,
+              prime_tags: [] as string[],
+            })
+          : qc.fetchQuery(reads.settings(nestId)).catch((e) => {
+              console.error("[NestView] getNestSettings failed", nestId, e);
+              return {
+                stewardship_enabled: false,
+                allow_self_approve: false,
+                prime_only_review: false,
+                prime_tags: [] as string[],
+              };
+            }),
+        grantOnly
+          ? empty({ entries: [], total: 0 })
+          : qc.fetchQuery(reads.externalEdits(nestId)).catch((e) => {
+              console.error("[NestView] listExternalEdits failed", nestId, e);
+              return { entries: [], total: 0 };
+            }),
+        grantOnly
+          ? empty({ counts: {} as Record<string, number> })
+          : qc.fetchQuery(reads.commentCounts(nestId)).catch((e) => {
+              console.error("[NestView] getCommentCounts failed", nestId, e);
+              return { counts: {} };
+            }),
         // Comment side of the activity feed — deliberately NOT filter=all.
         // The server's change items are the RAW pending set, but this view
         // renders reviewableQueue: the review-queue response post-filtered
@@ -684,13 +724,18 @@ export function NestView({
         // with the already-filtered changes, using the same (createdAt, id)
         // ordering as the server merge. If reviewable filtering ever moves
         // server-side, collapse this into a single filter=all call.
-        qc.fetchQuery(reads.feed(nestId, "comments")).catch((e) => {
-          console.error("[NestView] getNestFeed failed", nestId, e);
-          return {
-            items: [] as api.FeedItem[],
-            counts: { changes: 0, comments: 0 },
-          };
-        }),
+        grantOnly
+          ? empty({
+              items: [] as api.FeedItem[],
+              counts: { changes: 0, comments: 0 },
+            })
+          : qc.fetchQuery(reads.feed(nestId, "comments")).catch((e) => {
+              console.error("[NestView] getNestFeed failed", nestId, e);
+              return {
+                items: [] as api.FeedItem[],
+                counts: { changes: 0, comments: 0 },
+              };
+            }),
       ]);
     setCommentCounts(countsData.counts);
     setNodes(nodesData.nodes);
@@ -1103,8 +1148,13 @@ export function NestView({
   // collaborator) edit any node; a doc/tag-scoped editor steward only edits
   // the nodes their scope covers — applying the coarse flag per row would
   // wrongly show Submit/Edit/Delete everywhere. Server still enforces.
-  const canEditNode = (node: { id: string; tags?: string[] }) => {
+  const canEditNode = (node: { id: string; tags?: string[]; myGrant?: string | null }) => {
     if (!node) return false;
+    // A write share grant is edit rights on this document specifically — it is
+    // access, not stewardship, so it shows up in neither isReadOnly nor the
+    // steward rows below. Checked before the read-only bail: a grant-only
+    // caller always reads as "read" at nest level whatever their grant says.
+    if (node.myGrant === "write") return true;
     if (isReadOnly) return false;
     if (canManage || collabCanWrite) return true;
     return myStewards.some((s) => {
@@ -1731,9 +1781,14 @@ export function NestView({
                 onSelect: onOpenTrace,
               });
             // One Delete entry, like a document's: the owner deletes the nest
-            // outright, everyone else raises a request an owner/admin actions.
-            // Hidden below owner once a nest flag is already pending.
-            if (!isReadOnly && (canDeleteNest || !nestFlagPending))
+            // outright, an editor raises a request an owner/admin actions.
+            // Hidden below owner once a nest flag is already pending, and
+            // withheld from viewers and reviewer-only stewards — neither may
+            // ask for a nest to be destroyed (canRequestDeletion).
+            if (
+              (canDeleteNest || canEditDocs) &&
+              (canDeleteNest || !nestFlagPending)
+            )
               actions.push({
                 label: "Delete",
                 icon: Trash2,
@@ -2507,11 +2562,16 @@ export function NestView({
                   const canDelete = canManage || authoredByMe;
                   const flag = flagByNode.get(node.id);
                   const flagPending = flag?.status === "pending";
-                  // ONE Delete action for everyone. Admins get the delete
-                  // confirm, everyone else gets the request dialog — which one
+                  // ONE Delete action for everyone who gets one. Admins get the
+                  // delete confirm, editors get the request dialog — which one
                   // opens is the dialog's job to explain, not two menu items'.
-                  // Hidden below admin once a flag is open (a second 409s).
-                  const showDeleteAction = canDelete || !flagPending;
+                  // Hidden below admin once a flag is open (a second 409s), and
+                  // hidden outright for viewers of any kind: proposing a
+                  // deletion is an editor's act, and the server refuses them
+                  // (canRequestDeletion), so the affordance would only lead to
+                  // a 403.
+                  const showDeleteAction =
+                    (canDelete || canEditNode(node)) && (canDelete || !flagPending);
                   const openDeleteFlow = () =>
                     canDelete ? setDeleteNodeTarget(node) : setDeletionTarget(node);
                   // Move (drag OR menu) mirrors the edit gate's stewardship
@@ -2964,11 +3024,40 @@ export function NestView({
                                 <Plus className="h-3.5 w-3.5" />
                               </button>
                             )}
+                            {/* Share the folder with one person — they reach
+                                everything under it and nothing else in the
+                                nest. Owner/admin only, matching /grants. */}
+                            {canManage && (
+                              <button
+                                type="button"
+                                className="rounded p-0.5 text-muted-foreground opacity-0 group-hover/fh:opacity-100 hover:text-primary hover:bg-primary/10"
+                                title={`Share ${prettyFolderPath(node.path)} with someone`}
+                                data-testid={`share-folder-${node.path}`}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setShareFolder({
+                                    // The row's own label, not the whole path:
+                                    // an imported nest's paths can be long and
+                                    // id-prefixed, which made the title
+                                    // unreadable. The exact target is shown in
+                                    // the dialog body instead.
+                                    path: shareTargetForFolder(node.path),
+                                    label: node.label || prettyFolder(node.name),
+                                  });
+                                }}
+                              >
+                                <Share2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                             {/* Same split as a document: admins/owners delete
-                                the folder (and everything under it), everyone
-                                else raises a request. Hidden while one is
-                                already pending on this folder. */}
-                            {(canManage || !folderFlagPending(node.path)) && (
+                                the folder (and everything under it), editors
+                                raise a request. Hidden while one is already
+                                pending, and withheld from viewers — the server
+                                refuses a folder flag below editor, and a
+                                folder-scope editor row isn't enough for it
+                                either (canRequestDeletion wants nest scope). */}
+                            {(canManage || canEditDocs) &&
+                              (canManage || !folderFlagPending(node.path)) && (
                               <button
                                 type="button"
                                 className={`rounded p-0.5 opacity-0 group-hover/fh:opacity-100 ${
@@ -3549,6 +3638,15 @@ export function NestView({
           nestName={nestName}
           onClose={() => setShowShare(false)}
           onChanged={fetchData}
+        />
+      )}
+      {shareFolder && (
+        <ShareTargetDialog
+          nestId={nestId}
+          targetType="folder"
+          target={shareFolder.path}
+          label={shareFolder.label}
+          onClose={() => setShareFolder(null)}
         />
       )}
 

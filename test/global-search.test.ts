@@ -66,24 +66,26 @@ describe("GET /search", () => {
     );
   });
 
-  it("snippets a deep body match around the term, not the head of the body", async () => {
+  it("finds a rejected document, which the nest's own list also shows", async () => {
+    // Engine discovery drops status:rejected by default — right for retrieval,
+    // wrong here: this app keeps unpublished work in the node list, so a doc
+    // that is plainly visible in the nest must not be unfindable by search.
     await jsonRequest(
       app,
       "POST",
       `/nests/${nestA}/nodes`,
-      { title: "Long Note", content: `${"filler ".repeat(100)}gizmo tail` },
+      // Deliberately free of "widget" — the limit cases below count those hits.
+      { title: "Retired Note", content: "# an old note", status: "rejected" },
       owner.apiKey,
     );
-    const { data } = await jsonRequest(
-      app,
-      "GET",
-      "/search?q=gizmo",
-      undefined,
-      owner.apiKey,
-    );
-    expect(data.count).toBe(1);
-    expect(data.nodes[0].snippet).toContain("gizmo");
-    expect(data.nodes[0].snippet.length).toBeLessThanOrEqual(201);
+
+    const list = await jsonRequest(app, "GET", `/nests/${nestA}/nodes`, undefined, owner.apiKey);
+    expect(list.data.nodes.map((n: any) => n.id)).toContain("nodes/retired-note");
+
+    for (const path of [`/nests/${nestA}/search?q=retired`, "/search?q=retired"]) {
+      const { data } = await jsonRequest(app, "GET", path, undefined, owner.apiKey);
+      expect(data.nodes.map((n: any) => n.id)).toEqual(["nodes/retired-note"]);
+    }
   });
 
   it("matches title, body and tags with every term required", async () => {
@@ -97,6 +99,43 @@ describe("GET /search", () => {
     expect(data.nodes.map((n: any) => n.title)).toEqual(["Widget Pricing"]);
   });
 
+  it("includes nests the caller only reads as a public Viewer", async () => {
+    // A public nest is reached by visibility alone — no collaborator or steward
+    // row — so it was the one readable category global search used to skip.
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestB}/visibility`,
+      { visibility: "public" },
+      owner.apiKey,
+    );
+    const direct = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestB}/nodes/nodes/widget-pricing`,
+      undefined,
+      outsider.apiKey,
+    );
+    expect(direct.status).toBe(200);
+
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      "/search?q=widget",
+      undefined,
+      outsider.apiKey,
+    );
+    expect(data.nodes.map((n: any) => n.nest_id)).toEqual([nestB]);
+
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestB}/visibility`,
+      { visibility: "private" },
+      owner.apiKey,
+    );
+  });
+
   it("never returns documents from nests the caller can't see", async () => {
     const { status, data } = await jsonRequest(
       app,
@@ -107,6 +146,89 @@ describe("GET /search", () => {
     );
     expect(status).toBe(200);
     expect(data.count).toBe(0);
+  });
+
+  // Runs after the "can't see" case above: it hands the outsider a grant, and
+  // the point of that case is an outsider with nothing at all.
+  it("includes a nest the caller only holds a document grant on", async () => {
+    // A doc/folder grantee has no collaborator or steward row, so the nest was
+    // absent from the search fan-out — while the doc opened fine by direct link.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestA}/grants`,
+      {
+        target_type: "document",
+        target: "nodes/onboarding-runbook",
+        email: outsider.email,
+        role: "read",
+      },
+      owner.apiKey,
+    );
+
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      "/search?q=widget",
+      undefined,
+      outsider.apiKey,
+    );
+    // Exactly the granted doc: nest B never contributes, and nest A's other
+    // documents stay behind the grant.
+    expect(data.nodes.map((n: any) => n.id)).toEqual(["nodes/onboarding-runbook"]);
+  });
+
+  it("ranks a title match above body matches, whatever the discovery order", async () => {
+    // Both in one nest so nest ordering can't carry the test: "Alpha Note"
+    // sorts first on disk and only mentions the term in its body, while the
+    // document actually called "Beacon" would trail it — and fall off the end
+    // once the result cap bites. Neither title carries "widget"/"retired", so
+    // the count assertions elsewhere in this file stay put.
+    for (const [title, content] of [
+      ["Alpha Note", "# the beacon shines here"],
+      ["Beacon", "# short"],
+    ] as const) {
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestA}/nodes`,
+        { title, content },
+        owner.apiKey,
+      );
+    }
+
+    for (const path of [`/nests/${nestA}/search?q=beacon`, "/search?q=beacon"]) {
+      const { data } = await jsonRequest(app, "GET", path, undefined, owner.apiKey);
+      expect(data.nodes.map((n: any) => n.title)).toEqual(["Beacon", "Alpha Note"]);
+    }
+  });
+
+  it("ranks a title match that starts a word above one buried inside a word", async () => {
+    // Matching is plain substring, so "Latest" contains "test" — a title that
+    // never mentions the concept used to tie with the document named for it.
+    // "Track…" sorts before "Zeta…" on disk, so discovery order alone would
+    // put the buried match first — only the word-start tier can flip it.
+    for (const title of ["Track the Latest Engine", "Zeta Test Plan"]) {
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestA}/nodes`,
+        { title, content: "# no keyword in the body" },
+        owner.apiKey,
+      );
+    }
+
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      "/search?q=test",
+      undefined,
+      owner.apiKey,
+    );
+    expect(data.nodes.map((n: any) => n.title)).toEqual([
+      "Zeta Test Plan",
+      "Track the Latest Engine",
+    ]);
   });
 
   it("requires q, whitespace included", async () => {
