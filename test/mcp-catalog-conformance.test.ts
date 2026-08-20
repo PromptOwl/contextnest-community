@@ -136,44 +136,28 @@ interface Case {
   local?: (payload: any) => void;
 }
 
-const TYPE_ENUM =
-  "the engine's NODE_TYPES enum has no such member; this server ships it as a " +
-  "first-class node type through REST/UI/MCP. GENUINE DISAGREEMENT — needs an " +
-  "upstream decision (widen NODE_TYPES, or stop serving the type), not a test " +
-  "suppression.";
-
 const CASES: Case[] = [
   {
     // Create must run first — later cases address the node it makes.
     tool: "context_create",
     args: { title: "Conformance Doc", content: "# Conformance\n\nfirst body." },
     catalog: "context_create",
-    allowed: {
-      "unknown_key at status":
-        "where the write landed — a draft awaiting steward review under " +
-        "stewardship, auto-published on a nest with no stewards. The catalog " +
-        "has no field for it and a caller cannot infer it. Additive, so a " +
-        "catalog-only reader is unaffected.",
-      "unknown_key at checkpoint":
-        "explicitly null: this server seals nothing. A write goes live through " +
-        "steward review, not a checkpoint. Saying so beats staying silent.",
-    },
+    // Clean since engine 2.1.0: the catalog now declares `status` and
+    // `checkpoint`, which this server had been emitting as documented
+    // divergences. Upstream caught up.
   },
   {
     tool: "context_update",
     args: { title: "Conformance Doc", content: "# Conformance\n\nsecond body." },
     catalog: "context_update",
-    allowed: {
-      "unknown_key at status": "same as context_create.",
-      "unknown_key at checkpoint": "same as context_create.",
-    },
+    // Clean — same catalog widening as context_create.
   },
   {
     tool: "context_list",
     catalog: "context_list",
+    // `table` and `agent` no longer diverge: engine 2.1.0 widened NODE_TYPES
+    // to cover both types this server ships.
     allowed: {
-      [`invalid_enum_value(table) at documents[].type`]: TYPE_ENUM,
-      [`invalid_enum_value(agent) at documents[].type`]: TYPE_ENUM,
       [`invalid_enum_value(external_edit_pending) at documents[].status`]:
         "a real workflow state this server computes (a document edited on disk " +
         "behind the API, awaiting reconciliation) and already reports through " +
@@ -194,12 +178,9 @@ const CASES: Case[] = [
     // no include_raw input and never served the stored bytes here.
   },
   {
-    // Matches the table node, so the type divergence is checked on this
-    // surface too rather than only on list/query.
     tool: "context_search",
     args: { query: "deal" },
     catalog: "context_search",
-    allowed: { [`invalid_enum_value(table) at results[].type`]: TYPE_ENUM },
     // No `score`: this is a term-containment filter, not a ranked search, and
     // the catalog makes score optional. Conforms as-is.
   },
@@ -207,7 +188,6 @@ const CASES: Case[] = [
     tool: "context_query",
     args: { query: "#api" },
     catalog: "context_query",
-    allowed: { [`invalid_enum_value(table) at documents[].type`]: TYPE_ENUM },
     // `source_nodes` is absent for the same security reason context_list omits
     // `body`: the handler never gates result.sourceNodes, so serving them
     // structurally would hand out content the prose path refuses. Optional in
@@ -274,11 +254,7 @@ const CASES: Case[] = [
     tool: "context_delete",
     args: { title: "Conformance Doc" },
     catalog: "context_delete",
-    allowed: {
-      "unknown_key at title":
-        "echoes back what was deleted so a title-addressed caller can confirm " +
-        "it hit the right node. Additive only.",
-    },
+    // Clean since engine 2.1.0: the catalog declares the echoed `title`.
   },
 ];
 
@@ -302,9 +278,9 @@ beforeAll(async () => {
     content: "# Architecture\n\nSystem-level design notes.",
     tags: ["architecture", "api"],
   });
-  // Two node types this server ships that the engine's NODE_TYPES enum does
-  // not know. Seeded on purpose: without them the type divergence is invisible
-  // and the conformance report reads cleaner than reality.
+  // Two node types beyond the default `document`, kept so the type enum stays
+  // exercised — engine 2.1.0 added both to NODE_TYPES, and this is what would
+  // catch a future narrowing.
   await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
     title: "Deal Table",
     content: "# Deals\n\n| a | b |\n|---|---|\n| 1 | 2 |",
