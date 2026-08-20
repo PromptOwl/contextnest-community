@@ -517,8 +517,23 @@ export async function listSharedNests(userId: string): Promise<Nest[]> {
  *
  * Callers that stitched owned+shared themselves (/me/work inbox, /stats) should
  * use this — it also dedupes, which the naive concat did not.
+ *
+ * `readable` widens the union to the two remaining paths that grant READ but no
+ * membership — visibility='public' (the dashboard's listPublicNests) and a
+ * document/folder share grant (the `grants` table, which lets a grantee open the
+ * nest shell, list its nodes and run its search). Read surfaces like global
+ * search need both, or a Viewer's nests are silently skipped even though every
+ * one of their documents opens fine by direct link. Both ride on the SAME query
+ * — one join and two ORs, deduped by the existing DISTINCT — so this costs no
+ * extra round trip and no extra pass over the rows.
+ *
+ * Off by default: the work inbox and /stats are about nests you're involved in,
+ * where every public nest on the server would be noise.
  */
-export async function listVisibleNests(userId: string): Promise<Nest[]> {
+export async function listVisibleNests(
+  userId: string,
+  opts: { readable?: boolean } = {},
+): Promise<Nest[]> {
   const db = getDb();
 
   // Owned OR collaborator OR active-steward — the same join listSharedNests
@@ -528,9 +543,14 @@ export async function listVisibleNests(userId: string): Promise<Nest[]> {
   // category an admin sees; another user's private nest still stays hidden.
   const includeAnon =
     config.AUTH_MODE === "open" || (await isServerAdminUserId(userId));
-  const params = includeAnon
-    ? [userId, userId, userId, ANON_USER_ID]
-    : [userId, userId, userId];
+  // Param order follows the `?`s in the SQL below: nc, u, [g], n.user_id, [anon].
+  const params = [
+    userId,
+    userId,
+    ...(opts.readable ? [userId] : []),
+    userId,
+    ...(includeAnon ? [ANON_USER_ID] : []),
+  ];
   const rows = (await db.all(
     `SELECT DISTINCT n.* FROM nests n
        LEFT JOIN nest_collaborators nc
@@ -539,9 +559,11 @@ export async function listVisibleNests(userId: string): Promise<Nest[]> {
        LEFT JOIN stewards s
          ON s.nest_id = n.id AND s.is_active = 1
         AND LOWER(s.user_email) = LOWER(u.email)
+       ${opts.readable ? "LEFT JOIN grants g ON g.nest_id = n.id AND g.user_id = ?" : ""}
       WHERE n.user_id = ?
          OR nc.user_id IS NOT NULL
          OR s.id IS NOT NULL
+         ${opts.readable ? "OR g.id IS NOT NULL OR n.visibility = 'public'" : ""}
          ${includeAnon ? "OR n.user_id = ?" : ""}
       ORDER BY n.created_at DESC`,
     params,

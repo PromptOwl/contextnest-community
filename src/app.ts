@@ -17,7 +17,12 @@ import {
 import { listMyDrafts } from "./governance/version-service.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
-import { matchDocuments, toSearchHit } from "./nodes/search.js";
+import {
+  matchDocuments,
+  toSearchHit,
+  discoverForSearch,
+  titleScore,
+} from "./nodes/search.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import {
   resolveStewardsForNode,
@@ -1408,11 +1413,18 @@ export function createApp(): Hono<AuthEnv> {
     // still deterministic.
     // ponytail: unbounded fan-out — add a concurrency limit if a caller ever
     // holds enough nests for the parallel walks to matter.
+    // `readable`, not the membership-only default: a Viewer reaches a nest by
+    // public visibility or a document/folder grant, with no collaborator or
+    // steward row. Both paths open the nest, its node list and its per-nest
+    // search — but were skipped here, so the one user who most needs global
+    // search could not find documents they can plainly read. filterAccessible
+    // below still narrows a public reader to approved docs and a grantee to
+    // their granted docs, so widening the scan surfaces nothing new.
     const perNest = await Promise.all(
-      (await listVisibleNests(userId)).map(async (nest): Promise<SearchHit[]> => {
+      (await listVisibleNests(userId, { readable: true })).map(async (nest): Promise<SearchHit[]> => {
         try {
           const { storage } = await engineCache.get(nest.id);
-          const matches = matchDocuments(await storage.discoverDocuments(), q);
+          const matches = matchDocuments(await discoverForSearch(storage), q);
           if (matches.length === 0) return [];
           // Per-nest stewardship filtering, same call the nest-scoped route
           // makes — a hit never leaks a doc the caller couldn't open directly.
@@ -1430,10 +1442,14 @@ export function createApp(): Hono<AuthEnv> {
         }
       }),
     );
-    const hits = perNest.flat();
+    // Scan every nest, then rank, then cap. Each nest ranked its own matches,
+    // but flattening interleaves them back into nest-creation order — so rank
+    // once more across the merged list, or the cap below drops a document named
+    // in the query in favour of a body mention from an older nest.
+    const hits = perNest
+      .flat()
+      .sort((a, b) => titleScore(b.title, q) - titleScore(a.title, q));
 
-    // Scan every nest, then cap: truncating per nest would let the first nests
-    // in creation order crowd out better matches elsewhere.
     return c.json({
       query: q,
       count: hits.length,
