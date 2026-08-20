@@ -6,7 +6,7 @@
 
 import { getDb } from "../db/client.js";
 import { isStewardshipEnabled } from "../nests/service.js";
-import { canUserAccess } from "./stewardship-service.js";
+import { canUserAccess, resolveStewardsForNode } from "./stewardship-service.js";
 import { isPublicReader, resolveNestPermission } from "../shared/access.js";
 import { getApprovedVersion, getApprovedVersions } from "./version-service.js";
 import {
@@ -53,6 +53,51 @@ export async function canReadNode(
   if (!(await isStewardshipEnabled(nestId))) return true;
   if ((await canUserAccess(nestId, nodeId, userEmail)).allowed) return true;
   return (await resolveNodeGrant(nestId, userId, nodeId)) !== null;
+}
+
+/**
+ * May this caller ask for something to be deleted?
+ *
+ * Deletion — even only asking for one — is an editor's act. A viewer of any
+ * kind (a `read` collaborator, a viewer steward, someone holding a read share
+ * grant) has no business proposing that content disappear, so the action is
+ * withheld from them entirely rather than offered and then refused.
+ *
+ * "Editor" is not one field: nest-wide `write`, an editor steward row covering
+ * the target, or a `write` share grant on it all qualify — the same three
+ * paths that let someone change the document in the first place.
+ *
+ * `nodeId` is the document for a per-node flag, or `""` for a folder/nest
+ * flag — which requires a NEST-scope editor, not one scoped to some unrelated
+ * document. Pass `permission` when the caller already resolved it (the REST
+ * middleware promotes open-mode callers, which this would otherwise miss).
+ *
+ * Lives here, not in a route, so the REST and MCP paths share one rule — two
+ * copies would drift, and the looser copy becomes the way in.
+ */
+export async function canRequestDeletion(params: {
+  nestId: string;
+  userId: string;
+  userEmail: string;
+  nodeId: string;
+  permission?: string | null;
+}): Promise<boolean> {
+  const { nestId, userId, userEmail, nodeId } = params;
+  const permission =
+    params.permission ?? (await resolveNestPermission(nestId, userId));
+  if (permission === "owner" || permission === "admin" || permission === "write") {
+    return true;
+  }
+  const resolved = await resolveStewardsForNode(nestId, nodeId);
+  const isEditorSteward = resolved.some(
+    (r) =>
+      r.steward.userEmail.toLowerCase() === userEmail.toLowerCase() &&
+      r.steward.role === "editor" &&
+      (nodeId !== "" || r.steward.scope === "nest"),
+  );
+  if (isEditorSteward) return true;
+  if (nodeId === "") return false;
+  return (await resolveNodeGrant(nestId, userId, nodeId)) === "write";
 }
 
 /**

@@ -17,6 +17,7 @@ import {
   canReadNode,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
+import { resolveNodeGrant } from "../governance/grants-service.js";
 import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
 import {
   nodeToMarkdown,
@@ -394,6 +395,13 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       response.collaborators = people.collaborators;
     }
   }
+
+  // The caller's share grant on THIS node, if any. A grant is access, not
+  // stewardship, so it appears in neither the nest permission (a grantee reads
+  // as "read" whatever their grant says) nor the per-node steward roles — and
+  // without it the client cannot tell a write grantee from a viewer, and shows
+  // the person who was granted edit rights a read-only document.
+  (response as any).myGrant = await resolveNodeGrant(nestId, userId, nodeId);
 
   // Public readers see approved version body only.
   if (publicReader) {
