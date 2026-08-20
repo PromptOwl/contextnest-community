@@ -1778,7 +1778,7 @@ export function NestView({
           <>
             <Card>
               <CardHeader className="pb-2">
-                <CardDescription>Pending Review</CardDescription>
+                <CardDescription>Pending Approvals</CardDescription>
                 <CardTitle className="text-3xl text-amber-600">
                   {initialLoad ? (
                     <CountSkeleton className="h-8 w-12" />
@@ -1814,7 +1814,7 @@ export function NestView({
             </Card>
             <Card>
               <CardHeader className="pb-2">
-                <CardDescription>Review Queue</CardDescription>
+                <CardDescription>Your Review Queue</CardDescription>
                 <CardTitle className="text-3xl text-blue-600">
                   {initialLoad ? (
                     <CountSkeleton className="h-8 w-12" />
