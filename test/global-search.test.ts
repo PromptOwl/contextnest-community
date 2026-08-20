@@ -203,11 +203,11 @@ describe("GET /search", () => {
     }
   });
 
-  it("ranks a whole-word title match above one buried inside a longer word", async () => {
+  it("ranks a title match that starts a word above one buried inside a word", async () => {
     // Matching is plain substring, so "Latest" contains "test" — a title that
     // never mentions the concept used to tie with the document named for it.
     // "Track…" sorts before "Zeta…" on disk, so discovery order alone would
-    // put the buried match first — only the boundary tier can flip it.
+    // put the buried match first — only the word-start tier can flip it.
     for (const title of ["Track the Latest Engine", "Zeta Test Plan"]) {
       await jsonRequest(
         app,

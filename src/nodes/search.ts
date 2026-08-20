@@ -39,10 +39,15 @@ export function titleScore(title: string, query: string): number {
   if (t === q) return 4;
 
   // Where the query lands in the title matters as much as whether it lands.
-  // Matching is plain substring, so "Latest" contains "test" — without the
-  // word-boundary tier below, "Law IV — Consumers Track the Latest Engine"
-  // scored exactly as high as the document called "Test 1". Scan every
-  // occurrence, not just the first: the boundary hit can come second.
+  // Matching is plain substring, so "Latest" contains "test" — without the tier
+  // below, "Law IV — Consumers Track the Latest Engine" scored exactly as high
+  // as the document called "Test 1". Scan every occurrence, not just the first:
+  // the good hit can come second.
+  //
+  // The test is that the query STARTS a word, not that it is a whole one — only
+  // the character before is checked. Deliberate, for a palette you type into:
+  // "test" should rank "testing level 1" highly while it is still being typed.
+  // So "test123abc" scores here too; that is the same leniency, not a miss.
   let midWord = false;
   for (let i = t.indexOf(q); i !== -1; i = t.indexOf(q, i + 1)) {
     if (i === 0) return 3;
@@ -62,7 +67,9 @@ export function titleScore(title: string, query: string): number {
  *  term must appear somewhere (AND), case-insensitive substring — the same rule
  *  the per-nest and cross-nest search routes both run on. Title matches sort
  *  first (see titleScore); ties keep discovery order, since Array#sort is
- *  stable. */
+ *  stable. Cross-nest search re-sorts the merged list by the same score, so
+ *  this sort is redundant on that path — kept because it is what makes a
+ *  per-nest result ordered at all, and it runs over matches, not the nest. */
 export function matchDocuments<T extends ContextNode>(
   documents: T[],
   query: string,

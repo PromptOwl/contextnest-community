@@ -17,11 +17,12 @@ import { matchNests } from "../lib/nest-search";
 /**
  * Document rows the palette lists, and the page size it asks the server for.
  *
- * 20 is the server's own ceiling on `limit`, so this takes everything one
- * request can return; the list scrolls. Eight rows used to hide the rest with
- * no way to reach it — and since results are ranked title-first, the further
- * you scroll the weaker the match, so a broad query is answered by typing more
- * rather than by paging further.
+ * 20 is the server's default page size for `/search` (its ceiling is 50) — a
+ * deliberate stop short of that, not the most a request could carry. Eight rows
+ * used to hide the rest with no way to reach it; 20 scrolls comfortably, and
+ * since results are ranked title-first, rows past that are progressively weaker
+ * matches. A broad query is answered by typing more, not by paging further —
+ * which is what the "Showing X of Y" line below the list says out loud.
  */
 const DOC_ROWS = 20;
 
