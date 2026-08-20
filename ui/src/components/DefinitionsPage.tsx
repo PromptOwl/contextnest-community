@@ -61,9 +61,15 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
   }, [nestId]);
 
   useEffect(() => {
+    // Guarded: this page is rendered without a key, so nestId can change while
+    // it stays mounted. A slow response for the previous nest must not land
+    // after the effect re-ran and grant (or withhold) the wrong nest's
+    // affordances.
+    let ignore = false;
     // Cached alongside the nest screens, so this is usually free.
     qc.fetchQuery(reads.nest(nestId))
       .then((meta: any) => {
+        if (ignore) return;
         const caps = deriveNestCaps({
           roles: meta?.roles ?? [],
           permission: meta?.permission ?? null,
@@ -77,7 +83,12 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
         // refused here by the server too.
         setCanWrite(caps.canManage || caps.collabCanWrite);
       })
-      .catch(() => setCanWrite(false));
+      .catch(() => {
+        if (!ignore) setCanWrite(false);
+      });
+    return () => {
+      ignore = true;
+    };
   }, [nestId, qc]);
 
   useEffect(() => {

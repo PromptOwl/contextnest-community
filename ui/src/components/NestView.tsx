@@ -1148,8 +1148,13 @@ export function NestView({
   // collaborator) edit any node; a doc/tag-scoped editor steward only edits
   // the nodes their scope covers — applying the coarse flag per row would
   // wrongly show Submit/Edit/Delete everywhere. Server still enforces.
-  const canEditNode = (node: { id: string; tags?: string[] }) => {
+  const canEditNode = (node: { id: string; tags?: string[]; myGrant?: string | null }) => {
     if (!node) return false;
+    // A write share grant is edit rights on this document specifically — it is
+    // access, not stewardship, so it shows up in neither isReadOnly nor the
+    // steward rows below. Checked before the read-only bail: a grant-only
+    // caller always reads as "read" at nest level whatever their grant says.
+    if (node.myGrant === "write") return true;
     if (isReadOnly) return false;
     if (canManage || collabCanWrite) return true;
     return myStewards.some((s) => {

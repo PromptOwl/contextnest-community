@@ -1715,9 +1715,11 @@ export function createApp(): Hono<AuthEnv> {
     const isCommentAction =
       /\/comments$/.test(path) ||
       /\/comments\/[^/]+\/resolve$/.test(path);
-    // Flagging a node for deletion is read-tier for the same reason commenting
-    // is: the people who notice stale content are usually below write. The
-    // handler re-checks node read-access. Resolving the flag
+    // Flagging a node for deletion is admitted at read-tier HERE so the
+    // handler can answer 404-then-403 in the right order (a caller who can't
+    // see the node must not learn it exists). The real gate is the handler's
+    // own editor check — canRequestDeletion in access-guard.ts — so a viewer
+    // gets through this line and is refused there. Resolving the flag
     // (/deletion-requests/:id/{delete,decline}) is NOT here — it stays at
     // 'write', the same tier DELETE /nodes/:id requires.
     const isDeletionRequestAction = /\/request-deletion$/.test(path);

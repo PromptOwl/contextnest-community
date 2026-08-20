@@ -183,6 +183,13 @@ export function DocumentEditor({
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
   const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
+  // Caller's share grant on THIS document (server-resolved on GET /nodes/:id).
+  // A grant is access, not stewardship: it appears in neither `permission` (a
+  // grantee always reads as "read" at nest level, whatever their grant says)
+  // nor `myNodeRoles`. Without it a write grantee got a read-only editor for
+  // the very document they were granted write on.
+  const [myGrant, setMyGrant] = useState<"read" | "write" | null>(null);
+  const grantCanWrite = myGrant === "write";
   // Caller's nest-wide scoped steward rows (from GET /nests/:id). Needed for
   // NEW docs, where there's no node yet to resolve a per-node role against.
   const [myStewards, setMyStewards] = useState<
@@ -259,7 +266,7 @@ export function DocumentEditor({
     myStewards.some((s) => s.role === "editor" && s.scope === "nest");
   const isViewOnly = isNew
     ? !canAuthorNew
-    : isReadOnly && myNodeRoles.length === 0;
+    : isReadOnly && myNodeRoles.length === 0 && !grantCanWrite;
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
   // default. Everyone else goes through the request path. The server still
@@ -283,6 +290,7 @@ export function DocumentEditor({
   const canRequestDeletion =
     canDeleteDirectly ||
     permission === "write" ||
+    grantCanWrite ||
     myNodeRoles.includes("editor") ||
     myStewards.some((s) => s.role === "editor" && s.scope === "nest");
   const [showSubmitModal, setShowSubmitModal] = useState(false);
@@ -799,6 +807,7 @@ export function DocumentEditor({
         ((node as any)?.pendingReviewBy as string | null | undefined) ?? null,
       );
       setDeletionRequest(((node as any)?.deletionRequest ?? null) as api.DeletionRequest | null);
+      setMyGrant((((node as any)?.myGrant ?? null) as "read" | "write" | null));
       initialSnapshotRef.current = {
         title: loadedTitle,
         content: loadedContent,

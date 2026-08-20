@@ -44,6 +44,7 @@ import { isPublicReader, resolveNestPermission } from "../shared/access.js";
 import {
   listUserGrants,
   grantCoversNode,
+  grantRoleForNode,
 } from "../governance/grants-service.js";
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
@@ -532,13 +533,16 @@ export async function listNodesForCaller(
   // apply to a non-member, so narrow it to their grant-covered docs. With
   // stewardship ON, filterAccessible already restricted to
   // steward-accessible + grant-covered, so there's nothing to narrow.
+  // Loaded once for the whole list: it narrows the set below AND stamps each
+  // row's `myGrant` during enrichment, so a write grantee's client can tell
+  // their row apart from a viewer's. One indexed query, not one per node.
+  const myGrants = await listUserGrants(nestId, userId);
   if (
     (await resolveNestPermission(nestId, userId)) === "none" &&
     !(await isStewardshipEnabled(nestId))
   ) {
-    const grants = await listUserGrants(nestId, userId);
-    accessible = grants.length
-      ? nodes.filter((d) => grantCoversNode(grants, d.id))
+    accessible = myGrants.length
+      ? nodes.filter((d) => grantCoversNode(myGrants, d.id))
       : accessible;
   }
   // A public reader was already narrowed to approved nodes by filterAccessible;
@@ -577,6 +581,12 @@ export async function listNodesForCaller(
       if (people) {
         r.author = people.author;
         r.collaborators = people.collaborators;
+      }
+      // A grant is access, not stewardship, so it shows up in neither the nest
+      // permission nor the steward roles. Without it the client cannot tell a
+      // write grantee from a viewer on this row.
+      if (myGrants.length) {
+        (r as any).myGrant = grantRoleForNode(myGrants, doc.id);
       }
 
       if (approvedVersions) {

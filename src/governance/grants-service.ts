@@ -81,6 +81,21 @@ export function grantCoversNode(
   );
 }
 
+/** Highest role among the already-loaded grants covering this node, or null.
+ *  The in-memory twin of resolveNodeGrant, for lists that hold the whole set. */
+export function grantRoleForNode(
+  grants: Array<{ target: string; role: GrantRole }>,
+  nodeId: string,
+): GrantRole | null {
+  let best: GrantRole | null = null;
+  for (const g of grants) {
+    if (nodeId === g.target || nodeId.startsWith(g.target + "/")) {
+      if (!best || rank(g.role) > rank(best)) best = g.role;
+    }
+  }
+  return best;
+}
+
 // ─── Management (owner/admin only — gated at the route) ──────────────────
 
 export async function createGrant(params: {

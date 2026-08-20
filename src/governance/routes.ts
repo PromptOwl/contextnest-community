@@ -276,8 +276,10 @@ governanceRoutes.post("/delete-folder", async (c) => {
 });
 
 // POST /nests/:nestId/request-deletion — flag a whole FOLDER or the NEST.
-// Read-tier for the same reason the per-node route is (see there); the path
-// suffix matches the middleware's request-deletion exception, so no new gate.
+// The middleware admits read-tier here (the path suffix matches its
+// request-deletion exception), so the editor gate below is what actually
+// decides: a viewer who can see the nest still cannot propose destroying part
+// of it. A folder or nest flag needs a NEST-scope editor row specifically.
 // Per-document flags keep their own route under /nodes/:nodeId.
 governanceRoutes.post("/request-deletion", async (c) => {
   const nestId = c.req.param("nestId")!;

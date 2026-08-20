@@ -158,6 +158,25 @@ describe("document grant — access is scoped to exactly that doc", () => {
     expect(sib.status).toBe(404);
   });
 
+  it("the node read reports the caller's grant so the UI can tell write from read", async () => {
+    // A grant is access, not stewardship: it shows up in neither the nest
+    // permission (a grantee always reads as "read") nor the per-node steward
+    // roles. Without this field the client showed a write grantee a read-only
+    // editor for the very document they were granted write on.
+    const single = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/shared-one`,
+      undefined,
+      guest.apiKey,
+    );
+    expect(single.data.node.myGrant).toBe("write");
+
+    const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, guest.apiKey);
+    const row = list.data.nodes.find((n: any) => n.id === "nodes/shared-one");
+    expect(row.myGrant).toBe("write");
+  });
+
   it("a WRITE grantee may request that document's deletion", async () => {
     // A write grant is edit rights on that document, which is exactly the
     // standing the deletion gate asks for — scoped to it, nothing else.
