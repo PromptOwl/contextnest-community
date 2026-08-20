@@ -27,7 +27,11 @@ import {
   isIdUnderFolder,
 } from "../nodes/service.js";
 import { deleteNest } from "../nests/service.js";
-import { canReadNode, resolveCallerEmail } from "./access-guard.js";
+import {
+  canReadNode,
+  resolveCallerEmail,
+  canRequestDeletion,
+} from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -226,9 +230,31 @@ function denyUnlessNestManager(c: any, what: string) {
     403,
   );
 }
-// Anyone who can read a node may flag it for deletion (POST on the node route
-// below); resolving is write-tier — the middleware already requires 'write' for
-// these paths, the same gate DELETE /nodes/:id passes, so no extra check here.
+/** Editor gate for the two request-deletion routes (see canRequestDeletion). */
+async function mayRequestDeletion(c: any, nestId: string, nodeId: string) {
+  return canRequestDeletion({
+    nestId,
+    userId: c.get("userId"),
+    userEmail: await getUserEmail(c),
+    nodeId,
+    // The middleware promotes open-mode callers; resolving fresh would miss it.
+    permission: c.get("nestPermission"),
+  });
+}
+
+/** 403 unless the caller may request this deletion. */
+function denyUnlessEditor(allowed: boolean, c: any, what: string) {
+  if (allowed) return null;
+  return c.json(
+    {
+      error: `Only an editor, a nest admin, or the nest owner can request the deletion of ${what}.`,
+    },
+    403,
+  );
+}
+
+// Resolving a request is write-tier — the middleware already requires 'write'
+// for those paths, the same gate DELETE /nodes/:id passes, so no extra check.
 
 // POST /nests/:nestId/delete-folder — delete a folder and every document
 // under it. Owner/admin only: a folder delete is many document deletes at
@@ -255,6 +281,12 @@ governanceRoutes.post("/delete-folder", async (c) => {
 // Per-document flags keep their own route under /nodes/:nodeId.
 governanceRoutes.post("/request-deletion", async (c) => {
   const nestId = c.req.param("nestId")!;
+  const denied = denyUnlessEditor(
+    await mayRequestDeletion(c, nestId, ""),
+    c,
+    "a folder or a nest",
+  );
+  if (denied) return denied;
   const body = await c.req
     .json<{ targetType?: string; target?: string; reason?: string }>()
     .catch(() => ({}) as any);
@@ -730,8 +762,8 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
 });
 
 // POST /nests/:nestId/nodes/:nodeId/request-deletion
-// Read-tier: anyone who can see the node may flag it (that's the point — the
-// people who spot stale content are usually below delete permission).
+// Editor-tier: below that, a reader who cannot change a document should not be
+// proposing it be destroyed either (see canRequestDeletion).
 governanceNodeRoutes.post("/:nodeId{.+}/request-deletion", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
@@ -746,6 +778,14 @@ governanceNodeRoutes.post("/:nodeId{.+}/request-deletion", async (c) => {
     // Same message for "gone" and "no access" — no existence oracle.
     return c.json({ error: `Node not found: ${nodeId}` }, 404);
   }
+  // Access checked first: a stranger gets the same 404 as for a missing node,
+  // and only someone who can already see it learns they lack the rights.
+  const denied = denyUnlessEditor(
+    await mayRequestDeletion(c, nestId, nodeId),
+    c,
+    "a document",
+  );
+  if (denied) return denied;
   // Existence check so a typo'd id can't park a row nobody can ever resolve.
   const { storage } = await engineCache.get(nestId);
   try {

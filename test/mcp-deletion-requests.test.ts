@@ -18,6 +18,7 @@ let env: ReturnType<typeof setupTestEnv>;
 let app: any;
 let nestId: string;
 let owner: { apiKey: string; email: string };
+let editor: { apiKey: string; email: string };
 let reader: { apiKey: string; email: string };
 
 async function callTool(
@@ -56,11 +57,19 @@ beforeAll(async () => {
   env = setupTestEnv();
   app = await createTestApp("key", { superAdmins: ["owner@acme.com"] });
   owner = await registerUser(app, "owner@acme.com", "Owner");
+  editor = await registerUser(app, "editor@acme.com", "Editor");
   reader = await registerUser(app, "reader@acme.com", "Reader");
 
   const { data } = await jsonRequest(app, "POST", "/nests", { name: "MCP Vault" }, owner.apiKey);
   nestId = data.nest.id;
 
+  await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/collaborators`,
+    { email: "editor@acme.com", permission: "write" },
+    owner.apiKey,
+  );
   await jsonRequest(
     app,
     "POST",
@@ -95,15 +104,29 @@ describe("MCP: deletion requests", () => {
     expect(out).toContain("context_request_deletion");
   });
 
-  it("a reader flags a document, and can't flag it twice", async () => {
-    const out = await callTool(reader.apiKey, "context_request_deletion", {
+  it("refuses a viewer's flag — document, folder and nest alike", async () => {
+    // Same rule as REST: proposing a deletion is an editor's act, and the MCP
+    // path must not be the way around it.
+    for (const args of [
+      { title: "Stale Doc", reason: "I don't like it" },
+      { folder: "legacy/api", reason: "nope" },
+      { nest: true, reason: "nope" },
+    ]) {
+      expect(
+        await callTool(reader.apiKey, "context_request_deletion", args),
+      ).toContain("Only an editor");
+    }
+  });
+
+  it("an editor flags a document, and can't flag it twice", async () => {
+    const out = await callTool(editor.apiKey, "context_request_deletion", {
       title: "Stale Doc",
       reason: "superseded by the new runbook",
     });
     expect(out).toContain("Stale Doc");
     expect(out).toContain("nothing is removed yet");
 
-    const dup = await callTool(reader.apiKey, "context_request_deletion", {
+    const dup = await callTool(editor.apiKey, "context_request_deletion", {
       title: "Stale Doc",
       reason: "again",
     });
@@ -112,14 +135,14 @@ describe("MCP: deletion requests", () => {
 
   it("requires a reason, and refuses an unknown folder", async () => {
     expect(
-      await callTool(reader.apiKey, "context_request_deletion", {
+      await callTool(editor.apiKey, "context_request_deletion", {
         title: "Kept Doc",
         reason: "   ",
       }),
     ).toContain("reason is required");
 
     expect(
-      await callTool(reader.apiKey, "context_request_deletion", {
+      await callTool(editor.apiKey, "context_request_deletion", {
         folder: "no/such/folder",
         reason: "stale",
       }),
@@ -173,7 +196,7 @@ describe("MCP: deletion requests", () => {
   });
 
   it("honours a folder request, deleting everything under it", async () => {
-    const flag = await callTool(reader.apiKey, "context_request_deletion", {
+    const flag = await callTool(editor.apiKey, "context_request_deletion", {
       folder: "legacy/api",
       reason: "dead api docs",
     });

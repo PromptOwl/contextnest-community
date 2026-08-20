@@ -1766,9 +1766,14 @@ export function NestView({
                 onSelect: onOpenTrace,
               });
             // One Delete entry, like a document's: the owner deletes the nest
-            // outright, everyone else raises a request an owner/admin actions.
-            // Hidden below owner once a nest flag is already pending.
-            if (!isReadOnly && (canDeleteNest || !nestFlagPending))
+            // outright, an editor raises a request an owner/admin actions.
+            // Hidden below owner once a nest flag is already pending, and
+            // withheld from viewers and reviewer-only stewards — neither may
+            // ask for a nest to be destroyed (canRequestDeletion).
+            if (
+              (canDeleteNest || canEditDocs) &&
+              (canDeleteNest || !nestFlagPending)
+            )
               actions.push({
                 label: "Delete",
                 icon: Trash2,
@@ -2529,11 +2534,16 @@ export function NestView({
                   const canDelete = canManage || authoredByMe;
                   const flag = flagByNode.get(node.id);
                   const flagPending = flag?.status === "pending";
-                  // ONE Delete action for everyone. Admins get the delete
-                  // confirm, everyone else gets the request dialog — which one
+                  // ONE Delete action for everyone who gets one. Admins get the
+                  // delete confirm, editors get the request dialog — which one
                   // opens is the dialog's job to explain, not two menu items'.
-                  // Hidden below admin once a flag is open (a second 409s).
-                  const showDeleteAction = canDelete || !flagPending;
+                  // Hidden below admin once a flag is open (a second 409s), and
+                  // hidden outright for viewers of any kind: proposing a
+                  // deletion is an editor's act, and the server refuses them
+                  // (canRequestDeletion), so the affordance would only lead to
+                  // a 403.
+                  const showDeleteAction =
+                    (canDelete || canEditNode(node)) && (canDelete || !flagPending);
                   const openDeleteFlow = () =>
                     canDelete ? setDeleteNodeTarget(node) : setDeletionTarget(node);
                   // Move (drag OR menu) mirrors the edit gate's stewardship
@@ -2986,16 +2996,6 @@ export function NestView({
                                 <Plus className="h-3.5 w-3.5" />
                               </button>
                             )}
-                            {/* Same split as a document: admins/owners delete
-                                the folder (and everything under it), everyone
-                                else raises a request. Hidden while one is
-                                already pending on this folder. */}
-                            {(canManage || !folderFlagPending(node.path)) && (
-                              <button
-                                type="button"
-                                className={`rounded p-0.5 opacity-0 group-hover/fh:opacity-100 ${
-                                  canManage
-                                    ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
                             {/* Share the folder with one person — they reach
                                 everything under it and nothing else in the
                                 nest. Owner/admin only, matching /grants. */}
@@ -3016,6 +3016,20 @@ export function NestView({
                                 <Share2 className="h-3.5 w-3.5" />
                               </button>
                             )}
+                            {/* Same split as a document: admins/owners delete
+                                the folder (and everything under it), editors
+                                raise a request. Hidden while one is already
+                                pending, and withheld from viewers — the server
+                                refuses a folder flag below editor, and a
+                                folder-scope editor row isn't enough for it
+                                either (canRequestDeletion wants nest scope). */}
+                            {(canManage || canEditDocs) &&
+                              (canManage || !folderFlagPending(node.path)) && (
+                              <button
+                                type="button"
+                                className={`rounded p-0.5 opacity-0 group-hover/fh:opacity-100 ${
+                                  canManage
+                                    ? "text-muted-foreground hover:text-destructive hover:bg-destructive/10"
                                     : "text-muted-foreground hover:text-primary hover:bg-primary/10"
                                 }`}
                                 title={
@@ -3593,6 +3607,15 @@ export function NestView({
           onChanged={fetchData}
         />
       )}
+      {shareFolder && (
+        <ShareTargetDialog
+          nestId={nestId}
+          targetType="folder"
+          target={shareFolder.path}
+          label={shareFolder.label}
+          onClose={() => setShareFolder(null)}
+        />
+      )}
 
       {showSettings && (
         <NestSettingsModal
@@ -3607,15 +3630,6 @@ export function NestView({
           onChanged={(next) => {
             setShowSettings(false);
             // Flip the governance UI (Pending/AI Ready/Review Queue tiles,
-      {shareFolder && (
-        <ShareTargetDialog
-          nestId={nestId}
-          targetType="folder"
-          target={shareFolder.path}
-          label={shareFolder.label}
-          onClose={() => setShareFolder(null)}
-        />
-      )}
             // Stewards tab, etc.) instantly instead of waiting for the full
             // refetch to land — then reconcile counts in the background.
             setStewardshipEnabled(next.stewardshipEnabled);

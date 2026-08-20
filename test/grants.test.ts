@@ -118,6 +118,19 @@ describe("document grant — access is scoped to exactly that doc", () => {
     expect(res.status).toBe(403);
   });
 
+  it("a READ grantee cannot even request the document's deletion", async () => {
+    // Being shown something is not standing to propose destroying it. Must run
+    // before the write upgrade below, which legitimately earns that right.
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/shared-one/request-deletion`,
+      { reason: "don't want it" },
+      guest.apiKey,
+    );
+    expect(res.status).toBe(403);
+  });
+
   it("upgrading to write lets guest edit that doc", async () => {
     await jsonRequest(
       app,
@@ -143,6 +156,29 @@ describe("document grant — access is scoped to exactly that doc", () => {
       guest.apiKey,
     );
     expect(sib.status).toBe(404);
+  });
+
+  it("a WRITE grantee may request that document's deletion", async () => {
+    // A write grant is edit rights on that document, which is exactly the
+    // standing the deletion gate asks for — scoped to it, nothing else.
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/nodes/shared-one/request-deletion`,
+      { reason: "superseded" },
+      guest.apiKey,
+    );
+    expect(res.status).toBe(201);
+    // Clean up so the later revoke test isn't reading a flagged node.
+    const roster = await jsonRequest(app, "GET", `/nests/${nestId}/deletion-requests`, undefined, owner.apiKey);
+    const req = roster.data.requests.find((r: any) => r.nodeId === "nodes/shared-one");
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/deletion-requests/${req.id}/decline`,
+      { note: "keeping it" },
+      owner.apiKey,
+    );
   });
 
   it("guest cannot reach nest management (settings/grants)", async () => {

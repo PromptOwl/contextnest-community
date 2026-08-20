@@ -275,6 +275,16 @@ export function DocumentEditor({
     permission === "owner" ||
     permission === "admin" ||
     authoredByMe;
+  // Even ASKING for a deletion is an editor's act — a viewer of any kind (a
+  // read collaborator, a viewer steward, a read share grantee) doesn't get the
+  // action at all. Mirrors canRequestDeletion on the server, which refuses
+  // them; hiding it means nobody clicks through a 403 for a request they were
+  // never allowed to make.
+  const canRequestDeletion =
+    canDeleteDirectly ||
+    permission === "write" ||
+    myNodeRoles.includes("editor") ||
+    myStewards.some((s) => s.role === "editor" && s.scope === "nest");
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDeletionModal, setShowDeletionModal] = useState(false);
   // Latest deletion flag on this doc. Pending hides the request button (a
@@ -1465,6 +1475,15 @@ export function DocumentEditor({
                   );
                 },
               });
+            // Share THIS doc first — it's the narrower, more common ask.
+            // Meaningless on an unsaved doc: there's no node id to grant on.
+            if (canShare && !isNew)
+              moreActions.push({
+                label: "Share this document",
+                icon: Share2,
+                testId: "document-editor-share-doc",
+                onSelect: () => setShowShareDoc(true),
+              });
             if (canShare)
               moreActions.push({
                 label: "Share nest",
@@ -1475,20 +1494,11 @@ export function DocumentEditor({
               });
             // Below admin only: this opens the REQUEST dialog, not a delete.
             // Admins delete from the nest list — this page has never carried a
-            // Share THIS doc first — it's the narrower, more common ask.
-            // Meaningless on an unsaved doc: there's no node id to grant on.
-            if (canShare && !isNew)
-              moreActions.push({
-                label: "Share this document",
-                icon: Share2,
-                testId: "document-editor-share-doc",
-                onSelect: () => setShowShareDoc(true),
-              });
             // real delete. Hidden once a flag is already pending.
             // One Delete entry: the author (and the admin/owner tier) deletes
             // outright, everyone else raises a request. Hidden below that tier
             // once a flag is already open.
-            if (!isNew && (canDeleteDirectly || !deletionRequested))
+            if (!isNew && canRequestDeletion && (canDeleteDirectly || !deletionRequested))
               moreActions.push({
                 label: "Delete",
                 icon: Trash2,
@@ -2591,6 +2601,15 @@ export function DocumentEditor({
         onSelect={handleDocLinkInsert}
       />
 
+      {showShareDoc && (
+        <ShareTargetDialog
+          nestId={nestId}
+          targetType="document"
+          target={nodeId}
+          label={title || nodeId}
+          onClose={() => setShowShareDoc(false)}
+        />
+      )}
       {showShare && (
         <ShareNestDialog
           nestId={nestId}
@@ -2601,15 +2620,6 @@ export function DocumentEditor({
                to reload here. The nest list re-reads on next visit. */
           }}
         />
-      {showShareDoc && (
-        <ShareTargetDialog
-          nestId={nestId}
-          targetType="document"
-          target={nodeId}
-          label={title || nodeId}
-          onClose={() => setShowShareDoc(false)}
-        />
-      )}
       )}
       {leaveIntent && (
         <Dialog open onOpenChange={() => setLeaveIntent(null)}>

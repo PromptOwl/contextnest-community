@@ -758,14 +758,16 @@ Full review history for a node.
 ### POST `/nests/:nestId/nodes/:nodeId/request-deletion`
 Body: `{ "reason": "superseded by the new runbook" }` (required).
 
-Read permission — anyone who can see the node may flag it as stale, which is the point: deleting is write-tier, so the people who notice dead content usually can't act on it. A flagged node is **not** locked or under review; it stays editable and never appears in the review queue. One pending flag per node (`409` on a second), `404` for a node the caller can't read or that doesn't exist. Returns `201 { request }`.
+**Editor permission.** Asking for a deletion is an editor's act: a viewer of any kind — a `read` collaborator, a viewer steward, someone holding a `read` share grant — gets `403`. What counts as an editor is the same three paths that let someone change the document: nest-wide `write`, an editor steward row covering it, or a `write` share grant on it. Deleting outright stays higher still (owner/admin, or the document's own author), so an editor who spots dead content flags it rather than removing it. `404` comes first for a node the caller can't read or that doesn't exist, so the gate is never an existence oracle.
+
+A flagged node is **not** locked or under review; it stays editable and never appears in the review queue. One pending flag per node (`409` on a second). Returns `201 { request }`.
 
 `GET /nests/:nestId/nodes/:nodeId` carries `deletionRequest` — the node's latest flag (`{ status, requestedBy, reason, resolvedBy?, resolutionNote?, resolvedAt? }`) or `null`. `pending` lets a client badge the document and drop its request affordance rather than discovering the `409`; `declined` carries the resolver's note, which is how the person who asked learns the verdict.
 
 ### POST `/nests/:nestId/request-deletion`
 Body: `{ "targetType": "folder" | "nest", "target": "api/limits", "reason": "..." }` (`target` ignored for `nest`).
 
-Read permission, same as the per-document route. A folder target is normalized (`/nodes/api/limits/` → `api/limits`) so two people flagging the same folder collide on one pending request rather than raising two; `404` if no documents live under it. One pending flag per (nest, target type, target).
+Editor permission, same as the per-document route — with one difference: a steward editor needs **nest** scope here, since a row scoped to one document is no mandate over a folder or the whole nest. A folder target is normalized (`/nodes/api/limits/` → `api/limits`) so two people flagging the same folder collide on one pending request rather than raising two; `404` if no documents live under it. One pending flag per (nest, target type, target).
 
 ### POST `/nests/:nestId/delete-folder`
 Body: `{ "folder": "api/limits" }`. **Owner/admin only** — a folder delete is many document deletes at once, so it sits at the nest-management tier, not `write`. Deletes every document under the prefix (sub-folders included) through the normal per-node path, so each gets its review-lock check, row purge and tombstone. Returns `{ deleted, nodeIds }`. Non-admins use the request flow above.
