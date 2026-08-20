@@ -1,5 +1,15 @@
 # @promptowl/contextnest-community
 
+## 1.16.1
+
+### Patch Changes
+
+- Drop four MCP catalog divergences that engine 2.1.0 resolved upstream.
+
+  The catalog-conformance guard is exact in both directions: an undocumented mismatch fails, and so does a documented one that stops happening. Engine 2.1.0 tripped the second half. `context_create` and `context_update` now have `status` and `checkpoint` in the catalog output, `context_delete` declares the echoed `title`, and `NODE_TYPES` covers `table` and `agent` — all four were recorded here as divergences with a note that upstream needed to decide. It did.
+
+  The entries are gone. The remaining divergences are untouched: `external_edit_pending` is still outside the engine's status enum, and `context_versions` still has no keyframe/content-hash/chain-hash model to report. The `table` and `agent` fixture nodes stay seeded so the widened type enum keeps being exercised rather than assumed.
+
 ## 1.16.0
 
 ### Minor Changes
