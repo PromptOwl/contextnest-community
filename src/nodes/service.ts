@@ -40,10 +40,9 @@ import {
   filterAccessible,
   canReadNode,
 } from "../governance/access-guard.js";
-import { isPublicReader, resolveNestPermission } from "../shared/access.js";
+import { isPublicReader } from "../shared/access.js";
 import {
   listUserGrants,
-  grantCoversNode,
   grantRoleForNode,
 } from "../governance/grants-service.js";
 import { getPendingChange } from "../governance/external-edit-service.js";
@@ -527,24 +526,17 @@ export async function listNodesForCaller(
     approvedVersions ?? undefined,
   );
 
-  // Share grants: a caller with NO nest-wide permission sees exactly the
-  // documents their grants cover — never the whole list. filterAccessible's
-  // stewardship-OFF path returns the entire nest (open read), which must NOT
-  // apply to a non-member, so narrow it to their grant-covered docs. With
-  // stewardship ON, filterAccessible already restricted to
-  // steward-accessible + grant-covered, so there's nothing to narrow.
-  // Loaded once for the whole list: it narrows the set below AND stamps each
-  // row's `myGrant` during enrichment, so a write grantee's client can tell
-  // their row apart from a viewer's. One indexed query, not one per node.
+  // Share grants (a caller with NO nest-wide permission sees exactly the
+  // documents their grants cover) are narrowed inside filterAccessible, on both
+  // the stewardship-on and stewardship-off paths — every read surface routes
+  // through it, so this list does not repeat the check.
+  //
+  // The grants are still read here, for one reason only: stamping each row's
+  // `myGrant` below. A grant is access, not stewardship, so it appears in
+  // neither the nest permission nor the steward roles, and without it a client
+  // cannot tell a write grantee's row from a viewer's. One indexed query for
+  // the whole list, not one per node.
   const myGrants = await listUserGrants(nestId, userId);
-  if (
-    (await resolveNestPermission(nestId, userId)) === "none" &&
-    !(await isStewardshipEnabled(nestId))
-  ) {
-    accessible = myGrants.length
-      ? nodes.filter((d) => grantCoversNode(myGrants, d.id))
-      : accessible;
-  }
   // A public reader was already narrowed to approved nodes by filterAccessible;
   // any other caller asking for this view is narrowed here.
   if (approvedVersions && !publicReader) {
