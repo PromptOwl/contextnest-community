@@ -219,42 +219,6 @@ describe("folder grant — covers everything under the prefix", () => {
   });
 });
 
-describe("revoking", () => {
-  it("deleting the grant removes access", async () => {
-    const roster = await jsonRequest(app, "GET", `/nests/${nestId}/grants`, undefined, owner.apiKey);
-    const g = roster.data.grants.find((x: any) => x.email === guest.email);
-    const del = await jsonRequest(app, "DELETE", `/nests/${nestId}/grants/${g.id}`, undefined, owner.apiKey);
-    expect(del.status).toBe(200);
-    const read = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/shared-one`, undefined, guest.apiKey);
-    expect(read.status).toBe(404);
-  });
-});
-
-// Grants must work identically whether or not the nest has stewardship (the
-// review-governance mode) enabled. The handler-level access guards
-// (canReadNode / filterAccessible) gate reads via steward roles when
-// stewardship is on — they are grants-aware so a grantee isn't 403'd on a
-// governed nest even though the coarse middleware already let them in.
-describe("grants under stewardship (governed nest)", () => {
-  let govNest: string;
-
-  beforeAll(async () => {
-    const nest = await jsonRequest(app, "POST", "/nests", { name: "Governed" }, owner.apiKey);
-    govNest = nest.data.nest.id;
-    await jsonRequest(app, "POST", `/nests/${govNest}/nodes`, { title: "Gov Shared", content: "# gov shared" }, owner.apiKey);
-    await jsonRequest(app, "POST", `/nests/${govNest}/nodes`, { title: "Gov Secret", content: "# gov secret" }, owner.apiKey);
-    const s = await jsonRequest(app, "PATCH", `/nests/${govNest}/settings`, { stewardship_enabled: true }, owner.apiKey);
-    expect(s.status).toBe(200);
-    expect(s.data.stewardship_enabled).toBe(true);
-  });
-
-  it("read grantee can READ the granted doc and it appears in their list", async () => {
-    const share = await jsonRequest(app, "POST", `/nests/${govNest}/grants`,
-      { target_type: "document", target: "nodes/gov-shared", email: guest.email, role: "read" }, owner.apiKey);
-    expect(share.status).toBe(201);
-
-    const read = await jsonRequest(app, "GET", `/nests/${govNest}/nodes/nodes/gov-shared`, undefined, guest.apiKey);
-    expect(read.status).toBe(200);
 // Being shared something is worthless if you can't find it. A grantee has no
 // nest-wide permission, so the nest must still be listed for them — as a
 // viewer of their slice, never describing the parts they can't see.
@@ -329,6 +293,47 @@ describe("discovery — the grantee finds the nest by logging in", () => {
   });
 });
 
+describe("revoking", () => {
+  it("deleting the grant removes access", async () => {
+    const roster = await jsonRequest(app, "GET", `/nests/${nestId}/grants`, undefined, owner.apiKey);
+    const g = roster.data.grants.find((x: any) => x.email === guest.email);
+    const del = await jsonRequest(app, "DELETE", `/nests/${nestId}/grants/${g.id}`, undefined, owner.apiKey);
+    expect(del.status).toBe(200);
+    const read = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/nodes/shared-one`, undefined, guest.apiKey);
+    expect(read.status).toBe(404);
+  });
+
+  it("and drops the nest off the grantee's list", async () => {
+    const res = await jsonRequest(app, "GET", "/nests", undefined, guest.apiKey);
+    expect(res.data.nests.map((n: any) => n.id)).not.toContain(nestId);
+  });
+});
+
+// Grants must work identically whether or not the nest has stewardship (the
+// review-governance mode) enabled. The handler-level access guards
+// (canReadNode / filterAccessible) gate reads via steward roles when
+// stewardship is on — they are grants-aware so a grantee isn't 403'd on a
+// governed nest even though the coarse middleware already let them in.
+describe("grants under stewardship (governed nest)", () => {
+  let govNest: string;
+
+  beforeAll(async () => {
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Governed" }, owner.apiKey);
+    govNest = nest.data.nest.id;
+    await jsonRequest(app, "POST", `/nests/${govNest}/nodes`, { title: "Gov Shared", content: "# gov shared" }, owner.apiKey);
+    await jsonRequest(app, "POST", `/nests/${govNest}/nodes`, { title: "Gov Secret", content: "# gov secret" }, owner.apiKey);
+    const s = await jsonRequest(app, "PATCH", `/nests/${govNest}/settings`, { stewardship_enabled: true }, owner.apiKey);
+    expect(s.status).toBe(200);
+    expect(s.data.stewardship_enabled).toBe(true);
+  });
+
+  it("read grantee can READ the granted doc and it appears in their list", async () => {
+    const share = await jsonRequest(app, "POST", `/nests/${govNest}/grants`,
+      { target_type: "document", target: "nodes/gov-shared", email: guest.email, role: "read" }, owner.apiKey);
+    expect(share.status).toBe(201);
+
+    const read = await jsonRequest(app, "GET", `/nests/${govNest}/nodes/nodes/gov-shared`, undefined, guest.apiKey);
+    expect(read.status).toBe(200);
     expect(read.data.node.content).toContain("gov shared");
 
     const list = await jsonRequest(app, "GET", `/nests/${govNest}/nodes`, undefined, guest.apiKey);
@@ -338,11 +343,6 @@ describe("discovery — the grantee finds the nest by logging in", () => {
 
   it("read grantee can SEARCH and get CONTEXT, scoped to their grant (not 404)", async () => {
     // Retrieval routes were 404 for grant-only callers before they were added
-
-  it("and drops the nest off the grantee's list", async () => {
-    const res = await jsonRequest(app, "GET", "/nests", undefined, guest.apiKey);
-    expect(res.data.nests.map((n: any) => n.id)).not.toContain(nestId);
-  });
     // to the grant middleware allow-list; results self-scope via filterAccessible.
     const search = await jsonRequest(app, "GET", `/nests/${govNest}/search?q=gov`, undefined, guest.apiKey);
     expect(search.status).toBe(200);

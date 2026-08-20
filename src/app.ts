@@ -24,7 +24,7 @@ import {
   canManageStewards,
   resolveUserRoles,
 } from "./governance/stewardship-service.js";
-import { resolveNodeGrant, hasAnyGrant } from "./governance/grants-service.js";
+import { resolveNodeGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
@@ -69,6 +69,7 @@ import {
 import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
+  resolveNestAccess,
   permissionLevel,
   isServerAdminUserId,
   type NestPermission,
@@ -1611,7 +1612,11 @@ export function createApp(): Hono<AuthEnv> {
       return next();
     }
 
-    const permission = await resolveNestPermission(nestId, userId);
+    // One fetch: the permission merge AND whether the caller holds any share
+    // grant here, which the grant branches below read off this row instead of
+    // re-querying once per branch.
+    const access = await resolveNestAccess(nestId, userId);
+    const permission = access.permission;
 
     // Document/folder share grant: a caller BELOW nest access may still reach
     // a specific granted node (or a bare nest read, so a shared-doc deep link
@@ -1651,7 +1656,7 @@ export function createApp(): Hono<AuthEnv> {
       } else if (parts.length === 1 && c.req.method === "GET") {
         // GET /nests/:id (bare) — let a grantee see the nest name so a shared
         // link resolves; the node LIST stays filtered to their grants.
-        grantNestVisible = await hasAnyGrant(nestId, userId);
+        grantNestVisible = access.hasGrant;
       } else if (
         parts[1] === "nodes" &&
         parts.length === 2 &&
@@ -1659,12 +1664,12 @@ export function createApp(): Hono<AuthEnv> {
       ) {
         // GET /nests/:id/nodes (the list) — allowed for grantees; the handler
         // (listNodesForCaller) filters to only the nodes they're granted.
-        grantNestVisible = await hasAnyGrant(nestId, userId);
+        grantNestVisible = access.hasGrant;
       } else if (isReadQuery) {
         // Retrieval routes — a grantee may query/search/context/export; the
         // handler's filterAccessible scopes every result to their grants, so
         // they can never read past what they were shared (same as the list).
-        grantNestVisible = await hasAnyGrant(nestId, userId);
+        grantNestVisible = access.hasGrant;
       }
       if (!grantRole && !grantNestVisible) {
         // Same message for "doesn't exist" and "no access" — existence oracle.

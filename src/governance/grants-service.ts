@@ -54,15 +54,9 @@ export async function resolveNodeGrant(
   return best;
 }
 
-/** Does the user hold ANY grant in this nest? (gates nest-shell visibility) */
-export async function hasAnyGrant(nestId: string, userId: string): Promise<boolean> {
-  if (!userId) return false;
-  const row = (await getDb().get(
-    "SELECT 1 AS x FROM grants WHERE nest_id = ? AND user_id = ? LIMIT 1",
-    [nestId, userId],
-  )) as { x: number } | undefined;
-  return !!row;
-}
+// "Does this user hold ANY grant here?" — the question that gates nest-shell
+// visibility — is answered by `hasGrant` on resolveNestAccess (shared/access.ts),
+// which folds it into the permission fetch rather than paying a query of its own.
 
 /** The user's grants in this nest — used to filter the node list to what they
  *  can see when they have no nest-wide permission. */
