@@ -1290,6 +1290,10 @@ export function NestView({
       );
   })();
 
+  // Overview stat tile: Root is a synthetic tocGroups entry for docs with no
+  // folder, not a user-created folder, so it's excluded from the count.
+  const folderCount = tocGroups.filter((g) => g.folder !== "Root").length;
+
   const openVersions = async (node: any) => {
     setVersionNode(node);
     try {
@@ -1981,10 +1985,10 @@ export function NestView({
                     </div>
                     <div>
                       <div className="text-2xl font-semibold leading-none">
-                        {tocGroups.length}
+                        {folderCount}
                       </div>
                       <div className="text-xs text-muted-foreground mt-1">
-                        Folder{tocGroups.length === 1 ? "" : "s"}
+                        Folder{folderCount === 1 ? "" : "s"}
                       </div>
                     </div>
                   </CardContent>
