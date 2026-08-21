@@ -695,7 +695,7 @@ export function ConnectModal({
             <p className="text-xs text-muted-foreground">
               Whole nest — nodes, full version history, tags, definitions and
               edges — as one .zip. Import it on another ContextNest host to
-              recreate the nest. Owner/admin only.
+              recreate the nest.
             </p>
           </div>
 
