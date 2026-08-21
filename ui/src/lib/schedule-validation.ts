@@ -60,7 +60,7 @@ const MONTH_NAMES = [
 const pad2 = (n: string) => n.padStart(2, "0");
 const isNum = (s: string) => /^\d+$/.test(s);
 
-/** One comma-separated field, e.g. `*`, `5`, `1-5`, `*/15`, `1-10/2`. */
+/** One comma-separated field, e.g. `*`, `5`, `1-5`, `*15`, `1-10/2`. */
 function validateCronField(
   raw: string,
   spec: (typeof CRON_FIELD_SPECS)[number],
