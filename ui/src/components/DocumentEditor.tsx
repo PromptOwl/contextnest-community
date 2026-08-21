@@ -1375,7 +1375,7 @@ export function DocumentEditor({
               title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
             >
               <Send className="h-4 w-4 mr-2" />
-              Publish
+              Submit for review
             </Button>
           )}
           {!isViewOnly && canReviewHere && (
