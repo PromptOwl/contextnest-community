@@ -59,6 +59,9 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
     notifications?: api.WatcherNotification[];
     pagination?: api.WorkPagination;
   }>({ items: [], waiting: [] });
+  // Gates the "My Work" empty state — without it, the empty message flashes
+  // on every mount/tab switch before the best-effort /me/work fetch resolves.
+  const [workLoading, setWorkLoading] = useState(true);
   const [loadingMoreWork, setLoadingMoreWork] = useState(false);
   // Drafts you never submitted — their own tab, not folded into My Work.
   const [drafts, setDrafts] = useState<api.MyDraft[]>([]);
@@ -119,7 +122,8 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
     qc
       .fetchQuery(reads.myWork())
       .then(setWork)
-      .catch(() => setWork({ items: [], waiting: [], notifications: [] }));
+      .catch(() => setWork({ items: [], waiting: [], notifications: [] }))
+      .finally(() => setWorkLoading(false));
     // Streams into its own tab like the other extras — never gated behind
     // setLoading, so it can't add to the dashboard's time-to-first-paint.
     void goToDraftsPage(0);
@@ -468,7 +472,15 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                   </span>
                 )}
               </div>
-              {work.items.length === 0 ? (
+              {workLoading ? (
+                // Loader, not the empty state: "nothing here" while the
+                // best-effort /me/work fetch is still in flight reads as an
+                // answer, same reasoning as draftsLoading below.
+                <div className="rounded-lg border bg-muted/20 px-4 py-6 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading your work…
+                </div>
+              ) : work.items.length === 0 ? (
                 <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
                   You're all caught up — nothing waiting on you.
                 </div>
