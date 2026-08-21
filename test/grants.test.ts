@@ -266,6 +266,16 @@ describe("discovery — the grantee finds the nest by logging in", () => {
     expect(res.data.myStewards).toEqual([]);
   });
 
+  it("the grantee can read the nest's glossary from the Definitions tab", async () => {
+    // Regression: a doc/folder grantee has no nest-wide permission, so
+    // GET /nests/:id/definitions fell through the middleware's grant
+    // checks (only bare GET, GET /nodes and the query/search/export
+    // routes were covered) and 404'd as "Nest not found" even though the
+    // grantee could otherwise open the nest fine.
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}/definitions`, undefined, guest.apiKey);
+    expect(res.status).toBe(200);
+  });
+
   it("read access still buys no nest-wide power", async () => {
     // Reporting a grantee as a reader inside the nest routes must not become
     // authority. Denial can come from the middleware (404 — these paths are

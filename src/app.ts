@@ -1686,6 +1686,18 @@ export function createApp(): Hono<AuthEnv> {
         // handler's filterAccessible scopes every result to their grants, so
         // they can never read past what they were shared (same as the list).
         grantNestVisible = access.hasGrant;
+      } else if (
+        parts[1] === "definitions" &&
+        parts.length === 2 &&
+        c.req.method === "GET"
+      ) {
+        // GET /nests/:id/definitions — the nest's glossary. Unlike node
+        // routes this isn't per-document content to scope with
+        // filterAccessible, it's shared vocabulary a doc/folder grantee
+        // needs to make sense of whatever they were granted (e.g. a term
+        // referenced by their node). Same visibility rule as the bare nest
+        // read and node list: any grant on this nest is enough to read it.
+        grantNestVisible = access.hasGrant;
       }
       if (!grantRole && !grantNestVisible) {
         // Same message for "doesn't exist" and "no access" — existence oracle.
