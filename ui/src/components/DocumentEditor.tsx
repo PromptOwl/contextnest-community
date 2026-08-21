@@ -183,6 +183,10 @@ export function DocumentEditor({
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
   const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
+  // True once the steward-role fetch below has resolved (even to []) — lets
+  // the default-comment-mode effect wait for a real answer instead of racing
+  // the initial empty array.
+  const [rolesLoaded, setRolesLoaded] = useState(false);
   // Caller's share grant on THIS document (server-resolved on GET /nodes/:id).
   // A grant is access, not stewardship: it appears in neither `permission` (a
   // grantee always reads as "read" at nest level, whatever their grant says)
@@ -752,6 +756,7 @@ export function DocumentEditor({
   useEffect(() => {
     if (isNew || !nodeId || !currentEmail) {
       setMyNodeRoles([]);
+      setRolesLoaded(true);
       return;
     }
     let cancelled = false;
@@ -765,6 +770,8 @@ export function DocumentEditor({
         setMyNodeRoles(mine.map((s) => s.role));
       } catch {
         if (!cancelled) setMyNodeRoles([]);
+      } finally {
+        if (!cancelled) setRolesLoaded(true);
       }
     })();
     return () => {
@@ -1150,6 +1157,21 @@ export function DocumentEditor({
   // approve/reject; viewers just read. A user with editor + reviewer is
   // NOT read-only — keep edit affordances open for them.
   const isReviewerOnly = !isOwner && myNodeRoles.length > 0 && !hasEditorRole;
+
+  // A pending-review doc opens read-only for a reviewer, and the comment box
+  // otherwise sits behind an easy-to-miss "turn on comment mode" affordance.
+  // Default comment mode ON for them so they land ready to leave feedback.
+  // The owner's own submission is excluded — they can still edit it, so the
+  // rendered/comment view shouldn't be forced on top of that. Applied once
+  // per doc (ref guard) so a manual toggle-off afterward isn't undone by
+  // later re-renders of this effect.
+  const defaultCommentModeAppliedRef = useRef(false);
+  useEffect(() => {
+    if (defaultCommentModeAppliedRef.current) return;
+    if (loading || !rolesLoaded) return;
+    defaultCommentModeAppliedRef.current = true;
+    if (status === "pending_review" && isReviewerOnly) setCommentMode(true);
+  }, [loading, rolesLoaded, status, isReviewerOnly]);
 
   // Always-editable surface ("buttery editor"): anyone who can edit drops
   // straight into the live editor instead of view → click → edit, which
