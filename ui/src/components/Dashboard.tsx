@@ -319,9 +319,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
     }
     setCreateError(null);
     try {
-      await api.createNest(newName.trim(), newDesc.trim());
+      const { nest } = await api.createNest(newName.trim(), newDesc.trim());
       setNewName(""); setNewDesc(""); setShowCreate(false);
       fetchNests();
+      // Straight into the new nest — the next thing anyone does is add a
+      // document to it, and the grid would make them find it first.
+      onSelectNest(nest.id, nest.name, true, nest.user_id === ANON_USER_ID);
     } catch (e) {
       console.error("[Dashboard] createNest failed", e);
       setCreateError(

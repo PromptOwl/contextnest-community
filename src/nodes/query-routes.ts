@@ -538,7 +538,7 @@ queryRoutes.get("/search", async (c) => {
   return c.json({
     query: q,
     count: accessible.length,
-    nodes: accessible.map(toSearchHit),
+    nodes: accessible.map((n) => toSearchHit(n, q)),
   });
 });
 

@@ -1833,7 +1833,7 @@ export function NestView({
           <>
             <Card>
               <CardHeader className="pb-2">
-                <CardDescription>Pending Review</CardDescription>
+                <CardDescription>Pending Approvals</CardDescription>
                 <CardTitle className="text-3xl text-amber-600">
                   {initialLoad ? (
                     <CountSkeleton className="h-8 w-12" />
@@ -1869,7 +1869,7 @@ export function NestView({
             </Card>
             <Card>
               <CardHeader className="pb-2">
-                <CardDescription>Review Queue</CardDescription>
+                <CardDescription>Your Review Queue</CardDescription>
                 <CardTitle className="text-3xl text-blue-600">
                   {initialLoad ? (
                     <CountSkeleton className="h-8 w-12" />
@@ -2068,8 +2068,21 @@ export function NestView({
                     <div className="py-8 text-center">
                       <FileText className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
                       <p className="text-sm text-muted-foreground">
-                        No documents yet. Create one from the Documents tab.
+                        No documents yet.
                       </p>
+                      {/* The header's New Document button is right there, so
+                          offer the action itself rather than directions to it.
+                          Read-only callers get the bare line. */}
+                      {!isReadOnly && canEditDocs && (
+                        <Button
+                          className="mt-3"
+                          size="sm"
+                          onClick={() => onOpenDocument("new")}
+                        >
+                          <Plus className="h-4 w-4 mr-2" />
+                          New Document
+                        </Button>
+                      )}
                     </div>
                   ) : (
                     <FolderTree

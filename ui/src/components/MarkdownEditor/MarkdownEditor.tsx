@@ -300,6 +300,8 @@ export const MarkdownEditor = forwardRef<
   const wikiNodesRef = useRef<Array<{ id: string; title: string }>>([]);
   // Bump when the list finishes loading so the filter effect recomputes.
   const [wikiNodesVersion, setWikiNodesVersion] = useState(0);
+  // In flight → the popup says "Loading" instead of flashing "no documents".
+  const [wikiLoading, setWikiLoading] = useState(false);
   // Refs mirror state so the editor's static `handleKeyDown` (captured
   // once at useEditor time) can see the latest values without a re-init.
   const wikiPopupRef = useRef(wikiPopup);
@@ -583,11 +585,13 @@ export const MarkdownEditor = forwardRef<
             if (pick) insertWikiPickRef.current?.(pick);
             return true;
           }
-          if (event.key === "Escape") {
-            event.preventDefault();
-            setWikiPopup(null);
-            return true;
-          }
+        }
+        // Escape dismisses the panel whether or not it has results — the
+        // empty-state panel is dismissable the same way.
+        if (popup && event.key === "Escape") {
+          event.preventDefault();
+          setWikiPopup(null);
+          return true;
         }
         if (
           (event.ctrlKey || event.metaKey) &&
@@ -697,6 +701,7 @@ export const MarkdownEditor = forwardRef<
   useEffect(() => {
     if (!wikiPopupOpen || !nestId) return;
     let cancelled = false;
+    setWikiLoading(true);
     (async () => {
       try {
         const res = await qc.fetchQuery(reads.nodes(nestId));
@@ -706,6 +711,8 @@ export const MarkdownEditor = forwardRef<
         setWikiNodesVersion((v) => v + 1);
       } catch {
         /* leave the last list in place; filter still works offline */
+      } finally {
+        if (!cancelled) setWikiLoading(false);
       }
     })();
     return () => {
@@ -1441,7 +1448,9 @@ export const MarkdownEditor = forwardRef<
         </div>
       )}
 
-      {wikiPopup && wikiResults.length > 0 && (() => {
+      {/* Rendered even with no results: typing `[[` in an empty nest used to
+          do nothing at all, which reads as a broken feature. */}
+      {wikiPopup && (() => {
         // Panel is w-72 (288px) / max-h-64 (256px), fixed-positioned at the
         // caret. Near the bottom or right edge of the viewport it would clip
         // off-screen, so flip it above the caret when space below is short,
@@ -1482,6 +1491,15 @@ export const MarkdownEditor = forwardRef<
           <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground border-b">
             Link a document
           </div>
+          {wikiResults.length === 0 ? (
+            <div className="px-3 py-2 text-sm text-muted-foreground">
+              {wikiLoading
+                ? "Loading documents…"
+                : wikiPopup.query.trim()
+                  ? `No documents match “${wikiPopup.query.trim()}”.`
+                  : "No documents to link yet."}
+            </div>
+          ) : (
           <ul className="py-1">
             {wikiResults.map((doc, idx) => (
               <li key={doc.id}>
@@ -1501,6 +1519,7 @@ export const MarkdownEditor = forwardRef<
               </li>
             ))}
           </ul>
+          )}
         </div>
         );
       })()}
