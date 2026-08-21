@@ -74,6 +74,9 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
   // Deletion flag being resolved from the inbox, and which dialog it opens.
   const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
   const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
+  // Review item being rejected from the inbox — goes through ReasonDialog so
+  // it requires feedback, same as the in-nest Request Changes flow.
+  const [rejectTarget, setRejectTarget] = useState<api.WorkItem | null>(null);
   // Served from the shared read cache: coming back to the dashboard paints the
   // previous list immediately and revalidates behind it. `isLoading` is true
   // only on a genuine first load with nothing cached, so the loader below still
@@ -225,16 +228,11 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
   // until the page is manually reloaded.
   useEffect(() => { fetchNests(); }, [currentUserEmail]);
 
-  const actOnReview = async (
-    w: api.WorkItem,
-    action: "approve" | "reject",
-  ) => {
+  const approveReviewItem = async (w: api.WorkItem) => {
     const key = `${w.nest_id}:${w.node_id}`;
     setActing((s) => ({ ...s, [key]: true }));
     try {
-      if (action === "approve")
-        await api.approveReview(w.nest_id, w.node_id);
-      else await api.rejectReview(w.nest_id, w.node_id, "Rejected from inbox");
+      await api.approveReview(w.nest_id, w.node_id);
       // Optimistic: drop the row, then reconcile from the server. Refetch the
       // CURRENT inbox page (not fetchNests, which reloads page 1) so a user
       // mid-triage on page 2+ isn't bounced back to the top.
@@ -254,6 +252,16 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
         return next;
       });
     }
+  };
+
+  // Reject requires feedback, same as the in-nest Request Changes flow — the
+  // ReasonDialog enforces that (see rejectTarget below), so this only runs
+  // once a non-empty note is provided. Throws on failure so the error lands
+  // in the dialog instead of a swallowed console line.
+  const handleRejectReview = async (note: string) => {
+    const w = rejectTarget!;
+    await api.rejectReview(w.nest_id, w.node_id, note);
+    dropWorkItem(w);
   };
 
   // Resolve a deletion flag straight from the inbox. Delete needs a confirm and
@@ -301,7 +309,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
     void goToWorkPage(work.pagination?.offset ?? 0);
   };
 
-  // Optimistic drop + reconcile, same as actOnReview.
+  // Optimistic drop + reconcile, same as approveReviewItem.
   const dropWorkItem = (w: api.WorkItem) => {
     setWork((prev) => ({
       ...prev,
@@ -545,7 +553,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                                 size="sm"
                                 variant="outline"
                                 disabled={busy}
-                                onClick={() => actOnReview(w, "approve")}
+                                onClick={() => approveReviewItem(w)}
                               >
                                 {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
                                 Approve
@@ -555,7 +563,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                                 variant="ghost"
                                 disabled={busy}
                                 className="text-muted-foreground hover:text-destructive"
-                                onClick={() => actOnReview(w, "reject")}
+                                onClick={() => setRejectTarget(w)}
                               >
                                 Reject
                               </Button>
@@ -1281,6 +1289,20 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
           onConfirm={
             deletionAction === "delete" ? handleInboxDelete : handleInboxDecline
           }
+        />
+      )}
+
+      {rejectTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setRejectTarget(null)}
+          title={`Reject "${rejectTarget.title}"?`}
+          description="The author is notified with your feedback, same as rejecting from inside the nest."
+          label="Why are you rejecting?"
+          placeholder="Explain what changes are needed..."
+          confirmLabel="Reject"
+          destructive
+          onConfirm={handleRejectReview}
         />
       )}
 
