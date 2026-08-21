@@ -947,6 +947,14 @@ export function DocumentEditor({
     ok: boolean;
     savedId?: string;
   }> => {
+    // No-op save: `isDirty` already normalizes title/content/tags/schedule/prime
+    // against the loaded snapshot, so trust it here too instead of re-hashing —
+    // skipping the request when nothing changed avoids stamping a new version
+    // that only bumps `version`/`updated_at`.
+    if (!isNew && !isDirty) {
+      setTouched(false);
+      return { ok: true, savedId: nodeId };
+    }
     const payload = { title: title.trim(), content, tags };
     let savedId: string | undefined;
     if (isNew) {
