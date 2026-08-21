@@ -35,22 +35,13 @@ import type { Transaction } from "@tiptap/pm/state";
 import { Markdown, type MarkdownStorage } from "tiptap-markdown";
 
 // tiptap-markdown's storage isn't in TipTap's Storage type; cast.
-// TextStyle/Color have no markdown representation. Without an explicit
-// (empty) mark serializer, tiptap-markdown's html:true fallback writes raw
-// <span style> into the stored .md — breaking the markdown-only invariant
-// and showing as literal tags in the react-markdown viewer. Strip on
-// serialize so color stays an in-editor-only affordance.
-const stripMarkSpec = { serialize: { open: "", close: "" }, parse: {} };
-const PlainTextStyle = TextStyle.extend({
-  addStorage() {
-    return { ...(this.parent?.() || {}), markdown: stripMarkSpec };
-  },
-});
-const PlainColor = Color.extend({
-  addStorage() {
-    return { ...(this.parent?.() || {}), markdown: stripMarkSpec };
-  },
-});
+// TextStyle/Color have no dedicated markdown syntax, so with no explicit
+// mark serializer tiptap-markdown's html:true fallback (see Markdown.configure
+// below) writes the mark as raw `<span style="color: …">` HTML straight into
+// the stored .md — that's valid CommonMark (raw inline HTML) and is exactly
+// how legacy HTML docs already round-trip through this editor. Same fallback
+// parses it back into the TextStyle/Color marks on load via their normal
+// `parseHTML`, so color survives save + reopen without any custom code here.
 
 // Unescape `\[\[ \]\]` — prosemirror-markdown escapes `[`/`]` as link syntax.
 function getEditorMarkdown(editor: Editor): string {
@@ -282,10 +273,6 @@ export const MarkdownEditor = forwardRef<
   const [previewing, setPreviewing] = useState(false);
   const qc = useQueryClient();
   const effectiveEditable = editable && !previewing;
-  // Text color has no markdown representation (see PlainColor above) — warn
-  // once per mount the first time it's applied, rather than silently
-  // discarding it on save with no explanation.
-  const colorHintShownRef = useRef(false);
 
   // `[[` autocomplete state. Opens when the user types an unclosed
   // double-bracket; the dropdown searches nest docs so picks are
@@ -429,10 +416,11 @@ export const MarkdownEditor = forwardRef<
       TiptapImage.configure({ inline: false, allowBase64: false }),
       // `==text==` highlight. multicolor lets the color marks set a bg.
       Highlight.configure({ multicolor: true }),
-      // Text color mark (in-editor + HTML export). Note: plain markdown has
-      // no color syntax, so color is not persisted to the .md on save.
-      PlainTextStyle,
-      PlainColor,
+      // Text color mark. Persisted via the html:true raw-HTML fallback below
+      // (see the TextStyle/Color import comment) — no dedicated markdown
+      // syntax needed.
+      TextStyle,
+      Color,
       // Smart typography: -- → em-dash, (c) → ©, -> → →, smart quotes, etc.
       Typography,
       // Word / character counter (read from editor.storage.characterCount).
@@ -1312,9 +1300,9 @@ export const MarkdownEditor = forwardRef<
 
           <Divider />
 
-          {/* Text color swatches. Note: not persisted to markdown — plain
-              markdown has no color syntax, so it's an in-editor/Preview-only
-              affordance (see PlainColor above). Selection collapses to the
+          {/* Text color swatches — saved with the document (see the
+              TextStyle/Color import comment above) and rendered on view too
+              (DocumentViewer's remarkColorSpans). Selection collapses to the
               end on pick so the applied color is visible immediately instead
               of staying hidden under the selection highlight, and the menu
               closes with it (BubbleMenu only shows for a live selection). */}
@@ -1322,16 +1310,9 @@ export const MarkdownEditor = forwardRef<
             <button
               key={c}
               type="button"
-              title={`Text color ${c} — preview only, not saved with the document`}
+              title={`Text color ${c}`}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
-                if (!colorHintShownRef.current) {
-                  colorHintShownRef.current = true;
-                  toast.message("Text color is preview-only", {
-                    description:
-                      "It shows while editing but isn't saved with the document.",
-                  });
-                }
                 const { to } = editor.state.selection;
                 editor.chain().focus().setColor(c).setTextSelection(to).run();
               }}
