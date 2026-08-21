@@ -946,6 +946,7 @@ export function DocumentEditor({
   const persistCurrent = async (): Promise<{
     ok: boolean;
     savedId?: string;
+    noop?: boolean;
   }> => {
     // No-op save: `isDirty` already normalizes title/content/tags/schedule/prime
     // against the loaded snapshot, so trust it here too instead of re-hashing —
@@ -953,7 +954,10 @@ export function DocumentEditor({
     // that only bumps `version`/`updated_at`.
     if (!isNew && !isDirty) {
       setTouched(false);
-      return { ok: true, savedId: nodeId };
+      toast.message(
+        "Not saved — no changes were made. Edit the document, then save again.",
+      );
+      return { ok: true, savedId: nodeId, noop: true };
     }
     const payload = { title: title.trim(), content, tags };
     let savedId: string | undefined;
@@ -1020,8 +1024,11 @@ export function DocumentEditor({
     setSaving(true);
     setError(null);
     try {
-      const { savedId } = await persistCurrent();
-      setJustSaved(true);
+      const { savedId, noop } = await persistCurrent();
+      // Skip the "Saved" checkmark on a no-op — the toast already told the
+      // user nothing changed, and flashing "Saved" alongside it would be
+      // contradictory.
+      if (!noop) setJustSaved(true);
       afterSave(savedId ?? "");
     } catch (err: any) {
       setError(err.message);
