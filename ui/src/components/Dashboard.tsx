@@ -30,7 +30,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { ReasonDialog, SubmitForReviewModal } from "./governance";
+import { ReasonDialog, ReviewActions, SubmitForReviewModal } from "./governance";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
@@ -70,13 +70,9 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
   // Draft awaiting the submit dialog (priority + note) — same modal the editor
   // uses, so submitting from here isn't a second, weaker path.
   const [submitTarget, setSubmitTarget] = useState<api.MyDraft | null>(null);
-  const [acting, setActing] = useState<Record<string, boolean>>({});
   // Deletion flag being resolved from the inbox, and which dialog it opens.
   const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
   const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
-  // Review item being rejected from the inbox — goes through ReasonDialog so
-  // it requires feedback, same as the in-nest Request Changes flow.
-  const [rejectTarget, setRejectTarget] = useState<api.WorkItem | null>(null);
   // Served from the shared read cache: coming back to the dashboard paints the
   // previous list immediately and revalidates behind it. `isLoading` is true
   // only on a genuine first load with nothing cached, so the loader below still
@@ -228,38 +224,16 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
   // until the page is manually reloaded.
   useEffect(() => { fetchNests(); }, [currentUserEmail]);
 
-  const approveReviewItem = async (w: api.WorkItem) => {
-    const key = `${w.nest_id}:${w.node_id}`;
-    setActing((s) => ({ ...s, [key]: true }));
-    try {
-      await api.approveReview(w.nest_id, w.node_id);
-      // Optimistic: drop the row, then reconcile from the server. Refetch the
-      // CURRENT inbox page (not fetchNests, which reloads page 1) so a user
-      // mid-triage on page 2+ isn't bounced back to the top.
-      setWork((prev) => ({
-        ...prev,
-        items: prev.items.filter(
-          (i) => !(i.nest_id === w.nest_id && i.node_id === w.node_id),
-        ),
-      }));
-      void goToWorkPage(work.pagination?.offset ?? 0);
-    } catch (e) {
-      console.error("[Dashboard] review action failed", e);
-    } finally {
-      setActing((s) => {
-        const next = { ...s };
-        delete next[key];
-        return next;
-      });
-    }
+  // Approve/reject both go through ReviewActions — the same required-feedback
+  // dialog used in the in-nest flow (NestView, DocumentEditor) — so rejecting
+  // from the inbox can't bypass the note requirement. Both throw on failure so
+  // the error lands in the dialog instead of a swallowed console line.
+  const approveReviewItem = async (w: api.WorkItem, note?: string) => {
+    await api.approveReview(w.nest_id, w.node_id, note);
+    dropWorkItem(w);
   };
 
-  // Reject requires feedback, same as the in-nest Request Changes flow — the
-  // ReasonDialog enforces that (see rejectTarget below), so this only runs
-  // once a non-empty note is provided. Throws on failure so the error lands
-  // in the dialog instead of a swallowed console line.
-  const handleRejectReview = async (note: string) => {
-    const w = rejectTarget!;
+  const rejectReviewItem = async (w: api.WorkItem, note: string) => {
     await api.rejectReview(w.nest_id, w.node_id, note);
     dropWorkItem(w);
   };
@@ -496,7 +470,6 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                 <div className="rounded-lg border divide-y overflow-hidden">
                   {work.items.map((w) => {
                     const key = `${w.nest_id}:${w.node_id}`;
-                    const busy = !!acting[key];
                     return (
                       <div
                         key={key}
@@ -548,26 +521,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                               </Button>
                             </>
                           ) : (
-                            <>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                disabled={busy}
-                                onClick={() => approveReviewItem(w)}
-                              >
-                                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
-                                Approve
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                disabled={busy}
-                                className="text-muted-foreground hover:text-destructive"
-                                onClick={() => setRejectTarget(w)}
-                              >
-                                Reject
-                              </Button>
-                            </>
+                            <ReviewActions
+                              documentTitle={w.title}
+                              version={1}
+                              onApprove={(note) => approveReviewItem(w, note)}
+                              onReject={(note) => rejectReviewItem(w, note)}
+                            />
                           )}
                         </div>
                       </div>
@@ -1289,20 +1248,6 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
           onConfirm={
             deletionAction === "delete" ? handleInboxDelete : handleInboxDecline
           }
-        />
-      )}
-
-      {rejectTarget && (
-        <ReasonDialog
-          open
-          onOpenChange={(o) => !o && setRejectTarget(null)}
-          title={`Reject "${rejectTarget.title}"?`}
-          description="The author is notified with your feedback, same as rejecting from inside the nest."
-          label="Why are you rejecting?"
-          placeholder="Explain what changes are needed..."
-          confirmLabel="Reject"
-          destructive
-          onConfirm={handleRejectReview}
         />
       )}
 
