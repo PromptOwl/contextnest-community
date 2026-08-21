@@ -98,6 +98,21 @@ function looksLikeHtml(s: string): boolean {
   return /^\s*</.test(s);
 }
 
+/** Human label for a Type's body-interpretation class, used by the New
+ *  Document Type-switch confirm dialog. */
+function bodyKindLabel(kind: "markdown" | "html" | "csv" | "code"): string {
+  switch (kind) {
+    case "html":
+      return "raw HTML (served as a sandboxed page)";
+    case "csv":
+      return "CSV data";
+    case "code":
+      return "code (tool source)";
+    default:
+      return "formatted document prose";
+  }
+}
+
 /** Canonicalize HTML for dirty-tracking (TipTap re-emits don't byte-match server load). */
 function normalizeHtml(s: string): string {
   if (!s) return "";
@@ -317,7 +332,38 @@ export function DocumentEditor({
   const [newType, setNewType] = useState<
     "document" | "artifact" | "agent" | "skill" | "tool" | "table"
   >("document");
+  // Type switch that would reinterpret existing content — confirmed before
+  // it's applied (see requestTypeChange below).
+  const [pendingType, setPendingType] = useState<{
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table";
+    label: string;
+  } | null>(null);
   const isArtifactDraft = isNew && newType === "artifact";
+  // How a type's body is interpreted — switching within the same class
+  // (e.g. Document → Agent, both markdown prose) doesn't change how
+  // existing content reads, so only a cross-class switch needs a warning.
+  const typeBodyKind = (
+    t: "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+  ): "markdown" | "html" | "csv" | "code" =>
+    t === "artifact" ? "html" : t === "table" ? "csv" : t === "tool" ? "code" : "markdown";
+  // New-doc Type switch: warn before applying when there's existing content
+  // AND the new type reinterprets it differently (prose vs HTML vs CSV vs
+  // code) — nothing to reinterpret on an empty draft, and same-class
+  // switches (e.g. Document ↔ Agent) don't change how the body is read.
+  const requestTypeChange = (
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+    label: string,
+  ) => {
+    if (
+      value !== newType &&
+      content.trim() &&
+      typeBodyKind(value) !== typeBodyKind(newType)
+    ) {
+      setPendingType({ value, label });
+      return;
+    }
+    setNewType(value);
+  };
   // The node's kind for editor-surface decisions: the picked kind while
   // drafting, the loaded type once it exists.
   const effectiveType = isNew ? newType : (nodeType ?? "document");
@@ -588,6 +634,15 @@ export function DocumentEditor({
   }, [selPopover]);
 
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+
+  // New document: Title is the first required field — focus it on mount
+  // instead of leaving focus to land in the body (MarkdownEditor skips its
+  // own autofocus when isNew, see the `autofocus` prop below).
+  useEffect(() => {
+    if (isNew) titleInputRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Last loaded/saved snapshot; drives isDirty for the leave-confirm path.
   const initialSnapshotRef = useRef<{
@@ -1646,6 +1701,7 @@ export function DocumentEditor({
                 </label>
                 <Input
                   id="document-editor-title"
+                  ref={titleInputRef}
                   value={title}
                   onChange={(e) => {
                     setTitle(e.target.value);
@@ -2088,8 +2144,9 @@ export function DocumentEditor({
                                 : `${label} (runnable)`
                       }
                       onClick={() =>
-                        setNewType(
+                        requestTypeChange(
                           value as "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+                          label,
                         )
                       }
                       className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${
@@ -2435,6 +2492,9 @@ export function DocumentEditor({
                 }}
                 onWikiLinkClick={handleWikiLinkClick}
                 placeholder="Start writing..."
+                // New document: Title is the first required field, so it
+                // gets focus instead (see the effect below), not the body.
+                autofocus={isNew ? false : "end"}
               />
             )}
           </div>
@@ -2705,6 +2765,35 @@ export function DocumentEditor({
                   <Save className="h-4 w-4 mr-2" />
                 )}
                 Save & leave
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {pendingType && (
+        <Dialog open onOpenChange={() => setPendingType(null)}>
+          <DialogContent className="sm:max-w-[460px]">
+            <DialogHeader>
+              <DialogTitle>Switch to {pendingType.label}?</DialogTitle>
+            </DialogHeader>
+            <p className="text-sm text-muted-foreground py-2">
+              Your existing content will stay as-is, but it will now be
+              interpreted as {bodyKindLabel(typeBodyKind(pendingType.value))}{" "}
+              instead of {bodyKindLabel(typeBodyKind(newType))}. Nothing is
+              converted automatically — review the body after switching.
+            </p>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setPendingType(null)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={() => {
+                  setNewType(pendingType.value);
+                  setPendingType(null);
+                }}
+              >
+                Switch anyway
               </Button>
             </DialogFooter>
           </DialogContent>

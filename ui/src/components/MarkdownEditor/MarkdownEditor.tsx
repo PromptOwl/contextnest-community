@@ -247,6 +247,10 @@ interface MarkdownEditorProps {
   placeholder?: string;
   editable?: boolean;
   className?: string;
+  /** Caret-ready on mount ("end"), or leave focus alone (false) — e.g. a
+   *  brand-new document wants focus on the Title field first. Default
+   *  preserves the existing Notion/Obsidian-style caret-ready feel. */
+  autofocus?: "end" | false;
 }
 
 export const MarkdownEditor = forwardRef<
@@ -267,6 +271,7 @@ export const MarkdownEditor = forwardRef<
     placeholder = "Start writing...",
     editable = true,
     className,
+    autofocus = "end",
   }: MarkdownEditorProps,
   ref: ForwardedRef<MarkdownEditorHandle>,
 ) {
@@ -277,6 +282,10 @@ export const MarkdownEditor = forwardRef<
   const [previewing, setPreviewing] = useState(false);
   const qc = useQueryClient();
   const effectiveEditable = editable && !previewing;
+  // Text color has no markdown representation (see PlainColor above) — warn
+  // once per mount the first time it's applied, rather than silently
+  // discarding it on save with no explanation.
+  const colorHintShownRef = useRef(false);
 
   // `[[` autocomplete state. Opens when the user types an unclosed
   // double-bracket; the dropdown searches nest docs so picks are
@@ -491,8 +500,10 @@ export const MarkdownEditor = forwardRef<
     content,
     editable,
     // Caret-ready on open so you can type immediately (Notion/Obsidian
-    // feel). "end" lands at doc end; placeholder shows when empty.
-    autofocus: "end",
+    // feel). "end" lands at doc end; placeholder shows when empty. A
+    // brand-new document passes `false` so the Title field gets focus
+    // instead (see DocumentEditor's initial-focus effect).
+    autofocus,
     immediatelyRender: false,
     onUpdate: ({ editor }) => {
       const md = getEditorMarkdown(editor);
@@ -1301,14 +1312,29 @@ export const MarkdownEditor = forwardRef<
 
           <Divider />
 
-          {/* Text color swatches. Note: not persisted to markdown. */}
+          {/* Text color swatches. Note: not persisted to markdown — plain
+              markdown has no color syntax, so it's an in-editor/Preview-only
+              affordance (see PlainColor above). Selection collapses to the
+              end on pick so the applied color is visible immediately instead
+              of staying hidden under the selection highlight, and the menu
+              closes with it (BubbleMenu only shows for a live selection). */}
           {["#ef4444", "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6"].map((c) => (
             <button
               key={c}
               type="button"
-              title={`Text color ${c}`}
+              title={`Text color ${c} — preview only, not saved with the document`}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => editor.chain().focus().setColor(c).run()}
+              onClick={() => {
+                if (!colorHintShownRef.current) {
+                  colorHintShownRef.current = true;
+                  toast.message("Text color is preview-only", {
+                    description:
+                      "It shows while editing but isn't saved with the document.",
+                  });
+                }
+                const { to } = editor.state.selection;
+                editor.chain().focus().setColor(c).setTextSelection(to).run();
+              }}
               className="m-0.5 h-4 w-4 rounded-full border border-border"
               style={{ backgroundColor: c }}
             />
