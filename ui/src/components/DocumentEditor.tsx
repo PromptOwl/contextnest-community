@@ -86,6 +86,7 @@ import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
+import { validateSchedule } from "../lib/schedule-validation";
 import { resolveWikiTarget, previewSnippet } from "../lib/wiki-preview";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
@@ -976,6 +977,10 @@ export function DocumentEditor({
     if (prime !== loadedPrimeRef.current) return true;
     return false;
   }, [touched, title, content, tags, schedule, prime]);
+
+  // Feedback only — the schedule is saved exactly as typed either way (it's
+  // opaque to this server; an external orchestrator parses it).
+  const scheduleCheck = useMemo(() => validateSchedule(schedule), [schedule]);
 
   const addTag = useCallback(() => {
     // Split on whitespace/comma; strip leading "#" (stored bare).
@@ -2203,21 +2208,40 @@ export function DocumentEditor({
                     data-testid="document-editor-schedule"
                     type="text"
                     value={schedule}
-                    placeholder="e.g. 0 6 * * *  or  @daily"
+                    placeholder="e.g. 0 6 * * *  or  @daily  or  @every 15m"
+                    aria-invalid={scheduleCheck.kind === "invalid"}
                     onChange={(e) => {
                       setSchedule(e.target.value);
                       setTouched(true);
                     }}
                     onBlur={saveOnBlur}
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                    className={`w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring ${
+                      scheduleCheck.kind === "invalid"
+                        ? "border-destructive focus:ring-destructive"
+                        : ""
+                    }`}
                   />
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Opaque to this server — an external orchestrator parses it
-                    and runs the{" "}
-                    {newType === "skill" || nodeType === "skill"
-                      ? "skill"
-                      : "agent"}
-                    . Leave blank for none.
+                  <p
+                    data-testid="document-editor-schedule-feedback"
+                    className={`mt-1 text-xs ${
+                      scheduleCheck.kind === "invalid"
+                        ? "text-destructive"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    {scheduleCheck.kind === "invalid" ? (
+                      <>Doesn't look like a cron/interval schedule — {scheduleCheck.error}.</>
+                    ) : scheduleCheck.kind === "valid" ? (
+                      <>{scheduleCheck.description}. Opaque to this server — an external orchestrator parses it and runs the{" "}
+                      {newType === "skill" || nodeType === "skill" ? "skill" : "agent"}.</>
+                    ) : (
+                      <>Opaque to this server — an external orchestrator parses it
+                      and runs the{" "}
+                      {newType === "skill" || nodeType === "skill"
+                        ? "skill"
+                        : "agent"}
+                      . Leave blank for none.</>
+                    )}
                   </p>
                 </div>
               )}
