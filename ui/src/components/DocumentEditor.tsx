@@ -1007,6 +1007,9 @@ export function DocumentEditor({
     ok: boolean;
     savedId?: string;
     noop?: boolean;
+    // Only set for a fresh create — the resulting status (draft vs.
+    // auto-published), so the caller can confirm what actually happened.
+    createdStatus?: string;
   }> => {
     // No-op save: `isDirty` already normalizes title/content/tags/schedule/prime
     // against the loaded snapshot, so trust it here too instead of re-hashing —
@@ -1021,6 +1024,7 @@ export function DocumentEditor({
     }
     const payload = { title: title.trim(), content, tags };
     let savedId: string | undefined;
+    let createdStatus: string | undefined;
     if (isNew) {
       const res = await api.createNode(nestId, {
         ...payload,
@@ -1034,6 +1038,7 @@ export function DocumentEditor({
         ...(prime === null ? {} : { prime }),
       });
       savedId = (res as any)?.node?.id;
+      createdStatus = (res as any)?.node?.status;
     } else {
       const primePatch =
         prime === loadedPrimeRef.current ? {} : { prime };
@@ -1062,7 +1067,7 @@ export function DocumentEditor({
     // Edits are on the server now; the local draft is spent.
     if (!isNew) clearDraft(nestId, nodeId);
     setTouched(false);
-    return { ok: true, savedId };
+    return { ok: true, savedId, ...(isNew ? { createdStatus } : {}) };
   };
 
   // Pending nav stashed behind unsaved-changes confirm; runs after Save/Discard.
@@ -1084,11 +1089,22 @@ export function DocumentEditor({
     setSaving(true);
     setError(null);
     try {
-      const { savedId, noop } = await persistCurrent();
+      const { savedId, noop, createdStatus } = await persistCurrent();
       // Skip the "Saved" checkmark on a no-op — the toast already told the
       // user nothing changed, and flashing "Saved" alongside it would be
       // contradictory.
       if (!noop) setJustSaved(true);
+      // `afterSave` (below) navigates away on create (onSaved → back to the
+      // nest), unmounting this editor before "Saved"/justSaved could ever be
+      // seen — so a fresh create needs its own toast to confirm what actually
+      // happened (published vs. saved as a draft awaiting review).
+      if (isNew && savedId) {
+        toast.success(
+          createdStatus === "published"
+            ? `"${title.trim() || "Untitled"}" published — it's now live and available for use.`
+            : `"${title.trim() || "Untitled"}" saved as a draft.`,
+        );
+      }
       afterSave(savedId ?? "");
     } catch (err: any) {
       setError(err.message);
