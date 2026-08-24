@@ -289,6 +289,12 @@ export function ConnectModal({
             </DialogDescription>
           </DialogHeader>
 
+          {/* Everything below the header scrolls as one region on short
+              viewports. Previously only the Tabs content scrolled while the
+              banners/key panel above it and the Export/Bundle/Nest ID
+              sections below it sat outside the scroll area, so a short
+              window squeezed the tab content into a sliver (or nothing). */}
+          <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0 space-y-4">
           {showLoginBanner && (
             <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
               <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
@@ -396,12 +402,11 @@ export function ConnectModal({
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0">
             {onGenerate && (
               <button
                 type="button"
                 onClick={onGenerate}
-                className="w-full mb-3 flex items-center gap-2 rounded-lg border border-dashed px-3 py-2.5 text-sm hover:border-primary hover:bg-muted/40 text-left"
+                className="w-full flex items-center gap-2 rounded-lg border border-dashed px-3 py-2.5 text-sm hover:border-primary hover:bg-muted/40 text-left"
                 data-testid="connect-add-with-ai"
               >
                 <Sparkles className="h-4 w-4 text-violet-500 shrink-0" />
@@ -415,7 +420,7 @@ export function ConnectModal({
               </button>
             )}
             <Tabs defaultValue="hootie" className="w-full min-w-0">
-              <TabsList className="grid w-full grid-cols-4">
+              <TabsList className="grid w-full grid-cols-4 sticky top-0 z-10">
                 <TabsTrigger value="hootie">
                   <Bot className="h-3.5 w-3.5 mr-1" />
                   Hootie
@@ -638,7 +643,6 @@ export function ConnectModal({
               </TabsContent>
 
             </Tabs>
-          </div>
 
           {/* Export — markdown egress. The URL is what agents fetch; the
               button downloads it as a file. Approved content only (server-side). */}
@@ -695,7 +699,7 @@ export function ConnectModal({
             <p className="text-xs text-muted-foreground">
               Whole nest — nodes, full version history, tags, definitions and
               edges — as one .zip. Import it on another ContextNest host to
-              recreate the nest. Owner/admin only.
+              recreate the nest.
             </p>
           </div>
 
@@ -707,6 +711,7 @@ export function ConnectModal({
               </code>
               <CopyButton value={nestId} />
             </div>
+          </div>
           </div>
         </DialogContent>
       </Dialog>

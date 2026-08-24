@@ -8,7 +8,9 @@
  *
  *  - approved/published docs export as `status: published` and re-import published
  *  - unapproved drafts export ONLY with ?includeDrafts=1
- *  - only the owner/admin may export a bundle
+ *  - any collaborator with nest access (viewer and up) may export a bundle,
+ *    matching the markdown export's permission gate — a caller with zero
+ *    access to the nest still gets 404 from the nest access middleware
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdirSync, writeFileSync } from "fs";
@@ -78,9 +80,24 @@ describe("nest export bundle → existing folder import", () => {
       { headers: authed(key) },
     );
 
-  it("refuses a bundle export from a non-owner", async () => {
+  it("refuses a bundle export from a caller with no access to the nest at all", async () => {
     const res = await exportBundle(bob.apiKey);
-    expect([403, 404]).toContain(res.status);
+    expect(res.status).toBe(404);
+  });
+
+  it("allows a read-only (viewer) collaborator to export a bundle too", async () => {
+    const share = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "bob@test.com", permission: "read" },
+      alice.apiKey,
+    );
+    expect(share.status).toBe(201);
+
+    const res = await exportBundle(bob.apiKey);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/zip");
   });
 
   it("exports approved docs only, and they re-import published via /nests/import", async () => {

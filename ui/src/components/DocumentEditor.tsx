@@ -86,6 +86,7 @@ import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
+import { validateSchedule } from "../lib/schedule-validation";
 import { resolveWikiTarget, previewSnippet } from "../lib/wiki-preview";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
@@ -96,6 +97,21 @@ import { Fragment } from "react";
 function looksLikeHtml(s: string): boolean {
   if (!s) return false;
   return /^\s*</.test(s);
+}
+
+/** Human label for a Type's body-interpretation class, used by the New
+ *  Document Type-switch confirm dialog. */
+function bodyKindLabel(kind: "markdown" | "html" | "csv" | "code"): string {
+  switch (kind) {
+    case "html":
+      return "raw HTML (served as a sandboxed page)";
+    case "csv":
+      return "CSV data";
+    case "code":
+      return "code (tool source)";
+    default:
+      return "formatted document prose";
+  }
 }
 
 /** Canonicalize HTML for dirty-tracking (TipTap re-emits don't byte-match server load). */
@@ -183,6 +199,10 @@ export function DocumentEditor({
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
   const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
+  // True once the steward-role fetch below has resolved (even to []) — lets
+  // the default-comment-mode effect wait for a real answer instead of racing
+  // the initial empty array.
+  const [rolesLoaded, setRolesLoaded] = useState(false);
   // Caller's share grant on THIS document (server-resolved on GET /nodes/:id).
   // A grant is access, not stewardship: it appears in neither `permission` (a
   // grantee always reads as "read" at nest level, whatever their grant says)
@@ -313,7 +333,38 @@ export function DocumentEditor({
   const [newType, setNewType] = useState<
     "document" | "artifact" | "agent" | "skill" | "tool" | "table"
   >("document");
+  // Type switch that would reinterpret existing content — confirmed before
+  // it's applied (see requestTypeChange below).
+  const [pendingType, setPendingType] = useState<{
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table";
+    label: string;
+  } | null>(null);
   const isArtifactDraft = isNew && newType === "artifact";
+  // How a type's body is interpreted — switching within the same class
+  // (e.g. Document → Agent, both markdown prose) doesn't change how
+  // existing content reads, so only a cross-class switch needs a warning.
+  const typeBodyKind = (
+    t: "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+  ): "markdown" | "html" | "csv" | "code" =>
+    t === "artifact" ? "html" : t === "table" ? "csv" : t === "tool" ? "code" : "markdown";
+  // New-doc Type switch: warn before applying when there's existing content
+  // AND the new type reinterprets it differently (prose vs HTML vs CSV vs
+  // code) — nothing to reinterpret on an empty draft, and same-class
+  // switches (e.g. Document ↔ Agent) don't change how the body is read.
+  const requestTypeChange = (
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+    label: string,
+  ) => {
+    if (
+      value !== newType &&
+      content.trim() &&
+      typeBodyKind(value) !== typeBodyKind(newType)
+    ) {
+      setPendingType({ value, label });
+      return;
+    }
+    setNewType(value);
+  };
   // The node's kind for editor-surface decisions: the picked kind while
   // drafting, the loaded type once it exists.
   const effectiveType = isNew ? newType : (nodeType ?? "document");
@@ -584,6 +635,15 @@ export function DocumentEditor({
   }, [selPopover]);
 
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+
+  // New document: Title is the first required field — focus it on mount
+  // instead of leaving focus to land in the body (MarkdownEditor skips its
+  // own autofocus when isNew, see the `autofocus` prop below).
+  useEffect(() => {
+    if (isNew) titleInputRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Last loaded/saved snapshot; drives isDirty for the leave-confirm path.
   const initialSnapshotRef = useRef<{
@@ -752,6 +812,7 @@ export function DocumentEditor({
   useEffect(() => {
     if (isNew || !nodeId || !currentEmail) {
       setMyNodeRoles([]);
+      setRolesLoaded(true);
       return;
     }
     let cancelled = false;
@@ -765,6 +826,8 @@ export function DocumentEditor({
         setMyNodeRoles(mine.map((s) => s.role));
       } catch {
         if (!cancelled) setMyNodeRoles([]);
+      } finally {
+        if (!cancelled) setRolesLoaded(true);
       }
     })();
     return () => {
@@ -915,6 +978,10 @@ export function DocumentEditor({
     return false;
   }, [touched, title, content, tags, schedule, prime]);
 
+  // Feedback only — the schedule is saved exactly as typed either way (it's
+  // opaque to this server; an external orchestrator parses it).
+  const scheduleCheck = useMemo(() => validateSchedule(schedule), [schedule]);
+
   const addTag = useCallback(() => {
     // Split on whitespace/comma; strip leading "#" (stored bare).
     const tokens = tagInput
@@ -939,9 +1006,25 @@ export function DocumentEditor({
   const persistCurrent = async (): Promise<{
     ok: boolean;
     savedId?: string;
+    noop?: boolean;
+    // Only set for a fresh create — the resulting status (draft vs.
+    // auto-published), so the caller can confirm what actually happened.
+    createdStatus?: string;
   }> => {
+    // No-op save: `isDirty` already normalizes title/content/tags/schedule/prime
+    // against the loaded snapshot, so trust it here too instead of re-hashing —
+    // skipping the request when nothing changed avoids stamping a new version
+    // that only bumps `version`/`updated_at`.
+    if (!isNew && !isDirty) {
+      setTouched(false);
+      toast.message(
+        "Not saved — no changes were made. Edit the document, then save again.",
+      );
+      return { ok: true, savedId: nodeId, noop: true };
+    }
     const payload = { title: title.trim(), content, tags };
     let savedId: string | undefined;
+    let createdStatus: string | undefined;
     if (isNew) {
       const res = await api.createNode(nestId, {
         ...payload,
@@ -955,6 +1038,7 @@ export function DocumentEditor({
         ...(prime === null ? {} : { prime }),
       });
       savedId = (res as any)?.node?.id;
+      createdStatus = (res as any)?.node?.status;
     } else {
       const primePatch =
         prime === loadedPrimeRef.current ? {} : { prime };
@@ -983,7 +1067,7 @@ export function DocumentEditor({
     // Edits are on the server now; the local draft is spent.
     if (!isNew) clearDraft(nestId, nodeId);
     setTouched(false);
-    return { ok: true, savedId };
+    return { ok: true, savedId, ...(isNew ? { createdStatus } : {}) };
   };
 
   // Pending nav stashed behind unsaved-changes confirm; runs after Save/Discard.
@@ -1005,8 +1089,22 @@ export function DocumentEditor({
     setSaving(true);
     setError(null);
     try {
-      const { savedId } = await persistCurrent();
-      setJustSaved(true);
+      const { savedId, noop, createdStatus } = await persistCurrent();
+      // Skip the "Saved" checkmark on a no-op — the toast already told the
+      // user nothing changed, and flashing "Saved" alongside it would be
+      // contradictory.
+      if (!noop) setJustSaved(true);
+      // `afterSave` (below) navigates away on create (onSaved → back to the
+      // nest), unmounting this editor before "Saved"/justSaved could ever be
+      // seen — so a fresh create needs its own toast to confirm what actually
+      // happened (published vs. saved as a draft awaiting review).
+      if (isNew && savedId) {
+        toast.success(
+          createdStatus === "published"
+            ? `"${title.trim() || "Untitled"}" published — it's now live and available for use.`
+            : `"${title.trim() || "Untitled"}" saved as a draft.`,
+        );
+      }
       afterSave(savedId ?? "");
     } catch (err: any) {
       setError(err.message);
@@ -1150,6 +1248,21 @@ export function DocumentEditor({
   // approve/reject; viewers just read. A user with editor + reviewer is
   // NOT read-only — keep edit affordances open for them.
   const isReviewerOnly = !isOwner && myNodeRoles.length > 0 && !hasEditorRole;
+
+  // A pending-review doc opens read-only for a reviewer, and the comment box
+  // otherwise sits behind an easy-to-miss "turn on comment mode" affordance.
+  // Default comment mode ON for them so they land ready to leave feedback.
+  // The owner's own submission is excluded — they can still edit it, so the
+  // rendered/comment view shouldn't be forced on top of that. Applied once
+  // per doc (ref guard) so a manual toggle-off afterward isn't undone by
+  // later re-renders of this effect.
+  const defaultCommentModeAppliedRef = useRef(false);
+  useEffect(() => {
+    if (defaultCommentModeAppliedRef.current) return;
+    if (loading || !rolesLoaded) return;
+    defaultCommentModeAppliedRef.current = true;
+    if (status === "pending_review" && isReviewerOnly) setCommentMode(true);
+  }, [loading, rolesLoaded, status, isReviewerOnly]);
 
   // Always-editable surface ("buttery editor"): anyone who can edit drops
   // straight into the live editor instead of view → click → edit, which
@@ -1338,7 +1451,7 @@ export function DocumentEditor({
               title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
             >
               <Send className="h-4 w-4 mr-2" />
-              Publish
+              Submit for review
             </Button>
           )}
           {!isViewOnly && canReviewHere && (
@@ -1609,6 +1722,7 @@ export function DocumentEditor({
                 </label>
                 <Input
                   id="document-editor-title"
+                  ref={titleInputRef}
                   value={title}
                   onChange={(e) => {
                     setTitle(e.target.value);
@@ -2051,8 +2165,9 @@ export function DocumentEditor({
                                 : `${label} (runnable)`
                       }
                       onClick={() =>
-                        setNewType(
+                        requestTypeChange(
                           value as "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+                          label,
                         )
                       }
                       className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${
@@ -2109,21 +2224,40 @@ export function DocumentEditor({
                     data-testid="document-editor-schedule"
                     type="text"
                     value={schedule}
-                    placeholder="e.g. 0 6 * * *  or  @daily"
+                    placeholder="e.g. 0 6 * * *  or  @daily  or  @every 15m"
+                    aria-invalid={scheduleCheck.kind === "invalid"}
                     onChange={(e) => {
                       setSchedule(e.target.value);
                       setTouched(true);
                     }}
                     onBlur={saveOnBlur}
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                    className={`w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring ${
+                      scheduleCheck.kind === "invalid"
+                        ? "border-destructive focus:ring-destructive"
+                        : ""
+                    }`}
                   />
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Opaque to this server — an external orchestrator parses it
-                    and runs the{" "}
-                    {newType === "skill" || nodeType === "skill"
-                      ? "skill"
-                      : "agent"}
-                    . Leave blank for none.
+                  <p
+                    data-testid="document-editor-schedule-feedback"
+                    className={`mt-1 text-xs ${
+                      scheduleCheck.kind === "invalid"
+                        ? "text-destructive"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    {scheduleCheck.kind === "invalid" ? (
+                      <>Doesn't look like a cron/interval schedule — {scheduleCheck.error}.</>
+                    ) : scheduleCheck.kind === "valid" ? (
+                      <>{scheduleCheck.description}. Opaque to this server — an external orchestrator parses it and runs the{" "}
+                      {newType === "skill" || nodeType === "skill" ? "skill" : "agent"}.</>
+                    ) : (
+                      <>Opaque to this server — an external orchestrator parses it
+                      and runs the{" "}
+                      {newType === "skill" || nodeType === "skill"
+                        ? "skill"
+                        : "agent"}
+                      . Leave blank for none.</>
+                    )}
                   </p>
                 </div>
               )}
@@ -2398,6 +2532,9 @@ export function DocumentEditor({
                 }}
                 onWikiLinkClick={handleWikiLinkClick}
                 placeholder="Start writing..."
+                // New document: Title is the first required field, so it
+                // gets focus instead (see the effect below), not the body.
+                autofocus={isNew ? false : "end"}
               />
             )}
           </div>
@@ -2668,6 +2805,35 @@ export function DocumentEditor({
                   <Save className="h-4 w-4 mr-2" />
                 )}
                 Save & leave
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {pendingType && (
+        <Dialog open onOpenChange={() => setPendingType(null)}>
+          <DialogContent className="sm:max-w-[460px]">
+            <DialogHeader>
+              <DialogTitle>Switch to {pendingType.label}?</DialogTitle>
+            </DialogHeader>
+            <p className="text-sm text-muted-foreground py-2">
+              Your existing content will stay as-is, but it will now be
+              interpreted as {bodyKindLabel(typeBodyKind(pendingType.value))}{" "}
+              instead of {bodyKindLabel(typeBodyKind(newType))}. Nothing is
+              converted automatically — review the body after switching.
+            </p>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setPendingType(null)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={() => {
+                  setNewType(pendingType.value);
+                  setPendingType(null);
+                }}
+              >
+                Switch anyway
               </Button>
             </DialogFooter>
           </DialogContent>

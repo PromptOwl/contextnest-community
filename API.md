@@ -1293,9 +1293,9 @@ curl 'http://localhost:3838/nests/<nestId>/nodes/nodes/auth-overview?format=mark
 Public readers receive the **approved** version body, never an unapproved
 working-copy draft (same gate as `/context`).
 
-### GET `/nests/:nestId/export?format=bundle` — portability bundle (owner/admin)
+### GET `/nests/:nestId/export?format=bundle` — portability bundle
 
-Downloads a `.zip` of the nest's documents to move it to another ContextNest host. Each document is serialized from its approved/published state (`status: published`). Owner or admin only. There is **no** separate import endpoint — unzip the bundle and bring it in with the existing folder importer (`POST /nests/import`).
+Downloads a `.zip` of the nest's documents to move it to another ContextNest host. Each document is serialized from its approved/published state (`status: published`). Any collaborator with nest access (viewer and up) may export — same gate as the markdown export above. There is **no** separate import endpoint — unzip the bundle and bring it in with the existing folder importer (`POST /nests/import`).
 
 - `?includeDrafts=1` — also export unapproved draft documents. Default: approved/published only.
 
