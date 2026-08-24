@@ -1095,6 +1095,14 @@ export async function declineDeletionRequest(
   );
 }
 
+/** Withdraw your own pending deletion request. */
+export async function withdrawDeletionRequest(nestId: string, id: string) {
+  return request<{ withdrawn: boolean; request: DeletionRequest }>(
+    `/nests/${nestId}/deletion-requests/${id}/withdraw`,
+    { method: "POST" },
+  );
+}
+
 export async function getReviewQueue(nestId: string, status = "pending") {
   return request<{ requests: any[]; total: number }>(
     `/nests/${nestId}/review-queue?status=${encodeURIComponent(status)}`,

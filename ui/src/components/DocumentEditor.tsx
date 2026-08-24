@@ -1631,6 +1631,28 @@ export function DocumentEditor({
                   : "document-editor-request-deletion",
                 onSelect: () => setShowDeletionModal(true),
               });
+            // Withdraw: only shown to the original requester while the request
+            // is still pending — lets them undo an accidental flag without
+            // waiting for an admin to decline it.
+            const isOwnDeletionRequest =
+              deletionRequested &&
+              deletionRequest?.requestedBy?.toLowerCase() === currentEmail;
+            if (!isNew && isOwnDeletionRequest)
+              moreActions.push({
+                label: "Withdraw deletion request",
+                icon: X,
+                separatorBefore: !canRequestDeletion || (canDeleteDirectly || !deletionRequested),
+                testId: "document-editor-withdraw-deletion",
+                onSelect: async () => {
+                  try {
+                    await api.withdrawDeletionRequest(nestId, deletionRequest!.id);
+                    setDeletionRequest(null);
+                    toast.success("Deletion request withdrawn");
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Failed to withdraw request");
+                  }
+                },
+              });
             return moreActions.length ? (
               <OverflowMenu
                 actions={moreActions}

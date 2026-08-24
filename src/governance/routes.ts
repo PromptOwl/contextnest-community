@@ -412,6 +412,18 @@ governanceRoutes.post("/deletion-requests/:id/decline", async (c) => {
   return c.json({ request });
 });
 
+// POST /nests/:nestId/deletion-requests/:id/withdraw — requester cancels own request
+governanceRoutes.post("/deletion-requests/:id/withdraw", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const request = await reviews.withdrawDeletionRequest({
+    nestId,
+    id: c.req.param("id")!,
+    withdrawnBy: await getUserEmail(c),
+  });
+  if (!request) return c.json({ error: "Deletion request not found or not yours" }, 404);
+  return c.json({ withdrawn: true, request });
+});
+
 // GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=
 // Activity feed: pending change submissions (the same rows the review queue
 // shows, every field intact) interleaved with annotation activity (new
