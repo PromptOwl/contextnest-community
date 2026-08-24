@@ -15,7 +15,6 @@ import { sendEmailToRecipient } from "../notify/email.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { engineCache, engineApi, opContext } from "../nodes/engine.js";
-import { safePublishDocument } from "./safe-publish.js";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
 import * as versions from "./version-service.js";
 import {

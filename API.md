@@ -1377,7 +1377,30 @@ sees **approved** agent/skill definitions; unapproved drafts are omitted.
   enrichment, so cost scales with the number of runnables, not total nest size.
 
 ### POST `/nests/:nestId/publish`
-Publishes the nest (snapshots + index).
+Bulk-create documents (and/or update `CONTEXT.md`) in one call. Each document
+routes through the same create path as `POST /nests/:nestId/nodes` — same slug
+derivation, same governance rows, same content-type policy gate (a disabled
+`artifact`/`table` type fails the whole batch up front, before any write).
+
+Body: `{ documents?, context_md? }` — at least one required.
+`documents[]` rows are `{ title, content, type?, tags?, scope? }`; rows missing
+`title` or `content` are skipped silently (a shape problem, not a policy one).
+
+A document whose title slugs to an id that already exists is **skipped and
+reported** — never overwritten, so republishing a folder cannot destroy an
+existing document's version history.
+
+```json
+{
+  "published": 2,
+  "context_md_updated": true,
+  "node_ids": ["nodes/alpha", "nodes/beta"],
+  "skipped": ["Existing Doc Title"]
+}
+```
+
+Returns `201`. Writes can fail with `503` + `Retry-After` when the vault's
+write lock is held past its acquire timeout (retry the request).
 
 ---
 

@@ -1,0 +1,31 @@
+---
+"@promptowl/contextnest-community": minor
+---
+
+Prepare for the engine's per-vault write lock, and retire the last legacy write path.
+
+The engine is adding a cross-process write lock (PromptOwl/ContextNest#78): every
+mutation through the operation catalog serializes on it, and a writer that cannot
+acquire it within 20s fails with `VaultLockTimeoutError`. Two things had to be
+true here before an upgrade to that engine is safe:
+
+**Every wire surface now maps the lock timeout to a retryable error.** REST
+returns `503` with a `Retry-After` header (via a new `VaultBusyError`); MCP
+returns an `isError` tool result whose `structuredContent` carries
+`code: "VAULT_BUSY"` — never a generic 500. Detection matches the error by
+`name`/`code` rather than `instanceof`, so it survives the package boundary and
+is simply inert until the engine release that ships the lock.
+
+**`POST /nests/:nestId/publish` no longer writes documents by hand.** It was the
+last pre-catalog write path — hand-built frontmatter, its own slugify, direct
+`writeDocument` — invisible to any engine-side locking. It now routes each
+document through the same `createNode` path as every other create surface.
+One behavior change: a document whose title slugs to an **existing id is skipped
+and reported** in a new additive `skipped` response field, instead of silently
+overwriting the existing document and restarting its version history.
+
+Also removed the dead `safePublishDocument` wrapper, and added the
+concurrent-writes regression for the MCP surface (the REST surface already had
+one): a burst of concurrent `context_update` calls must land as a contiguous,
+duplicate-free, fully reconstructable version history with nothing staged by a
+drift scan.

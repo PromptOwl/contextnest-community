@@ -49,3 +49,28 @@ export class LockedError extends AppError {
     this.name = "LockedError";
   }
 }
+
+/**
+ * The engine's per-vault write lock could not be acquired — a concurrent
+ * writer held it past the acquire timeout (normally a wedged process; the
+ * critical section is milliseconds). Retryable by design: surfaced as
+ * 503 + Retry-After, never a 500. Distinct from LockedError (423), which is
+ * the steward-review lock on a document.
+ */
+export class VaultBusyError extends AppError {
+  retryAfterSeconds = 5;
+  constructor(message = "The vault is busy with another write. Retry shortly.") {
+    super(503, message);
+    this.name = "VaultBusyError";
+  }
+}
+
+/**
+ * Detects the engine's VaultLockTimeoutError by name/code rather than
+ * instanceof: matching survives the dual CJS/ESM package boundary, and works
+ * (as a no-op) against engine versions that predate the vault lock.
+ */
+export function isVaultLockTimeout(err: unknown): boolean {
+  const e = err as { name?: string; code?: string } | null;
+  return e?.name === "VaultLockTimeoutError" || e?.code === "VAULT_LOCK_TIMEOUT";
+}

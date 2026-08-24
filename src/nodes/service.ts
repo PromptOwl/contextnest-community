@@ -12,7 +12,7 @@ import {
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
+import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
 import {
   AppError,
@@ -21,6 +21,8 @@ import {
   ValidationError,
   ConflictError,
   ForbiddenError,
+  VaultBusyError,
+  isVaultLockTimeout,
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
@@ -205,6 +207,12 @@ function toSafeError(err: unknown, context: string, message: string): AppError {
     return new ConflictError(
       "This document is rejected. Change its status before saving.",
     );
+  }
+  // Vault write-lock timeout is retryable state, not an internal fault —
+  // keep it as a 503 the caller can act on instead of a generic 500.
+  if (isVaultLockTimeout(err)) {
+    console.error(`${context}:`, err);
+    return new VaultBusyError();
   }
   console.error(`${context}:`, err);
   return new AppError(500, message);

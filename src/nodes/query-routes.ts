@@ -1,12 +1,15 @@
 import { Hono } from "hono";
-import { serializeDocument } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
-import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
+import {
+  ValidationError,
+  NotFoundError,
+  ForbiddenError,
+  ConflictError,
+} from "../shared/errors.js";
 import { queryTableNode } from "../tables/query.js";
 import { trackEvent } from "../telemetry/tracker.js";
-import { syncNodeTags } from "../governance/tag-index-service.js";
 import {
   resolveCallerEmail,
   filterAccessible,
@@ -23,7 +26,7 @@ import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel, isPublicReader, resolveNestPermission } from "../shared/access.js";
 import { exportNestBundle } from "../nests/bundle-service.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
-import { listNodesForCaller, RUNNABLE_NODE_TYPES } from "./service.js";
+import { listNodesForCaller, createNode, RUNNABLE_NODE_TYPES } from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
@@ -719,55 +722,49 @@ queryRoutes.post("/publish", async (c) => {
   }
 
   const nestId = c.req.param("nestId")!;
-  const { storage } = await engineCache.get(nestId);
+  const userEmail = await resolveCallerEmail(c.get("userId"));
   const created: string[] = [];
+  const skipped: string[] = [];
 
   if (body.context_md) {
+    // No engine op exists for context.md, so this stays a direct write; the
+    // index regen keeps graph-mode reads (seeded from context.yaml) aware of
+    // it. Document creation below regenerates per doc via the engine.
+    const { storage } = await engineCache.get(nestId);
     await storage.writeContextMd(body.context_md);
+    await storage.regenerateIndex();
   }
 
   for (const doc of body.documents || []) {
     if (!doc.title || !doc.content) continue;
 
-    const slug = doc.title
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "");
-    const id = `nodes/${slug}`;
-    const now = new Date().toISOString();
-    const tags =
-      doc.tags?.map((t) => (t.startsWith("#") ? t : `#${t}`)) || [];
-
-    const node: ContextNode = {
-      id,
-      filePath: "",
-      frontmatter: {
-        title: doc.title,
-        type: (doc.type as any) || "document",
-        tags,
-        status: "draft",
-        version: 1,
-        created_at: now,
-        updated_at: now,
-        metadata: {
-          owners: ["*"],
-          scope: doc.scope || "team",
+    // Route through the canonical create (engine `context_create` underneath)
+    // instead of hand-assembling documents here: same slugs, same governance
+    // rows, same id-occupancy check as every other create surface.
+    try {
+      const result = await createNode(
+        nestId,
+        {
+          title: doc.title,
+          content: doc.content,
+          type: doc.type,
+          tags: doc.tags,
+          scope: doc.scope,
         },
-      },
-      body: doc.content,
-      rawContent: "",
-    };
-
-    const serialized = serializeDocument(node);
-    await storage.writeDocument(id, serialized);
-    await syncNodeTags(nestId, id, tags);
-    created.push(id);
+        userEmail,
+      );
+      created.push(result.node.id);
+    } catch (err) {
+      // Occupied id: the legacy handler silently overwrote the existing doc
+      // and restarted its history. Skip instead — republishing a folder must
+      // not destroy version chains — and report it so callers can react.
+      if (err instanceof ConflictError) {
+        skipped.push(doc.title);
+        continue;
+      }
+      throw err;
+    }
   }
-
-  // Once for the batch, not per document. Without it context.yaml never learned
-  // about these writes, so graph-mode reads — which seed from that index —
-  // could not see anything this endpoint created.
-  if (created.length > 0 || body.context_md) await storage.regenerateIndex();
 
   trackEvent("nest.publish", { nestId, count: created.length });
 
@@ -776,6 +773,7 @@ queryRoutes.post("/publish", async (c) => {
       published: created.length,
       context_md_updated: !!body.context_md,
       node_ids: created,
+      skipped,
     },
     201,
   );

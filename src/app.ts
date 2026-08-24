@@ -79,7 +79,12 @@ import {
   isServerAdminUserId,
   type NestPermission,
 } from "./shared/access.js";
-import { AppError, ValidationError } from "./shared/errors.js";
+import {
+  AppError,
+  ValidationError,
+  VaultBusyError,
+  isVaultLockTimeout,
+} from "./shared/errors.js";
 import { config, isEmailish, isEmailListish } from "./config.js";
 import { verifySmtp } from "./notify/email.js";
 import { getDb } from "./db/client.js";
@@ -2026,6 +2031,15 @@ export function createApp(): Hono<AuthEnv> {
   // disk/path errors). Anything truly unexpected still falls through
   // to the 500.
   app.onError((err, c) => {
+    // Vault write-lock timeout: retryable, so it carries Retry-After — the
+    // one AppError with a header. Raw engine errors are converted here too,
+    // for any route that throws them without passing through toSafeError.
+    if (isVaultLockTimeout(err) || err instanceof VaultBusyError) {
+      const busy = err instanceof VaultBusyError ? err : new VaultBusyError();
+      return c.json({ error: busy.message }, 503, {
+        "Retry-After": String(busy.retryAfterSeconds),
+      });
+    }
     if (err instanceof AppError) {
       return c.json({ error: err.message }, err.statusCode as any);
     }
