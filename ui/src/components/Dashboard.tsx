@@ -251,6 +251,16 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
     await api.declineDeletionRequest(w.nest_id, w.request_id!, note);
     dropWorkItem(w);
   };
+  // Withdraw your own pending deletion request from the "Waiting on others" list.
+  const handleWithdrawDeletion = async (w: api.WorkItem) => {
+    await api.withdrawDeletionRequest(w.nest_id, w.request_id!);
+    setWork((prev) => ({
+      ...prev,
+      waiting: prev.waiting.filter(
+        (x) => !(x.nest_id === w.nest_id && x.node_id === w.node_id),
+      ),
+    }));
+  };
   // A folder or nest deletion item carries a folder path / nest id in node_id,
   // not a document id — opening the editor on it lands on a page for a node
   // that was never there. Send those to the nest instead.
@@ -548,25 +558,47 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                 </div>
                 <div className="rounded-lg border divide-y overflow-hidden">
                   {work.waiting.map((w) => (
-                    <button
+                    <div
                       key={`${w.nest_id}:${w.node_id}`}
-                      onClick={() => openWorkItem(w)}
-                      className="w-full flex items-center gap-3 px-4 py-2 text-left hover:bg-muted/40 group text-sm"
+                      className="flex items-center gap-3 px-4 py-2 hover:bg-muted/40 group text-sm"
                     >
-                      <span className="font-medium truncate">{w.title}</span>
-                      <span className="text-xs text-muted-foreground shrink-0">
-                        in {w.nest_name} ·{" "}
-                        {w.type === "deletion" ? "requested" : "submitted"}{" "}
-                        {relTime(w.requested_at)}
-                      </span>
-                      <span className="flex-1" />
-                      <span className="text-xs text-muted-foreground">
-                        {w.type === "deletion"
-                          ? "Deletion Requested"
-                          : "Pending Review"}
-                      </span>
+                      <button
+                        onClick={() => openWorkItem(w)}
+                        className="flex items-center gap-3 flex-1 min-w-0 text-left"
+                      >
+                        <span className="font-medium truncate">{w.title}</span>
+                        <span className="text-xs text-muted-foreground shrink-0">
+                          in {w.nest_name} ·{" "}
+                          {w.type === "deletion" ? "requested" : "submitted"}{" "}
+                          {relTime(w.requested_at)}
+                        </span>
+                        <span className="flex-1" />
+                        <span className="text-xs text-muted-foreground">
+                          {w.type === "deletion"
+                            ? "Deletion Requested"
+                            : "Pending Review"}
+                        </span>
+                      </button>
+                      {w.type === "deletion" && w.request_id && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="shrink-0 text-muted-foreground h-7 px-2"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            try {
+                              await handleWithdrawDeletion(w);
+                            } catch (err) {
+                              // Silently ignore — item may already be resolved
+                            }
+                          }}
+                          title="Withdraw this deletion request"
+                        >
+                          Withdraw
+                        </Button>
+                      )}
                       <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-0.5 transition-transform shrink-0" />
-                    </button>
+                    </div>
                   ))}
                 </div>
               </div>

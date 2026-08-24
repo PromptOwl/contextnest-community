@@ -1750,7 +1750,12 @@ export function createApp(): Hono<AuthEnv> {
     // gets through this line and is refused there. Resolving the flag
     // (/deletion-requests/:id/{delete,decline}) is NOT here — it stays at
     // 'write', the same tier DELETE /nodes/:id requires.
-    const isDeletionRequestAction = /\/request-deletion$/.test(path);
+    // Withdrawing your OWN request (/deletion-requests/:id/withdraw) is also
+    // admitted at read-tier — you don't need write access to undo your own
+    // flag. The handler validates ownership (withdrawnBy === requestedBy).
+    const isDeletionRequestAction =
+      /\/request-deletion$/.test(path) ||
+      /\/deletion-requests\/[^/]+\/withdraw$/.test(path);
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin plus the nest owner/admin collaborators, so an
     // owner can delegate vault people-management by granting admin. All
