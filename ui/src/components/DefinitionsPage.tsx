@@ -167,12 +167,29 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
       <NestPageHeader nestName={nestName} onBack={onBack} />
 
       <p className="text-sm text-muted-foreground">
-        The nest's shared vocabulary — terms and tags, articulated once,
-        pulled anywhere. Agents and analysis jobs fetch these live:{" "}
-        <code className="text-[11px] bg-muted px-1 py-0.5 rounded">
-          GET /nests/{nestId.slice(0, 8)}…/definitions?term=&lt;term&gt;
-        </code>
+        The nest's shared vocabulary — what each term means here, written down
+        once so everyone (and every agent reading this nest) uses it the same
+        way.
       </p>
+
+      {/* The endpoint is real and worth having, but it belongs behind a
+          disclosure: most people opening this page are writing a definition,
+          not calling an API. */}
+      <details className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
+        <summary className="cursor-pointer font-medium text-muted-foreground">
+          For developers — fetch a definition over HTTP
+        </summary>
+        <div className="mt-2 space-y-1.5 text-muted-foreground">
+          <p>
+            Agents and analysis jobs read these live, so a definition edited
+            here changes what they answer with on the next call.
+          </p>
+          <pre className="overflow-x-auto rounded border bg-background p-2 font-mono text-[10.5px] leading-relaxed">
+            GET /nests/{nestId}/definitions?term=&lt;term&gt;
+          </pre>
+          <p>Omit the query to get the whole glossary.</p>
+        </div>
+      </details>
 
       {/* Add / edit form — write-tier only. */}
       {canWrite && (
