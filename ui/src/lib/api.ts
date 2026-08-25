@@ -1983,9 +1983,17 @@ export interface RunSummary {
   finished_at: string | null;
   depth?: number;
   parent_run_id?: string | null;
+  /** Set when a runner claims the run (GET /runs/:id/bundle). Until then the
+      run is only *queued* — the wire status says "running" from creation. */
+  claimed_by?: string | null;
+  claimed_at?: string | null;
   /** Write-tier only; null for read-tier callers. */
   trace?: { error?: string; [k: string]: unknown } | null;
 }
+
+/** A run is only really running once a runner has claimed it. */
+export const isQueued = (r: Pick<RunSummary, "status" | "claimed_by">) =>
+  r.status === "running" && !r.claimed_by;
 
 export interface RunStep {
   seq: number;
@@ -2286,6 +2294,17 @@ export async function getRun(runId: string) {
     `/runs/${runId}`,
   );
   return { ...r.run, steps: r.steps };
+}
+
+/** Cancel a queued or running run (PATCH is rejected once terminal). */
+export async function cancelRun(runId: string, reason?: string) {
+  return request<{ ok: true; status: string }>(`/runs/${runId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      status: "cancelled",
+      trace: { error: reason ?? "Cancelled from the Runs page" },
+    }),
+  });
 }
 
 /** Trigger an agent — returns the run bundle (the runner's entry point). */

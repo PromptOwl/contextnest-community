@@ -23,6 +23,7 @@ import { resolveNestPermission, permissionLevel } from "../shared/access.js";
 import { isSuspended, getSuspensionReason, getCurrentLicense } from "../auth/license.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
 import { requireWorkflowPlane } from "./edge-type-routes.js";
+import { cancelDescendants } from "./run-service.js";
 import { envValues } from "./env-routes.js";
 import { dispatchEvent } from "../notify/dispatch.js";
 
@@ -515,6 +516,8 @@ runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
       run.id,
     ],
   );
+  // Cancelling stops the whole branch — sub-agents under this run go too.
+  if (status === "cancelled") await cancelDescendants(run.id);
   if (status === "failed") {
     const err =
       body.trace && typeof body.trace === "object"

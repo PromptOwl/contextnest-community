@@ -20,6 +20,7 @@ import {
   Clock3,
   Wrench,
   Table2,
+  X,
 } from "lucide-react";
 import {
   listEdges,
@@ -30,6 +31,8 @@ import {
   listRuns,
   getRun,
   triggerRun,
+  cancelRun,
+  isQueued,
   listNodes,
   listSchedules,
   createSchedule,
@@ -83,12 +86,19 @@ interface Props {
 }
 
 const statusVariant = (
-  s: RunSummary["status"],
+  s: string,
 ): "default" | "secondary" | "destructive" | "outline" => {
   if (s === "succeeded") return "default";
   if (s === "failed" || s === "cancelled") return "destructive";
+  if (s === "queued") return "outline";
   return "secondary"; // running
 };
+
+// The wire status is "running" from creation; a run is only really executing
+// once a runner has claimed it, so show the unclaimed stretch as "queued".
+const runStatus = (r: Pick<RunSummary, "status" | "claimed_by">) =>
+  isQueued(r) ? "queued" : r.status;
+const QUEUED_HINT = "Created — waiting for a runner to claim it";
 
 // The step-log icon mirrors the run-trace prototype's read/branch/write/notify.
 const stepIcon = (action: string) => {
@@ -757,6 +767,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
   // Spawn errors render inline in the row form (the top card's error banner
   // is off-screen when the user is spawning from a deep row).
   const [spawnError, setSpawnError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState<string | null>(null);
   const [nodes, setNodes] = useState<Array<{ id: string; title?: string; type?: string }>>([]);
 
   const load = useCallback(async () => {
@@ -789,6 +800,21 @@ function RunsPanel({ nestId }: { nestId: string }) {
       setSelected(await getRun(id));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load run");
+    }
+  };
+
+  // Cancel a queued/running run. The server rejects a PATCH once terminal, so
+  // a stale row just surfaces that conflict instead of silently reopening.
+  const cancel = async (id: string) => {
+    setCancelling(id);
+    try {
+      await cancelRun(id);
+      await load();
+      if (selected?.id === id) await open(id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel run");
+    } finally {
+      setCancelling(null);
     }
   };
 
@@ -932,8 +958,12 @@ function RunsPanel({ nestId }: { nestId: string }) {
             <span className="font-mono text-xs truncate">
               {r.id.slice(0, 12)}
             </span>
-            <Badge variant={statusVariant(r.status)} className="text-[10px]">
-              {r.status}
+            <Badge
+              variant={statusVariant(runStatus(r))}
+              className="text-[10px]"
+              title={isQueued(r) ? QUEUED_HINT : undefined}
+            >
+              {runStatus(r)}
             </Badge>
             {level > 0 && (
               <Badge
@@ -949,30 +979,52 @@ function RunsPanel({ nestId }: { nestId: string }) {
                 {kids.length} child{kids.length === 1 ? "" : "ren"}
               </span>
             )}
-            {/* Row action — spawn a sub-agent under THIS run. Only running
-                runs can parent one; hidden when sub-agent runs are disabled,
-                and hidden once this run is at the depth OR fan-out cap (a
-                deeper/wider child would be rejected server-side). */}
-            {subagentRunsEnabled &&
-              r.status === "running" &&
-              (r.depth ?? 0) < maxDepth &&
-              childCount(r.id) < maxChildren && (
+            {/* Row actions — one right-aligned group, revealed on hover.
+                Sub-agent: only running runs can parent one; hidden when the
+                feature is off or this run is at the depth / fan-out cap (a
+                deeper/wider child would be rejected server-side).
+                Cancel: the only way out of a run no runner ever claims. */}
+            {r.status === "running" && (
+              <div className="ml-auto flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
+                {subagentRunsEnabled &&
+                  (r.depth ?? 0) < maxDepth &&
+                  childCount(r.id) < maxChildren && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2 text-[11px] text-muted-foreground"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSpawnParent(spawnParent === r.id ? "" : r.id);
+                        setSpawnAgent("");
+                        setSpawnInputs("");
+                        setSpawnError(null);
+                      }}
+                      title="Spawn a sub-agent nested under this run"
+                    >
+                      <Plus className="h-3 w-3 mr-1" /> sub-agent
+                    </Button>
+                  )}
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="ml-auto h-6 px-2 text-[11px] text-muted-foreground opacity-0 group-hover:opacity-100 shrink-0"
+                  className="h-6 px-2 text-[11px] text-muted-foreground hover:text-destructive"
+                  disabled={cancelling === r.id}
                   onClick={(e) => {
                     e.stopPropagation();
-                    setSpawnParent(spawnParent === r.id ? "" : r.id);
-                    setSpawnAgent("");
-                    setSpawnInputs("");
-                    setSpawnError(null);
+                    void cancel(r.id);
                   }}
-                  title="Spawn a sub-agent nested under this run"
+                  title="Cancel this run"
                 >
-                  <Plus className="h-3 w-3 mr-1" /> sub-agent
+                  {cancelling === r.id ? (
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                  ) : (
+                    <X className="h-3 w-3 mr-1" />
+                  )}
+                  cancel
                 </Button>
-              )}
+              </div>
+            )}
           </div>
           <div className="text-[11px] text-muted-foreground truncate">
             {runLabel(r.agent_node)} · {timeOf(r.started_at)}
@@ -1209,6 +1261,8 @@ function RunsPanel({ nestId }: { nestId: string }) {
               label={runLabel}
               typeOf={runType}
               onOpen={(id) => void open(id)}
+              onCancel={(id) => void cancel(id)}
+              cancelling={cancelling === selected.id}
             />
           </div>
         )}
@@ -1224,6 +1278,8 @@ function RunTrace({
   label = (id) => id,
   typeOf = () => undefined,
   onOpen,
+  onCancel,
+  cancelling = false,
 }: {
   run: RunDetail;
   children?: RunSummary[];
@@ -1231,17 +1287,41 @@ function RunTrace({
   label?: (id: string) => string;
   typeOf?: (id: string) => string | undefined;
   onOpen?: (id: string) => void;
+  onCancel?: (id: string) => void;
+  cancelling?: boolean;
 }) {
   return (
     <div>
       <div className="flex items-center gap-2 mb-1">
         <NodeTypeIcon type={typeOf(run.agent_node)} className="h-4 w-4" />
         <span className="font-mono text-sm">{run.id}</span>
-        <Badge variant={statusVariant(run.status)}>{run.status}</Badge>
+        <Badge
+          variant={statusVariant(runStatus(run))}
+          title={isQueued(run) ? QUEUED_HINT : undefined}
+        >
+          {runStatus(run)}
+        </Badge>
         {(run.depth ?? 0) > 0 && (
           <Badge variant="outline" className="text-[10px]">
             sub-agent · depth {run.depth}
           </Badge>
+        )}
+        {run.status === "running" && onCancel && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="ml-auto h-7"
+            disabled={cancelling}
+            onClick={() => onCancel(run.id)}
+            title="Cancel this run"
+          >
+            {cancelling ? (
+              <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+            ) : (
+              <X className="h-3.5 w-3.5 mr-1" />
+            )}
+            Cancel run
+          </Button>
         )}
       </div>
       <div className="text-xs text-muted-foreground mb-4">
@@ -1278,8 +1358,8 @@ function RunTrace({
                 <CornerDownRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
                 <NodeTypeIcon type={typeOf(k.agent_node)} className="h-3.5 w-3.5" />
                 <span className="truncate">{label(k.agent_node)}</span>
-                <Badge variant={statusVariant(k.status)} className="text-[10px] shrink-0">
-                  {k.status}
+                <Badge variant={statusVariant(runStatus(k))} className="text-[10px] shrink-0">
+                  {runStatus(k)}
                 </Badge>
                 <span className="ml-auto font-mono text-[10px] text-muted-foreground shrink-0">
                   {k.id.slice(0, 8)}
@@ -1299,7 +1379,9 @@ function RunTrace({
       <div className="space-y-0">
         {run.steps.length === 0 ? (
           <div className="text-xs text-muted-foreground">
-            No steps recorded.
+            {isQueued(run)
+              ? "No steps yet — queued, waiting for a runner to claim it. Start a runner (see “How do I run one?” above) or cancel the run."
+              : "No steps recorded."}
           </div>
         ) : (
           run.steps.map((s: RunStep) => (
