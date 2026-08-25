@@ -101,6 +101,13 @@ export const keys = {
     [...keys.me, "drafts", limit ?? null, offset ?? null] as const,
 
   health: ["health"] as const,
+
+  // Cross-nest search. Not under a nest: one query spans every nest the caller
+  // can see, so a write in any of them drops the whole family (see the
+  // invalidation map below).
+  search: ["search"] as const,
+  globalSearch: (query: string, limit: number) =>
+    [...keys.search, "global", query, limit] as const,
 };
 
 /**
@@ -216,19 +223,27 @@ const NEST_WRITE_SCOPES: Array<{
       [...keys.nest(n), "feed"],
     ],
   },
-  // Create — no id in the path.
+  // Create — no id in the path. A new document is findable, so the cross-nest
+  // search results cached from before it existed have to go.
   {
     match: /^\/nodes(?:\/)?$/,
-    affects: (n) => [keys.nodes(n), keys.nestList(), [...keys.nest(n), "feed"]],
+    affects: (n) => [
+      keys.nodes(n),
+      keys.nestList(),
+      keys.search,
+      [...keys.nest(n), "feed"],
+    ],
   },
-  // Any other write to one document: its body, the listing it appears in, and
-  // the nest row's document_count / updated_at that the Dashboard totals use.
+  // Any other write to one document: its body, the listing it appears in, the
+  // nest row's document_count / updated_at that the Dashboard totals use, and
+  // any search result that quoted the old title or body.
   {
     match: /^\/nodes\/(.+)$/,
     affects: (n, m) => [
       keys.node(n, m[1]),
       keys.nodes(n),
       keys.nestList(),
+      keys.search,
       [...keys.nest(n), "feed"],
     ],
   },
@@ -425,6 +440,20 @@ export const reads = {
     queryOptions({
       queryKey: keys.overview(nestId),
       queryFn: () => api.getOverview(nestId),
+      staleTime: STALE.listing,
+    }),
+  /**
+   * Cross-nest search. The server fans out over every visible nest, so a cold
+   * query is the most expensive read in the app — caching it means retyping a
+   * term (or reopening the palette on it) paints from memory, and the two
+   * requests a fast typist fires for the same string collapse into one.
+   * `listing` matches the server's own discovery TTL, so both go stale on the
+   * same clock rather than the client holding results the server has moved past.
+   */
+  globalSearch: (query: string, limit: number) =>
+    queryOptions({
+      queryKey: keys.globalSearch(query, limit),
+      queryFn: () => api.searchAllNests(query, limit),
       staleTime: STALE.listing,
     }),
   // Tag vocabulary — reference data, and the steward picker reopens often.

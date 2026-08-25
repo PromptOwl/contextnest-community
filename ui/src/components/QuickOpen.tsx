@@ -114,9 +114,12 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
                 ),
               )
               .catch((): QuickOpenResult[] => []),
-            // Search stays uncached — results must reflect the query exactly.
-            api
-              .searchAllNests(q, DOC_ROWS)
+            // Cached per exact query: the cross-nest search fans out over
+            // every visible nest, so retyping a term — or reopening the
+            // palette on one — should not pay for that walk again. A write to
+            // any document drops the whole search family (see queries.ts).
+            qc
+              .fetchQuery(reads.globalSearch(q, DOC_ROWS))
               .then((d) => {
                 setTotalDocs(d.count);
                 return d.nodes.map(

@@ -23,6 +23,9 @@ import { FlatNestStorage } from "./flat-storage.js";
  * instances behind one load balancer can disagree. Writes made through this
  * process evict on the spot. Matches the UI's read-cache TTL in
  * `ui/src/lib/api.ts`, so both layers go stale on the same clock.
+ *
+ * An expired entry is served, not awaited: the refresh runs behind the request
+ * (see withDiscoveryCache), so the age bound above is really TTL + one crawl.
  */
 const DISCOVERY_TTL_MS = 30_000;
 
@@ -50,26 +53,62 @@ function withDiscoveryCache<S extends NestStorage>(
   storage: S,
 ): { storage: S; invalidate: () => void } {
   const entries = new Map<string, { docs: ContextNode[]; ts: number }>();
+  // Crawls in flight, keyed the same way. Cross-nest search fans out over every
+  // nest at once and the palette fires a query per keystroke, so without this
+  // the same cold nest gets crawled several times over, concurrently.
+  const inflight = new Map<string, Promise<ContextNode[]>>();
   const discover = storage.discoverDocuments.bind(storage);
   // Bumped on every write so a crawl already in flight when one lands knows its
   // result predates the write and must not be cached (the same generation guard
   // the UI read cache uses).
   let generation = 0;
 
+  const crawl = (
+    key: string,
+    options: Parameters<typeof discover>[0],
+  ): Promise<ContextNode[]> => {
+    const existing = inflight.get(key);
+    if (existing) return existing;
+    const startedAt = generation;
+    const run = discover(options)
+      .then((docs) => {
+        if (generation === startedAt) entries.set(key, { docs, ts: Date.now() });
+        return docs;
+      })
+      .finally(() => {
+        if (inflight.get(key) === run) inflight.delete(key);
+      });
+    inflight.set(key, run);
+    return run;
+  };
+
   storage.discoverDocuments = async (options = {}) => {
     const key =
       options.includeRetired || options.includeSuperseded ? "all" : "live";
     const hit = entries.get(key);
-    if (hit && Date.now() - hit.ts < DISCOVERY_TTL_MS) return hit.docs;
-    const startedAt = generation;
-    const docs = await discover(options);
-    if (generation === startedAt) entries.set(key, { docs, ts: Date.now() });
-    return docs;
+    if (hit) {
+      // Stale-while-revalidate. The crawl parses every file in the nest, so
+      // waiting for a fresh one put the caller behind a multi-second walk every
+      // time the entry aged out — the cross-nest search paid it per nest, for
+      // any query not repeated inside the TTL. Serve what we have and refresh
+      // behind the request: the set is at most one crawl older than the strict
+      // version, and a write through this process still evicts on the spot.
+      if (Date.now() - hit.ts >= DISCOVERY_TTL_MS) {
+        void crawl(key, options).catch(() => {
+          // A failed refresh keeps the previous set; the next read retries.
+        });
+      }
+      return hit.docs;
+    }
+    return crawl(key, options);
   };
 
   const invalidate = () => {
     generation++;
     entries.clear();
+    // Drop in-flight crawls too, or a read arriving after the write joins one
+    // that started before it and gets pre-write content.
+    inflight.clear();
   };
 
   // Version keyframes, diffs, suggestions and INDEX/CONTEXT files all live in
