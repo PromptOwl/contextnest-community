@@ -60,3 +60,35 @@
 ::highlight(comment-anchor-active) {
   background-color: rgb(251 191 36 / 0.65);
 }
+
+/* Toasts must stay inside the window.
+   Sonner pins the stack with `right: var(--offset-right)` on a fixed element,
+   so the offset resolves against that element's containing block. Whenever
+   that block is wider than the window — a page that overflows horizontally,
+   or an ancestor that establishes a containing block for fixed children — a
+   24px offset lands the toast partly off-screen.
+   `100%` here is the containing block, `100vw` the window, so the max()
+   grows the offset by exactly the overhang and is a no-op when there is
+   none. The width clamp covers the narrow-window case. */
+[data-sonner-toaster][data-x-position="right"] {
+  right: max(var(--offset-right, 24px), calc(100% - 100vw + var(--offset-right, 24px)));
+}
+[data-sonner-toaster][data-x-position="left"] {
+  left: max(var(--offset-left, 24px), calc(100% - 100vw + var(--offset-left, 24px)));
+}
+[data-sonner-toaster] {
+  max-width: calc(100vw - 2rem);
+}
+[data-sonner-toaster] [data-sonner-toast] {
+  max-width: 100%;
+}
+
+/* Same guarantee for dialogs. A caller's `sm:max-w-[640px]` is a plain width
+   cap; on a window narrower than that — or on a page that scrolls sideways,
+   where the fixed dialog's percentage box is wider than the window — the panel
+   runs past the edge. This selector outranks the utility classes, so every
+   dialog stays inside the window whatever width it asks for. */
+[role="dialog"][data-state],
+[role="alertdialog"][data-state] {
+  max-width: calc(100vw - 2rem);
+}

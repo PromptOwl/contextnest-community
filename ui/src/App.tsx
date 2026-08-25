@@ -893,7 +893,12 @@ export default function App() {
       {/* Content */}
       {/* <main> owns page padding for every view — page roots must not add
           their own md:py-*, or one section sits lower than the next. */}
-      <main className={`${shellWidth} mx-auto px-4 py-4`}>
+      {/* min-w-0 + clip: a page section that refuses to shrink (a nowrap row,
+          a wide grid) must not widen the document. Page-level sideways scroll
+          also drags fixed UI — toasts, dialogs — off the window, since their
+          percentage boxes resolve against the wider block. `clip` (not
+          `hidden`) keeps sticky headers inside pages working. */}
+      <main className={`${shellWidth} mx-auto px-4 py-4 min-w-0 overflow-x-clip`}>
         {view.page === "dashboard" && (
           <Dashboard
             onOpenSearch={() => setShowQuickOpen(true)}
