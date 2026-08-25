@@ -17,14 +17,19 @@ import {
 import { listMyDrafts } from "./governance/version-service.js";
 import { folderForNode } from "./governance/title-resolver.js";
 import { engineCache } from "./nodes/engine.js";
-import { matchDocuments, toSearchHit } from "./nodes/search.js";
+import {
+  matchDocuments,
+  toSearchHit,
+  discoverForSearch,
+  titleScore,
+} from "./nodes/search.js";
 import { resolveCallerEmail, filterAccessible } from "./governance/access-guard.js";
 import {
   resolveStewardsForNode,
   canManageStewards,
   resolveUserRoles,
 } from "./governance/stewardship-service.js";
-import { resolveNodeGrant, hasAnyGrant } from "./governance/grants-service.js";
+import { resolveNodeGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
@@ -69,6 +74,7 @@ import {
 import { assertSafeNodeId } from "./shared/node-id.js";
 import {
   resolveNestPermission,
+  resolveNestAccess,
   permissionLevel,
   isServerAdminUserId,
   type NestPermission,
@@ -1408,17 +1414,24 @@ export function createApp(): Hono<AuthEnv> {
     // still deterministic.
     // ponytail: unbounded fan-out — add a concurrency limit if a caller ever
     // holds enough nests for the parallel walks to matter.
+    // `readable`, not the membership-only default: a Viewer reaches a nest by
+    // public visibility or a document/folder grant, with no collaborator or
+    // steward row. Both paths open the nest, its node list and its per-nest
+    // search — but were skipped here, so the one user who most needs global
+    // search could not find documents they can plainly read. filterAccessible
+    // below still narrows a public reader to approved docs and a grantee to
+    // their granted docs, so widening the scan surfaces nothing new.
     const perNest = await Promise.all(
-      (await listVisibleNests(userId)).map(async (nest): Promise<SearchHit[]> => {
+      (await listVisibleNests(userId, { readable: true })).map(async (nest): Promise<SearchHit[]> => {
         try {
           const { storage } = await engineCache.get(nest.id);
-          const matches = matchDocuments(await storage.discoverDocuments(), q);
+          const matches = matchDocuments(await discoverForSearch(storage), q);
           if (matches.length === 0) return [];
           // Per-nest stewardship filtering, same call the nest-scoped route
           // makes — a hit never leaks a doc the caller couldn't open directly.
           const accessible = await filterAccessible(nest.id, userId, userEmail, matches);
           return accessible.map((n) => ({
-            ...toSearchHit(n),
+            ...toSearchHit(n, q),
             nest_id: nest.id,
             nest_name: nest.name ?? nest.id,
           }));
@@ -1430,10 +1443,14 @@ export function createApp(): Hono<AuthEnv> {
         }
       }),
     );
-    const hits = perNest.flat();
+    // Scan every nest, then rank, then cap. Each nest ranked its own matches,
+    // but flattening interleaves them back into nest-creation order — so rank
+    // once more across the merged list, or the cap below drops a document named
+    // in the query in favour of a body mention from an older nest.
+    const hits = perNest
+      .flat()
+      .sort((a, b) => titleScore(b.title, q) - titleScore(a.title, q));
 
-    // Scan every nest, then cap: truncating per nest would let the first nests
-    // in creation order crowd out better matches elsewhere.
     return c.json({
       query: q,
       count: hits.length,
@@ -1611,7 +1628,11 @@ export function createApp(): Hono<AuthEnv> {
       return next();
     }
 
-    const permission = await resolveNestPermission(nestId, userId);
+    // One fetch: the permission merge AND whether the caller holds any share
+    // grant here, which the grant branches below read off this row instead of
+    // re-querying once per branch.
+    const access = await resolveNestAccess(nestId, userId);
+    const permission = access.permission;
 
     // Document/folder share grant: a caller BELOW nest access may still reach
     // a specific granted node (or a bare nest read, so a shared-doc deep link
@@ -1651,7 +1672,7 @@ export function createApp(): Hono<AuthEnv> {
       } else if (parts.length === 1 && c.req.method === "GET") {
         // GET /nests/:id (bare) — let a grantee see the nest name so a shared
         // link resolves; the node LIST stays filtered to their grants.
-        grantNestVisible = await hasAnyGrant(nestId, userId);
+        grantNestVisible = access.hasGrant;
       } else if (
         parts[1] === "nodes" &&
         parts.length === 2 &&
@@ -1659,12 +1680,24 @@ export function createApp(): Hono<AuthEnv> {
       ) {
         // GET /nests/:id/nodes (the list) — allowed for grantees; the handler
         // (listNodesForCaller) filters to only the nodes they're granted.
-        grantNestVisible = await hasAnyGrant(nestId, userId);
+        grantNestVisible = access.hasGrant;
       } else if (isReadQuery) {
         // Retrieval routes — a grantee may query/search/context/export; the
         // handler's filterAccessible scopes every result to their grants, so
         // they can never read past what they were shared (same as the list).
-        grantNestVisible = await hasAnyGrant(nestId, userId);
+        grantNestVisible = access.hasGrant;
+      } else if (
+        parts[1] === "definitions" &&
+        parts.length === 2 &&
+        c.req.method === "GET"
+      ) {
+        // GET /nests/:id/definitions — the nest's glossary. Unlike node
+        // routes this isn't per-document content to scope with
+        // filterAccessible, it's shared vocabulary a doc/folder grantee
+        // needs to make sense of whatever they were granted (e.g. a term
+        // referenced by their node). Same visibility rule as the bare nest
+        // read and node list: any grant on this nest is enough to read it.
+        grantNestVisible = access.hasGrant;
       }
       if (!grantRole && !grantNestVisible) {
         // Same message for "doesn't exist" and "no access" — existence oracle.
@@ -1710,12 +1743,19 @@ export function createApp(): Hono<AuthEnv> {
     const isCommentAction =
       /\/comments$/.test(path) ||
       /\/comments\/[^/]+\/resolve$/.test(path);
-    // Flagging a node for deletion is read-tier for the same reason commenting
-    // is: the people who notice stale content are usually below write. The
-    // handler re-checks node read-access. Resolving the flag
+    // Flagging a node for deletion is admitted at read-tier HERE so the
+    // handler can answer 404-then-403 in the right order (a caller who can't
+    // see the node must not learn it exists). The real gate is the handler's
+    // own editor check — canRequestDeletion in access-guard.ts — so a viewer
+    // gets through this line and is refused there. Resolving the flag
     // (/deletion-requests/:id/{delete,decline}) is NOT here — it stays at
     // 'write', the same tier DELETE /nodes/:id requires.
-    const isDeletionRequestAction = /\/request-deletion$/.test(path);
+    // Withdrawing your OWN request (/deletion-requests/:id/withdraw) is also
+    // admitted at read-tier — you don't need write access to undo your own
+    // flag. The handler validates ownership (withdrawnBy === requestedBy).
+    const isDeletionRequestAction =
+      /\/request-deletion$/.test(path) ||
+      /\/deletion-requests\/[^/]+\/withdraw$/.test(path);
     // The steward roster — list, assign, remove, sync — is restricted to the
     // server (license) admin plus the nest owner/admin collaborators, so an
     // owner can delegate vault people-management by granting admin. All

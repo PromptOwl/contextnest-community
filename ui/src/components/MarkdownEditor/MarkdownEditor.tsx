@@ -35,22 +35,13 @@ import type { Transaction } from "@tiptap/pm/state";
 import { Markdown, type MarkdownStorage } from "tiptap-markdown";
 
 // tiptap-markdown's storage isn't in TipTap's Storage type; cast.
-// TextStyle/Color have no markdown representation. Without an explicit
-// (empty) mark serializer, tiptap-markdown's html:true fallback writes raw
-// <span style> into the stored .md — breaking the markdown-only invariant
-// and showing as literal tags in the react-markdown viewer. Strip on
-// serialize so color stays an in-editor-only affordance.
-const stripMarkSpec = { serialize: { open: "", close: "" }, parse: {} };
-const PlainTextStyle = TextStyle.extend({
-  addStorage() {
-    return { ...(this.parent?.() || {}), markdown: stripMarkSpec };
-  },
-});
-const PlainColor = Color.extend({
-  addStorage() {
-    return { ...(this.parent?.() || {}), markdown: stripMarkSpec };
-  },
-});
+// TextStyle/Color have no dedicated markdown syntax, so with no explicit
+// mark serializer tiptap-markdown's html:true fallback (see Markdown.configure
+// below) writes the mark as raw `<span style="color: …">` HTML straight into
+// the stored .md — that's valid CommonMark (raw inline HTML) and is exactly
+// how legacy HTML docs already round-trip through this editor. Same fallback
+// parses it back into the TextStyle/Color marks on load via their normal
+// `parseHTML`, so color survives save + reopen without any custom code here.
 
 // Unescape `\[\[ \]\]` — prosemirror-markdown escapes `[`/`]` as link syntax.
 function getEditorMarkdown(editor: Editor): string {
@@ -247,6 +238,10 @@ interface MarkdownEditorProps {
   placeholder?: string;
   editable?: boolean;
   className?: string;
+  /** Caret-ready on mount ("end"), or leave focus alone (false) — e.g. a
+   *  brand-new document wants focus on the Title field first. Default
+   *  preserves the existing Notion/Obsidian-style caret-ready feel. */
+  autofocus?: "end" | false;
 }
 
 export const MarkdownEditor = forwardRef<
@@ -267,6 +262,7 @@ export const MarkdownEditor = forwardRef<
     placeholder = "Start writing...",
     editable = true,
     className,
+    autofocus = "end",
   }: MarkdownEditorProps,
   ref: ForwardedRef<MarkdownEditorHandle>,
 ) {
@@ -300,6 +296,8 @@ export const MarkdownEditor = forwardRef<
   const wikiNodesRef = useRef<Array<{ id: string; title: string }>>([]);
   // Bump when the list finishes loading so the filter effect recomputes.
   const [wikiNodesVersion, setWikiNodesVersion] = useState(0);
+  // In flight → the popup says "Loading" instead of flashing "no documents".
+  const [wikiLoading, setWikiLoading] = useState(false);
   // Refs mirror state so the editor's static `handleKeyDown` (captured
   // once at useEditor time) can see the latest values without a re-init.
   const wikiPopupRef = useRef(wikiPopup);
@@ -418,10 +416,11 @@ export const MarkdownEditor = forwardRef<
       TiptapImage.configure({ inline: false, allowBase64: false }),
       // `==text==` highlight. multicolor lets the color marks set a bg.
       Highlight.configure({ multicolor: true }),
-      // Text color mark (in-editor + HTML export). Note: plain markdown has
-      // no color syntax, so color is not persisted to the .md on save.
-      PlainTextStyle,
-      PlainColor,
+      // Text color mark. Persisted via the html:true raw-HTML fallback below
+      // (see the TextStyle/Color import comment) — no dedicated markdown
+      // syntax needed.
+      TextStyle,
+      Color,
       // Smart typography: -- → em-dash, (c) → ©, -> → →, smart quotes, etc.
       Typography,
       // Word / character counter (read from editor.storage.characterCount).
@@ -489,8 +488,10 @@ export const MarkdownEditor = forwardRef<
     content,
     editable,
     // Caret-ready on open so you can type immediately (Notion/Obsidian
-    // feel). "end" lands at doc end; placeholder shows when empty.
-    autofocus: "end",
+    // feel). "end" lands at doc end; placeholder shows when empty. A
+    // brand-new document passes `false` so the Title field gets focus
+    // instead (see DocumentEditor's initial-focus effect).
+    autofocus,
     immediatelyRender: false,
     onUpdate: ({ editor }) => {
       const md = getEditorMarkdown(editor);
@@ -583,11 +584,13 @@ export const MarkdownEditor = forwardRef<
             if (pick) insertWikiPickRef.current?.(pick);
             return true;
           }
-          if (event.key === "Escape") {
-            event.preventDefault();
-            setWikiPopup(null);
-            return true;
-          }
+        }
+        // Escape dismisses the panel whether or not it has results — the
+        // empty-state panel is dismissable the same way.
+        if (popup && event.key === "Escape") {
+          event.preventDefault();
+          setWikiPopup(null);
+          return true;
         }
         if (
           (event.ctrlKey || event.metaKey) &&
@@ -697,6 +700,7 @@ export const MarkdownEditor = forwardRef<
   useEffect(() => {
     if (!wikiPopupOpen || !nestId) return;
     let cancelled = false;
+    setWikiLoading(true);
     (async () => {
       try {
         const res = await qc.fetchQuery(reads.nodes(nestId));
@@ -706,6 +710,8 @@ export const MarkdownEditor = forwardRef<
         setWikiNodesVersion((v) => v + 1);
       } catch {
         /* leave the last list in place; filter still works offline */
+      } finally {
+        if (!cancelled) setWikiLoading(false);
       }
     })();
     return () => {
@@ -1294,14 +1300,22 @@ export const MarkdownEditor = forwardRef<
 
           <Divider />
 
-          {/* Text color swatches. Note: not persisted to markdown. */}
+          {/* Text color swatches — saved with the document (see the
+              TextStyle/Color import comment above) and rendered on view too
+              (DocumentViewer's remarkColorSpans). Selection collapses to the
+              end on pick so the applied color is visible immediately instead
+              of staying hidden under the selection highlight, and the menu
+              closes with it (BubbleMenu only shows for a live selection). */}
           {["#ef4444", "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6"].map((c) => (
             <button
               key={c}
               type="button"
               title={`Text color ${c}`}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => editor.chain().focus().setColor(c).run()}
+              onClick={() => {
+                const { to } = editor.state.selection;
+                editor.chain().focus().setColor(c).setTextSelection(to).run();
+              }}
               className="m-0.5 h-4 w-4 rounded-full border border-border"
               style={{ backgroundColor: c }}
             />
@@ -1441,7 +1455,9 @@ export const MarkdownEditor = forwardRef<
         </div>
       )}
 
-      {wikiPopup && wikiResults.length > 0 && (() => {
+      {/* Rendered even with no results: typing `[[` in an empty nest used to
+          do nothing at all, which reads as a broken feature. */}
+      {wikiPopup && (() => {
         // Panel is w-72 (288px) / max-h-64 (256px), fixed-positioned at the
         // caret. Near the bottom or right edge of the viewport it would clip
         // off-screen, so flip it above the caret when space below is short,
@@ -1482,6 +1498,15 @@ export const MarkdownEditor = forwardRef<
           <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground border-b">
             Link a document
           </div>
+          {wikiResults.length === 0 ? (
+            <div className="px-3 py-2 text-sm text-muted-foreground">
+              {wikiLoading
+                ? "Loading documents…"
+                : wikiPopup.query.trim()
+                  ? `No documents match “${wikiPopup.query.trim()}”.`
+                  : "No documents to link yet."}
+            </div>
+          ) : (
           <ul className="py-1">
             {wikiResults.map((doc, idx) => (
               <li key={doc.id}>
@@ -1501,6 +1526,7 @@ export const MarkdownEditor = forwardRef<
               </li>
             ))}
           </ul>
+          )}
         </div>
         );
       })()}

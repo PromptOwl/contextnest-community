@@ -1095,6 +1095,14 @@ export async function declineDeletionRequest(
   );
 }
 
+/** Withdraw your own pending deletion request. */
+export async function withdrawDeletionRequest(nestId: string, id: string) {
+  return request<{ withdrawn: boolean; request: DeletionRequest }>(
+    `/nests/${nestId}/deletion-requests/${id}/withdraw`,
+    { method: "POST" },
+  );
+}
+
 export async function getReviewQueue(nestId: string, status = "pending") {
   return request<{ requests: any[]; total: number }>(
     `/nests/${nestId}/review-queue?status=${encodeURIComponent(status)}`,
@@ -1590,6 +1598,48 @@ export async function removeCollaborator(nestId: string, collabId: string) {
     `/nests/${nestId}/collaborators/${collabId}`,
     { method: "DELETE" },
   );
+}
+
+// ─── Share grants ───────────────────────────────────────────────────────
+// Access to ONE document or ONE folder for someone who is not a nest-wide
+// collaborator. Distinct from stewardship (review governance) — see
+// src/governance/grants-service.ts. Managing them is owner/admin only.
+
+export interface Grant {
+  id: string;
+  nest_id: string;
+  target_type: "document" | "folder";
+  target: string;
+  user_id: string;
+  role: "read" | "write";
+  granted_by: string;
+  email: string | null;
+  created_at: string;
+}
+
+export async function listGrants(nestId: string) {
+  return request<{ count: number; grants: Grant[] }>(`/nests/${nestId}/grants`);
+}
+
+export async function createGrant(
+  nestId: string,
+  data: {
+    target_type: "document" | "folder";
+    target: string;
+    email: string;
+    role: "read" | "write";
+  },
+) {
+  return request<{ grant: Grant }>(`/nests/${nestId}/grants`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteGrant(nestId: string, grantId: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/grants/${grantId}`, {
+    method: "DELETE",
+  });
 }
 
 // ─── Teams ──────────────────────────────────────────────────────────────

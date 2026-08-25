@@ -5,6 +5,7 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
+import { resolveEditorAccess } from "../lib/editor-access";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -35,6 +36,7 @@ import {
   Table2,
   Pencil,
   Users,
+  Share2,
   Link as LinkIcon,
   History,
   Code2,
@@ -60,6 +62,7 @@ import { TableViewer } from "./TableViewer";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { ShareTargetDialog } from "./ShareTargetDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
   buildTextIndex,
@@ -84,6 +87,7 @@ import { relatedDocs } from "../lib/related";
 import { copyTextWithToast } from "../lib/clipboard";
 import { unlinkedMentions } from "../lib/unlinked-mentions";
 import { extractHeadings } from "../lib/toc";
+import { validateSchedule } from "../lib/schedule-validation";
 import { resolveWikiTarget, previewSnippet } from "../lib/wiki-preview";
 import { DocumentPickerModal } from "./DocumentPickerModal";
 import { useAuth } from "../auth/AuthContext";
@@ -94,6 +98,21 @@ import { Fragment } from "react";
 function looksLikeHtml(s: string): boolean {
   if (!s) return false;
   return /^\s*</.test(s);
+}
+
+/** Human label for a Type's body-interpretation class, used by the New
+ *  Document Type-switch confirm dialog. */
+function bodyKindLabel(kind: "markdown" | "html" | "csv" | "code"): string {
+  switch (kind) {
+    case "html":
+      return "raw HTML (served as a sandboxed page)";
+    case "csv":
+      return "CSV data";
+    case "code":
+      return "code (tool source)";
+    default:
+      return "formatted document prose";
+  }
 }
 
 /** Canonicalize HTML for dirty-tracking (TipTap re-emits don't byte-match server load). */
@@ -174,10 +193,24 @@ export function DocumentEditor({
   // looking at a real nest the caller can administer.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
+  // Share THIS document with one person (a grant), as opposed to the whole
+  // nest above. Same owner/admin gate the /grants routes enforce.
+  const [showShareDoc, setShowShareDoc] = useState(false);
   const qc = useQueryClient();
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
   const [myNodeRoles, setMyNodeRoles] = useState<string[]>([]);
+  // True once the steward-role fetch below has resolved (even to []) — lets
+  // the default-comment-mode effect wait for a real answer instead of racing
+  // the initial empty array.
+  const [rolesLoaded, setRolesLoaded] = useState(false);
+  // Caller's share grant on THIS document (server-resolved on GET /nodes/:id).
+  // A grant is access, not stewardship: it appears in neither `permission` (a
+  // grantee always reads as "read" at nest level, whatever their grant says)
+  // nor `myNodeRoles`. Without it a write grantee got a read-only editor for
+  // the very document they were granted write on.
+  const [myGrant, setMyGrant] = useState<"read" | "write" | null>(null);
+  const grantCanWrite = myGrant === "write";
   // Caller's nest-wide scoped steward rows (from GET /nests/:id). Needed for
   // NEW docs, where there's no node yet to resolve a per-node role against.
   const [myStewards, setMyStewards] = useState<
@@ -238,23 +271,23 @@ export function DocumentEditor({
   // (public reader OR a read-only collaborator); 'write'/'admin'/'owner' can
   // edit. null until loaded.
   const [permission, setPermission] = useState<string | null>(null);
-  // Read-only when the caller's nest permission is 'read' and they hold no
-  // per-node steward row. Any editor/reviewer node row overrides this so a
-  // steward scoped to this doc still gets their affordances.
-  const isReadOnly = permission === "read";
-  // Authoring a NEW doc can't resolve a per-node role (no node yet), so gate
-  // on nest-wide capability: owner/admin, a write+ collaborator, or a
-  // nest-scope editor steward. Mirrors NestView's "New Document" gate.
-  const canAuthorNew =
-    isOwner ||
-    isAdmin ||
-    permission === "owner" ||
-    permission === "admin" ||
-    permission === "write" ||
-    myStewards.some((s) => s.role === "editor" && s.scope === "nest");
-  const isViewOnly = isNew
-    ? !canAuthorNew
-    : isReadOnly && myNodeRoles.length === 0;
+  // Every edit/approve affordance below gates on these — see editor-access.ts
+  // for the rules and ui/src/lib/editor-access.test.ts for the role matrix.
+  const {
+    canAuthorNew,
+    hasAdminApprove,
+    isViewOnly,
+    isReviewerOnly,
+    canEditContent,
+  } = resolveEditorAccess({
+    isNew,
+    isOwner,
+    isAdmin,
+    permission,
+    nestStewards: myStewards,
+    nodeRoles: myNodeRoles,
+    grant: myGrant,
+  });
   // Who deletes outright: the nest admin/owner tier, plus the person who wrote
   // the document — asking permission to delete your own work is the wrong
   // default. Everyone else goes through the request path. The server still
@@ -270,6 +303,17 @@ export function DocumentEditor({
     permission === "owner" ||
     permission === "admin" ||
     authoredByMe;
+  // Even ASKING for a deletion is an editor's act — a viewer of any kind (a
+  // read collaborator, a viewer steward, a read share grantee) doesn't get the
+  // action at all. Mirrors canRequestDeletion on the server, which refuses
+  // them; hiding it means nobody clicks through a 403 for a request they were
+  // never allowed to make.
+  const canRequestDeletion =
+    canDeleteDirectly ||
+    permission === "write" ||
+    grantCanWrite ||
+    myNodeRoles.includes("editor") ||
+    myStewards.some((s) => s.role === "editor" && s.scope === "nest");
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [showDeletionModal, setShowDeletionModal] = useState(false);
   // Latest deletion flag on this doc. Pending hides the request button (a
@@ -290,7 +334,38 @@ export function DocumentEditor({
   const [newType, setNewType] = useState<
     "document" | "artifact" | "agent" | "skill" | "tool" | "table"
   >("document");
+  // Type switch that would reinterpret existing content — confirmed before
+  // it's applied (see requestTypeChange below).
+  const [pendingType, setPendingType] = useState<{
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table";
+    label: string;
+  } | null>(null);
   const isArtifactDraft = isNew && newType === "artifact";
+  // How a type's body is interpreted — switching within the same class
+  // (e.g. Document → Agent, both markdown prose) doesn't change how
+  // existing content reads, so only a cross-class switch needs a warning.
+  const typeBodyKind = (
+    t: "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+  ): "markdown" | "html" | "csv" | "code" =>
+    t === "artifact" ? "html" : t === "table" ? "csv" : t === "tool" ? "code" : "markdown";
+  // New-doc Type switch: warn before applying when there's existing content
+  // AND the new type reinterprets it differently (prose vs HTML vs CSV vs
+  // code) — nothing to reinterpret on an empty draft, and same-class
+  // switches (e.g. Document ↔ Agent) don't change how the body is read.
+  const requestTypeChange = (
+    value: "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+    label: string,
+  ) => {
+    if (
+      value !== newType &&
+      content.trim() &&
+      typeBodyKind(value) !== typeBodyKind(newType)
+    ) {
+      setPendingType({ value, label });
+      return;
+    }
+    setNewType(value);
+  };
   // The node's kind for editor-surface decisions: the picked kind while
   // drafting, the loaded type once it exists.
   const effectiveType = isNew ? newType : (nodeType ?? "document");
@@ -561,6 +636,15 @@ export function DocumentEditor({
   }, [selPopover]);
 
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+
+  // New document: Title is the first required field — focus it on mount
+  // instead of leaving focus to land in the body (MarkdownEditor skips its
+  // own autofocus when isNew, see the `autofocus` prop below).
+  useEffect(() => {
+    if (isNew) titleInputRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Last loaded/saved snapshot; drives isDirty for the leave-confirm path.
   const initialSnapshotRef = useRef<{
@@ -729,6 +813,7 @@ export function DocumentEditor({
   useEffect(() => {
     if (isNew || !nodeId || !currentEmail) {
       setMyNodeRoles([]);
+      setRolesLoaded(true);
       return;
     }
     let cancelled = false;
@@ -742,6 +827,8 @@ export function DocumentEditor({
         setMyNodeRoles(mine.map((s) => s.role));
       } catch {
         if (!cancelled) setMyNodeRoles([]);
+      } finally {
+        if (!cancelled) setRolesLoaded(true);
       }
     })();
     return () => {
@@ -784,6 +871,7 @@ export function DocumentEditor({
         ((node as any)?.pendingReviewBy as string | null | undefined) ?? null,
       );
       setDeletionRequest(((node as any)?.deletionRequest ?? null) as api.DeletionRequest | null);
+      setMyGrant((((node as any)?.myGrant ?? null) as "read" | "write" | null));
       initialSnapshotRef.current = {
         title: loadedTitle,
         content: loadedContent,
@@ -891,6 +979,10 @@ export function DocumentEditor({
     return false;
   }, [touched, title, content, tags, schedule, prime]);
 
+  // Feedback only — the schedule is saved exactly as typed either way (it's
+  // opaque to this server; an external orchestrator parses it).
+  const scheduleCheck = useMemo(() => validateSchedule(schedule), [schedule]);
+
   const addTag = useCallback(() => {
     // Split on whitespace/comma; strip leading "#" (stored bare).
     const tokens = tagInput
@@ -915,9 +1007,25 @@ export function DocumentEditor({
   const persistCurrent = async (): Promise<{
     ok: boolean;
     savedId?: string;
+    noop?: boolean;
+    // Only set for a fresh create — the resulting status (draft vs.
+    // auto-published), so the caller can confirm what actually happened.
+    createdStatus?: string;
   }> => {
+    // No-op save: `isDirty` already normalizes title/content/tags/schedule/prime
+    // against the loaded snapshot, so trust it here too instead of re-hashing —
+    // skipping the request when nothing changed avoids stamping a new version
+    // that only bumps `version`/`updated_at`.
+    if (!isNew && !isDirty) {
+      setTouched(false);
+      toast.message(
+        "Not saved — no changes were made. Edit the document, then save again.",
+      );
+      return { ok: true, savedId: nodeId, noop: true };
+    }
     const payload = { title: title.trim(), content, tags };
     let savedId: string | undefined;
+    let createdStatus: string | undefined;
     if (isNew) {
       const res = await api.createNode(nestId, {
         ...payload,
@@ -931,6 +1039,7 @@ export function DocumentEditor({
         ...(prime === null ? {} : { prime }),
       });
       savedId = (res as any)?.node?.id;
+      createdStatus = (res as any)?.node?.status;
     } else {
       const primePatch =
         prime === loadedPrimeRef.current ? {} : { prime };
@@ -959,7 +1068,7 @@ export function DocumentEditor({
     // Edits are on the server now; the local draft is spent.
     if (!isNew) clearDraft(nestId, nodeId);
     setTouched(false);
-    return { ok: true, savedId };
+    return { ok: true, savedId, ...(isNew ? { createdStatus } : {}) };
   };
 
   // Pending nav stashed behind unsaved-changes confirm; runs after Save/Discard.
@@ -981,8 +1090,22 @@ export function DocumentEditor({
     setSaving(true);
     setError(null);
     try {
-      const { savedId } = await persistCurrent();
-      setJustSaved(true);
+      const { savedId, noop, createdStatus } = await persistCurrent();
+      // Skip the "Saved" checkmark on a no-op — the toast already told the
+      // user nothing changed, and flashing "Saved" alongside it would be
+      // contradictory.
+      if (!noop) setJustSaved(true);
+      // `afterSave` (below) navigates away on create (onSaved → back to the
+      // nest), unmounting this editor before "Saved"/justSaved could ever be
+      // seen — so a fresh create needs its own toast to confirm what actually
+      // happened (published vs. saved as a draft awaiting review).
+      if (isNew && savedId) {
+        toast.success(
+          createdStatus === "published"
+            ? `"${title.trim() || "Untitled"}" published — it's now live and available for use.`
+            : `"${title.trim() || "Untitled"}" saved as a draft.`,
+        );
+      }
       afterSave(savedId ?? "");
     } catch (err: any) {
       setError(err.message);
@@ -1093,7 +1216,6 @@ export function DocumentEditor({
   };
 
   const hasReviewerRole = myNodeRoles.includes("reviewer");
-  const hasEditorRole = myNodeRoles.includes("editor");
 
   // Mirrors server-side canUserApprove:
   //   admin (collaborator/steward) -> approve anything
@@ -1102,8 +1224,6 @@ export function DocumentEditor({
   // SoD: you can't approve a review YOU submitted — unless you're the owner
   // and the nest allows self-approve (the seeding switch).
   const isOwnSubmission = isOwnPendingReview;
-  const hasAdminApprove =
-    isAdmin || permission === "admin" || myNodeRoles.includes("admin");
 
   // Prime resolution mirrors the server (document → tag → nest). `primeByTag`
   // is what the doc would be WITHOUT its own flag, so the switch can tell an
@@ -1121,11 +1241,20 @@ export function DocumentEditor({
     canApproveCapability &&
     (!isOwnSubmission || (isOwner && allowSelfApprove));
 
-  // Read-only when the caller's only steward rows are reviewer/viewer
-  // (no editor row anywhere). Editors author content; reviewers just
-  // approve/reject; viewers just read. A user with editor + reviewer is
-  // NOT read-only — keep edit affordances open for them.
-  const isReviewerOnly = !isOwner && myNodeRoles.length > 0 && !hasEditorRole;
+  // A pending-review doc opens read-only for a reviewer, and the comment box
+  // otherwise sits behind an easy-to-miss "turn on comment mode" affordance.
+  // Default comment mode ON for them so they land ready to leave feedback.
+  // The owner's own submission is excluded — they can still edit it, so the
+  // rendered/comment view shouldn't be forced on top of that. Applied once
+  // per doc (ref guard) so a manual toggle-off afterward isn't undone by
+  // later re-renders of this effect.
+  const defaultCommentModeAppliedRef = useRef(false);
+  useEffect(() => {
+    if (defaultCommentModeAppliedRef.current) return;
+    if (loading || !rolesLoaded) return;
+    defaultCommentModeAppliedRef.current = true;
+    if (status === "pending_review" && isReviewerOnly) setCommentMode(true);
+  }, [loading, rolesLoaded, status, isReviewerOnly]);
 
   // Always-editable surface ("buttery editor"): anyone who can edit drops
   // straight into the live editor instead of view → click → edit, which
@@ -1314,7 +1443,7 @@ export function DocumentEditor({
               title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
             >
               <Send className="h-4 w-4 mr-2" />
-              Publish
+              Submit for review
             </Button>
           )}
           {!isViewOnly && canReviewHere && (
@@ -1460,6 +1589,15 @@ export function DocumentEditor({
                   );
                 },
               });
+            // Share THIS doc first — it's the narrower, more common ask.
+            // Meaningless on an unsaved doc: there's no node id to grant on.
+            if (canShare && !isNew)
+              moreActions.push({
+                label: "Share this document",
+                icon: Share2,
+                testId: "document-editor-share-doc",
+                onSelect: () => setShowShareDoc(true),
+              });
             if (canShare)
               moreActions.push({
                 label: "Share nest",
@@ -1474,7 +1612,9 @@ export function DocumentEditor({
             // One Delete entry: the author (and the admin/owner tier) deletes
             // outright, everyone else raises a request. Hidden below that tier
             // once a flag is already open.
-            if (!isNew && (canDeleteDirectly || !deletionRequested))
+            const showDelete =
+              !isNew && canRequestDeletion && (canDeleteDirectly || !deletionRequested);
+            if (showDelete)
               moreActions.push({
                 label: "Delete",
                 icon: Trash2,
@@ -1484,6 +1624,30 @@ export function DocumentEditor({
                   ? "document-editor-delete"
                   : "document-editor-request-deletion",
                 onSelect: () => setShowDeletionModal(true),
+              });
+            // Withdraw: only shown to the original requester while the request
+            // is still pending — lets them undo an accidental flag without
+            // waiting for an admin to decline it.
+            const isOwnDeletionRequest =
+              deletionRequested &&
+              deletionRequest?.requestedBy?.toLowerCase() === currentEmail;
+            if (!isNew && isOwnDeletionRequest)
+              moreActions.push({
+                label: "Withdraw deletion request",
+                icon: X,
+                // Withdraw belongs with Delete in the destructive group, so it
+                // only opens that group when Delete isn't there to open it.
+                separatorBefore: !showDelete,
+                testId: "document-editor-withdraw-deletion",
+                onSelect: async () => {
+                  try {
+                    await api.withdrawDeletionRequest(nestId, deletionRequest!.id);
+                    setDeletionRequest(null);
+                    toast.success("Deletion request withdrawn");
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Failed to withdraw request");
+                  }
+                },
               });
             return moreActions.length ? (
               <OverflowMenu
@@ -1576,6 +1740,7 @@ export function DocumentEditor({
                 </label>
                 <Input
                   id="document-editor-title"
+                  ref={titleInputRef}
                   value={title}
                   onChange={(e) => {
                     setTitle(e.target.value);
@@ -1593,11 +1758,10 @@ export function DocumentEditor({
                   aria-required="true"
                   aria-invalid={touched && !title.trim() ? true : undefined}
                   data-testid="document-editor-title"
-                  className={`h-10 text-base font-medium placeholder:font-normal placeholder:text-muted-foreground/60${
-                    touched && !title.trim()
-                      ? " border-destructive focus-visible:ring-destructive"
-                      : ""
-                  }`}
+                  className={`h-10 text-base font-medium placeholder:font-normal placeholder:text-muted-foreground/60${touched && !title.trim()
+                    ? " border-destructive focus-visible:ring-destructive"
+                    : ""
+                    }`}
                 />
                 {((touched && !title.trim()) || title.length >= 90) && (
                   <div className="mt-1 flex items-start justify-between gap-2 text-xs">
@@ -1687,9 +1851,8 @@ export function DocumentEditor({
                     setFolder("");
                     setTouched(true);
                   }}
-                  className={`text-sm rounded px-1.5 py-0.5 ${
-                    folder ? "text-primary hover:bg-muted" : "font-medium bg-muted"
-                  }`}
+                  className={`text-sm rounded px-1.5 py-0.5 ${folder ? "text-primary hover:bg-muted" : "font-medium bg-muted"
+                    }`}
                   title="File directly under the nest root"
                 >
                   Root
@@ -1702,9 +1865,8 @@ export function DocumentEditor({
                     <span key={path} className="flex items-center gap-1">
                       <span className="text-muted-foreground/50 text-sm">/</span>
                       <span
-                        className={`flex items-center rounded ${
-                          isLast ? "bg-muted" : ""
-                        }`}
+                        className={`flex items-center rounded ${isLast ? "bg-muted" : ""
+                          }`}
                       >
                         <button
                           type="button"
@@ -1713,11 +1875,10 @@ export function DocumentEditor({
                             setFolder(path);
                             setTouched(true);
                           }}
-                          className={`text-sm rounded px-1.5 py-0.5 ${
-                            isLast
-                              ? "font-medium"
-                              : "text-primary hover:bg-muted"
-                          }`}
+                          className={`text-sm rounded px-1.5 py-0.5 ${isLast
+                            ? "font-medium"
+                            : "text-primary hover:bg-muted"
+                            }`}
                           title={`Scope to ${path}`}
                         >
                           {seg}
@@ -1775,75 +1936,83 @@ export function DocumentEditor({
             </div>
           )}
 
-          {/* Tags */}
-          <div>
-            <label className="block mb-1 text-sm font-medium">Tags</label>
-            <div className="flex items-center gap-2">
-              <Input
-                value={tagInput}
-                onChange={(e) => setTagInput(e.target.value)}
-                onKeyDown={(e) => {
-                  // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
-                  if (e.key === "Enter" || e.key === "," || e.key === " ") {
-                    e.preventDefault();
-                    addTag();
-                  }
-                }}
-                placeholder='Press Enter or space. Try "#api #v2" or "api, v2"'
-                disabled={fieldsDisabled}
-                data-testid="document-editor-tag-input"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={addTag}
-                disabled={fieldsDisabled || !tagInput.trim()}
-              >
-                Add
-              </Button>
-            </div>
-            {tags.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 mt-2">
-                {tags.map((t) => {
-                  // View mode: chip click → filter nest by tag. Edit mode: X removes.
-                  const tagClickable = mode === "view" && !!onTagClick;
-                  return (
-                    <span
-                      key={t}
-                      onClick={
-                        tagClickable
-                          ? (e) => {
-                            e.stopPropagation();
-                            onTagClick!(t);
-                          }
-                          : undefined
-                      }
-                      className={
-                        "inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs" +
-                        (tagClickable ? " cursor-pointer hover:bg-secondary/80" : "")
-                      }
-                      title={tagClickable ? `Filter nest by ${t}` : undefined}
+          {/* Tags — hide the editor controls (input + Add) for anyone who
+              can't author here (view-only, plus reviewer/viewer stewards);
+              they see only the existing tag chips. */}
+          {(canEditContent || tags.length > 0) && (
+            <div>
+              {canEditContent && (
+                <>
+                  <label className="block mb-1 text-sm font-medium">Tags</label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      value={tagInput}
+                      onChange={(e) => setTagInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
+                        if (e.key === "Enter" || e.key === "," || e.key === " ") {
+                          e.preventDefault();
+                          addTag();
+                        }
+                      }}
+                      placeholder='Press Enter or space. Try "#api #v2" or "api, v2"'
+                      disabled={fieldsDisabled}
+                      data-testid="document-editor-tag-input"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={addTag}
+                      disabled={fieldsDisabled || !tagInput.trim()}
                     >
-                      {t}
-                      {!fieldsDisabled && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            removeTag(t);
-                          }}
-                          className="hover:text-destructive"
-                          aria-label={`Remove ${t}`}
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      )}
-                    </span>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+                      Add
+                    </Button>
+                  </div>
+                </>
+              )}
+              {tags.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {tags.map((t) => {
+                    // View mode: chip click → filter nest by tag. Edit mode: X removes.
+                    const tagClickable = mode === "view" && !!onTagClick;
+                    return (
+                      <span
+                        key={t}
+                        onClick={
+                          tagClickable
+                            ? (e) => {
+                              e.stopPropagation();
+                              onTagClick!(t);
+                            }
+                            : undefined
+                        }
+                        className={
+                          "inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs" +
+                          (tagClickable ? " cursor-pointer hover:bg-secondary/80" : "")
+                        }
+                        title={tagClickable ? `Filter nest by ${t}` : undefined}
+                      >
+                        {t}
+                        {!fieldsDisabled && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeTag(t);
+                            }}
+                            className="hover:text-destructive"
+                            aria-label={`Remove ${t}`}
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        )}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Prime — governed nests only, and only for the roles allowed to
               set it. Everyone else just sees the badge next to the title. */}
@@ -1954,109 +2123,121 @@ export function DocumentEditor({
               Existing artifacts open straight into the ArtifactViewer (handled
               above), so Type is create-only; Schedule shows for any agent/skill
               node. */}
-          {!isViewOnly && (isNew || isRunnable) && (
+          {canEditContent && (isNew || isRunnable) && (
             <div className="flex flex-col sm:flex-row gap-4 w-full">
               {isNew && (
                 <div className="flex-1 min-w-0">
-              <label className="block text-sm font-medium mb-1">Type</label>
-              {/* Icon segmented control, not a dropdown: all choices are
+                  <label className="block text-sm font-medium mb-1">Type</label>
+                  {/* Icon segmented control, not a dropdown: all choices are
                   visible at once and carry the same type color language as
                   the list icons (document slate / artifact amber / agent
                   violet / skill blue). Built from the enabled set: document
                   always on; artifact/table only when their content-type
                   toggle is on; runnable types only when the workflow plane
                   is on. */}
-              <div
-                className="inline-flex rounded-md border overflow-hidden"
-                role="radiogroup"
-                data-testid="document-editor-type"
-              >
-                {(
-                  [
-                    { value: "document", label: "Document", Icon: FileText,
-                      on: "bg-slate-500/15 text-slate-700 dark:text-slate-300" },
-                    ...(typeArtifactEnabled
-                      ? [
-                          { value: "artifact", label: "Artifact", Icon: Code2,
-                            on: "bg-amber-500/15 text-amber-700 dark:text-amber-300" },
-                        ]
-                      : []),
-                    ...(typeTableEnabled
-                      ? [
-                          { value: "table", label: "Table", Icon: Table2,
-                            on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300" },
-                        ]
-                      : []),
-                    ...(workflowPlaneEnabled
-                      ? [
-                          { value: "agent", label: "Agent", Icon: Bot,
-                            on: "bg-violet-500/15 text-violet-700 dark:text-violet-300" },
-                          { value: "skill", label: "Skill", Icon: Zap,
-                            on: "bg-blue-500/15 text-blue-700 dark:text-blue-300" },
-                          { value: "tool", label: "Tool", Icon: Wrench,
-                            on: "bg-teal-500/15 text-teal-700 dark:text-teal-300" },
-                        ]
-                      : []),
-                  ] as const
-                ).map(({ value, label, Icon, on }, i) => {
-                  const active = newType === value;
-                  return (
-                    <button
-                      key={value}
-                      type="button"
-                      role="radio"
-                      aria-checked={active}
-                      title={
-                        value === "document"
-                          ? "Markdown document"
-                          : value === "artifact"
-                            ? "Hosted HTML artifact"
-                            : value === "table"
-                              ? "Table — CSV fact store, queryable deterministically"
-                              : value === "tool"
-                                ? "Tool — the body is code an agent can call"
-                                : `${label} (runnable)`
-                      }
-                      onClick={() =>
-                        setNewType(
-                          value as "document" | "artifact" | "agent" | "skill" | "tool" | "table",
-                        )
-                      }
-                      className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${
-                        i > 0 ? "border-l" : ""
-                      } ${active ? `${on} font-medium` : "text-muted-foreground hover:bg-muted/60"}`}
-                      data-testid={`document-editor-type-${value}`}
-                    >
-                      <Icon className="h-4 w-4" />
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-              {newType === "artifact" && (
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  Hosted HTML — the body is served as a sandboxed page.
-                </p>
-              )}
-              {(newType === "agent" || newType === "skill") && (
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  The body is the instructions. Add flow edges from it in the
-                  Workflows tab, then trigger a run.
-                </p>
-              )}
-              {newType === "table" && (
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  The body is CSV — header first, directives welcome
-                  (<code>sku:key, price:number, region</code>). Agents fetch
-                  exact rows with table-query instead of reading it whole.
-                </p>
-              )}
-              {newType === "tool" && (
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  The body is code. Wire it to an agent on the canvas and the
-                  runner ships it (plus the nest's env vars) in the run bundle.
-                </p>
-              )}
+                  <div
+                    className="inline-flex rounded-md border overflow-hidden"
+                    role="radiogroup"
+                    data-testid="document-editor-type"
+                  >
+                    {(
+                      [
+                        {
+                          value: "document", label: "Document", Icon: FileText,
+                          on: "bg-slate-500/15 text-slate-700 dark:text-slate-300"
+                        },
+                        ...(typeArtifactEnabled
+                          ? [
+                            {
+                              value: "artifact", label: "Artifact", Icon: Code2,
+                              on: "bg-amber-500/15 text-amber-700 dark:text-amber-300"
+                            },
+                          ]
+                          : []),
+                        ...(typeTableEnabled
+                          ? [
+                            {
+                              value: "table", label: "Table", Icon: Table2,
+                              on: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-300"
+                            },
+                          ]
+                          : []),
+                        ...(workflowPlaneEnabled
+                          ? [
+                            {
+                              value: "agent", label: "Agent", Icon: Bot,
+                              on: "bg-violet-500/15 text-violet-700 dark:text-violet-300"
+                            },
+                            {
+                              value: "skill", label: "Skill", Icon: Zap,
+                              on: "bg-blue-500/15 text-blue-700 dark:text-blue-300"
+                            },
+                            {
+                              value: "tool", label: "Tool", Icon: Wrench,
+                              on: "bg-teal-500/15 text-teal-700 dark:text-teal-300"
+                            },
+                          ]
+                          : []),
+                      ] as const
+                    ).map(({ value, label, Icon, on }, i) => {
+                      const active = newType === value;
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          title={
+                            value === "document"
+                              ? "Markdown document"
+                              : value === "artifact"
+                                ? "Hosted HTML artifact"
+                                : value === "table"
+                                  ? "Table — CSV fact store, queryable deterministically"
+                                  : value === "tool"
+                                    ? "Tool — the body is code an agent can call"
+                                    : `${label} (runnable)`
+                          }
+                          onClick={() =>
+                            requestTypeChange(
+                              value as "document" | "artifact" | "agent" | "skill" | "tool" | "table",
+                              label,
+                            )
+                          }
+                          className={`flex items-center gap-1.5 px-3 py-1.5 text-sm transition-colors ${i > 0 ? "border-l" : ""
+                            } ${active ? `${on} font-medium` : "text-muted-foreground hover:bg-muted/60"}`}
+                          data-testid={`document-editor-type-${value}`}
+                        >
+                          <Icon className="h-4 w-4" />
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {newType === "artifact" && (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Hosted HTML — the body is served as a sandboxed page.
+                    </p>
+                  )}
+                  {(newType === "agent" || newType === "skill") && (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      The body is the instructions. Add flow edges from it in the
+                      Workflows tab, then trigger a run.
+                    </p>
+                  )}
+                  {newType === "table" && (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      The body is CSV — header first, directives welcome
+                      (<code>sku:key, price:number, region</code>). Agents fetch
+                      exact rows with table-query instead of reading it whole.
+                    </p>
+                  )}
+                  {newType === "tool" && (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      The body is code. Wire it to an agent on the canvas and the
+                      runner ships it (plus the nest's env vars) in the run bundle.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -2076,21 +2257,38 @@ export function DocumentEditor({
                     data-testid="document-editor-schedule"
                     type="text"
                     value={schedule}
-                    placeholder="e.g. 0 6 * * *  or  @daily"
+                    placeholder="e.g. 0 6 * * *  or  @daily  or  @every 15m"
+                    aria-invalid={scheduleCheck.kind === "invalid"}
                     onChange={(e) => {
                       setSchedule(e.target.value);
                       setTouched(true);
                     }}
                     onBlur={saveOnBlur}
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                    className={`w-full rounded-md border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring ${scheduleCheck.kind === "invalid"
+                      ? "border-destructive focus:ring-destructive"
+                      : ""
+                      }`}
                   />
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Opaque to this server — an external orchestrator parses it
-                    and runs the{" "}
-                    {newType === "skill" || nodeType === "skill"
-                      ? "skill"
-                      : "agent"}
-                    . Leave blank for none.
+                  <p
+                    data-testid="document-editor-schedule-feedback"
+                    className={`mt-1 text-xs ${scheduleCheck.kind === "invalid"
+                      ? "text-destructive"
+                      : "text-muted-foreground"
+                      }`}
+                  >
+                    {scheduleCheck.kind === "invalid" ? (
+                      <>Doesn't look like a cron/interval schedule — {scheduleCheck.error}.</>
+                    ) : scheduleCheck.kind === "valid" ? (
+                      <>{scheduleCheck.description}. Opaque to this server — an external orchestrator parses it and runs the{" "}
+                        {newType === "skill" || nodeType === "skill" ? "skill" : "agent"}.</>
+                    ) : (
+                      <>Opaque to this server — an external orchestrator parses it
+                        and runs the{" "}
+                        {newType === "skill" || nodeType === "skill"
+                          ? "skill"
+                          : "agent"}
+                        . Leave blank for none.</>
+                    )}
                   </p>
                 </div>
               )}
@@ -2135,263 +2333,266 @@ export function DocumentEditor({
           {/* Document + ever-present comments rail (Notion/Docs-style):
               editor left, comments a sticky panel on the right. */}
           <div className="flex flex-col lg:flex-row gap-6 items-start">
-          <div className="flex-1 min-w-0">
-          {commentMode && compareVersion == null && (
-            <div className="mb-2 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50/70 dark:bg-amber-950/20 px-3 py-1.5 text-xs text-amber-900 dark:text-amber-200">
-              <MessageSquare className="h-3.5 w-3.5 shrink-0" />
-              Comment mode — select any text to pin a comment, or click a
-              highlighted phrase to open its thread. Editing is paused.
-            </div>
-          )}
-          {/* Dblclick → edit unless commenting/locked/reviewer/public-viewer. */}
-          <div
-            onClick={() => {
-              if (commentMode || isViewOnly || isLocked || isArtifactDraft) return;
-              // Table read view is interactive (query box + buttons), so a
-              // stray click must not yank the grid away — entering edit is
-              // explicit via "Start Editing".
-              if (effectiveType === "table") return;
-              if (mode === "view" && !isReviewerOnly) {
-                setMode("edit");
-              }
-            }}
-          >
-            <label className="block text-sm font-medium mb-1">
-              {isArtifactDraft
-                ? "Artifact HTML"
-                : effectiveType === "tool"
-                  ? "Tool source (code)"
-                  : effectiveType === "table"
-                    ? "Table data (CSV)"
-                    : "Content"}{" "}
-              <span className="text-destructive">*</span>
-            </label>
-            {compareVersion != null ? (
-              /* Ever-present inline diff: current vs a chosen past version. */
-              <div data-testid="document-editor-inline-diff">
-                <div className="flex items-center justify-between mb-2">
-                  <label className="text-sm font-medium flex items-center gap-2">
-                    <GitCompare className="h-4 w-4" />
-                    Diff: v{compareVersion} → current (v
-                    {versionData?.currentVersion ?? baseVersion ?? "?"})
-                    {isDirty && (
-                      <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase">
-                        incl. unsaved edits
-                      </span>
-                    )}
-                  </label>
-                  <div className="flex items-center gap-1">
-                    {/* Source = exact line changes; Rendered = formatted markdown. */}
-                    <div className="flex rounded-md border overflow-hidden text-xs">
-                      <button
-                        type="button"
-                        className={`px-2 py-1 ${!diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
-                        onClick={() => setDiffRendered(false)}
-                      >
-                        Source
-                      </button>
-                      <button
-                        type="button"
-                        className={`px-2 py-1 ${diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
-                        onClick={() => setDiffRendered(true)}
-                      >
-                        Rendered
-                      </button>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7"
-                      onClick={() => compareWith(null)}
-                    >
-                      <X className="h-4 w-4 mr-1" /> Exit diff
-                    </Button>
-                  </div>
+            <div className="flex-1 min-w-0">
+              {commentMode && compareVersion == null && (
+                <div className="mb-2 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50/70 dark:bg-amber-950/20 px-3 py-1.5 text-xs text-amber-900 dark:text-amber-200">
+                  <MessageSquare className="h-3.5 w-3.5 shrink-0" />
+                  Comment mode — select any text to pin a comment, or click a
+                  highlighted phrase to open its thread. Editing is paused.
                 </div>
-                {(() => {
-                  const past = versionData?.versions.find(
-                    (v) => v.version === compareVersion,
-                  );
-                  if (!past) {
-                    return (
-                      <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 border rounded-lg">
-                        <Loader2 className="h-4 w-4 animate-spin" /> Loading version{" "}
-                        {compareVersion}…
-                      </div>
-                    );
-                  }
-                  if (diffRendered) {
-                    return (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <div className="border rounded-lg overflow-hidden">
-                          <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
-                            v{compareVersion}
-                          </div>
-                          <DocumentViewer
-                            content={past.content || ""}
-                            className="px-4 py-3"
-                          />
-                        </div>
-                        <div className="border rounded-lg overflow-hidden">
-                          <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
-                            current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
-                          </div>
-                          <DocumentViewer content={content} className="px-4 py-3" />
-                        </div>
-                      </div>
-                    );
-                  }
-                  return (
-                    <DiffViewer
-                      patch={unifiedDiff(past.content || "", content)}
-                      className="max-h-none border rounded-lg"
-                    />
-                  );
-                })()}
-              </div>
-            ) : isSourceOnly && mode === "edit" && !commentMode ? (
-              /* Tool/table edit is ALWAYS raw source — no TipTap, no
-                 markdown round-trip. Tables get the CSV affordances
-                 (file replace + grid-paste conversion) on top. */
-              effectiveType === "table" ? (
-                <TableSourceEditor
-                  value={content}
-                  onChange={(next) => {
-                    if (fieldsDisabled) return;
-                    setContent(next);
-                    setTouched(true);
-                  }}
-                  onBlur={saveOnBlur}
-                  readOnly={fieldsDisabled}
-                />
-              ) : (
-                <textarea
-                  value={content}
-                  onChange={(e) => {
-                    if (fieldsDisabled) return;
-                    setContent(e.target.value);
-                    setTouched(true);
-                  }}
-                  onBlur={saveOnBlur}
-                  readOnly={fieldsDisabled}
-                  spellCheck={false}
-                  placeholder={
-                    "The body is code — paste or write the tool's source."
-                  }
-                  className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-                  data-testid="tool-source-editor"
-                />
-              )
-            ) : rawMode ? (
-              <textarea
-                value={content}
-                onChange={(e) => {
-                  if (fieldsDisabled) return;
-                  setContent(e.target.value);
-                  setTouched(true);
-                }}
-                onBlur={saveOnBlur}
-                readOnly={fieldsDisabled}
-                spellCheck={false}
-                placeholder="# Raw markdown"
-                className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-                data-testid="document-editor-raw-markdown"
-              />
-            ) : isArtifactDraft ? (
-              <textarea
-                value={content}
-                onChange={(e) => {
-                  setContent(e.target.value);
-                  setTouched(true);
-                }}
-                onBlur={saveOnBlur}
-                placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
-                spellCheck={false}
-                className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
-              />
-            ) : (commentMode || mode === "view") &&
-              (isSourceOnly || !looksLikeHtml(content)) ? (
-              /* isSourceOnly bypasses the looksLikeHtml guard: a tool body
-                 may legitimately start with `<` (HTML/XML/JSX code) and must
-                 still render as source, never fall through to TipTap. */
+              )}
+              {/* Dblclick → edit unless commenting/locked/reviewer/public-viewer. */}
               <div
-                ref={docViewRef}
-                onMouseUp={isNew ? undefined : onDocMouseUp}
-                onClick={isNew ? undefined : onDocClick}
-                onMouseMove={isNew ? undefined : onDocMouseMove}
-                className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text"
+                onClick={() => {
+                  if (commentMode || isViewOnly || isLocked || isArtifactDraft) return;
+                  // Table read view is interactive (query box + buttons), so a
+                  // stray click must not yank the grid away — entering edit is
+                  // explicit via "Start Editing".
+                  if (effectiveType === "table") return;
+                  if (mode === "view" && !isReviewerOnly) {
+                    setMode("edit");
+                  }
+                }}
               >
-                {effectiveType === "table" && !isNew ? (
-                  <div className="p-4">
-                    <TableViewer nestId={nestId} nodeId={nodeId} csv={content} />
+                <label className="block text-sm font-medium mb-1">
+                  {isArtifactDraft
+                    ? "Artifact HTML"
+                    : effectiveType === "tool"
+                      ? "Tool source (code)"
+                      : effectiveType === "table"
+                        ? "Table data (CSV)"
+                        : "Content"}
+                  {canEditContent && <span className="text-destructive"> *</span>}
+                </label>
+                {compareVersion != null ? (
+                  /* Ever-present inline diff: current vs a chosen past version. */
+                  <div data-testid="document-editor-inline-diff">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm font-medium flex items-center gap-2">
+                        <GitCompare className="h-4 w-4" />
+                        Diff: v{compareVersion} → current (v
+                        {versionData?.currentVersion ?? baseVersion ?? "?"})
+                        {isDirty && (
+                          <span className="rounded bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 px-1.5 py-px text-[10px] font-semibold uppercase">
+                            incl. unsaved edits
+                          </span>
+                        )}
+                      </label>
+                      <div className="flex items-center gap-1">
+                        {/* Source = exact line changes; Rendered = formatted markdown. */}
+                        <div className="flex rounded-md border overflow-hidden text-xs">
+                          <button
+                            type="button"
+                            className={`px-2 py-1 ${!diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+                            onClick={() => setDiffRendered(false)}
+                          >
+                            Source
+                          </button>
+                          <button
+                            type="button"
+                            className={`px-2 py-1 ${diffRendered ? "bg-secondary font-medium" : "text-muted-foreground hover:bg-muted/50"}`}
+                            onClick={() => setDiffRendered(true)}
+                          >
+                            Rendered
+                          </button>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7"
+                          onClick={() => compareWith(null)}
+                        >
+                          <X className="h-4 w-4 mr-1" /> Exit diff
+                        </Button>
+                      </div>
+                    </div>
+                    {(() => {
+                      const past = versionData?.versions.find(
+                        (v) => v.version === compareVersion,
+                      );
+                      if (!past) {
+                        return (
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 border rounded-lg">
+                            <Loader2 className="h-4 w-4 animate-spin" /> Loading version{" "}
+                            {compareVersion}…
+                          </div>
+                        );
+                      }
+                      if (diffRendered) {
+                        return (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div className="border rounded-lg overflow-hidden">
+                              <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                                v{compareVersion}
+                              </div>
+                              <DocumentViewer
+                                content={past.content || ""}
+                                className="px-4 py-3"
+                              />
+                            </div>
+                            <div className="border rounded-lg overflow-hidden">
+                              <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                                current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
+                              </div>
+                              <DocumentViewer content={content} className="px-4 py-3" />
+                            </div>
+                          </div>
+                        );
+                      }
+                      return (
+                        <DiffViewer
+                          patch={unifiedDiff(past.content || "", content)}
+                          className="max-h-none border rounded-lg"
+                        />
+                      );
+                    })()}
                   </div>
-                ) : effectiveType === "tool" ? (
-                  /* Code block, dependency-free: no syntax highlighting,
-                     just monospace + horizontal scroll. */
-                  <pre
-                    className="overflow-x-auto p-4 font-mono text-xs leading-relaxed whitespace-pre"
-                    data-testid="tool-source-view"
+                ) : isSourceOnly && mode === "edit" && !commentMode ? (
+                  /* Tool/table edit is ALWAYS raw source — no TipTap, no
+                     markdown round-trip. Tables get the CSV affordances
+                     (file replace + grid-paste conversion) on top. */
+                  effectiveType === "table" ? (
+                    <TableSourceEditor
+                      value={content}
+                      onChange={(next) => {
+                        if (fieldsDisabled) return;
+                        setContent(next);
+                        setTouched(true);
+                      }}
+                      onBlur={saveOnBlur}
+                      readOnly={fieldsDisabled}
+                    />
+                  ) : (
+                    <textarea
+                      value={content}
+                      onChange={(e) => {
+                        if (fieldsDisabled) return;
+                        setContent(e.target.value);
+                        setTouched(true);
+                      }}
+                      onBlur={saveOnBlur}
+                      readOnly={fieldsDisabled}
+                      spellCheck={false}
+                      placeholder={
+                        "The body is code — paste or write the tool's source."
+                      }
+                      className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                      data-testid="tool-source-editor"
+                    />
+                  )
+                ) : rawMode ? (
+                  <textarea
+                    value={content}
+                    onChange={(e) => {
+                      if (fieldsDisabled) return;
+                      setContent(e.target.value);
+                      setTouched(true);
+                    }}
+                    onBlur={saveOnBlur}
+                    readOnly={fieldsDisabled}
+                    spellCheck={false}
+                    placeholder="# Raw markdown"
+                    className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                    data-testid="document-editor-raw-markdown"
+                  />
+                ) : isArtifactDraft ? (
+                  <textarea
+                    value={content}
+                    onChange={(e) => {
+                      setContent(e.target.value);
+                      setTouched(true);
+                    }}
+                    onBlur={saveOnBlur}
+                    placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
+                    spellCheck={false}
+                    className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                  />
+                ) : (commentMode || mode === "view") &&
+                  (isSourceOnly || !looksLikeHtml(content)) ? (
+                  /* isSourceOnly bypasses the looksLikeHtml guard: a tool body
+                     may legitimately start with `<` (HTML/XML/JSX code) and must
+                     still render as source, never fall through to TipTap. */
+                  <div
+                    ref={docViewRef}
+                    onMouseUp={isNew ? undefined : onDocMouseUp}
+                    onClick={isNew ? undefined : onDocClick}
+                    onMouseMove={isNew ? undefined : onDocMouseMove}
+                    className="border rounded-lg bg-background shadow-sm min-h-[300px] cursor-text"
                   >
-                    <code>{content}</code>
-                  </pre>
+                    {effectiveType === "table" && !isNew ? (
+                      <div className="p-4">
+                        <TableViewer nestId={nestId} nodeId={nodeId} csv={content} />
+                      </div>
+                    ) : effectiveType === "tool" ? (
+                      /* Code block, dependency-free: no syntax highlighting,
+                         just monospace + horizontal scroll. */
+                      <pre
+                        className="overflow-x-auto p-4 font-mono text-xs leading-relaxed whitespace-pre"
+                        data-testid="tool-source-view"
+                      >
+                        <code>{content}</code>
+                      </pre>
+                    ) : (
+                      <DocumentViewer
+                        content={content}
+                        onWikiLinkClick={(title) =>
+                          handleWikiLinkClick(title, null)
+                        }
+                        previewFor={previewFor}
+                      />
+                    )}
+                  </div>
                 ) : (
-                  <DocumentViewer
+                  <MarkdownEditor
+                    ref={editorRef}
                     content={content}
-                    onWikiLinkClick={(title) =>
-                      handleWikiLinkClick(title, null)
-                    }
-                    previewFor={previewFor}
+                    onChange={(next) => {
+                      setContent(next);
+                      // TipTap onUpdate fires only on real user input here.
+                      setTouched(true);
+                    }}
+                    onSave={handleSave}
+                    onBlur={saveOnBlur}
+                    nestId={nestId}
+                    currentNodeId={isNew ? undefined : nodeId}
+                    editable={!fieldsDisabled}
+                    onRequestDocLink={() => setShowDocPicker(true)}
+                    onUploadImage={async (file) => {
+                      const { url } = await api.uploadAsset(nestId, file);
+                      return url;
+                    }}
+                    onWikiLinkClick={handleWikiLinkClick}
+                    placeholder="Start writing..."
+                    // New document: Title is the first required field, so it
+                    // gets focus instead (see the effect below), not the body.
+                    autofocus={isNew ? false : "end"}
                   />
                 )}
               </div>
-            ) : (
-              <MarkdownEditor
-                ref={editorRef}
-                content={content}
-                onChange={(next) => {
-                  setContent(next);
-                  // TipTap onUpdate fires only on real user input here.
-                  setTouched(true);
-                }}
-                onSave={handleSave}
-                onBlur={saveOnBlur}
-                nestId={nestId}
-                currentNodeId={isNew ? undefined : nodeId}
-                editable={!fieldsDisabled}
-                onRequestDocLink={() => setShowDocPicker(true)}
-                onUploadImage={async (file) => {
-                  const { url } = await api.uploadAsset(nestId, file);
-                  return url;
-                }}
-                onWikiLinkClick={handleWikiLinkClick}
-                placeholder="Start writing..."
-              />
-            )}
-          </div>
-          </div>
+            </div>
 
-          {/* Ever-present comments rail — beside the doc, not stacked below. */}
-          {!isNew && (
-            <aside className="w-full lg:w-80 shrink-0 self-start lg:sticky lg:top-4 flex flex-col min-h-0 max-h-[70vh]">
-              <AnnotationsPanel
-                nestId={nestId}
-                nodeId={nodeId}
-                readOnly={isViewOnly}
-                pendingAnchor={pendingAnchor}
-                onClearAnchor={() => setPendingAnchor(null)}
-                onFocusAnchor={focusAnchor}
-                onThreadsChange={setAnchoredThreads}
-                activeThreadId={activeThreadId}
-                commentMode={commentMode}
-                onSetCommentMode={(on) => {
-                  setCommentMode(on);
-                  if (on) setMode("view");
-                  setSelPopover(null);
-                  if (!on) setActiveThreadId(null);
-                }}
-              />
-            </aside>
-          )}
+            {/* Ever-present comments rail — beside the doc, not stacked below. */}
+            {!isNew && (
+              <aside className="w-full lg:w-80 shrink-0 self-start lg:sticky lg:top-4 flex flex-col min-h-0 max-h-[70vh]">
+                <AnnotationsPanel
+                  nestId={nestId}
+                  nodeId={nodeId}
+                  readOnly={isViewOnly}
+                  pendingAnchor={pendingAnchor}
+                  onClearAnchor={() => setPendingAnchor(null)}
+                  onFocusAnchor={focusAnchor}
+                  onThreadsChange={setAnchoredThreads}
+                  activeThreadId={activeThreadId}
+                  commentMode={commentMode}
+                  onSetCommentMode={(on) => {
+                    setCommentMode(on);
+                    if (on) setMode("view");
+                    setSelPopover(null);
+                    if (!on) setActiveThreadId(null);
+                  }}
+                />
+              </aside>
+            )}
           </div>
 
           {/* Floating "Comment" button on text selection — pins a comment to
@@ -2513,7 +2714,9 @@ export function DocumentEditor({
             (await api.getNodeVersionContent(nestId, nodeId, v)).content
           }
           onRestore={
-            isViewOnly
+            // Reverting rewrites the document — an author's act, not a
+            // reviewer's, so it follows the same gate as the editor itself.
+            !canEditContent
               ? undefined
               : async (v) => {
                 try {
@@ -2577,6 +2780,15 @@ export function DocumentEditor({
         onSelect={handleDocLinkInsert}
       />
 
+      {showShareDoc && (
+        <ShareTargetDialog
+          nestId={nestId}
+          targetType="document"
+          target={nodeId}
+          label={title || nodeId}
+          onClose={() => setShowShareDoc(false)}
+        />
+      )}
       {showShare && (
         <ShareNestDialog
           nestId={nestId}
@@ -2626,6 +2838,35 @@ export function DocumentEditor({
                   <Save className="h-4 w-4 mr-2" />
                 )}
                 Save & leave
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {pendingType && (
+        <Dialog open onOpenChange={() => setPendingType(null)}>
+          <DialogContent className="sm:max-w-[460px]">
+            <DialogHeader>
+              <DialogTitle>Switch to {pendingType.label}?</DialogTitle>
+            </DialogHeader>
+            <p className="text-sm text-muted-foreground py-2">
+              Your existing content will stay as-is, but it will now be
+              interpreted as {bodyKindLabel(typeBodyKind(pendingType.value))}{" "}
+              instead of {bodyKindLabel(typeBodyKind(newType))}. Nothing is
+              converted automatically — review the body after switching.
+            </p>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setPendingType(null)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={() => {
+                  setNewType(pendingType.value);
+                  setPendingType(null);
+                }}
+              >
+                Switch anyway
               </Button>
             </DialogFooter>
           </DialogContent>

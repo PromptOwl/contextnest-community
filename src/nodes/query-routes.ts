@@ -3,7 +3,7 @@ import { serializeDocument } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
-import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
+import { ValidationError, NotFoundError } from "../shared/errors.js";
 import { queryTableNode } from "../tables/query.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import { syncNodeTags } from "../governance/tag-index-service.js";
@@ -20,11 +20,11 @@ import {
 import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
-import { permissionLevel, isPublicReader, resolveNestPermission } from "../shared/access.js";
+import { permissionLevel, isPublicReader } from "../shared/access.js";
 import { exportNestBundle } from "../nests/bundle-service.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
 import { listNodesForCaller, RUNNABLE_NODE_TYPES } from "./service.js";
-import { matchDocuments, toSearchHit } from "./search.js";
+import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
 
@@ -529,8 +529,7 @@ queryRoutes.get("/search", async (c) => {
 
   const nestId = c.req.param("nestId")!;
   const { storage } = await engineCache.get(nestId);
-  const documents = await storage.discoverDocuments();
-  const matches = matchDocuments(documents, q);
+  const matches = matchDocuments(await discoverForSearch(storage), q);
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
@@ -539,7 +538,7 @@ queryRoutes.get("/search", async (c) => {
   return c.json({
     query: q,
     count: accessible.length,
-    nodes: accessible.map(toSearchHit),
+    nodes: accessible.map((n) => toSearchHit(n, q)),
   });
 });
 
@@ -597,13 +596,11 @@ queryRoutes.get("/export", async (c) => {
   const nestId = c.req.param("nestId")!;
 
   // Portability bundle (?format=bundle): the nest's documents as a .zip that
-  // the existing folder importer (POST /nests/import) ingests. Owner/admin only.
+  // the existing folder importer (POST /nests/import) ingests. Gated the same
+  // as the markdown export above — the nest access middleware already 404s
+  // callers with no access at all, so any reader (viewer and up) may export.
   // `?includeDrafts=1` also exports unapproved drafts; default is approved only.
   if (c.req.query("format") === "bundle") {
-    const perm = await resolveNestPermission(nestId, c.get("userId"));
-    if (perm !== "owner" && perm !== "admin") {
-      throw new ForbiddenError("Only the nest owner or an admin can export a bundle");
-    }
     const draftsParam = c.req.query("includeDrafts");
     const includeDrafts = draftsParam === "1" || draftsParam === "true";
     const zip = await exportNestBundle(nestId, includeDrafts);

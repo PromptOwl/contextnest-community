@@ -8,12 +8,16 @@ import {
 } from "./helpers.js";
 import { isIdUnderFolder } from "../src/nodes/service.js";
 
-// Request-deletion workflow (CU-wdqcpzxqcm): a read-only user flags a stale
-// node with a reason, a writer deletes it or declines with a note.
+// Request-deletion workflow (CU-wdqcpzxqcm): an editor flags a stale node with
+// a reason, an owner/admin deletes it or declines with a note. Asking is an
+// editor's act — a read-only collaborator is refused outright (see the viewer
+// test below), because someone who cannot change a document has no standing to
+// propose destroying it.
 describe("deletion requests", () => {
   let env: ReturnType<typeof setupTestEnv>;
   let app: any;
   let owner: { apiKey: string };
+  let editor: { apiKey: string };
   let reader: { apiKey: string };
   let nestId: string;
   let staleNode: string;
@@ -23,6 +27,7 @@ describe("deletion requests", () => {
     env = setupTestEnv();
     app = await createTestApp("key", { superAdmins: ["owner@acme.com"] });
     owner = await registerUser(app, "owner@acme.com", "Owner");
+    editor = await registerUser(app, "editor@acme.com", "Editor");
     reader = await registerUser(app, "reader@acme.com", "Reader");
 
     const { data: nestData } = await jsonRequest(
@@ -34,6 +39,13 @@ describe("deletion requests", () => {
     );
     nestId = nestData.nest.id;
 
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: "editor@acme.com", permission: "write" },
+      owner.apiKey,
+    );
     await jsonRequest(
       app,
       "POST",
@@ -62,7 +74,48 @@ describe("deletion requests", () => {
 
   afterAll(() => env.cleanup());
 
-  it("a read-only user can flag a node, and can't delete it directly", async () => {
+  it("a viewer cannot flag anything — not a node, not a folder, not the nest", async () => {
+    // A read-only collaborator can see this document and nothing more. Asking
+    // for it to be deleted is withheld, not merely unhonoured.
+    const node = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${staleNode}/request-deletion`,
+      { reason: "I don't like it" },
+      reader.apiKey,
+    );
+    expect(node.status).toBe(403);
+
+    const folder = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "folder", target: "legacy/api", reason: "nope" },
+      reader.apiKey,
+    );
+    expect(folder.status).toBe(403);
+
+    const nest = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/request-deletion`,
+      { targetType: "nest", reason: "nope" },
+      reader.apiKey,
+    );
+    expect(nest.status).toBe(403);
+
+    // Nothing was recorded — a refused request must not park a row.
+    const { data: queue } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/deletion-requests?status=all`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(queue.requests).toHaveLength(0);
+  });
+
+  it("an editor can flag a node, and can't delete it directly", async () => {
     const direct = await jsonRequest(
       app,
       "DELETE",
@@ -77,11 +130,11 @@ describe("deletion requests", () => {
       "POST",
       `/nests/${nestId}/nodes/${staleNode}/request-deletion`,
       { reason: "superseded by the new runbook" },
-      reader.apiKey,
+      editor.apiKey,
     );
     expect(status).toBe(201);
     expect(data.request.status).toBe("pending");
-    expect(data.request.requestedBy).toBe("reader@acme.com");
+    expect(data.request.requestedBy).toBe("editor@acme.com");
 
     // The node read carries the flag, so the UI can badge the doc and drop
     // its "Request deletion" affordance instead of 409ing on a second click.
@@ -104,7 +157,7 @@ describe("deletion requests", () => {
       "POST",
       `/nests/${nestId}/nodes/${keeperNode}/request-deletion`,
       { reason: "   " },
-      reader.apiKey,
+      editor.apiKey,
     );
     expect(empty.status).toBe(400);
 
@@ -113,7 +166,7 @@ describe("deletion requests", () => {
       "POST",
       `/nests/${nestId}/nodes/${staleNode}/request-deletion`,
       { reason: "again" },
-      reader.apiKey,
+      editor.apiKey,
     );
     expect(dup.status).toBe(409);
   });
@@ -124,7 +177,7 @@ describe("deletion requests", () => {
       "POST",
       `/nests/${nestId}/nodes/nodes/ghost/request-deletion`,
       { reason: "gone" },
-      reader.apiKey,
+      editor.apiKey,
     );
     expect(status).toBe(404);
   });
@@ -150,15 +203,15 @@ describe("deletion requests", () => {
 
     // The requester sees their own flag as waiting-on-others, never as work
     // for them — they can't delete, that's the whole point.
-    const { data: readerWork } = await jsonRequest(
+    const { data: editorWork } = await jsonRequest(
       app,
       "GET",
       "/me/work",
       undefined,
-      reader.apiKey,
+      editor.apiKey,
     );
-    expect(readerWork.items.some((i: any) => i.type === "deletion")).toBe(false);
-    expect(readerWork.waiting.some((i: any) => i.type === "deletion")).toBe(true);
+    expect(editorWork.items.some((i: any) => i.type === "deletion")).toBe(false);
+    expect(editorWork.waiting.some((i: any) => i.type === "deletion")).toBe(true);
   });
 
   it("declining keeps the node and records the note", async () => {
@@ -240,14 +293,14 @@ describe("deletion requests", () => {
     expect(again.status).toBe(404);
 
     // The requester is told the verdict — otherwise the flag just vanishes.
-    const { data: readerWork } = await jsonRequest(
+    const { data: editorWork } = await jsonRequest(
       app,
       "GET",
       "/me/work",
       undefined,
-      reader.apiKey,
+      editor.apiKey,
     );
-    const verdict = readerWork.notifications.find(
+    const verdict = editorWork.notifications.find(
       (n: any) => n.kind === "deletion_declined",
     );
     expect(verdict).toBeTruthy();
@@ -278,20 +331,20 @@ describe("deletion requests", () => {
       "POST",
       `/nests/${nestId}/request-deletion`,
       { targetType: "folder", target: "no/such/folder", reason: "stale" },
-      reader.apiKey,
+      editor.apiKey,
     );
     expect(missing.status).toBe(404);
 
-    // The admin's direct folder delete is owner/admin-only — a reader gets
-    // the request path instead, never the bulk delete.
-    const readerDirect = await jsonRequest(
+    // The direct folder delete is owner/admin-only — an editor gets the
+    // request path instead, never the bulk delete.
+    const editorDirect = await jsonRequest(
       app,
       "POST",
       `/nests/${nestId}/delete-folder`,
       { folder: "legacy/api" },
-      reader.apiKey,
+      editor.apiKey,
     );
-    expect(readerDirect.status).toBe(403);
+    expect(editorDirect.status).toBe(403);
 
     // Leading slash / "nodes/" prefix normalize to the same target.
     const { status, data } = await jsonRequest(
@@ -299,7 +352,7 @@ describe("deletion requests", () => {
       "POST",
       `/nests/${nestId}/request-deletion`,
       { targetType: "folder", target: "/nodes/legacy/api/", reason: "dead api docs" },
-      reader.apiKey,
+      editor.apiKey,
     );
     expect(status).toBe(201);
     expect(data.request.targetType).toBe("folder");
@@ -310,7 +363,7 @@ describe("deletion requests", () => {
       "POST",
       `/nests/${nestId}/request-deletion`,
       { targetType: "folder", target: "legacy/api", reason: "again" },
-      reader.apiKey,
+      editor.apiKey,
     );
     expect(dup.status).toBe(409);
 
@@ -399,7 +452,7 @@ describe("deletion requests", () => {
       "POST",
       `/nests/${nestId}/nodes/${keeperNode}/request-deletion`,
       { reason: "duplicate" },
-      reader.apiKey,
+      editor.apiKey,
     );
     const id = flagged.request.id;
 
@@ -443,14 +496,14 @@ describe("deletion requests", () => {
 
     // The document is gone, so the notification is the ONLY way the requester
     // learns their flag was honoured — it must carry the title, not the id.
-    const { data: readerWork } = await jsonRequest(
+    const { data: editorWork } = await jsonRequest(
       app,
       "GET",
       "/me/work",
       undefined,
-      reader.apiKey,
+      editor.apiKey,
     );
-    const verdict = readerWork.notifications.find(
+    const verdict = editorWork.notifications.find(
       (n: any) => n.kind === "deletion_deleted",
     );
     expect(verdict).toBeTruthy();
@@ -463,7 +516,7 @@ describe("deletion requests", () => {
       "POST",
       `/nests/${nestId}/request-deletion`,
       { targetType: "nest", reason: "project wound down" },
-      reader.apiKey,
+      editor.apiKey,
     );
     expect(status).toBe(201);
     expect(data.request.targetType).toBe("nest");
@@ -518,6 +571,182 @@ describe("deletion requests", () => {
       owner.apiKey,
     );
     expect(gone.status).toBe(404);
+  });
+});
+
+// Withdrawing your own pending flag. Undoing an accidental request shouldn't
+// need an admin to decline it — but it also must not become a way to clear
+// someone else's flag, and it has to survive the requester being downgraded to
+// read-only afterwards (which is what the route's read-tier exemption is for).
+describe("withdrawing a deletion request", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let alice: { apiKey: string };
+  let bob: { apiKey: string };
+  let nestId: string;
+  let aliceCollabId: string;
+  let docA: string;
+  let docB: string;
+
+  const flag = (node: string, key: string) =>
+    jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${node}/request-deletion`,
+      { reason: "stale" },
+      key,
+    );
+
+  const withdraw = (id: string, key: string, nest = nestId) =>
+    jsonRequest(
+      app,
+      "POST",
+      `/nests/${nest}/deletion-requests/${id}/withdraw`,
+      {},
+      key,
+    );
+
+  const pendingIds = async () => {
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/deletion-requests?status=pending`,
+      undefined,
+      owner.apiKey,
+    );
+    return (data.requests as Array<{ id: string }>).map((r) => r.id);
+  };
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key", { superAdmins: ["owner@wd.com"] });
+    owner = await registerUser(app, "owner@wd.com", "Owner");
+    alice = await registerUser(app, "alice@wd.com", "Alice");
+    await resetAuthRateLimit();
+    bob = await registerUser(app, "bob@wd.com", "Bob");
+
+    const { data: nest } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Withdraw Vault" },
+      owner.apiKey,
+    );
+    nestId = nest.nest.id;
+
+    for (const email of ["alice@wd.com", "bob@wd.com"]) {
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/collaborators`,
+        { email, permission: "write" },
+        owner.apiKey,
+      );
+    }
+    const { data: roster } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/collaborators`,
+      undefined,
+      owner.apiKey,
+    );
+    aliceCollabId = roster.collaborators.find(
+      (c: any) => c.email === "alice@wd.com",
+    ).id;
+
+    for (const title of ["Doc A", "Doc B"]) {
+      const { data } = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title, content: `# ${title}` },
+        owner.apiKey,
+      );
+      if (title === "Doc A") docA = data.node.id;
+      else docB = data.node.id;
+    }
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("lets the requester withdraw, clearing the flag from the document", async () => {
+    const { data: made } = await flag(docA, alice.apiKey);
+    const { status, data } = await withdraw(made.request.id, alice.apiKey);
+    expect(status).toBe(200);
+    expect(data.withdrawn).toBe(true);
+
+    expect(await pendingIds()).not.toContain(made.request.id);
+    const { data: node } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${docA}`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(node.node.deletionRequest ?? null).toBeNull();
+    // The document itself is untouched — withdrawing cancels the ask, and
+    // nothing else.
+    expect(node.node.content).toContain("Doc A");
+  });
+
+  it("refuses to withdraw someone else's flag, and leaves it pending", async () => {
+    const { data: made } = await flag(docB, alice.apiKey);
+    const other = await withdraw(made.request.id, bob.apiKey);
+    expect(other.status).toBe(404);
+    // Not even an admin gets to withdraw on the requester's behalf — declining
+    // is the admin's verdict, and it keeps a record; withdrawing keeps none.
+    const asOwner = await withdraw(made.request.id, owner.apiKey);
+    expect(asOwner.status).toBe(404);
+    expect(await pendingIds()).toContain(made.request.id);
+  });
+
+  it("404s an unknown id and one addressed through the wrong nest", async () => {
+    const { data: nest2 } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Other Vault" },
+      owner.apiKey,
+    );
+    const [pending] = await pendingIds();
+    expect(pending).toBeTruthy();
+
+    const wrongNest = await withdraw(pending, alice.apiKey, nest2.nest.id);
+    expect(wrongNest.status).toBe(404);
+    expect(await pendingIds()).toContain(pending);
+
+    const unknown = await withdraw("no-such-request", alice.apiKey);
+    expect(unknown.status).toBe(404);
+  });
+
+  it("still works after the requester is downgraded to read-only", async () => {
+    // The flag was a legitimate editor's act; losing write access later must
+    // not strand it. This is what the route's read-tier exemption exists for —
+    // the generic non-GET write bump would refuse the request outright.
+    const [pending] = await pendingIds();
+    expect(pending).toBeTruthy();
+
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/collaborators/${aliceCollabId}`,
+      { permission: "read" },
+      owner.apiKey,
+    );
+    // Confirm the downgrade actually took: writing is refused now.
+    const write = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Nope", content: "# Nope" },
+      alice.apiKey,
+    );
+    expect(write.status).toBe(403);
+
+    const { status } = await withdraw(pending, alice.apiKey);
+    expect(status).toBe(200);
+    expect(await pendingIds()).not.toContain(pending);
   });
 });
 

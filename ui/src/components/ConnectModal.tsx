@@ -1,6 +1,6 @@
 /**
  * ConnectModal — copy-paste snippets for connecting external clients
- * (Hootie, Claude Desktop, ctx CLI, raw MCP) to a nest.
+ * (Hootie, Claude Desktop, raw MCP) to a nest.
  *
  * Key-secrecy model: this dialog NEVER renders the plaintext api_key in
  * its snippets — every snippet shows a placeholder that the user must
@@ -35,7 +35,6 @@ import {
 import {
   Copy,
   Check,
-  Terminal,
   Monitor,
   Bot,
   AlertCircle,
@@ -267,14 +266,6 @@ export function ConnectModal({
     2,
   );
 
-  // Only `ctx push` talks to a remote server; the other ctx commands operate on
-  // a local vault. Push uploads the local vault into this nest.
-  // Open mode needs no credential — drop --key so the copied command runs as-is.
-  const ctxCommand =
-    authMode === "open"
-      ? `ctx push --server ${serverUrl} --nest ${nestId}`
-      : `ctx push --server ${serverUrl} --nest ${nestId} --key ${KEY_PLACEHOLDER}`;
-
   const showOpenModeBanner = authMode === "open";
   const showLoginBanner = !authenticated && authMode === "key";
 
@@ -298,6 +289,12 @@ export function ConnectModal({
             </DialogDescription>
           </DialogHeader>
 
+          {/* Everything below the header scrolls as one region on short
+              viewports. Previously only the Tabs content scrolled while the
+              banners/key panel above it and the Export/Bundle/Nest ID
+              sections below it sat outside the scroll area, so a short
+              window squeezed the tab content into a sliver (or nothing). */}
+          <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0 space-y-4">
           {showLoginBanner && (
             <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
               <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
@@ -405,12 +402,11 @@ export function ConnectModal({
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0">
             {onGenerate && (
               <button
                 type="button"
                 onClick={onGenerate}
-                className="w-full mb-3 flex items-center gap-2 rounded-lg border border-dashed px-3 py-2.5 text-sm hover:border-primary hover:bg-muted/40 text-left"
+                className="w-full flex items-center gap-2 rounded-lg border border-dashed px-3 py-2.5 text-sm hover:border-primary hover:bg-muted/40 text-left"
                 data-testid="connect-add-with-ai"
               >
                 <Sparkles className="h-4 w-4 text-violet-500 shrink-0" />
@@ -424,7 +420,7 @@ export function ConnectModal({
               </button>
             )}
             <Tabs defaultValue="hootie" className="w-full min-w-0">
-              <TabsList className="grid w-full grid-cols-5">
+              <TabsList className="grid w-full grid-cols-4 sticky top-0 z-10">
                 <TabsTrigger value="hootie">
                   <Bot className="h-3.5 w-3.5 mr-1" />
                   Hootie
@@ -435,10 +431,6 @@ export function ConnectModal({
                 </TabsTrigger>
                 <TabsTrigger value="mcp">MCP</TabsTrigger>
                 <TabsTrigger value="api">API</TabsTrigger>
-                <TabsTrigger value="cli">
-                  <Terminal className="h-3.5 w-3.5 mr-1" />
-                  CLI
-                </TabsTrigger>
               </TabsList>
 
               {/* Hootie */}
@@ -650,49 +642,7 @@ export function ConnectModal({
                 </div>
               </TabsContent>
 
-              {/* CLI */}
-              <TabsContent value="cli" className="space-y-4 pt-4">
-                <div>
-                  <p className="text-sm mb-3">
-                    Push a local{" "}
-                    <code className="text-xs bg-muted px-1 py-0.5 rounded">
-                      ctx
-                    </code>{" "}
-                    vault into this nest:
-                  </p>
-                  <Snippet label="Push to this nest" value={ctxCommand} />
-                </div>
-                <div className="text-xs text-muted-foreground space-y-2">
-                  <p>
-                    Add{" "}
-                    <code className="text-[11px] bg-muted px-1 rounded">
-                      --include-drafts
-                    </code>{" "}
-                    to also push unpublished nodes.
-                  </p>
-                  <p>
-                    <span className="font-medium">Note:</span> only{" "}
-                    <code className="text-[11px] bg-muted px-1 rounded">
-                      ctx push
-                    </code>{" "}
-                    talks to a remote server. Other ctx commands (
-                    <code className="text-[11px]">query</code>,{" "}
-                    <code className="text-[11px]">add</code>,{" "}
-                    <code className="text-[11px]">search</code>) operate on your
-                    local vault — to read this nest remotely use the MCP endpoint
-                    or the REST API (see the API tab for deterministic{" "}
-                    <code className="text-[11px]">curl</code> retrieval).
-                  </p>
-                  <p className="pt-1">
-                    Install:{" "}
-                    <code className="text-[11px] bg-muted px-1 py-0.5 rounded">
-                      npm i -g @promptowl/contextnest-cli
-                    </code>
-                  </p>
-                </div>
-              </TabsContent>
             </Tabs>
-          </div>
 
           {/* Export — markdown egress. The URL is what agents fetch; the
               button downloads it as a file. Approved content only (server-side). */}
@@ -749,7 +699,7 @@ export function ConnectModal({
             <p className="text-xs text-muted-foreground">
               Whole nest — nodes, full version history, tags, definitions and
               edges — as one .zip. Import it on another ContextNest host to
-              recreate the nest. Owner/admin only.
+              recreate the nest.
             </p>
           </div>
 
@@ -761,6 +711,7 @@ export function ConnectModal({
               </code>
               <CopyButton value={nestId} />
             </div>
+          </div>
           </div>
         </DialogContent>
       </Dialog>
@@ -887,7 +838,7 @@ function KeyRevealModal({
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
-            Paste it into Hootie / Claude Desktop / CLI wherever the snippets
+            Paste it into Hootie / Claude Desktop wherever the snippets
             in the Connect dialog show{" "}
             <code className="text-[11px]">{KEY_PLACEHOLDER}</code>.
           </p>
