@@ -201,7 +201,25 @@ describe("write invalidation scope @unit", () => {
       qc.fetchQuery(reads.reviewQueue("n1")),
       qc.fetchQuery(reads.externalEdits("n1")),
       qc.fetchQuery(reads.node("n1", "nodes/deep/doc")),
+      qc.fetchQuery(reads.globalSearch("revenue", 8)),
     ]);
+  });
+
+  it("serves a repeated cross-nest search from cache, and drops it on a write", async () => {
+    const calls = () =>
+      (globalThis as any).fetch.mock.calls.filter((c: any[]) =>
+        String(c[0]).includes("/search?q=revenue"),
+      ).length;
+    const before = calls();
+
+    // The palette re-runs the same query on every reopen; the fan-out over
+    // every nest must not run again for it.
+    await qc.fetchQuery(reads.globalSearch("revenue", 8));
+    expect(calls()).toBe(before);
+
+    // A new document is findable, so results captured before it are stale.
+    await api.createNode("n1", { title: "t", content: "c" });
+    expect(isStale(reads.globalSearch("revenue", 8).queryKey)).toBe(true);
   });
 
   it("editing a document leaves that nest's stewards and connectors alone", async () => {

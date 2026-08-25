@@ -24,6 +24,9 @@ import { FlatNestStorage } from "./flat-storage.js";
  * instances behind one load balancer can disagree. Writes made through this
  * process evict on the spot. Matches the UI's read-cache TTL in
  * `ui/src/lib/api.ts`, so both layers go stale on the same clock.
+ *
+ * An expired entry is served, not awaited: the refresh runs behind the request
+ * (see withDiscoveryCache), so the age bound above is really TTL + one crawl.
  */
 const DISCOVERY_TTL_MS = 30_000;
 
@@ -61,6 +64,12 @@ function withDiscoveryCache<S extends NestStorage>(
   storage: S,
 ): { storage: S; invalidate: () => void } {
   const entries = new Map<string, { docs: ContextNode[]; ts: number }>();
+  // The crawl in flight, if any. Cross-nest search fans out over every nest at
+  // once and the palette fires a query per keystroke, so without this the same
+  // cold nest gets crawled several times over, concurrently. One entry, not one
+  // per key, because a crawl produces both sets.
+  let inflight: Promise<{ all: ContextNode[]; live: ContextNode[] }> | null =
+    null;
   const discover = storage.discoverDocuments.bind(storage);
   const readDoc = storage.readDocument.bind(storage);
   // FlatNestStorage discovers an imported folder wholesale and honours no
@@ -72,34 +81,67 @@ function withDiscoveryCache<S extends NestStorage>(
   // the UI read cache uses).
   let generation = 0;
 
+  /**
+   * Crawl once, fill both keys. The engine reads every document and only then
+   * drops the retired ones, so the superset is the same work and "live" is a
+   * filter over it — a write path asks for both, back to back.
+   */
+  const crawl = (
+    options: Parameters<typeof discover>[0],
+  ): Promise<{ all: ContextNode[]; live: ContextNode[] }> => {
+    if (inflight) return inflight;
+    const startedAt = generation;
+    const run = discover({ ...options, includeRetired: true })
+      .then((crawled) => {
+        const sets = {
+          all: crawled,
+          live: filtersRetired ? crawled.filter(isLive) : crawled,
+        };
+        if (generation === startedAt) {
+          const ts = Date.now();
+          entries.set("all", { docs: sets.all, ts });
+          entries.set("live", { docs: sets.live, ts });
+        }
+        return sets;
+      })
+      .finally(() => {
+        if (inflight === run) inflight = null;
+      });
+    inflight = run;
+    return run;
+  };
+
   storage.discoverDocuments = async (options = {}) => {
-    const key =
+    const key: "all" | "live" =
       options.includeRetired || options.includeSuperseded ? "all" : "live";
     const hit = entries.get(key);
-    if (hit && Date.now() - hit.ts < DISCOVERY_TTL_MS) return hit.docs;
-    // One crawl fills both keys: the engine reads every document and only then
-    // drops the retired ones, so the superset is the same work and "live" is a
-    // filter over it. A write path asks for both, back to back.
-    const all = entries.get("all");
-    if (all && Date.now() - all.ts < DISCOVERY_TTL_MS) {
-      const docs = filtersRetired ? all.docs.filter(isLive) : all.docs;
-      entries.set("live", { docs, ts: all.ts });
-      return docs;
+    if (hit) {
+      // Stale-while-revalidate. The crawl parses every file in the nest, so
+      // waiting for a fresh one put the caller behind a multi-second walk every
+      // time the entry aged out — the cross-nest search paid it per nest, for
+      // any query not repeated inside the TTL. Serve what we have and refresh
+      // behind the request: the set is at most one crawl older than the strict
+      // version, and a write through this process still reconciles on the spot.
+      if (Date.now() - hit.ts >= DISCOVERY_TTL_MS) {
+        void crawl(options).catch((err) => {
+          // A failed refresh keeps the previous set and the next read retries,
+          // so reads keep succeeding — which is exactly why this is logged: a
+          // wedged storage mount would otherwise stay invisible behind a cache
+          // that never stops serving.
+          console.error("[discovery] background refresh failed", err);
+        });
+      }
+      return hit.docs;
     }
-    const startedAt = generation;
-    const crawled = await discover({ ...options, includeRetired: true });
-    const docs = key === "all" || !filtersRetired ? crawled : crawled.filter(isLive);
-    if (generation === startedAt) {
-      const ts = Date.now();
-      entries.set("all", { docs: crawled, ts });
-      entries.set(key, { docs, ts });
-    }
-    return docs;
+    return (await crawl(options))[key];
   };
 
   const invalidate = () => {
     generation++;
     entries.clear();
+    // Drop the in-flight crawl too, or a read arriving after the write joins
+    // one that started before it and gets pre-write content.
+    inflight = null;
   };
 
   /**
@@ -111,8 +153,11 @@ function withDiscoveryCache<S extends NestStorage>(
    * can get relative to another instance.
    */
   const patch = async (id: string): Promise<void> => {
-    // Same guard as invalidate(): a crawl already in flight predates this write.
+    // Same guard as invalidate(): a crawl already in flight predates this
+    // write, so its result must neither be cached nor handed to a reader that
+    // joins it after the fact.
     generation++;
+    inflight = null;
     let node: ContextNode | null = null;
     try {
       node = await readDoc(id);

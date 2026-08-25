@@ -7,6 +7,7 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
+import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
@@ -441,10 +442,7 @@ export function NestView({
   const [newFolderPath, setNewFolderPath] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
 
-  // Folder-nesting ceiling. Mirrors the server's folderToSegments guard
-  // (src/nodes/service.ts) — the leaf document doesn't count, only the folder
-  // segments. Kept in sync by hand; the server stays authoritative.
-  const MAX_FOLDER_DEPTH = 8;
+  // The ceiling counts folder segments only — the leaf document doesn't count.
   const newFolderDepth = newFolderPath
     .split("/")
     .map((s) => s.trim())
@@ -1933,11 +1931,15 @@ export function NestView({
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because
           their data is empty by definition. */}
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full min-w-0">
         {/* New Folder sits beside the tab row — it acts on the content area
-            below (Overview/Documents), not on the nest as a whole. */}
-        <div className="flex items-center gap-2 mb-4">
-          <TabsList>
+            below (Overview/Documents), not on the nest as a whole.
+            The triggers never wrap, so on a narrow window the row scrolls
+            inside itself rather than making the whole page scroll sideways —
+            page-level overflow drags fixed UI (toasts, dialogs) off-screen
+            with it. */}
+        <div className="flex items-center gap-2 mb-4 min-w-0">
+          <TabsList className="max-w-full justify-start overflow-x-auto">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="documents">Documents</TabsTrigger>
             {/* Governance tabs hidden for view-only. */}
@@ -1982,7 +1984,7 @@ export function NestView({
             <Button
               variant="outline"
               size="sm"
-              className="ml-auto text-muted-foreground"
+              className="ml-auto shrink-0 text-muted-foreground"
               onClick={() => setShowNewFolder(true)}
               title="Create a folder (nest with parent/child)"
             >

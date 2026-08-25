@@ -48,7 +48,7 @@ import {
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
-import { ANON_USER_ID } from "../shared/constants.js";
+import { ANON_USER_ID, MAX_FOLDER_DEPTH } from "../shared/constants.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { config } from "../config.js";
 
@@ -88,30 +88,63 @@ function assertTitleLength(title: string): void {
 }
 
 /**
- * A title of "###", "...", or spaces slugifies to nothing, and the derived id
- * would be a bare `nodes/` — a ghost at nodes/.md that no list shows and no id
- * addresses. The engine's storage guard refuses that id; this raises the same
- * refusal as a 400 with a message a person can act on. Same choke point as
- * assertTitleLength: REST and MCP both route here.
- *
- * The slug is ASCII, so an all-CJK/Cyrillic/Arabic title lands here too — it
- * derived the same empty id. The message names that real constraint rather
- * than claiming the title has no letters.
+ * The engine refuses a title with no letter or number at all ("###", "...",
+ * spaces) — it cannot be read back by search or wiki links. Raise that as a
+ * 400 here, at the choke point REST and MCP share, rather than letting it
+ * surface as a 500 from deep inside a publish. Letter/number is Unicode-wide:
+ * "日本語のみ" is letters, and only the derived id needs ASCII.
  */
-function assertTitleSluggable(title: string): void {
-  if (!slugify(title)) {
+function assertTitleReadable(title: string): void {
+  if (!/[\p{L}\p{N}]/u.test(title)) {
     throw new ValidationError(
-      "the document id is built from the title using a-z and 0-9, so the " +
-        "title needs at least one of those"
+      "the title needs at least one letter or number — it is what search and " +
+        "wiki links read back",
     );
   }
 }
 
+/**
+ * Ids are ASCII path segments, but a title is whatever the author wrote.
+ * Decompose first (NFKD) and drop the combining marks, so "Café Résumé"
+ * derives `cafe-resume` instead of `caf-r-sum` — the accents are stripped from
+ * the letters they sit on rather than taking the letters with them. A script
+ * with no ASCII form at all (CJK, Cyrillic, Arabic) still slugifies to "";
+ * createNode falls back to a generated id there rather than refusing the title.
+ */
 const slugify = (s: string) =>
   s
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "");
+
+/**
+ * The id for a title that carries no ASCII at all: document-1, document-2, …,
+ * the first one free in this folder. The title stays exactly what the author
+ * typed; only the path is ASCII.
+ *
+ * ponytail: linear probe. Fine while such titles are a minority of a folder —
+ * if a nest ever fills a folder with thousands, list the folder once instead.
+ */
+async function generatedSlug(
+  storage: { readDocument: (id: string) => Promise<unknown> },
+  prefix: string,
+): Promise<string> {
+  for (let n = 1; n <= 1000; n++) {
+    const slug = `document-${n}`;
+    try {
+      await storage.readDocument(`${prefix}${slug}`);
+    } catch (err) {
+      if (err instanceof DocumentNotFoundError) return slug;
+      throw err;
+    }
+  }
+  throw new ValidationError(
+    "too many generated document ids in this folder — give the document a " +
+      "title with Latin letters or digits, or file it elsewhere",
+  );
+}
 
 /**
  * Does this document id live under `folder`? The engine only prefixes ids
@@ -135,8 +168,9 @@ function folderToSegments(folder: string): string[] {
   // list means "the nest root" — so the doc lands at nodes/<title> instead, and
   // the next such folder collides with it ("already exists at nodes/overview").
   // An absent folder is still fine; only a name the caller meant is refused.
-  // Folder segments are path components, so the ASCII bound is the same one
-  // assertTitleSluggable explains.
+  // A folder path has no fallback the way a title does (createNode generates
+  // an id when a title carries no ASCII) — a folder IS its path, so a name
+  // that slugifies away leaves nothing to file under.
   if (folder.trim() && segments.length === 0) {
     throw new ValidationError(
       "the folder path is built from the name using a-z and 0-9, so the " +
@@ -150,8 +184,10 @@ function folderToSegments(folder: string): string[] {
   // in create and move separately. Cost: a folder literally named "nodes"
   // under the root is unaddressable — nobody wants nodes/nodes/.
   if (segments[0] === "nodes") segments.shift();
-  if (segments.length > 8) {
-    throw new ValidationError("folder may nest at most 8 levels deep");
+  if (segments.length > MAX_FOLDER_DEPTH) {
+    throw new ValidationError(
+      `folder may nest at most ${MAX_FOLDER_DEPTH} levels deep`,
+    );
   }
   if (segments.some((seg) => seg.length > 100)) {
     throw new ValidationError(
@@ -741,7 +777,34 @@ async function autoPublishReason(
     : null;
 }
 
+/**
+ * Create a node, retrying a generated id that lost a race.
+ *
+ * A title with no Latin characters gets its id by probing for the first free
+ * `document-N`, and that probe runs before the per-id write lock is taken — so
+ * two concurrent such creates in one folder can pick the same id and the loser
+ * gets a conflict on an id it never chose. Probe again and take the next one:
+ * the fallback exists to hand out a free id, so failing there defeats it. Only
+ * that case retries; every other conflict is the caller's own id and stands.
+ */
 export async function createNode(
+  nestId: string,
+  input: CreateNodeInput,
+  userEmail: string,
+): Promise<NodeMutationResult> {
+  const generatedId = !input.id && !slugify(input.title);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await createNodeOnce(nestId, input, userEmail);
+    } catch (err) {
+      if (!generatedId || attempt >= 3 || !(err instanceof ConflictError)) {
+        throw err;
+      }
+    }
+  }
+}
+
+async function createNodeOnce(
   nestId: string,
   input: CreateNodeInput,
   userEmail: string
@@ -749,10 +812,7 @@ export async function createNode(
   const { storage, versions: versionManager } = await engineCache.get(nestId);
 
   assertTitleLength(input.title);
-  // Only when the id is derived from the title — an explicit id makes the title
-  // a label, and a caller that minted its own id has already said where the doc
-  // goes.
-  if (!input.id) assertTitleSluggable(input.title);
+  assertTitleReadable(input.title);
   // The id slug is derived, not user-facing: a title within MAX_TITLE_LENGTH
   // can still slugify past the 100-char path-segment bound, so truncate rather
   // than reject. Keeps storage.writeDocument off ENAMETOOLONG without making
@@ -768,10 +828,14 @@ export async function createNode(
   let id = input.id;
   if (!id) {
     const folderSegments = folderToSegments(input.folder ?? "");
-    id =
+    const prefix =
       folderSegments.length > 0
-        ? `nodes/${folderSegments.join("/")}/${slug}`
-        : `nodes/${slug}`;
+        ? `nodes/${folderSegments.join("/")}/`
+        : "nodes/";
+    // "###" or an all-CJK/Cyrillic/Arabic title slugifies to nothing, and a
+    // bare `nodes/` id is a ghost at nodes/.md that no list shows and no id
+    // addresses. Generate one instead of refusing the title.
+    id = `${prefix}${slug || (await generatedSlug(storage, prefix))}`;
   }
   const tags = (input.tags || []).map(normalizeTag);
 
@@ -1212,10 +1276,10 @@ export async function updateNode(
         // title. The editor sends `title` on EVERY save, so a flat check would
         // make those docs unsavable — enforce only on an actual rename.
         if (patch.title !== node.frontmatter.title) {
+          // A rename keeps the id, so the new title never has to be sluggable
+          // — it only has to be bounded and readable.
           assertTitleLength(patch.title);
-          // A rename keeps the id, so nothing is written to nodes/ — but the
-          // title is still what search, wiki links and every header read back.
-          assertTitleSluggable(patch.title);
+          assertTitleReadable(patch.title);
         }
         node = {
           ...node,

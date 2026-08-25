@@ -12,7 +12,7 @@
  * save, which offered an action that was never theirs to take.
  */
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, Plus, Trash2, Pencil } from "lucide-react";
+import { Loader2, Plus, Trash2, Pencil, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -109,6 +109,18 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
     setLinkedTag(d.linked_tag?.replace(/^#/, "") ?? "");
   };
 
+  // A term the nest already defines. The POST upserts by term, so typing an
+  // existing one in the add form is an overwrite of a teammate's wording, not
+  // an add — surface it before the click rather than after. In edit mode the
+  // match is a *sibling* row (self excluded), which the server 409s.
+  const typedTerm = term.trim().toLowerCase();
+  const existing =
+    typedTerm
+      ? rows.find(
+          (r) => r.term.toLowerCase() === typedTerm && r.id !== editingId,
+        ) ?? null
+      : null;
+
   const save = async () => {
     if (!term.trim() || !definition.trim()) {
       toast.error("Term and definition are both required.");
@@ -124,7 +136,13 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
         // (server 409s if the new term already belongs to another row).
         ...(editingId ? { editing_id: editingId } : {}),
       });
-      toast.success(editingId ? "Definition updated" : "Term defined");
+      toast.success(
+        editingId
+          ? "Definition updated"
+          : existing
+            ? `Replaced the definition of "${existing.term}"`
+            : "Term defined",
+      );
       resetForm();
       await load();
     } catch (e: any) {
@@ -149,12 +167,29 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
       <NestPageHeader nestName={nestName} onBack={onBack} />
 
       <p className="text-sm text-muted-foreground">
-        The nest's shared vocabulary — terms and tags, articulated once,
-        pulled anywhere. Agents and analysis jobs fetch these live:{" "}
-        <code className="text-[11px] bg-muted px-1 py-0.5 rounded">
-          GET /nests/{nestId.slice(0, 8)}…/definitions?term=&lt;term&gt;
-        </code>
+        The nest's shared vocabulary — what each term means here, written down
+        once so everyone (and every agent reading this nest) uses it the same
+        way.
       </p>
+
+      {/* The endpoint is real and worth having, but it belongs behind a
+          disclosure: most people opening this page are writing a definition,
+          not calling an API. */}
+      <details className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
+        <summary className="cursor-pointer font-medium text-muted-foreground">
+          For developers — fetch a definition over HTTP
+        </summary>
+        <div className="mt-2 space-y-1.5 text-muted-foreground">
+          <p>
+            Agents and analysis jobs read these live, so a definition edited
+            here changes what they answer with on the next call.
+          </p>
+          <pre className="overflow-x-auto rounded border bg-background p-2 font-mono text-[10.5px] leading-relaxed">
+            GET /nests/{nestId}/definitions?term=&lt;term&gt;
+          </pre>
+          <p>Omit the query to get the whole glossary.</p>
+        </div>
+      </details>
 
       {/* Add / edit form — write-tier only. */}
       {canWrite && (
@@ -177,6 +212,40 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
           placeholder="Definition — articulate exactly what this term means here, including formula/source if quantitative."
           className="w-full min-h-[72px] rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         />
+        {existing && (
+          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <b>{existing.term}</b>{" "}
+                {editingId ? (
+                  <>
+                    is already defined by another entry ({existing.defined_by}) —
+                    saving this rename will be rejected.
+                  </>
+                ) : (
+                  <>
+                    is already defined by {existing.defined_by}. Saving replaces
+                    that definition:
+                  </>
+                )}
+                <div className="mt-1 whitespace-pre-wrap text-amber-900/80">
+                  {existing.definition.length > 240
+                    ? `${existing.definition.slice(0, 240)}…`
+                    : existing.definition}
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 shrink-0"
+                onClick={() => startEdit(existing)}
+              >
+                <Pencil className="h-3.5 w-3.5 mr-1" /> Edit it instead
+              </Button>
+            </div>
+          </div>
+        )}
         <div className="flex items-center justify-end gap-2">
           {editingId && (
             <Button variant="ghost" size="sm" onClick={resetForm}>
@@ -189,6 +258,10 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
             ) : editingId ? (
               <>
                 <Pencil className="h-3.5 w-3.5 mr-1" /> Update
+              </>
+            ) : existing ? (
+              <>
+                <AlertTriangle className="h-3.5 w-3.5 mr-1" /> Replace definition
               </>
             ) : (
               <>
