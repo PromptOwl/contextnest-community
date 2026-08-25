@@ -154,6 +154,49 @@ describe("nested runs", () => {
     expect(over.data.error).toContain("step limit");
   });
 
+  it("a cancel that lost the race leaves the winner's verdict and its children", async () => {
+    // The status check and the write are two statements, so a runner reporting
+    // success in between could be overwritten by a Cancel — and since cancel
+    // now stops the whole branch, that would also kill the sub-agents of a run
+    // that actually succeeded.
+    const root = await trigger("root-agent");
+    const child = await trigger("child-agent", { parent_run_id: root.data.run_id });
+    const ok = await jsonRequest(
+      app,
+      "PATCH",
+      `/runs/${root.data.run_id}`,
+      { status: "succeeded" },
+      owner.apiKey,
+    );
+    expect(ok.status).toBe(200);
+
+    const late = await jsonRequest(
+      app,
+      "PATCH",
+      `/runs/${root.data.run_id}`,
+      { status: "cancelled" },
+      owner.apiKey,
+    );
+    expect(late.status).toBe(409);
+
+    const after = await jsonRequest(
+      app,
+      "GET",
+      `/runs/${root.data.run_id}`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(after.data.run.status).toBe("succeeded");
+    const kid = await jsonRequest(
+      app,
+      "GET",
+      `/runs/${child.data.run_id}`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(kid.data.run.status).toBe("running");
+  });
+
   it("cancelling a run cancels the whole branch under it", async () => {
     const root = await trigger("root-agent");
     const child = await trigger("child-agent", { parent_run_id: root.data.run_id });

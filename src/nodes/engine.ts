@@ -123,8 +123,12 @@ function withDiscoveryCache<S extends NestStorage>(
       // behind the request: the set is at most one crawl older than the strict
       // version, and a write through this process still reconciles on the spot.
       if (Date.now() - hit.ts >= DISCOVERY_TTL_MS) {
-        void crawl(options).catch(() => {
-          // A failed refresh keeps the previous set; the next read retries.
+        void crawl(options).catch((err) => {
+          // A failed refresh keeps the previous set and the next read retries,
+          // so reads keep succeeding — which is exactly why this is logged: a
+          // wedged storage mount would otherwise stay invisible behind a cache
+          // that never stops serving.
+          console.error("[discovery] background refresh failed", err);
         });
       }
       return hit.docs;

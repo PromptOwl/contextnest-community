@@ -32,6 +32,7 @@ import { reads } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import { deriveNestCaps } from "../lib/nest-caps";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
+import { slugifyFolderPath } from "../lib/folder-target";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -302,24 +303,30 @@ export function MaturityBoard({
    * folder itself is created by the first card dropped into it (moveNode
    * writes the path server-side) — so a nest whose documents all sit in Root
    * has somewhere to drag them, which is the one interaction the board's own
-   * instructions describe. A column nobody drops into is layout-only and
-   * disappears on the next load, which is the right outcome for a typo.
+   * instructions describe. It is layout-only until then, and removable with
+   * the × while it holds no cards.
+   *
+   * The folder key is slugified here because the server slugifies the path it
+   * writes: keyed on the typed text, "New Folder" would sit empty next to the
+   * `new-folder` column the dropped card actually created.
    */
   const addColumn = useCallback(
     (value: string) => {
       const v =
         effectiveConfig.dimension === "folder"
-          ? value.trim().replace(/^\/+|\/+$/g, "")
+          ? slugifyFolderPath(value)
           : value.trim();
+      if (effectiveConfig.dimension === "folder" && !v) {
+        // Slugifying to nothing is the same bound the server enforces: a name
+        // with no letter or digit has no path to derive.
+        if (value.trim()) {
+          toast("A folder name needs at least one letter or digit.");
+        }
+        return;
+      }
       if (!v) return;
       if (effectiveConfig.dimension === "folder") {
-        // Both bounds the server enforces (src/nodes/service.ts): the path is
-        // slugified to a-z0-9, and it may nest at most MAX_FOLDER_DEPTH deep.
-        if (!/[a-z0-9]/i.test(v)) {
-          toast("A folder name needs at least one letter or digit.");
-          return;
-        }
-        if (v.split("/").filter(Boolean).length > MAX_FOLDER_DEPTH) {
+        if (v.split("/").length > MAX_FOLDER_DEPTH) {
           toast(`Folders may nest at most ${MAX_FOLDER_DEPTH} levels deep.`);
           return;
         }

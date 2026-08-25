@@ -24,3 +24,32 @@ export function folderGrantTarget(
   // Empty folder — fall back to the conventional root.
   return folderPath.startsWith("nodes/") ? folderPath : `nodes/${folderPath}`;
 }
+
+/**
+ * The folder path the server will actually write, for a name typed in the UI.
+ *
+ * Folder paths are derived, not stored verbatim: the server slugifies each
+ * segment (see folderToSegments) and drops a leading `nodes`, so "New Folder"
+ * becomes `new-folder`. A caller that keeps the typed text instead ends up
+ * disagreeing with the ids that come back — on the board, a column keyed by
+ * the raw name would sit empty forever beside the real one.
+ *
+ * Kept in step with the server by hand; it stays authoritative.
+ */
+export function slugifyFolderPath(input: string): string {
+  const segments = input
+    .split("/")
+    .map((seg) =>
+      seg
+        // Decompose so an accent comes off its letter rather than taking the
+        // letter with it: "Café" → cafe, not caf.
+        .normalize("NFKD")
+        .replace(/\p{M}+/gu, "")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, ""),
+    )
+    .filter(Boolean);
+  if (segments[0] === "nodes") segments.shift();
+  return segments.join("/");
+}

@@ -507,8 +507,14 @@ runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
     throw new ValidationError("status must be running | succeeded | failed | cancelled");
   }
   const terminal = status !== "running";
-  await getDb().run(
-    `UPDATE runs SET status = ?, trace = COALESCE(?, trace), finished_at = ? WHERE id = ?`,
+  // Compare-and-swap on the status, same as closeRun: the check above read the
+  // row before this write, so a runner reporting success through MCP in that
+  // window would otherwise be overwritten — and, since cancelling now stops the
+  // whole branch, a losing Cancel would take the completed run's sub-agents
+  // with it. Rows-affected is the arbiter; the loser gets the 409.
+  const res = await getDb().run(
+    `UPDATE runs SET status = ?, trace = COALESCE(?, trace), finished_at = ?
+      WHERE id = ? AND status = 'running'`,
     [
       status,
       body.trace === undefined ? null : JSON.stringify(body.trace),
@@ -516,7 +522,15 @@ runDetailRoutes.patch("/:id", requireWorkflowPlane, async (c) => {
       run.id,
     ],
   );
+  if (!res.changes) {
+    const now = (await getDb().get("SELECT status FROM runs WHERE id = ?", [
+      run.id,
+    ])) as { status: string } | undefined;
+    throw new ConflictError(`Run already terminal (${now?.status ?? "closed"})`);
+  }
   // Cancelling stops the whole branch — sub-agents under this run go too.
+  // Only once the swap above won, or a lost race would cancel the descendants
+  // of a run that actually succeeded.
   if (status === "cancelled") await cancelDescendants(run.id);
   if (status === "failed") {
     const err =

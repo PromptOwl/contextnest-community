@@ -168,8 +168,9 @@ function folderToSegments(folder: string): string[] {
   // list means "the nest root" — so the doc lands at nodes/<title> instead, and
   // the next such folder collides with it ("already exists at nodes/overview").
   // An absent folder is still fine; only a name the caller meant is refused.
-  // Folder segments are path components, so the ASCII bound is the same one
-  // assertTitleSluggable explains.
+  // A folder path has no fallback the way a title does (createNode generates
+  // an id when a title carries no ASCII) — a folder IS its path, so a name
+  // that slugifies away leaves nothing to file under.
   if (folder.trim() && segments.length === 0) {
     throw new ValidationError(
       "the folder path is built from the name using a-z and 0-9, so the " +
@@ -776,7 +777,34 @@ async function autoPublishReason(
     : null;
 }
 
+/**
+ * Create a node, retrying a generated id that lost a race.
+ *
+ * A title with no Latin characters gets its id by probing for the first free
+ * `document-N`, and that probe runs before the per-id write lock is taken — so
+ * two concurrent such creates in one folder can pick the same id and the loser
+ * gets a conflict on an id it never chose. Probe again and take the next one:
+ * the fallback exists to hand out a free id, so failing there defeats it. Only
+ * that case retries; every other conflict is the caller's own id and stands.
+ */
 export async function createNode(
+  nestId: string,
+  input: CreateNodeInput,
+  userEmail: string,
+): Promise<NodeMutationResult> {
+  const generatedId = !input.id && !slugify(input.title);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await createNodeOnce(nestId, input, userEmail);
+    } catch (err) {
+      if (!generatedId || attempt >= 3 || !(err instanceof ConflictError)) {
+        throw err;
+      }
+    }
+  }
+}
+
+async function createNodeOnce(
   nestId: string,
   input: CreateNodeInput,
   userEmail: string
