@@ -77,13 +77,13 @@ describe("tokenizePrompt", () => {
 });
 
 describe("compilePrompt — against seeded nest", () => {
-  it("matches prompt tokens to node tags from node_tag_index", () => {
+  it("matches prompt tokens to node tags from node_tag_index", async () => {
     const titles = [
       "API Authentication Guide",
       "Database Setup",
       "Brand Guidelines",
     ];
-    const result = compilePrompt("How do I authenticate?", nestId, titles);
+    const result = await compilePrompt("How do I authenticate?", nestId, titles);
     // "authenticate" token matches title "API Authentication Guide" (via its
     // "authentication" word)? No — tokenizePrompt on "API Authentication Guide"
     // gives ["api", "authentication", "guide"], and prompt tokens are
@@ -92,9 +92,9 @@ describe("compilePrompt — against seeded nest", () => {
     expect(result.unmatched).toContain("authenticate");
   });
 
-  it("matches exact tag names in the prompt", () => {
+  it("matches exact tag names in the prompt", async () => {
     const titles = ["API Authentication Guide", "Database Setup"];
-    const result = compilePrompt(
+    const result = await compilePrompt(
       "I need help with database and auth",
       nestId,
       titles,
@@ -104,17 +104,17 @@ describe("compilePrompt — against seeded nest", () => {
     expect(result.selector).toContain("#database");
   });
 
-  it("matches titles whose words overlap with prompt tokens", () => {
+  it("matches titles whose words overlap with prompt tokens", async () => {
     const titles = ["API Authentication Guide", "Database Setup"];
-    const result = compilePrompt("database setup walkthrough", nestId, titles);
+    const result = await compilePrompt("database setup walkthrough", nestId, titles);
     expect(result.matchedTitles).toContain("Database Setup");
     // Selector carries tags only; titles are resolved via direct lookup
     // because the engine's selector grammar doesn't support [[Title]].
     expect(result.selector).toContain("#database");
   });
 
-  it("returns selector=null when nothing matches", () => {
-    const result = compilePrompt(
+  it("returns selector=null when nothing matches", async () => {
+    const result = await compilePrompt(
       "quantum supply-chain logistics",
       nestId,
       ["API Authentication Guide"],
@@ -223,5 +223,69 @@ describe("POST /nests/:id/context", () => {
     );
     const separators = (data.context.match(/\n---\n/g) || []).length;
     expect(separators).toBe(data.nodes.length - 1);
+  });
+});
+
+// ── explicit [[Title]] selector parts (graph click-to-query emits these) ──
+
+describe("POST /context — explicit [[Title]] selector", () => {
+  beforeAll(async () => {
+    // A links to B; C is unlinked. Lets us assert hop expansion precisely.
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Hub Note",
+      content: "# Hub\n\nSee [[Spoke Note]] for details.",
+      tags: ["hub"],
+    });
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes`, {
+      title: "Spoke Note",
+      content: "# Spoke\n\nLeaf content.",
+    });
+  });
+
+  it("resolves a [[Title]] part with hops 0 to exactly that doc", async () => {
+    const res = await jsonRequest(app, "POST", `/nests/${nestId}/context`, {
+      selector: "[[Hub Note]]",
+      hops: 0,
+    });
+    expect(res.status).toBe(200);
+    const ids = res.data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/hub-note");
+    expect(ids).not.toContain("nodes/spoke-note");
+  });
+
+  it("hop-expands a [[Title]] match over wikilinks", async () => {
+    const res = await jsonRequest(app, "POST", `/nests/${nestId}/context`, {
+      selector: "[[Hub Note]]",
+      hops: 1,
+    });
+    const ids = res.data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/hub-note");
+    expect(ids).toContain("nodes/spoke-note");
+    expect(res.data.trace.hops_used).toBeGreaterThanOrEqual(1);
+  });
+
+  it("keeps explicit [[Title]] matches even when prompt is also sent", async () => {
+    // A pure [[Title]] selector fully consumes `selector`; the prompt branch
+    // must not then overwrite the resolved title matches.
+    const res = await jsonRequest(app, "POST", `/nests/${nestId}/context`, {
+      selector: "[[Hub Note]]",
+      prompt: "tell me about brand guidelines",
+      hops: 0,
+    });
+    expect(res.status).toBe(200);
+    const ids = res.data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/hub-note");
+  });
+
+  it("mixes [[Title]] parts with engine selector parts in an OR union", async () => {
+    const res = await jsonRequest(app, "POST", `/nests/${nestId}/context`, {
+      selector: "[[Spoke Note]] | #brand",
+      hops: 0,
+    });
+    const ids = res.data.nodes.map((n: any) => n.id);
+    expect(ids).toContain("nodes/spoke-note");
+    // #brand side goes through the engine; tolerate index lag like the
+    // other selector tests, but the title side must always resolve.
+    expect(res.status).toBe(200);
   });
 });

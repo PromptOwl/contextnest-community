@@ -3,18 +3,40 @@
  */
 import React, { useState, useEffect } from "react";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Terminal, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Search,
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
+import { copyTextWithToast } from "../lib/clipboard";
+import { relTime, formatServerDate } from "../lib/dates";
+import { nestNameProblem } from "../lib/nest-name";
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { CountSkeleton } from "@/components/ui/count-skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { ReasonDialog, SubmitForReviewModal } from "./governance";
 import { DeleteNestDialog } from "./DeleteNestDialog";
+import { RenameNestDialog } from "./RenameNestDialog";
+import { ImportFolderModal } from "./ImportFolderModal";
+
+// relTime / formatServerDate live in lib/dates: SQL-default timestamps arrive
+// as UTC with no zone, which new Date() would read as local time.
 
 interface DashboardProps {
   onSelectNest: (
@@ -23,45 +45,173 @@ interface DashboardProps {
     isOwner: boolean,
     isAnonOwned: boolean,
   ) => void;
+  onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
+  /** Opens the cross-nest search palette (the same one Cmd/Ctrl+K opens). */
+  onOpenSearch?: () => void;
 }
 
-interface ServerStats {
-  nests: number;
-  documents: number;
-  users: number;
-}
-
-export function Dashboard({ onSelectNest }: DashboardProps) {
+export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
-  const [nests, setNests] = useState<any[]>([]);
-  const [stats, setStats] = useState<ServerStats | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [work, setWork] = useState<{
+    items: api.WorkItem[];
+    waiting: api.WorkItem[];
+    notifications?: api.WatcherNotification[];
+    pagination?: api.WorkPagination;
+  }>({ items: [], waiting: [] });
+  const [loadingMoreWork, setLoadingMoreWork] = useState(false);
+  // Drafts you never submitted — their own tab, not folded into My Work.
+  const [drafts, setDrafts] = useState<api.MyDraft[]>([]);
+  const [draftsPage, setDraftsPage] = useState<api.WorkPagination | null>(null);
+  const [draftsLoading, setDraftsLoading] = useState(true);
+  // Draft awaiting the submit dialog (priority + note) — same modal the editor
+  // uses, so submitting from here isn't a second, weaker path.
+  const [submitTarget, setSubmitTarget] = useState<api.MyDraft | null>(null);
+  const [acting, setActing] = useState<Record<string, boolean>>({});
+  // Deletion flag being resolved from the inbox, and which dialog it opens.
+  const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
+  const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
+  // Served from the shared read cache: coming back to the dashboard paints the
+  // previous list immediately and revalidates behind it. `isLoading` is true
+  // only on a genuine first load with nothing cached, so the loader below still
+  // appears exactly when it used to and never on a revisit.
+  const {
+    data: nestsData,
+    isLoading: loading,
+    refetch: refetchNests,
+  } = useNests();
+  const nests = nestsData?.nests ?? [];
+  const qc = useQueryClient();
+  const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
+  const [syncing, setSyncing] = useState<Record<string, boolean>>({});
+  const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
   const [showCreate, setShowCreate] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [createError, setCreateError] = useState<string | null>(null);
   // Pending target sits in state so the modal can render the nest name in
   // the confirmation copy without prop-drilling through a separate child.
   const [deleteTarget, setDeleteTarget] = useState<
-    { id: string; name: string } | null
+    { id: string; name: string; isImported: boolean } | null
+  >(null);
+  const [renameTarget, setRenameTarget] = useState<
+    { id: string; name: string; description: string | null } | null
+  >(null);
+  // Unsynced folder pending discard — drives the confirm dialog.
+  const [discardTarget, setDiscardTarget] = useState<
+    { name: string; label: string } | null
   >(null);
 
   const serverUrl =
     typeof window !== "undefined" ? window.location.origin : "http://localhost:3838";
 
   const fetchNests = async () => {
-    setLoading(true);
+    // The page loader is gated on the nest list only. The banner stats are
+    // derived from that same response (each nest carries document_count), so
+    // there is no separate /stats round-trip. /unsynced and /me/work are
+    // best-effort extras that stream into their own sections as they land —
+    // /unsynced is admin-gated (403 for non-admins).
+    qc
+      .fetchQuery(reads.unsynced())
+      .then((d) => setUnsynced(d.folders))
+      .catch(() => setUnsynced([]));
+    qc
+      .fetchQuery(reads.myWork())
+      .then(setWork)
+      .catch(() => setWork({ items: [], waiting: [], notifications: [] }));
+    // Streams into its own tab like the other extras — never gated behind
+    // setLoading, so it can't add to the dashboard's time-to-first-paint.
+    void goToDraftsPage(0);
+    // The list itself comes from the cache. A refetch here is a no-op when a
+    // mutation already invalidated it (the query is refetching anyway) and
+    // joins the in-flight request on mount rather than doubling it.
+    await refetchNests();
+  };
+
+  // Jump to a page of drafts. Same replace-the-page contract as the work
+  // inbox below, so submitting one can reload the page the user is standing on.
+  const goToDraftsPage = async (offset: number) => {
+    setDraftsLoading(true);
     try {
-      // /stats is best-effort. If it 503s (license gate, on older servers)
-      // or 404s (not deployed yet) we fall back to nest count only.
-      const [nestsData, statsData] = await Promise.all([
-        api.listNests(),
-        api.getServerStats().catch(() => null),
-      ]);
-      setNests(nestsData.nests);
-      setStats(statsData);
-    } catch {} finally {
-      setLoading(false);
+      const next = await qc.fetchQuery(reads.myDrafts({ offset }));
+      setDrafts(next.drafts);
+      setDraftsPage(next.pagination);
+    } catch (e) {
+      console.error("[Dashboard] goToDraftsPage failed", e);
+      setDrafts([]);
+    } finally {
+      setDraftsLoading(false);
+    }
+  };
+
+  // Jump to a page of pending reviews (Prev/Next). Replaces the current page
+  // rather than appending — offset is clamped ≥ 0 by the caller.
+  const goToWorkPage = async (offset: number) => {
+    setLoadingMoreWork(true);
+    try {
+      const next = await qc.fetchQuery(reads.myWork({ offset }));
+      setWork((prev) => ({
+        items: next.items,
+        waiting: next.waiting,
+        notifications: next.notifications ?? prev.notifications,
+        pagination: next.pagination,
+      }));
+    } catch (e) {
+      console.error("[Dashboard] goToWorkPage failed", e);
+    } finally {
+      setLoadingMoreWork(false);
+    }
+  };
+
+  const handleSync = async (name: string) => {
+    setSyncing((s) => ({ ...s, [name]: true }));
+    setSyncErrors((s) => {
+      const next = { ...s };
+      delete next[name];
+      return next;
+    });
+    try {
+      await api.syncUnsyncedFolder(name);
+      await fetchNests();
+    } catch (e) {
+      console.error("[Dashboard] syncUnsyncedFolder failed", name, e);
+      const msg = e instanceof Error ? e.message : "Failed to sync folder";
+      setSyncErrors((s) => ({ ...s, [name]: msg }));
+    } finally {
+      setSyncing((s) => {
+        const next = { ...s };
+        delete next[name];
+        return next;
+      });
+    }
+  };
+
+  // Delete an unsynced folder outright (leftover files the user doesn't want as
+  // a nest). Confirmed via the discard dialog — it removes files from disk and
+  // can't be undone.
+  const handleDiscardUnsynced = async (name: string) => {
+    setSyncing((s) => ({ ...s, [name]: true }));
+    setSyncErrors((s) => {
+      const next = { ...s };
+      delete next[name];
+      return next;
+    });
+    try {
+      await api.deleteUnsyncedFolder(name);
+      setUnsynced((prev) => prev.filter((f) => f.name !== name));
+      setDiscardTarget(null);
+    } catch (e) {
+      console.error("[Dashboard] deleteUnsyncedFolder failed", name, e);
+      const msg = e instanceof Error ? e.message : "Failed to delete folder";
+      setSyncErrors((s) => ({ ...s, [name]: msg }));
+      setDiscardTarget(null);
+    } finally {
+      setSyncing((s) => {
+        const next = { ...s };
+        delete next[name];
+        return next;
+      });
     }
   };
 
@@ -71,22 +221,121 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
   // until the page is manually reloaded.
   useEffect(() => { fetchNests(); }, [currentUserEmail]);
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newName.trim()) return;
+  const actOnReview = async (
+    w: api.WorkItem,
+    action: "approve" | "reject",
+  ) => {
+    const key = `${w.nest_id}:${w.node_id}`;
+    setActing((s) => ({ ...s, [key]: true }));
     try {
-      await api.createNest(newName, newDesc);
-      setNewName(""); setNewDesc(""); setShowCreate(false);
-      fetchNests();
-    } catch {}
+      if (action === "approve")
+        await api.approveReview(w.nest_id, w.node_id);
+      else await api.rejectReview(w.nest_id, w.node_id, "Rejected from inbox");
+      // Optimistic: drop the row, then reconcile from the server. Refetch the
+      // CURRENT inbox page (not fetchNests, which reloads page 1) so a user
+      // mid-triage on page 2+ isn't bounced back to the top.
+      setWork((prev) => ({
+        ...prev,
+        items: prev.items.filter(
+          (i) => !(i.nest_id === w.nest_id && i.node_id === w.node_id),
+        ),
+      }));
+      void goToWorkPage(work.pagination?.offset ?? 0);
+    } catch (e) {
+      console.error("[Dashboard] review action failed", e);
+    } finally {
+      setActing((s) => {
+        const next = { ...s };
+        delete next[key];
+        return next;
+      });
+    }
   };
 
-  const requestDelete = (nestId: string, nestName: string) => {
-    setDeleteTarget({ id: nestId, name: nestName });
+  // Resolve a deletion flag straight from the inbox. Delete needs a confirm and
+  // decline needs a note, so both go through ReasonDialog; the handlers throw
+  // on failure so the error lands in the dialog, not a swallowed console line.
+  const handleInboxDelete = async () => {
+    const w = deletionTarget!;
+    await api.approveDeletionRequest(w.nest_id, w.request_id!);
+    dropWorkItem(w);
+  };
+  const handleInboxDecline = async (note: string) => {
+    const w = deletionTarget!;
+    await api.declineDeletionRequest(w.nest_id, w.request_id!, note);
+    dropWorkItem(w);
+  };
+  // A folder or nest deletion item carries a folder path / nest id in node_id,
+  // not a document id — opening the editor on it lands on a page for a node
+  // that was never there. Send those to the nest instead.
+  const openWorkItem = (w: api.WorkItem) => {
+    if (w.type === "deletion" && w.target_type && w.target_type !== "document") {
+      onSelectNest(w.nest_id, w.nest_name, false, false);
+      return;
+    }
+    onOpenReview(w.nest_id, w.nest_name, w.node_id);
+  };
+
+  // Submit a draft straight from the list — the whole point of the tab is that
+  // the doc was stranded, so the fix (hand it to a reviewer) is one click away.
+  // It leaves the drafts list and shows up under "Waiting on others". Throws on
+  // failure so the error surfaces in the dialog instead of a swallowed console
+  // line; the dialog also owns the busy state.
+  const submitDraft = async (
+    d: api.MyDraft,
+    note: string,
+    priority: string,
+  ) => {
+    await api.submitForReview(d.nest_id, d.node_id, note, priority);
+    // Optimistic drop, then reload the page the user is on — a row leaving
+    // pulls one up from the next page, and the total shifts.
+    setDrafts((prev) =>
+      prev.filter((x) => !(x.nest_id === d.nest_id && x.node_id === d.node_id)),
+    );
+    setSubmitTarget(null);
+    void goToDraftsPage(draftsPage?.offset ?? 0);
+    void goToWorkPage(work.pagination?.offset ?? 0);
+  };
+
+  // Optimistic drop + reconcile, same as actOnReview.
+  const dropWorkItem = (w: api.WorkItem) => {
+    setWork((prev) => ({
+      ...prev,
+      items: prev.items.filter(
+        (i) => !(i.nest_id === w.nest_id && i.node_id === w.node_id),
+      ),
+    }));
+    void goToWorkPage(work.pagination?.offset ?? 0);
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    // Say why instead of returning silently — the submit still reaches here
+    // when the browser autofills or the button is driven by Enter.
+    const problem = nestNameProblem(newName);
+    if (problem) {
+      setCreateError(problem);
+      return;
+    }
+    setCreateError(null);
+    try {
+      await api.createNest(newName.trim(), newDesc.trim());
+      setNewName(""); setNewDesc(""); setShowCreate(false);
+      fetchNests();
+    } catch (e) {
+      console.error("[Dashboard] createNest failed", e);
+      setCreateError(
+        e instanceof Error ? e.message : "Failed to create nest",
+      );
+    }
+  };
+
+  const requestDelete = (nestId: string, nestName: string, isImported = false) => {
+    setDeleteTarget({ id: nestId, name: nestName, isImported });
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Server info banner */}
       <Card className="bg-gradient-to-br from-blue-50 to-indigo-50 border-blue-200">
         <CardHeader className="pb-3">
@@ -101,24 +350,26 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                 <CopyInline value={serverUrl} />
               </CardDescription>
             </div>
+            {/* On a cold load `nests` is [], and rendering that as 0/0 reads as
+                "your content is gone". Hold a placeholder bar until the counts
+                are real — `loading` is false on a cached revisit, so this never
+                flashes when there's something to show. */}
             <div className="flex gap-6 text-center">
               <div>
                 <div className="text-2xl font-bold">
-                  {stats?.nests ?? nests.length}
+                  {loading ? <CountSkeleton /> : nests.length}
                 </div>
                 <div className="text-xs text-muted-foreground">Nests</div>
               </div>
               <div>
                 <div className="text-2xl font-bold">
-                  {stats ? stats.documents : "—"}
+                  {loading ? (
+                    <CountSkeleton />
+                  ) : (
+                    nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)
+                  )}
                 </div>
                 <div className="text-xs text-muted-foreground">Documents</div>
-              </div>
-              <div>
-                <div className="text-2xl font-bold">
-                  {stats ? stats.users : "—"}
-                </div>
-                <div className="text-xs text-muted-foreground">Users</div>
               </div>
             </div>
           </div>
@@ -138,13 +389,357 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
             <ClientHint
               icon={<Terminal className="h-4 w-4" />}
               title="CLI"
-              desc={`ctx --server ${serverUrl}`}
+              desc={`ctx push --server ${serverUrl}`}
               mono
             />
           </div>
         </CardContent>
       </Card>
 
+      {/* Tabbed view: Nests (default) vs My Work. With 200+ work items the
+          stacked layout pushed the nest grid below a huge scroll — tabs keep
+          nests one click away without touching either section's internals. */}
+      <Tabs defaultValue="nests">
+        <TabsList className="h-12 p-1.5">
+          <TabsTrigger value="nests" className="px-6 py-2 text-sm">
+            <Database className="h-4 w-4 mr-1.5" />
+            Nests
+          </TabsTrigger>
+          <TabsTrigger value="work" className="px-6 py-2 text-sm gap-1.5">
+            <Inbox className="h-4 w-4" />
+            My Work
+            {work.items.length > 0 && (
+              <span className="rounded-full bg-primary text-primary-foreground text-xs font-semibold px-1.5 py-0.5">
+                {work.items.length}
+              </span>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="drafts" className="px-6 py-2 text-sm gap-1.5">
+            <Pencil className="h-4 w-4" />
+            My Drafts
+            {(draftsPage?.total ?? 0) > 0 && (
+              <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-1.5 py-0.5">
+                {draftsPage!.total}
+              </span>
+            )}
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="work">
+      {/* My Work — cross-nest inbox. Slack/CRM-clean: two tight lists, every
+          row clicks straight to the document (circular nav), approve/reject
+          inline. "My Work" = waiting on you; "Waiting on" = you handed off. */}
+      <div className="space-y-5">
+        <div>
+          {(work.notifications?.length ?? 0) > 0 && (
+            <div className="mb-3 rounded-lg border border-amber-300/50 bg-amber-500/5">
+              <div className="px-4 py-2 flex items-center gap-2 text-sm font-medium">
+                🔔 Notifications
+                <span className="text-xs text-muted-foreground">
+                  ({work.notifications!.length})
+                </span>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  className="text-xs text-primary hover:underline"
+                  onClick={async () => {
+                    await api.markNotificationsRead("all");
+                    setWork((prev) => ({ ...prev, notifications: [] }));
+                  }}
+                >
+                  Mark all read
+                </button>
+              </div>
+              <div className="divide-y border-t">
+                {work.notifications!.slice(0, 8).map((n) => (
+                  <div key={n.id} className="px-4 py-2 text-xs flex items-center gap-2">
+                    <span className="flex-1">{n.message}</span>
+                    <span className="text-muted-foreground shrink-0">
+                      {formatServerDate(n.created_at)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="flex items-center gap-2 mb-2">
+            <Inbox className="h-5 w-5 text-muted-foreground" />
+            <h2 className="text-xl font-semibold">My Work</h2>
+            {work.items.length > 0 && (
+              <span className="rounded-full bg-primary text-primary-foreground text-xs font-semibold px-2 py-0.5">
+                {work.items.length}
+              </span>
+            )}
+          </div>
+          {work.items.length === 0 ? (
+            <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
+              You're all caught up — nothing waiting on you.
+            </div>
+          ) : (
+            <div className="rounded-lg border divide-y overflow-hidden">
+              {work.items.map((w) => {
+                const key = `${w.nest_id}:${w.node_id}`;
+                const busy = !!acting[key];
+                return (
+                  <div
+                    key={key}
+                    className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
+                  >
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${
+                        w.type === "deletion"
+                          ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
+                          : "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                      }`}
+                    >
+                      {w.type === "deletion" ? "Deletion" : "Review"}
+                    </span>
+                    <button
+                      onClick={() => openWorkItem(w)}
+                      className="flex items-center gap-2 min-w-0 flex-1 text-left"
+                    >
+                      <span className="font-medium truncate">{w.title}</span>
+                      <span className="text-xs text-muted-foreground truncate">
+                        in {w.nest_name} · {w.requested_by} · {relTime(w.requested_at)}
+                        {w.reason ? ` · "${w.reason}"` : ""}
+                      </span>
+                    </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {w.type === "deletion" ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => {
+                              setDeletionAction("delete");
+                              setDeletionTarget(w);
+                            }}
+                          >
+                            <Trash2 className="h-3.5 w-3.5 mr-1" />
+                            Delete
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="text-muted-foreground"
+                            onClick={() => {
+                              setDeletionAction("decline");
+                              setDeletionTarget(w);
+                            }}
+                          >
+                            Reject
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={busy}
+                            onClick={() => actOnReview(w, "approve")}
+                          >
+                            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 mr-1" />}
+                            Approve
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={busy}
+                            className="text-muted-foreground hover:text-destructive"
+                            onClick={() => actOnReview(w, "reject")}
+                          >
+                            Reject
+                          </Button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {work.waiting.length > 0 && (
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+                Waiting on others
+              </h3>
+              <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-2 py-0.5">
+                {work.waiting.length}
+              </span>
+            </div>
+            <div className="rounded-lg border divide-y overflow-hidden">
+              {work.waiting.map((w) => (
+                <button
+                  key={`${w.nest_id}:${w.node_id}`}
+                  onClick={() => openWorkItem(w)}
+                  className="w-full flex items-center gap-3 px-4 py-2 text-left hover:bg-muted/40 group text-sm"
+                >
+                  <span className="font-medium truncate">{w.title}</span>
+                  <span className="text-xs text-muted-foreground shrink-0">
+                    in {w.nest_name} ·{" "}
+                    {w.type === "deletion" ? "requested" : "submitted"}{" "}
+                    {relTime(w.requested_at)}
+                  </span>
+                  <span className="flex-1" />
+                  <span className="text-xs text-muted-foreground">
+                    {w.type === "deletion"
+                      ? "Deletion Requested"
+                      : "Pending Review"}
+                  </span>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:translate-x-0.5 transition-transform shrink-0" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {work.pagination && work.pagination.total > work.pagination.limit && (
+          <div className="flex items-center justify-center gap-3 pt-1 text-sm text-muted-foreground">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={loadingMoreWork || work.pagination.offset === 0}
+              onClick={() =>
+                goToWorkPage(Math.max(0, work.pagination!.offset - work.pagination!.limit))
+              }
+            >
+              <ChevronLeft className="h-3.5 w-3.5 mr-1" />
+              Prev
+            </Button>
+            <span>
+              Page {Math.floor(work.pagination.offset / work.pagination.limit) + 1} of{" "}
+              {Math.max(1, Math.ceil(work.pagination.total / work.pagination.limit))}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={loadingMoreWork || !work.pagination.has_more}
+              onClick={() =>
+                goToWorkPage(work.pagination!.offset + work.pagination!.limit)
+              }
+            >
+              Next
+              <ChevronRight className="h-3.5 w-3.5 ml-1" />
+            </Button>
+          </div>
+        )}
+      </div>
+        </TabsContent>
+
+        {/* My Drafts — everything you started and never handed off. A draft
+            that was never submitted has no review request, so before this it
+            appeared in no queue at all and was only findable by search. */}
+        <TabsContent value="drafts">
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <Pencil className="h-5 w-5 text-muted-foreground" />
+              <h2 className="text-xl font-semibold">My Drafts</h2>
+              {(draftsPage?.total ?? 0) > 0 && (
+                <span className="rounded-full bg-muted text-muted-foreground text-xs font-semibold px-2 py-0.5">
+                  {draftsPage!.total}
+                </span>
+              )}
+            </div>
+            {draftsLoading ? (
+              // Loader, not the empty state: "nothing here" while the request is
+              // still in flight reads as an answer, and this list existing at
+              // all is the fix for a draft nobody knew about.
+              <div className="rounded-lg border bg-muted/20 px-4 py-6 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading your drafts…
+              </div>
+            ) : drafts.length === 0 ? (
+              <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
+                No unsubmitted drafts — everything you've written is in review or approved.
+              </div>
+            ) : (
+              <div className="rounded-lg border divide-y overflow-hidden">
+                {drafts.map((d) => {
+                  const key = `${d.nest_id}:${d.node_id}`;
+                  return (
+                    <div
+                      key={key}
+                      className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
+                    >
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${
+                          d.status === "rejected"
+                            ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
+                            : "bg-muted text-muted-foreground"
+                        }`}
+                      >
+                        {d.status === "rejected" ? "Rejected" : "Draft"}
+                      </span>
+                      {/* Two lines: the title gets the full width (these run
+                          long), its location sits under it. Inline, both
+                          competed for the same row and each truncated the
+                          other — the location being readable is the point. */}
+                      <button
+                        onClick={() => onOpenReview(d.nest_id, d.nest_name, d.node_id)}
+                        className="flex flex-col min-w-0 flex-1 text-left gap-0.5"
+                      >
+                        <span className="font-medium truncate">{d.title}</span>
+                        <span
+                          className="text-xs text-muted-foreground truncate"
+                          title={`${d.nest_name} / ${d.node_id}`}
+                        >
+                          <Folder className="h-3 w-3 inline mr-1 -mt-0.5" />
+                          {d.nest_name}
+                          {d.folder ? ` / ${d.folder}` : ""} · edited{" "}
+                          {relTime(d.updated_at)}
+                        </span>
+                      </button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0"
+                        onClick={() => setSubmitTarget(d)}
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+                        Submit for review
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {draftsPage && draftsPage.total > draftsPage.limit && (
+              <div className="flex items-center justify-center gap-3 pt-3 text-sm text-muted-foreground">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={draftsLoading || draftsPage.offset === 0}
+                  onClick={() =>
+                    goToDraftsPage(Math.max(0, draftsPage.offset - draftsPage.limit))
+                  }
+                >
+                  <ChevronLeft className="h-3.5 w-3.5 mr-1" />
+                  Prev
+                </Button>
+                <span>
+                  Page {Math.floor(draftsPage.offset / draftsPage.limit) + 1} of{" "}
+                  {Math.max(1, Math.ceil(draftsPage.total / draftsPage.limit))}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={draftsLoading || !draftsPage.has_more}
+                  onClick={() =>
+                    goToDraftsPage(draftsPage.offset + draftsPage.limit)
+                  }
+                >
+                  Next
+                  <ChevronRight className="h-3.5 w-3.5 ml-1" />
+                </Button>
+              </div>
+            )}
+          </div>
+        </TabsContent>
+
+        <TabsContent value="nests" className="space-y-6">
       {/* Nests header */}
       <div className="flex items-center justify-between">
         <div>
@@ -153,10 +748,30 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
             Shared knowledge vaults for your team
           </p>
         </div>
-        <Button onClick={() => setShowCreate(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          New Nest
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* Styled as a field rather than a button: the palette it opens is
+              where you type, and a search box is what people look for. */}
+          {onOpenSearch && (
+            <button
+              type="button"
+              onClick={onOpenSearch}
+              className="flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50"
+              data-testid="global-search-trigger"
+            >
+              <Search className="h-4 w-4" />
+              Search nests &amp; documents
+              <kbd className="ml-2 rounded border px-1 text-[10px]">⌘K</kbd>
+            </button>
+          )}
+          <Button variant="outline" onClick={() => setShowImport(true)}>
+            <FolderInput className="h-4 w-4 mr-2" />
+            Import Folder
+          </Button>
+          <Button onClick={() => setShowCreate(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            New Nest
+          </Button>
+        </div>
       </div>
 
       {/* Create form */}
@@ -169,21 +784,31 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                 <Input
                   placeholder="Team Knowledge"
                   value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
+                  onChange={(e) => {
+                    setNewName(e.target.value);
+                    if (createError) setCreateError(null);
+                  }}
+                  aria-invalid={!!createError}
                   autoFocus
                 />
+                {createError && (
+                  <p className="text-xs text-destructive">{createError}</p>
+                )}
               </div>
               <div className="space-y-1">
                 <Label>Description (optional)</Label>
-                <Input
+                <Textarea
                   placeholder="Shared docs for the engineering team"
                   value={newDesc}
                   onChange={(e) => setNewDesc(e.target.value)}
+                  rows={3}
                 />
               </div>
               <div className="flex gap-2">
-                <Button type="submit">Create Nest</Button>
-                <Button type="button" variant="outline" onClick={() => setShowCreate(false)}>
+                <Button type="submit" disabled={!!nestNameProblem(newName)}>
+                  Create Nest
+                </Button>
+                <Button type="button" variant="outline" onClick={() => { setShowCreate(false); setCreateError(null); }}>
                   Cancel
                 </Button>
               </div>
@@ -195,7 +820,7 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
       {/* Nest list */}
       {loading ? (
         <div className="text-center py-12 text-muted-foreground">Loading...</div>
-      ) : nests.length === 0 ? (
+      ) : nests.length === 0 && unsynced.length === 0 ? (
         <Card>
           <CardContent className="text-center py-12">
             <Database className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
@@ -212,6 +837,83 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
       ) : (
         <>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {unsynced.map((folder) => {
+              const isSyncing = !!syncing[folder.name];
+              const errMsg = syncErrors[folder.name];
+              return (
+                <div
+                  key={`unsynced:${folder.name}`}
+                  className="relative text-left p-4 rounded-lg border border-dashed border-blue-300 bg-blue-50/40"
+                >
+                  <div className="flex items-start gap-3 pr-2">
+                    <div className="p-2 rounded-md bg-blue-100">
+                      <Folder className="h-5 w-5 text-blue-700" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h3 className="font-medium truncate">{folder.label}</h3>
+                      <p
+                        className="text-xs text-muted-foreground font-mono truncate mt-0.5"
+                        title={folder.name}
+                      >
+                        {folder.name}
+                      </p>
+                      <p className="text-sm text-muted-foreground truncate mt-1">
+                        {folder.mdCount} markdown file
+                        {folder.mdCount === 1 ? "" : "s"} waiting to sync
+                      </p>
+                      <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground flex-wrap">
+                        <span
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200"
+                          title="Folder is on disk but not registered as a nest"
+                        >
+                          <Folder className="h-3 w-3" />
+                          Unsynced
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-3">
+                        <Button
+                          size="sm"
+                          onClick={() => handleSync(folder.name)}
+                          disabled={isSyncing}
+                        >
+                          {isSyncing ? (
+                            <>
+                              <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+                              Syncing…
+                            </>
+                          ) : (
+                            <>
+                              <FolderSync className="h-3.5 w-3.5 mr-2" />
+                              Sync to Nest
+                            </>
+                          )}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-muted-foreground hover:text-destructive"
+                          onClick={() => setDiscardTarget({ name: folder.name, label: folder.label })}
+                          disabled={isSyncing}
+                          title="Delete this folder from the server"
+                        >
+                          <Trash2 className="h-3.5 w-3.5 mr-2" />
+                          Delete
+                        </Button>
+                      </div>
+                      {errMsg && (
+                        <p
+                          role="alert"
+                          className="mt-2 text-xs text-red-700 bg-red-50 border border-red-200 rounded px-2 py-1 break-words"
+                          title={errMsg}
+                        >
+                          {errMsg}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
             {nests.map((nest) => {
               const isAnonymous = nest.user_id === ANON_USER_ID;
               const openNest = () =>
@@ -234,22 +936,72 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
               const canDelete =
                 isOwner ||
                 (isAnonymous && authMode !== "open" && isAdmin);
-              const roleLabel =
-                permission === "admin"
-                  ? "Admin"
-                  : permission === "write"
-                    ? "Editor"
-                    : permission === "read"
-                      ? "Viewer"
-                      : null;
-              const RoleIcon =
-                permission === "admin"
-                  ? Shield
-                  : permission === "write"
-                    ? Pencil
-                    : permission === "read"
-                      ? Eye
-                      : null;
+              // Mirror server rename rule (PATCH /nests/:nestId — owner or
+              // nest-admin), plus the same admin-caretaker carve-out for the
+              // anon commons in key mode. Gate on the caller's RAW grant
+              // (`roles`) rather than `permission`, which folds license
+              // admins to "admin" on every nest — the UI deliberately hides
+              // admin affordances on other users' nests (same philosophy as
+              // NestView). Anon nests already resolve license admins to
+              // is_owner=true server-side; the authMode term is the
+              // client-side fallback matching canDelete above.
+              const canRename =
+                isOwner ||
+                (Array.isArray(nest.roles) && nest.roles.includes("admin")) ||
+                (isAnonymous && authMode !== "open" && isAdmin);
+              // Card role badge — derive from merged effective roles
+              // (collaborator + steward), not just the collaborator permission.
+              // A steward editor/reviewer resolves to permission='read'
+              // server-side, so keying off permission alone mislabeled them
+              // "Viewer". Precedence: admin > editor > reviewer > viewer.
+              const roleList: string[] = Array.isArray(nest.roles)
+                ? nest.roles
+                : [];
+              const effRole = roleList.includes("admin")
+                ? "admin"
+                : roleList.includes("editor")
+                  ? "editor"
+                  : roleList.includes("reviewer")
+                    ? "reviewer"
+                    : roleList.includes("viewer")
+                      ? "viewer"
+                      : permission === "admin"
+                        ? "admin"
+                        : permission === "write"
+                          ? "editor"
+                          : permission === "read"
+                            ? "viewer"
+                            : null;
+              const roleBadge = effRole
+                ? ({
+                    admin: {
+                      label: "Admin",
+                      Icon: Shield,
+                      cls: "bg-purple-50 text-purple-700 border-purple-200",
+                      title: "Admin — full access except deleting the nest",
+                    },
+                    editor: {
+                      label: "Editor",
+                      Icon: Pencil,
+                      cls: "bg-indigo-50 text-indigo-700 border-indigo-200",
+                      title: "Editor — you can read and edit documents",
+                    },
+                    reviewer: {
+                      label: "Reviewer",
+                      Icon: CheckCircle2,
+                      cls: "bg-amber-50 text-amber-700 border-amber-200",
+                      title:
+                        "Reviewer — you can approve or reject submissions",
+                    },
+                    viewer: {
+                      label: "Viewer",
+                      Icon: Eye,
+                      cls: "bg-slate-50 text-slate-700 border-slate-200",
+                      title: "View only — you can read but not edit",
+                    },
+                  }[effRole])
+                : null;
+              const RoleIcon = roleBadge?.Icon ?? null;
               return (
                 <div
                   key={nest.id}
@@ -268,27 +1020,49 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                       : "border-border"
                   }`}
                 >
-                  {/* Delete — gated to match server rules (owner, or admin
-                      caretaker on the ungoverned commons in key mode).
-                      Keeps the affordance off cards the user can't act on
-                      so shared/reviewer/viewer nests don't show a teasing
-                      Trash icon. */}
-                  {canDelete && (
-                    <button
-                      type="button"
-                      aria-label={`Delete nest ${nest.name}`}
-                      title="Delete nest"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        requestDelete(nest.id, nest.name);
-                      }}
-                      className="absolute top-2 right-2 p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                  {/* Card actions — each gated to match server rules so
+                      shared/reviewer/viewer nests don't show teasing icons.
+                      Rename: owner or nest-admin (PATCH /nests/:nestId).
+                      Delete: owner, or admin caretaker on the ungoverned
+                      commons in key mode. */}
+                  {(canRename || canDelete) && (
+                    <div className="absolute top-2 right-2 flex items-center gap-0.5">
+                      {canRename && (
+                        <button
+                          type="button"
+                          aria-label={`Rename nest ${nest.name}`}
+                          title="Rename nest"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRenameTarget({
+                              id: nest.id,
+                              name: nest.name,
+                              description: nest.description ?? null,
+                            });
+                          }}
+                          className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      {canDelete && (
+                        <button
+                          type="button"
+                          aria-label={`Delete nest ${nest.name}`}
+                          title="Delete nest"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            requestDelete(nest.id, nest.name, !!nest.is_imported);
+                          }}
+                          className="p-1.5 rounded-md text-muted-foreground hover:text-red-600 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
                   )}
 
-                  <div className="flex items-start gap-3 pr-7">
+                  <div className="flex items-start gap-3 pr-12">
                     <div
                       className={`p-2 rounded-md ${
                         isAnonymous ? "bg-amber-100" : "bg-primary/10"
@@ -325,8 +1099,70 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                           </span>
                         </p>
                       )}
+                      {/* Provenance for imported nests: the importer is the
+                          owner (import sets user_id to the caller) and the
+                          import time is the row's created_at. */}
+                      {nest.is_imported ? (
+                        <p
+                          className="flex items-center gap-1 mt-1 text-xs text-muted-foreground truncate"
+                          title={`Imported ${formatServerDate(nest.created_at)}`}
+                        >
+                          <FolderInput className="h-3 w-3 shrink-0" />
+                          <span className="truncate">
+                            Imported by{" "}
+                            <span className="font-medium">
+                              {nest.is_owner ? "you" : nest.owner_email || "unknown user"}
+                            </span>{" "}
+                            · {formatServerDate(nest.created_at)}
+                          </span>
+                        </p>
+                      ) : null}
                       <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground flex-wrap">
-                        {isAnonymous && (
+                        <span
+                          className="inline-flex items-center gap-1"
+                          title="Documents"
+                        >
+                          <FileText className="h-3 w-3" />
+                          {nest.document_count ?? 0}
+                        </span>
+                        {/* WHO, not just counts: shared-with (plain chips)
+                            and stewards (shield-tinted chips), initials with
+                            the email on hover. */}
+                        {(nest.collaborator_emails?.length ?? 0) > 0 && (
+                          <span className="inline-flex items-center gap-0.5" title="Shared with">
+                            <Users className="h-3 w-3 mr-0.5" />
+                            {nest.collaborator_emails!.slice(0, 4).map((e: string) => (
+                              <span
+                                key={e}
+                                title={`Shared with ${e}`}
+                                className="inline-flex h-4.5 min-w-[18px] items-center justify-center rounded-full bg-muted px-1 text-[9px] font-semibold uppercase"
+                              >
+                                {e.slice(0, 2)}
+                              </span>
+                            ))}
+                            {nest.collaborator_emails!.length > 4 && (
+                              <span className="text-[10px]">+{nest.collaborator_emails!.length - 4}</span>
+                            )}
+                          </span>
+                        )}
+                        {(nest.steward_emails?.length ?? 0) > 0 && (
+                          <span className="inline-flex items-center gap-0.5" title="Stewards">
+                            <Shield className="h-3 w-3 mr-0.5 text-emerald-600" />
+                            {nest.steward_emails!.slice(0, 4).map((e: string) => (
+                              <span
+                                key={e}
+                                title={`Steward: ${e}`}
+                                className="inline-flex h-4.5 min-w-[18px] items-center justify-center rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 px-1 text-[9px] font-semibold uppercase"
+                              >
+                                {e.slice(0, 2)}
+                              </span>
+                            ))}
+                            {nest.steward_emails!.length > 4 && (
+                              <span className="text-[10px]">+{nest.steward_emails!.length - 4}</span>
+                            )}
+                          </span>
+                        )}
+                        {isAnonymous && !nest.stewardship_enabled && (
                           <span
                             className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200"
                             title="Owned by the anonymous admin — no stewardship applied"
@@ -334,29 +1170,25 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                             Ungoverned
                           </span>
                         )}
-                        {isShared && roleLabel && RoleIcon && (
+                        {isAnonymous && nest.stewardship_enabled && (
                           <span
-                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border ${
-                              permission === "read"
-                                ? "bg-slate-50 text-slate-700 border-slate-200"
-                                : permission === "write"
-                                  ? "bg-indigo-50 text-indigo-700 border-indigo-200"
-                                  : "bg-purple-50 text-purple-700 border-purple-200"
-                            }`}
-                            title={
-                              permission === "read"
-                                ? "View only — you can read but not edit"
-                                : permission === "write"
-                                  ? "Editor — you can read and edit documents"
-                                  : "Admin — full access except deleting the nest"
-                            }
+                            className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200"
+                            title="Stewardship is enabled — drafts require review before AI use"
+                          >
+                            Governed
+                          </span>
+                        )}
+                        {isShared && roleBadge && RoleIcon && (
+                          <span
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border ${roleBadge.cls}`}
+                            title={roleBadge.title}
                           >
                             <RoleIcon className="h-3 w-3" />
-                            {roleLabel}
+                            {roleBadge.label}
                           </span>
                         )}
                         <span
-                          className={`px-1.5 py-0.5 rounded ${
+                          className={`px-1.5 py-0.5 rounded capitalize ${
                             nest.visibility === "public"
                               ? "bg-green-100 text-green-700"
                               : "bg-secondary text-secondary-foreground"
@@ -364,7 +1196,16 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
                         >
                           {nest.visibility}
                         </span>
-                        <span>{new Date(nest.created_at).toLocaleDateString()}</span>
+                        {nest.is_imported ? (
+                          <span
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200"
+                            title="Imported from a folder — its files were copied into the workspace"
+                          >
+                            <FolderInput className="h-3 w-3" />
+                            Imported
+                          </span>
+                        ) : null}
+                        <span>{formatServerDate(nest.created_at)}</span>
                       </div>
                     </div>
                   </div>
@@ -374,11 +1215,87 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
           </div>
         </>
       )}
+        </TabsContent>
+      </Tabs>
+
+      {renameTarget && (
+        <RenameNestDialog
+          nestId={renameTarget.id}
+          nestName={renameTarget.name}
+          nestDescription={renameTarget.description}
+          open
+          onOpenChange={(open) => {
+            if (!open) setRenameTarget(null);
+          }}
+          onRenamed={(updated) => {
+            // Patch the cached row so the card renames instantly. The PATCH
+            // already invalidated the list, so a refetch confirms this behind
+            // the scenes — this is only about not blanking the name meanwhile.
+            qc.setQueryData(reads.nestList().queryKey, (prev) =>
+              prev
+                ? {
+                    ...prev,
+                    nests: prev.nests.map((n: any) =>
+                      n.id === updated.id
+                        ? {
+                            ...n,
+                            name: updated.name,
+                            slug: updated.slug,
+                            description: updated.description,
+                          }
+                        : n,
+                    ),
+                  }
+                : prev,
+            );
+            setRenameTarget(null);
+          }}
+        />
+      )}
+
+      {deletionTarget && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setDeletionTarget(null)}
+          title={
+            deletionAction === "delete"
+              ? `Delete "${deletionTarget.title}"?`
+              : "Reject this deletion request"
+          }
+          description={`${deletionTarget.requested_by} asked for this: "${deletionTarget.reason ?? ""}". ${
+            deletionAction === "delete"
+              ? "Deleting removes the document, its history, comments and annotations. It cannot be undone."
+              : "The document stays; your note is the record, and the requester is notified."
+          }`}
+          label={
+            deletionAction === "decline" ? "Why are you rejecting?" : undefined
+          }
+          placeholder="e.g. still referenced by onboarding"
+          confirmLabel={
+            deletionAction === "delete" ? "Delete document" : "Reject"
+          }
+          destructive={deletionAction === "delete"}
+          onConfirm={
+            deletionAction === "delete" ? handleInboxDelete : handleInboxDecline
+          }
+        />
+      )}
+
+      {submitTarget && (
+        <SubmitForReviewModal
+          isOpen
+          onClose={() => setSubmitTarget(null)}
+          documentTitle={submitTarget.title}
+          currentVersion={submitTarget.version}
+          onSubmit={(note, priority) => submitDraft(submitTarget, note, priority)}
+        />
+      )}
 
       {deleteTarget && (
         <DeleteNestDialog
           nestId={deleteTarget.id}
           nestName={deleteTarget.name}
+          isImported={deleteTarget.isImported}
           open
           onOpenChange={(open) => {
             if (!open) setDeleteTarget(null);
@@ -389,6 +1306,62 @@ export function Dashboard({ onSelectNest }: DashboardProps) {
           }}
         />
       )}
+
+      <Dialog
+        open={!!discardTarget}
+        onOpenChange={(open) => {
+          // Don't let a click-away close it mid-delete.
+          if (!open && discardTarget && syncing[discardTarget.name]) return;
+          if (!open) setDiscardTarget(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-700">
+              <Trash2 className="h-4 w-4" />
+              Delete folder
+            </DialogTitle>
+            <DialogDescription>
+              Permanently delete{" "}
+              <strong className="text-foreground">{discardTarget?.label}</strong>{" "}
+              and its files from the server. This can't be undone. The folder
+              won't be synced into a nest.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setDiscardTarget(null)}
+              disabled={!!discardTarget && !!syncing[discardTarget.name]}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => discardTarget && handleDiscardUnsynced(discardTarget.name)}
+              disabled={!!discardTarget && !!syncing[discardTarget.name]}
+            >
+              {discardTarget && syncing[discardTarget.name] ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />
+                  Deleting…
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-3.5 w-3.5 mr-2" />
+                  Delete folder
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ImportFolderModal
+        isOpen={showImport}
+        onClose={() => setShowImport(false)}
+        onImported={fetchNests}
+      />
     </div>
   );
 }
@@ -423,7 +1396,7 @@ function CopyInline({ value }: { value: string }) {
     <button
       onClick={async (e) => {
         e.stopPropagation();
-        await navigator.clipboard.writeText(value);
+        if (!(await copyTextWithToast(value))) return;
         setCopied(true);
         setTimeout(() => setCopied(false), 1200);
       }}

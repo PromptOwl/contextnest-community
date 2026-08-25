@@ -9,6 +9,8 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import * as api from "../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { reads } from "../lib/queries";
 import {
   Dialog,
   DialogContent,
@@ -42,16 +44,22 @@ export function DocumentPickerModal({
   excludeNodeId,
   onSelect,
 }: DocumentPickerModalProps) {
+  // Full list preloaded on open — never overwritten by search, so it can
+  // be restored when the query is cleared.
   const [nodes, setNodes] = useState<PickerNode[]>([]);
+  // Server FTS results for the current query (null = no active search).
+  const [searchResults, setSearchResults] = useState<PickerNode[] | null>(null);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const qc = useQueryClient();
 
   // Always preload the full list on open so users see something
   // immediately. Search refines via server FTS once they type.
   useEffect(() => {
     if (!isOpen) {
       setQuery("");
+      setSearchResults(null);
       setError(null);
       return;
     }
@@ -59,7 +67,7 @@ export function DocumentPickerModal({
     (async () => {
       setLoading(true);
       try {
-        const { nodes: list } = await api.listNodes(nestId);
+        const { nodes: list } = await qc.fetchQuery(reads.nodes(nestId));
         if (!cancelled) setNodes(list as PickerNode[]);
       } catch (err: any) {
         if (!cancelled) setError(err.message);
@@ -70,18 +78,22 @@ export function DocumentPickerModal({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, nestId]);
+  }, [isOpen, nestId, qc]);
 
-  // Debounced server search on query. Falls back to listing if cleared.
+  // Debounced server search on query. When cleared, drop the search
+  // results so the preloaded full list shows again.
   useEffect(() => {
     if (!isOpen) return;
-    if (!query.trim()) return; // nothing to do; full list already loaded
+    if (!query.trim()) {
+      setSearchResults(null); // restore full list
+      return;
+    }
     let cancelled = false;
     const t = setTimeout(async () => {
       setLoading(true);
       try {
         const { nodes: list } = await api.searchNodes(nestId, query.trim());
-        if (!cancelled) setNodes(list as PickerNode[]);
+        if (!cancelled) setSearchResults(list as PickerNode[]);
       } catch (err: any) {
         if (!cancelled) setError(err.message);
       } finally {
@@ -94,17 +106,18 @@ export function DocumentPickerModal({
     };
   }, [isOpen, nestId, query]);
 
-  // Client-side filter on the preloaded list — useful for tiny queries
-  // that arrive before debounce fires. Combined with the server search,
-  // user always sees the freshest data possible.
+  // Display source: server search results when a query is active, else the
+  // preloaded full list. Client-side title filter covers tiny queries that
+  // arrive before the debounce fires.
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return nodes.filter((n) => {
+    const source = q && searchResults !== null ? searchResults : nodes;
+    return source.filter((n) => {
       if (n.id === excludeNodeId) return false;
       if (!q) return true;
       return n.title.toLowerCase().includes(q);
     });
-  }, [nodes, query, excludeNodeId]);
+  }, [nodes, searchResults, query, excludeNodeId]);
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>

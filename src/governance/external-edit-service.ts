@@ -12,11 +12,17 @@ import { join } from "path";
 import {
   detectDrift,
   stageSuggestion,
+  ChainEventLog,
   approveSuggestion,
   rejectSuggestion,
   listSuggestions,
   readSuggestion,
+  parseDocument,
   VersionManager,
+  computeContentHash,
+  getChecksumContent,
+  type ContextNode,
+  type HashChainEvent,
   type RbacHook,
   type SuggestionMeta,
   type PendingChange,
@@ -24,7 +30,7 @@ import {
 } from "@promptowl/contextnest-engine";
 import { engineCache } from "../nodes/engine.js";
 import { getDb } from "../db/client.js";
-import { config } from "../config.js";
+import { resolveNestPath } from "../shared/paths.js";
 
 /** Community-tier RBAC stub.
  *
@@ -55,7 +61,7 @@ export interface ExternalEditEntry {
 
 /** Resolve a document's on-disk path inside a nest. */
 function docPath(nestId: string, documentId: string): string {
-  return join(config.DATA_ROOT, "nests", nestId, `${documentId}.md`);
+  return join(resolveNestPath(nestId), `${documentId}.md`);
 }
 
 /** Read raw file bytes; null if the file is gone (treat as deletion drift). */
@@ -93,6 +99,45 @@ async function loadChainHead(
 }
 
 /**
+ * Reconstruct the document at its latest history version and return a
+ * parsed node. Used when drift is detected: the engine's
+ * `readDocument(verifyChecksum: true)` returns the nearest *keyframe*
+ * (every 10 versions), which means a v=5 doc would render the v=1
+ * body in the editor while the drift banner is shown. Reconstructing
+ * from history.yaml gives the actual last-approved bytes.
+ */
+export async function loadLatestApprovedNode(
+  nestId: string,
+  documentId: string,
+): Promise<ContextNode | null> {
+  const { storage } = await engineCache.get(nestId);
+  const head = await loadChainHead(storage, documentId);
+  if (!head) return null;
+  return parseDocument(docPath(nestId, documentId), head.content, documentId);
+}
+
+/**
+ * True when the live body hash matches the latest version's body in
+ * history.yaml. Drift against the stored frontmatter checksum that
+ * lands on a body we already wrote (PATCH/MCP save left a stale
+ * checksum, or scanner raced between writeDocument and createVersion)
+ * is not a real out-of-band edit — the content is recorded in history.
+ *
+ * A real external edit produces bytes no version reconstructs to and
+ * still gets flagged.
+ */
+async function bodyMatchesLatestVersion(
+  storage: NestStorage,
+  documentId: string,
+  liveBodyHash: string,
+): Promise<boolean> {
+  const head = await loadChainHead(storage, documentId);
+  if (!head) return false;
+  const headBodyHash = computeContentHash(getChecksumContent(head.content));
+  return headBodyHash === liveBodyHash;
+}
+
+/**
  * Check a single document for drift and stage a suggestion if the live
  * bytes diverged from the last-approved checksum. Returns the staged
  * suggestion meta, or null when nothing drifted.
@@ -111,7 +156,7 @@ async function scanDocumentForDriftInternal(
   documentId: string,
   actor: string,
 ): Promise<{ meta: SuggestionMeta; created: boolean } | null> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const node = await storage.readDocument(documentId).catch(() => null);
   if (!node) return null;
 
@@ -120,6 +165,14 @@ async function scanDocumentForDriftInternal(
 
   const drift = detectDrift(raw, node.frontmatter.checksum);
   if (!drift.drifted) return null;
+
+  // Skip staging when the live body already matches the latest version
+  // in history — the bytes are ours (draft save / MCP update left a
+  // stale checksum) and not an out-of-band edit. Without this the next
+  // GET flips the doc to external_edit_pending right after a save.
+  if (await bodyMatchesLatestVersion(storage, documentId, drift.actualHash)) {
+    return null;
+  }
 
   // Match the chain head the engine will read on approveSuggestion.
   // The engine calls `reconstructVersion(latest)`, which returns the live
@@ -154,7 +207,11 @@ export async function scanNestForDrift(
   nestId: string,
   actor: string = "system:scanner",
 ): Promise<{ scanned: number; staged: number }> {
-  const { storage } = engineCache.get(nestId);
+  const { storage, invalidateDiscovery } = await engineCache.get(nestId);
+  // Edits made outside this process are the whole point of the scan, so it
+  // reads disk directly rather than the cached document set — which by
+  // definition cannot contain a write this server never made.
+  invalidateDiscovery();
   const docs = await storage.discoverDocuments();
   const results = await Promise.all(
     docs.map((doc) => scanDocumentForDriftInternal(nestId, doc.id, actor)),
@@ -163,31 +220,57 @@ export async function scanNestForDrift(
   return { scanned: docs.length, staged };
 }
 
-/** Get the latest pending external edit for a document, if any. */
+/** Get the latest pending external edit for a document, if any.
+ *
+ * Stale suggestions whose proposed body has since been folded into
+ * history (e.g. legacy entries staged before the latest-version guard
+ * in scan) are filtered out so they no longer flip the doc to
+ * external_edit_pending in the UI.
+ */
 export async function getPendingChange(
   nestId: string,
   documentId: string,
 ): Promise<PendingChange | null> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const list = await listSuggestions(storage, documentId);
-  if (list.length === 0) return null;
-  const latest = list[list.length - 1];
-  return {
-    suggestion_id: latest.suggestion_id,
-    detected_at: latest.detected_at,
-    source: latest.source,
-    proposed_hash: latest.proposed_hash,
-  };
+  for (let i = list.length - 1; i >= 0; i--) {
+    const meta = list[i];
+    if (await bodyMatchesLatestVersion(storage, documentId, meta.proposed_hash)) {
+      continue;
+    }
+    return {
+      suggestion_id: meta.suggestion_id,
+      detected_at: meta.detected_at,
+      source: meta.source,
+      proposed_hash: meta.proposed_hash,
+    };
+  }
+  return null;
 }
 
-/** List every pending external edit across all documents in a nest. */
+/** List every pending external edit across all documents in a nest.
+ *
+ * Filters stale suggestions whose proposed body matches the document's
+ * latest version — those are recorded history, not real out-of-band
+ * edits, so showing them in the admin queue is misleading.
+ */
 export async function listNestExternalEdits(
   nestId: string,
 ): Promise<ExternalEditEntry[]> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const docs = await storage.discoverDocuments();
   const lists = await Promise.all(
-    docs.map((doc) => listSuggestions(storage, doc.id)),
+    docs.map(async (doc) => {
+      const metas = await listSuggestions(storage, doc.id);
+      const fresh: SuggestionMeta[] = [];
+      for (const meta of metas) {
+        if (await bodyMatchesLatestVersion(storage, doc.id, meta.proposed_hash)) {
+          continue;
+        }
+        fresh.push(meta);
+      }
+      return fresh;
+    }),
   );
   const entries: ExternalEditEntry[] = lists.flat().map((meta) => ({
     suggestion_id: meta.suggestion_id,
@@ -209,7 +292,7 @@ export async function getExternalEditDetail(
   documentId: string,
   suggestionId: string,
 ): Promise<ExternalEditEntry | null> {
-  const { storage } = engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
   const found = await readSuggestion(storage, documentId, suggestionId);
   if (!found) return null;
   return {
@@ -226,6 +309,134 @@ export async function getExternalEditDetail(
   };
 }
 
+/** A verdict on an external edit, as document history renders it. */
+export interface ExternalEditVerdict {
+  suggestion_id: string;
+  status: "approved" | "rejected";
+  /** Who approved or rejected it. */
+  actor: string;
+  /** ISO-8601, from the engine's chain event. */
+  at: string;
+  /** Rejection reason, or the approver's comment when they left one. */
+  note?: string;
+  source?: string;
+}
+
+/**
+ * Persist a governance verdict in the engine's append-only chain-event log
+ * (`.versions/chain_events.yaml`). The engine builds these events and returns
+ * them, but writes none — so every verdict on an external edit was lost the
+ * moment the route responded. Best-effort: the edit is already approved or
+ * rejected on disk, so a failed audit write must not fail the request; the
+ * caller is told it did not land rather than being shown a clean success.
+ */
+async function recordVerdict(
+  nestId: string,
+  event: HashChainEvent,
+): Promise<boolean> {
+  try {
+    const { storage } = await engineCache.get(nestId);
+    await new ChainEventLog(storage).append(event);
+    return true;
+  } catch (err) {
+    console.error(
+      `[external-edit] failed to record verdict ${event.event_id} for nest ${nestId}:`,
+      err,
+    );
+    return false;
+  }
+}
+
+/**
+ * Every recorded verdict on a document's external edits, oldest first.
+ *
+ * Read straight off the engine's chain-event log — a rejection changes no
+ * content, so it earns no version, and this is the audit trail rather than
+ * `node_versions`. `suggestion_id` in the metadata is what marks an event as a
+ * verdict on a staged edit (a Czar direct edit shares one of the event types
+ * but carries no suggestion); `rejection_reason` is what separates the two
+ * verdicts, since the engine records a standard-tier rejection as an "altered
+ * to no change" event rather than a rejection type of its own.
+ */
+export async function listExternalEditVerdicts(
+  nestId: string,
+  documentId: string,
+): Promise<ExternalEditVerdict[]> {
+  try {
+    const { storage } = await engineCache.get(nestId);
+    const events = await new ChainEventLog(storage).readByDocument(documentId);
+    return events.flatMap((e) => {
+      const meta = (e.action_metadata || {}) as Record<string, unknown>;
+      if (typeof meta.suggestion_id !== "string") return [];
+      const reason = meta.rejection_reason;
+      const comment = meta.approval_comment;
+      return [
+        {
+          suggestion_id: meta.suggestion_id,
+          status: (typeof reason === "string" ? "rejected" : "approved") as
+            | "approved"
+            | "rejected",
+          actor: e.actor,
+          at: e.timestamp,
+          note:
+            typeof reason === "string"
+              ? reason
+              : typeof comment === "string"
+                ? comment
+                : undefined,
+          source: typeof meta.source === "string" ? meta.source : undefined,
+        },
+      ];
+    });
+  } catch (err) {
+    console.error(
+      `[external-edit] failed to read verdicts for ${nestId}/${documentId}:`,
+      err,
+    );
+    return [];
+  }
+}
+
+/**
+ * Mirror an engine version into the governance `node_versions` row that the
+ * UI's document history reads. Without it a verdict on an external edit is
+ * invisible: history, the approved-version pin and getCurrentVersion all read
+ * SQLite, not history.yaml.
+ */
+async function mirrorVersion(input: {
+  nestId: string;
+  documentId: string;
+  version: number;
+  actor: string;
+  note: string;
+}) {
+  const { storage } = await engineCache.get(input.nestId);
+  const node = await storage.readDocument(input.documentId);
+  const { upsertVersion, setApprovedVersion } = await import(
+    "./version-service.js"
+  );
+  // upsert, not insert: the engine commits a version here, but a governance
+  // row can already exist at that number (an imported nest, a mirror that
+  // failed and is being retried). Insert-only turned that into a UNIQUE
+  // violation that silently dropped the approval from history.
+  await upsertVersion({
+    nestId: input.nestId,
+    nodeId: input.documentId,
+    version: input.version,
+    content: node.body || "",
+    author: input.actor,
+    status: "published",
+    tags: (node.frontmatter.tags || []) as string[],
+    changeNote: input.note,
+  });
+  await setApprovedVersion(
+    input.nestId,
+    input.documentId,
+    input.version,
+    input.actor,
+  );
+}
+
 /** Approve a pending external edit — commits the patch as a new version. */
 export async function approveExternalEdit(input: {
   nestId: string;
@@ -234,7 +445,7 @@ export async function approveExternalEdit(input: {
   actor: string;
   comment?: string;
 }) {
-  const { storage } = engineCache.get(input.nestId);
+  const { storage } = await engineCache.get(input.nestId);
   let result;
   try {
     result = await approveSuggestion({
@@ -258,25 +469,18 @@ export async function approveExternalEdit(input: {
   // governance node_versions row was skipped — UI version history and
   // approved-version pin would drift behind disk. Mirror the engine
   // entry into SQLite so /versions, getCurrentVersion, and
-  // setApprovedVersion all see the external edit.
+  // setApprovedVersion all see the external edit. Best-effort: the engine
+  // already committed, so a failed mirror must not fail the approval.
   try {
-    const node = await storage.readDocument(input.documentId);
-    const versionNum = result.versionEntry.version;
-    const tags = (node.frontmatter.tags || []) as string[];
-    const { createVersion, setApprovedVersion } = await import(
-      "./version-service.js"
-    );
-    createVersion({
+    await mirrorVersion({
       nestId: input.nestId,
-      nodeId: input.documentId,
-      version: versionNum,
-      content: node.body || "",
-      author: input.actor,
-      status: "published",
-      tags,
-      changeNote: input.comment || "External edit approved",
+      documentId: input.documentId,
+      version: result.versionEntry.version,
+      actor: input.actor,
+      note: input.comment
+        ? `External edit approved: ${input.comment}`
+        : "External edit approved",
     });
-    setApprovedVersion(input.nestId, input.documentId, versionNum, input.actor);
   } catch (err) {
     console.error(
       `[external-edit] failed to mirror approved version into node_versions for ${input.nestId}/${input.documentId}:`,
@@ -284,17 +488,29 @@ export async function approveExternalEdit(input: {
     );
   }
 
-  return result;
+  // Same verdict record as a rejection, and reported the same way — an
+  // approval whose audit entry did not land must not read as a clean success
+  // either, even though the content change itself is already committed.
+  const historyRecorded = await recordVerdict(input.nestId, result.chainEvent);
+
+  return { ...result, historyRecorded };
 }
 
 /**
- * Reject a pending external edit — archives the suggestion and reverts
- * the on-disk file back to the last-approved chain head.
+ * Reject a pending external edit — archives the suggestion, records the
+ * verdict, and reverts the on-disk file back to the last-approved chain head.
  *
  * Without the revert step the file stays drifted, the next scanner tick
  * sees the same proposed_hash, and a fresh suggestion gets re-staged
  * with a new id — making the reject look like it "didn't take". Writing
  * the approved base back clears drift in one shot.
+ *
+ * A rejection changes no content, so it earns no version: the verdict goes to
+ * the engine's chain-event log, and the rejected bytes stay where the engine
+ * already keeps them permanently (`_archive/rejected/`).
+ *
+ * `historyRecorded` reports whether the verdict landed, so a caller is never
+ * told the audit write succeeded when it did not.
  */
 export async function rejectExternalEdit(input: {
   nestId: string;
@@ -303,7 +519,7 @@ export async function rejectExternalEdit(input: {
   actor: string;
   reason: string;
 }) {
-  const { storage } = engineCache.get(input.nestId);
+  const { storage } = await engineCache.get(input.nestId);
   const result = await rejectSuggestion({
     storage,
     rbac: communityRbac,
@@ -314,9 +530,18 @@ export async function rejectExternalEdit(input: {
     reason: input.reason,
   });
 
+  // The verdict itself — who rejected, when, and why — is what the engine
+  // hands back and then forgets: rejectSuggestion builds the chain event but
+  // never writes it, so dropping it here is what left rejections with no
+  // audit trail. Appending costs no version and no new storage: the log is
+  // the engine's own .versions/chain_events.yaml.
+  const historyRecorded = await recordVerdict(input.nestId, result.chainEvent);
+
   // Revert disk to chain head so the drift scanner stops re-staging it.
   // loadChainHead uses the engine's reconstructVersion(latest) — same
-  // base approveSuggestion would have rebuilt against.
+  // base approveSuggestion would have rebuilt against. No publish: those
+  // reconstructed bytes carry the checksum they were published with, so the
+  // restored file already matches and drift clears without a version bump.
   try {
     const approved = await loadChainHead(storage, input.documentId);
     if (approved) {
@@ -329,7 +554,7 @@ export async function rejectExternalEdit(input: {
     );
   }
 
-  return result;
+  return { ...result, historyRecorded };
 }
 
 // ─── Background scanner ─────────────────────────────────────────────────
@@ -339,9 +564,7 @@ let scannerTimer: NodeJS.Timeout | null = null;
 /** Iterate every nest on disk and scan for drift. */
 async function scanAllNests(): Promise<void> {
   const db = getDb();
-  const rows = db
-    .prepare("SELECT id FROM nests")
-    .all() as Array<{ id: string }>;
+  const rows = await db.all("SELECT id FROM nests") as Array<{ id: string }>;
   await Promise.all(
     rows.map(({ id }) =>
       scanNestForDrift(id).catch((err) =>

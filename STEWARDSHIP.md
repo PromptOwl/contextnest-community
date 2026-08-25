@@ -47,6 +47,49 @@ If nothing matches and no steward resolves, the **nest owner** is the implicit s
 3. A **Reviewer steward** opens the review queue, reads the doc, clicks **Approve** or **Reject**. Rejecting requires a note.
 4. On approve, the doc becomes **approved** and is now AI-readable. The approved version number is pinned (`approvedVersion`), so subsequent drafts don't automatically replace it — AI keeps getting the last blessed version until a new one is approved.
 
+### Auto-publish owner & admin edits (`allow_self_approve`)
+
+A per-nest flag (**off** by default; nest Settings → "Auto-publish owner & admin edits"). When it's **on**, a create or edit by the nest **owner** or an **admin** publishes immediately — it skips steps 2–4 entirely instead of landing as a draft. This is a governance *bypass* for the two roles that already hold approval authority, not a separation-of-duties exception. **Editor and reviewer flows are unchanged**: their edits still save as drafts and go through Submit → Review → Approve regardless of the flag. The pending-review edit lock still applies, so an owner/admin can't overwrite a doc a teammate has in review. Turning the flag back off doesn't unpublish anything; it only affects future edits.
+
+## Prime documents
+
+Most content in a nest doesn't need a review gate — call notes, social drafts, scratch research. A small set does: messaging architecture, the sales playbook, pricing policy. **Prime** marks that second set.
+
+A prime document **always** goes through draft → pending → approved, no matter who writes it. It is the one thing `allow_self_approve` does not bypass: an owner editing a prime document still lands a draft.
+
+### How a document becomes prime
+
+Resolution mirrors the steward scope order — **document → tag → nest**, first match wins:
+
+| Priority | Scope | How it's set |
+|---|---|---|
+| 1 | **Document** | The Prime switch in the document editor (owner/admin only). `true` forces prime; `false` **exempts** this one doc from an otherwise-prime tag. |
+| 2 | **Tag** | The doc carries one of the nest's **prime tags** (Settings → Prime tags; `prime-document` out of the box). |
+| 3 | **Nest** | Nothing matched → not prime. |
+
+Only the nest owner or an admin can set or clear the document flag — it's a governance decision, not an authoring one. Otherwise any editor could un-flag the playbook and walk their own edit past the gate.
+
+### Reviewing prime documents only (`prime_only_review`)
+
+A per-nest flag (**off** by default; nest Settings → "Review prime documents only"). It changes what a governed nest's *default* is:
+
+| | `prime_only_review` off (default) | on |
+|---|---|---|
+| Ordinary document, any author | Draft → review → approve (unless the author has a self-approve bypass) | **Publishes immediately** |
+| Prime document, any author | Draft → review → approve | Draft → review → approve |
+
+That's the "most content self-publishes, high-stakes content is gated" posture. Leaving it off preserves the original behaviour, so turning stewardship on doesn't silently change meaning for an existing nest.
+
+While `prime_only_review` is on, `allow_self_approve` has no effect at all — non-prime documents already publish for everyone, and prime documents ignore the bypass. Settings disables that switch and says so rather than leaving a live control that changes nothing.
+
+Prime only applies to **governed** nests. With stewardship off there are no stewards to approve anything, so a prime tag is inert until you turn stewardship on.
+
+### At a glance
+
+Prime documents carry a **Prime** badge in the nest's document list, with a tooltip saying whether it came from the document flag or an inherited tag. To see every document a given prime tag covers, filter the list by that tag.
+
+Flipping any of this only affects **future** writes. Marking a published document prime doesn't unpublish it; the next edit is what needs approval.
+
 ## Who sees what
 
 Governance gates two things: who can **approve**, and who can **read**.
@@ -57,7 +100,102 @@ Governance gates two things: who can **approve**, and who can **read**.
 In key mode, when stewardship is enabled on a nest:
 - Node list / single-read / search / query responses are filtered to docs the caller can access
 - A non-steward gets an empty list or a 403 on the node they asked for
-- The nest **owner** and any resolved **steward (any role)** can read; **super admins** configured in `access.yaml` bypass the check
+- The nest **owner** and any resolved **steward (any role)** can read; **super admins** bypass the check
+
+## Server super-admins
+
+Super-admins administer **every** nest on the server without being added per-nest. The effective set is the union of three sources:
+
+- **license** — the PromptOwl account that owns the installed license (always; never revocable)
+- **config** — emails in `access.yaml: super_admins` (the bootstrap; edit the file + restart to change)
+- **granted** — grants managed from **Teammates → Superadmins** in the UI, or `GET/POST /admin/super-admins` (see `API.md`)
+
+A super-admin can:
+
+- Read every document (bypasses the read gate, even with stewardship enabled)
+- Change a nest's visibility (public / private)
+- Add, remove, and re-role collaborators
+- Add, remove, and re-role stewards
+- Approve and reject pending versions in any nest's review queue
+
+What a super-admin **cannot** do (owner-only operations):
+
+- Delete a nest
+- Transfer ownership
+
+Use this for a small set of platform operators — a CEO, a head of governance, an internal compliance admin — not as a default broad-access mechanism. Day-to-day governance should still flow through per-nest stewards.
+
+## Teams — sharing with a group
+
+Instead of adding people one at a time, you can create a **team** — a reusable,
+owner-managed group — and share it onto a nest. Each team member carries a
+**role** set on the membership (not on the share), and that role applies on
+**every** nest the team is shared to:
+
+| Member role | Nest access | Governance |
+|---|---|---|
+| **viewer** | read | viewer |
+| **editor** | write | editor |
+| **admin** | admin | admin |
+
+Key points:
+
+- A member's role is uniform across nests — set it once on the team. To vary
+  access per nest, use a different team (or a direct collaborator/steward grant).
+- When a user reaches a nest by several paths (a direct collaborator grant **and**
+  team membership), the **highest** access wins.
+- Sharing a team whose members carry a governance role (viewer/editor)
+  **enables stewardship** on the nest — same effect as assigning an individual
+  steward. An `admin`-only team is collaborator-style and doesn't.
+- Removing a member, deleting the team, or unsharing it **revokes access
+  immediately** — there are no per-user rows to clean up.
+- Managing a team is gated by your role on it: editor/admin members (and the
+  owner) can add people, capped to their own level; admins can also change
+  roles and remove members; only the owner can delete the team.
+
+### Importing a team from PromptOwl
+
+If you already run teams in PromptOwl, the Teams page has a **PromptOwl Teams**
+tab listing your teams there with their members. Each one has a **Sync** button
+that copies it here as a normal team owned by you, instead of you retyping every
+member. Members without an account here become invited placeholders, exactly as
+if you'd added them by hand.
+
+**The tab only appears if you signed in with PromptOwl** — that sign-in is what
+gives this server permission to read your teams. Signing in another way (SSO,
+your identity provider, or email and password) means no PromptOwl identity to
+read teams for, so the tab isn't offered.
+
+**You can import a team you're an owner or editor of in PromptOwl.** Teams you're
+view-only on are listed for reference but can't be imported: the copy would be
+yours to control here — rename it, rewrite its roster, share it onto a nest —
+and that's more than PromptOwl lets you do with that team. Ask one of its owners
+or editors to import it instead.
+
+Already-imported teams are marked **Synced** in that tab, and show a **PromptOwl**
+badge in the ContextNest Teams tab. Two things worth knowing before you sync
+one again:
+
+- **PromptOwl is the source of truth on every sync.** The roster is reconciled to
+  match: roles are reset, and anyone no longer in the PromptOwl team is removed —
+  including people you added to this team by hand here. If you need a group that
+  differs from PromptOwl, make it a separate team rather than editing an
+  imported one.
+- **Your PromptOwl access isn't stored on this server.** The connection lives in
+  a cookie in your own browser and ends when your session does — this server's
+  database never holds anything that can reach your PromptOwl account, so a
+  stolen backup of it exposes nothing of yours. The connection is also limited
+  to reading your profile and your teams: it cannot chat as you or spend your
+  credits. Signing out ends it, and revoking the device in PromptOwl's account
+  settings ends it immediately from the other side.
+
+PromptOwl's `User` role — its default membership — maps to **viewer** here, as
+does any role this version doesn't recognize; `Owner` maps to admin, and
+`Editor`/`Viewer` map across as themselves.
+
+Members see the teams they belong to on the **Teams** page and any team-shared
+nest on their dashboard. Manage teams there (create, add/remove members with a
+role); share them from a nest's sharing panel. See `API.md` §3a for the endpoints.
 
 ## Picking a scope when you assign a steward
 

@@ -43,12 +43,38 @@ export type LoginSuccessUser = {
 
 export interface AuthContextValue {
   authMode: AuthMode;
+  logoUrl: string | null;
+  serverVersion: string | null;
   adminStatus: AdminStatus | null;
   authenticated: boolean;
   isAdmin: boolean;
+  /** Public feature flag from /health — the server's route gate, so the UI
+   *  hides the workflow plane exactly when the API would 404 it. */
+  workflowPlaneEnabled: boolean;
+  /** Public feature flag from /health — import teams from PromptOwl (default
+   *  OFF). Off → /teams/promptowl 404s, so the UI hides the panel to match. */
+  promptowlTeamsEnabled: boolean;
+  /** Content-type toggles from /health (default ON). The editor's type picker
+   *  hides a disabled type exactly when the API would refuse creating it;
+   *  existing nodes of the type stay readable. */
+  typeArtifactEnabled: boolean;
+  typeTableEnabled: boolean;
+  /** Public feature flag from /health — sub-agent (nested) runs. Gated
+   *  separately from the plane; when off the UI hides the "spawn sub-agent"
+   *  option exactly when the API would reject a parent_run_id (400). */
+  subagentRunsEnabled: boolean;
+  /** Server's sub-agent recursion caps from /health (env-overridable). The
+   *  Runs picker validates against these real values, not hardcoded defaults,
+   *  so an operator's override stays in sync with the grey-outs. */
+  subagentMaxDepth: number;
+  subagentMaxChildren: number;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
+  /** Re-read the public feature flags from /health and update them live —
+   *  call after an admin toggles a flag in Settings so gated UI (workflow
+   *  plane, sub-agent runs) reacts without a full page reload. */
+  refreshHealth: () => Promise<void>;
   loginSuccess: (user?: LoginSuccessUser) => void;
   logout: () => Promise<void>;
 }
@@ -57,6 +83,19 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: PropsWithChildren) {
   const [authMode, setAuthMode] = useState<AuthMode>(null);
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
+  const [workflowPlaneEnabled, setWorkflowPlaneEnabled] = useState(false);
+  const [promptowlTeamsEnabled, setPromptowlTeamsEnabled] = useState(false);
+  // Content types default ON (mirrors config.ts — only an explicit "false"
+  // disables), so the picker doesn't flicker types away while /health loads.
+  const [typeArtifactEnabled, setTypeArtifactEnabled] = useState(true);
+  const [typeTableEnabled, setTypeTableEnabled] = useState(true);
+  const [subagentRunsEnabled, setSubagentRunsEnabled] = useState(false);
+  // Defaults mirror config.ts; overwritten by /health so operator overrides
+  // flow through to the picker.
+  const [subagentMaxDepth, setSubagentMaxDepth] = useState(8);
+  const [subagentMaxChildren, setSubagentMaxChildren] = useState(16);
   const [adminStatus, setAdminStatus] = useState<AdminStatus | null>(null);
   const [authenticated, setAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -74,6 +113,22 @@ export function AuthProvider({ children }: PropsWithChildren) {
     },
     [],
   );
+
+  const refreshHealth = useCallback(async () => {
+    try {
+      const h = await api.getHealth();
+      setLogoUrl(h.logo_url ?? null);
+      setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+      setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
+      setTypeArtifactEnabled(h.type_artifact_enabled !== false);
+      setTypeTableEnabled(h.type_table_enabled !== false);
+      setSubagentRunsEnabled(!!h.subagent_runs_enabled);
+      if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
+      if (typeof h.subagent_max_children === "number") setSubagentMaxChildren(h.subagent_max_children);
+    } catch {
+      /* keep the last-known flags on a transient health failure */
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     const mySeq = ++seqRef.current;
@@ -101,6 +156,15 @@ export function AuthProvider({ children }: PropsWithChildren) {
         if (cancelled) return;
         const mode = h.auth_mode as AuthMode;
         setAuthMode(mode);
+        setLogoUrl(h.logo_url ?? null);
+        setServerVersion(h.version ?? null);
+        setWorkflowPlaneEnabled(!!h.workflow_plane_enabled);
+        setPromptowlTeamsEnabled(!!h.promptowl_teams_enabled);
+        setTypeArtifactEnabled(h.type_artifact_enabled !== false);
+        setTypeTableEnabled(h.type_table_enabled !== false);
+        setSubagentRunsEnabled(!!h.subagent_runs_enabled);
+        if (typeof h.subagent_max_depth === "number") setSubagentMaxDepth(h.subagent_max_depth);
+        if (typeof h.subagent_max_children === "number") setSubagentMaxChildren(h.subagent_max_children);
 
         const status = await api.getAdminStatus();
         if (cancelled) return;
@@ -116,6 +180,14 @@ export function AuthProvider({ children }: PropsWithChildren) {
       cancelled = true;
     };
   }, [deriveAuthenticated]);
+
+  // Swap browser tab favicon to the operator's custom logo when set.
+  // The fallback href in index.html stays as the inline 🪺 SVG.
+  useEffect(() => {
+    if (!logoUrl) return;
+    const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (link) link.href = logoUrl;
+  }, [logoUrl]);
 
   // Listen for 401s from any api.request — the server says our session
   // is invalid. Reset state so the user is bounced back to the login
@@ -148,6 +220,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
     const KEY = "cnst_auth_tick";
     const onStorage = (e: StorageEvent) => {
       if (e.key !== KEY) return;
+      // Auth changed in a sibling tab — this tab's read cache may belong to
+      // the previous identity.
+      api.invalidateNestReads();
       void refresh();
     };
     const onVisible = () => {
@@ -178,6 +253,10 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const loginSuccess = useCallback(
     (user?: LoginSuccessUser) => {
       const mySeq = ++seqRef.current;
+      // The read cache may still hold the previous identity's responses
+      // (anonymous view, or another user on a shared machine) — access is
+      // per-user, so never let them cross an auth transition.
+      api.invalidateNestReads();
       if (user) {
         const name = user.name ?? null;
         setAdminStatus((prev) => ({
@@ -207,12 +286,28 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const logout = useCallback(async () => {
     ++seqRef.current;
+    // If this session was started via OIDC SSO, the server set a readable
+    // marker cookie. Route logout through GET /auth/oidc/logout so the IdP
+    // session ends too (RP-initiated logout) — otherwise the next "Sign in
+    // with SSO" click silently re-authenticates. That endpoint tears the
+    // local session down server-side and redirects back to "/", so we hand
+    // the whole tab over to it rather than calling api.logout().
+    const ssoSession = document.cookie
+      .split(";")
+      .some((c) => c.trim().startsWith("cnst_sso_session="));
+    if (ssoSession) {
+      window.location.assign("/auth/oidc/logout");
+      return;
+    }
     try {
       await api.logout();
     } catch {
       // Even if the server call fails, treat the client as logged out —
       // the cookie may already be invalid and we don't want a stuck UI.
     }
+    // Drop the read cache with the session — cached nest data belongs to the
+    // identity that just signed out.
+    api.invalidateNestReads();
     setAuthenticated(authMode === "open");
     setAdminStatus((prev) => (prev ? { ...prev, me: null } : prev));
     broadcastAuthChange();
@@ -224,12 +319,22 @@ export function AuthProvider({ children }: PropsWithChildren) {
     <AuthContext.Provider
       value={{
         authMode,
+        logoUrl,
+        serverVersion,
         adminStatus,
         authenticated,
         isAdmin,
+        workflowPlaneEnabled,
+        promptowlTeamsEnabled,
+        typeArtifactEnabled,
+        typeTableEnabled,
+        subagentRunsEnabled,
+        subagentMaxDepth,
+        subagentMaxChildren,
         loading,
         error,
         refresh,
+        refreshHealth,
         loginSuccess,
         logout,
       }}

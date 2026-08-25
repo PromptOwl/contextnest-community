@@ -1,24 +1,43 @@
 import { Hono } from "hono";
-import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import type { AuthEnv } from "../auth/middleware.js";
-import { ValidationError } from "../shared/errors.js";
-import type { NestCollaborator, NestCollaboratorPermission } from "../shared/types.js";
+import { NotFoundError, ValidationError } from "../shared/errors.js";
+import {
+  resolveUserRoles,
+  getStewardRolesForUser,
+} from "../governance/stewardship-service.js";
+import { addCollaborator } from "./sharing-service.js";
+import { requestBaseUrl } from "../shared/base-url.js";
+import type { NestCollaborator } from "../shared/types.js";
 
 export const sharingRoutes = new Hono<AuthEnv>();
 
 // GET /nests/:nestId/collaborators
 sharingRoutes.get("/collaborators", async (c) => {
   const db = getDb();
-  const collabs = db
-    .prepare(
-      `SELECT nc.*, u.email FROM nest_collaborators nc
+  const nestId = c.req.param("nestId")!;
+  const collabs = (await db.all(
+    `SELECT nc.*, u.email FROM nest_collaborators nc
        LEFT JOIN users u ON nc.user_id = u.id
        WHERE nc.nest_id = ?
        ORDER BY nc.granted_at`,
-    )
-    .all(c.req.param("nestId")!) as Array<NestCollaborator & { email?: string }>;
-  return c.json({ collaborators: collabs });
+    [nestId],
+  )) as Array<NestCollaborator & { email?: string }>;
+  // Annotate with the user's steward roles + merged effective roles so the
+  // UI shows the full picture (a collaborator may also be a reviewer steward).
+  const enriched = [];
+  for (const collab of collabs) {
+    if (!collab.email) {
+      enriched.push({ ...collab, stewardRoles: [], roles: [] });
+      continue;
+    }
+    enriched.push({
+      ...collab,
+      stewardRoles: await getStewardRolesForUser(nestId, collab.email),
+      roles: await resolveUserRoles(nestId, collab.email),
+    });
+  }
+  return c.json({ collaborators: enriched });
 });
 
 // POST /nests/:nestId/collaborators — share by email
@@ -29,54 +48,22 @@ sharingRoutes.post("/collaborators", async (c) => {
     permission?: string;
   }>();
 
-  if (!body.permission || !["read", "write", "admin"].includes(body.permission)) {
-    throw new ValidationError("permission must be read, write, or admin");
-  }
-
-  const db = getDb();
-  let userId = body.user_id;
-
-  // Allow sharing by email — look up or create placeholder user
-  if (!userId && body.email) {
-    let user = db.prepare("SELECT id FROM users WHERE email = ?").get(body.email) as
-      | { id: string }
-      | undefined;
-
-    if (!user) {
-      // Create a placeholder user (they'll claim the account by registering
-      // with the same email — see /auth/register claim flow).
-      const { hashPassword } = await import("../auth/keys.js");
-      userId = uuid();
-      db.prepare(
-        "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
-      ).run(userId, body.email, null, await hashPassword(uuid()));
-    } else {
-      userId = user.id;
-    }
-  }
-
-  if (!userId) {
-    throw new ValidationError("user_id or email is required");
-  }
-
-  const collabId = uuid();
-  db.prepare(
-    "INSERT INTO nest_collaborators (id, nest_id, user_id, permission, granted_by) VALUES (?, ?, ?, ?, ?)",
-  ).run(
-    collabId,
-    c.req.param("nestId")!,
-    userId,
-    body.permission,
-    c.get("userId"),
-  );
-
-  const collab = db
-    .prepare("SELECT * FROM nest_collaborators WHERE id = ?")
-    .get(collabId) as NestCollaborator;
+  const collab = await addCollaborator({
+    nestId: c.req.param("nestId")!,
+    email: body.email,
+    userId: body.user_id,
+    permission: body.permission ?? "",
+    grantedByUserId: c.get("userId"),
+    // Enforce the escalation cap against the caller's own nest permission
+    // (set by the access guard) — a write collaborator can't grant admin.
+    callerPermission: c.get("nestPermission"),
+    baseUrl: requestBaseUrl(c.req.url),
+  });
   return c.json({ collaborator: collab }, 201);
 });
 
-// PATCH /nests/:nestId/collaborators/:collabId
+// PATCH /nests/:nestId/collaborators/:collabId — admin-only (access guard).
+// Changing an existing collaborator's level stays an admin-tier action.
 sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   const body = await c.req.json<{ permission?: string }>();
   if (!body.permission || !["read", "write", "admin"].includes(body.permission)) {
@@ -84,19 +71,34 @@ sharingRoutes.patch("/collaborators/:collabId", async (c) => {
   }
 
   const db = getDb();
-  db.prepare("UPDATE nest_collaborators SET permission = ? WHERE id = ?").run(
-    body.permission,
-    c.req.param("collabId")!,
+  // Scope to the nest in the URL — the guard authorised the caller against
+  // THIS nest, so the row we touch must belong to it (a bare `id =` match
+  // would let an admin of nest A mutate a collaborator row from nest B).
+  const info = await db.run(
+    "UPDATE nest_collaborators SET permission = ? WHERE id = ? AND nest_id = ?",
+    [body.permission, c.req.param("collabId")!, c.req.param("nestId")!],
   );
+  // No row matched → the collabId is unknown or belongs to another nest. Don't
+  // claim success for a no-op.
+  if (info.changes === 0) {
+    throw new NotFoundError("Collaborator not found");
+  }
   return c.json({ updated: true });
 });
 
-// DELETE /nests/:nestId/collaborators/:collabId
+// DELETE /nests/:nestId/collaborators/:collabId — admin-only (access guard).
+// Removing a collaborator stays an admin-tier action.
 sharingRoutes.delete("/collaborators/:collabId", async (c) => {
   const db = getDb();
-  db.prepare("DELETE FROM nest_collaborators WHERE id = ?").run(
-    c.req.param("collabId")!,
+  // Scope to the nest in the URL (see PATCH above) — never delete a row that
+  // belongs to a different nest just because the UUID matches.
+  const info = await db.run(
+    "DELETE FROM nest_collaborators WHERE id = ? AND nest_id = ?",
+    [c.req.param("collabId")!, c.req.param("nestId")!],
   );
+  if (info.changes === 0) {
+    throw new NotFoundError("Collaborator not found");
+  }
   return c.json({ removed: true });
 });
 
@@ -108,9 +110,21 @@ sharingRoutes.patch("/visibility", async (c) => {
   }
 
   const db = getDb();
-  db.prepare("UPDATE nests SET visibility = ? WHERE id = ?").run(
+  const nestId = c.req.param("nestId")!;
+  const result = await db.run("UPDATE nests SET visibility = ? WHERE id = ?", [
     body.visibility,
-    c.req.param("nestId")!,
-  );
-  return c.json({ visibility: body.visibility });
+    nestId,
+  ]);
+  // A zero-row update means the nest id didn't resolve — report it instead of
+  // echoing success, which previously let the UI flip to a state the DB never
+  // took (the "made it private but it still shows public" symptom).
+  if (result.changes === 0) {
+    throw new NotFoundError("Nest not found");
+  }
+  // Re-read the persisted value so the client reconciles against the DB truth,
+  // not the value it sent.
+  const row = (await db.get("SELECT visibility FROM nests WHERE id = ?", [
+    nestId,
+  ])) as { visibility: string };
+  return c.json({ visibility: row.visibility });
 });

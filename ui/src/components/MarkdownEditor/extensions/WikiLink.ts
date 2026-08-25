@@ -1,5 +1,6 @@
 import { Extension } from "@tiptap/core";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
 export interface WikiLinkOptions {
@@ -13,16 +14,170 @@ export interface WikiLinkOptions {
    * navigation succeeds).
    */
   checkExists?: (title: string) => Promise<{ exists: boolean; id?: string }>;
+  /**
+   * Nest the document lives in. Scopes the existence cache so the same
+   * `[[Title]]` resolved in nest A never leaks its id/exists state into
+   * nest B (the two nests can hold different docs under the same title).
+   */
+  nestId?: string;
 }
 
 // `[[Title]]` or `[[Title|Display text]]`. Greedy until ]] to allow
 // titles with spaces; the | alias form mirrors common wiki conventions.
 const wikiLinkRegex = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
-// Process-wide cache so re-renders don't re-fire the existence check
-// for every keystroke. Keyed on lowercased title (case-insensitive
+// Process-wide cache so re-renders don't re-fire the existence check for
+// every keystroke. Keyed on `${nestId}::${lowercased title}` — the nest
+// scope keeps cross-nest lookups from colliding (case-insensitive title
 // matches feel less brittle to users).
 const existsCache = new Map<string, { exists: boolean; id?: string }>();
+
+function cacheKey(nestId: string | undefined, target: string): string {
+  return `${nestId ?? ""}::${target.toLowerCase()}`;
+}
+
+/** Drop cached existence results — all of them, or just one nest's. Call
+ *  on nest switch / after create/delete so stale "exists" can't linger. */
+export function clearWikiExistsCache(nestId?: string): void {
+  if (nestId === undefined) {
+    existsCache.clear();
+    return;
+  }
+  const prefix = `${nestId}::`;
+  for (const key of existsCache.keys()) {
+    if (key.startsWith(prefix)) existsCache.delete(key);
+  }
+}
+
+/**
+ * One `[[…]]` occurrence as absolute doc positions:
+ *   start ──[[── labelStart ──visible label── labelEnd ──]]── end
+ * The `[[target|` prefix and trailing `]]` are the hidden (zero-width)
+ * spans; the label between them is what the reader sees.
+ */
+export interface WikiLinkRange {
+  start: number;
+  labelStart: number;
+  labelEnd: number;
+  end: number;
+  target: string;
+  displayText: string;
+  hasAlias: boolean;
+}
+
+/**
+ * Find every `[[…]]` in the doc as absolute-position ranges. Shared by
+ * the decoration builder and the caret-snap plugin so both agree on
+ * exactly where the hidden brackets sit. Exported for unit tests.
+ */
+export function collectWikiLinkRanges(doc: ProseMirrorNode): WikiLinkRange[] {
+  const ranges: WikiLinkRange[] = [];
+  doc.descendants((node, pos, parent) => {
+    if (!node.isText || !node.text) return;
+    // W3: never treat code as wiki links — `[[ ]]` inside a code block or an
+    // inline `code` mark is literal source, not a link.
+    if (parent?.type.name === "codeBlock") return;
+    if (node.marks.some((m) => m.type.name === "code")) return;
+
+    const text = node.text;
+    let match;
+    wikiLinkRegex.lastIndex = 0;
+    while ((match = wikiLinkRegex.exec(text)) !== null) {
+      const fullMatch = match[0];
+      const target = match[1].trim();
+      const hasAlias = match[2] !== undefined;
+      const displayText = match[2]?.trim() || target;
+      const start = pos + match.index;
+      const end = start + fullMatch.length;
+      // Show alias only; hide `[[target|` + `]]`.
+      const labelStart = hasAlias
+        ? start + fullMatch.lastIndexOf("|") + 1
+        : start + 2;
+      const labelEnd = end - 2;
+      ranges.push({ start, labelStart, labelEnd, end, target, displayText, hasAlias });
+    }
+  });
+  return ranges;
+}
+
+/**
+ * Build wiki-link decorations for a whole document, with absolute doc
+ * positions. Exported so the behavior is unit-testable against a real
+ * ProseMirror doc without a DOM (the model layer needs no browser).
+ */
+export function collectWikiLinkDecorations(
+  doc: ProseMirrorNode,
+  checkExists?: WikiLinkOptions["checkExists"],
+  nestId?: string,
+): Decoration[] {
+  const decorations: Decoration[] = [];
+
+  for (const range of collectWikiLinkRanges(doc)) {
+    const { start, labelStart, labelEnd, end, target, displayText } = range;
+    {
+      const key = cacheKey(nestId, target);
+      const cached = existsCache.get(key);
+      const exists = cached?.exists ?? !checkExists;
+      const docId = cached?.id;
+
+      const linkClass = exists ? "wiki-link-exists" : "wiki-link-broken";
+      // Existing links get the rich hover-preview popover, so omit the native
+      // `title` tooltip to avoid two overlapping affordances. Broken links have
+      // no preview — keep the "not found" tooltip there.
+      const attrs: Record<string, string> = {
+        class: `wiki-link ${linkClass}`,
+        "data-wiki-title": target,
+        "data-wiki-id": docId || "",
+        "data-wiki-display": displayText,
+      };
+      if (!exists) {
+        attrs.title = `"${displayText}" not found in this nest`;
+      }
+
+      decorations.push(
+        Decoration.inline(start, labelStart, { class: "wiki-bracket-hidden" }),
+      );
+      decorations.push(Decoration.inline(labelStart, labelEnd, attrs));
+      decorations.push(
+        Decoration.inline(labelEnd, end, { class: "wiki-bracket-hidden" }),
+      );
+
+      if (checkExists && !existsCache.has(key)) {
+        // Seed a tentative entry so we don't fire the same request again
+        // while the first one is in flight.
+        existsCache.set(key, { exists: false });
+        checkExists(target)
+          .then((result) => {
+            existsCache.set(key, result);
+          })
+          .catch(() => {
+            /* keep the tentative miss on failure */
+          });
+      }
+    }
+  }
+
+  return decorations;
+}
+
+/**
+ * Snap a collapsed caret out of the hidden `[[ ]]` bracket spans. font-size:0
+ * makes those chars zero-width, so a click or arrow can land "inside" a bracket
+ * where there's no glyph. We snap OUTWARD — landing in the leading `[[target|`
+ * span jumps to before the link (start), landing in the trailing `]]` span jumps
+ * to after it (end). This keeps typing next to a link from inserting text inside
+ * the brackets and corrupting the `[[…]]` markup.
+ */
+function snapCaretOutOfBrackets(
+  ranges: WikiLinkRange[],
+  pos: number,
+): number | null {
+  for (const r of ranges) {
+    if (pos > r.start && pos < r.labelStart) return r.start;
+    if (pos > r.labelEnd && pos < r.end) return r.end;
+  }
+  return null;
+}
 
 export const WikiLink = Extension.create<WikiLinkOptions>({
   name: "wikiLink",
@@ -31,84 +186,37 @@ export const WikiLink = Extension.create<WikiLinkOptions>({
     return {
       onWikiLinkClick: undefined,
       checkExists: undefined,
+      nestId: undefined,
     };
   },
 
   addProseMirrorPlugins() {
-    const { onWikiLinkClick, checkExists } = this.options;
+    const { onWikiLinkClick, checkExists, nestId } = this.options;
 
     return [
       new Plugin({
         key: new PluginKey("wikiLink"),
+        // Caret-snap: after any selection/doc change, push a collapsed
+        // cursor sitting inside a hidden bracket span onto the label edge.
+        appendTransaction(transactions, oldState, newState) {
+          const sel = newState.selection;
+          if (!sel.empty) return null;
+          const selChanged = !oldState.selection.eq(sel);
+          const docChanged = transactions.some((t) => t.docChanged);
+          if (!selChanged && !docChanged) return null;
+          const ranges = collectWikiLinkRanges(newState.doc);
+          const snapped = snapCaretOutOfBrackets(ranges, sel.from);
+          if (snapped === null) return null;
+          return newState.tr.setSelection(
+            TextSelection.create(newState.doc, snapped),
+          );
+        },
         props: {
           decorations(state) {
-            const decorations: Decoration[] = [];
-            const doc = state.doc;
-
-            doc.descendants((node, pos) => {
-              if (!node.isText || !node.text) return;
-
-              const text = node.text;
-              let match;
-              wikiLinkRegex.lastIndex = 0;
-              while ((match = wikiLinkRegex.exec(text)) !== null) {
-                const fullMatch = match[0];
-                const title = match[1].trim();
-                const displayText = match[2]?.trim() || title;
-                const start = pos + match.index;
-
-                const cached = existsCache.get(title.toLowerCase());
-                const exists = cached?.exists ?? !checkExists;
-                const docId = cached?.id;
-
-                const linkClass = exists
-                  ? "wiki-link-exists"
-                  : "wiki-link-broken";
-                const tooltip = exists
-                  ? `Open "${title}"`
-                  : `"${title}" not found in this nest`;
-
-                const openBracketEnd = start + 2;
-                const closeBracketStart = start + fullMatch.length - 2;
-
-                decorations.push(
-                  Decoration.inline(start, openBracketEnd, {
-                    class: "wiki-bracket-hidden",
-                  }),
-                );
-                decorations.push(
-                  Decoration.inline(openBracketEnd, closeBracketStart, {
-                    class: `wiki-link ${linkClass}`,
-                    "data-wiki-title": title,
-                    "data-wiki-id": docId || "",
-                    "data-wiki-display": displayText,
-                    title: tooltip,
-                  }),
-                );
-                decorations.push(
-                  Decoration.inline(
-                    closeBracketStart,
-                    start + fullMatch.length,
-                    { class: "wiki-bracket-hidden" },
-                  ),
-                );
-
-                if (checkExists && !existsCache.has(title.toLowerCase())) {
-                  // Seed a tentative entry so we don't fire the same
-                  // request again while the first one is in flight.
-                  existsCache.set(title.toLowerCase(), { exists: false });
-                  checkExists(title)
-                    .then((result) => {
-                      existsCache.set(title.toLowerCase(), result);
-                    })
-                    .catch(() => {
-                      /* keep the tentative miss on failure */
-                    });
-                }
-              }
-            });
-
-            return DecorationSet.create(doc, decorations);
+            return DecorationSet.create(
+              state.doc,
+              collectWikiLinkDecorations(state.doc, checkExists, nestId),
+            );
           },
           handleClick(_view, _pos, event) {
             const target = event.target as HTMLElement;
@@ -117,6 +225,46 @@ export const WikiLink = Extension.create<WikiLinkOptions>({
             const id = target.getAttribute("data-wiki-id") || null;
             if (title && onWikiLinkClick) {
               onWikiLinkClick(title, id);
+              return true;
+            }
+            return false;
+          },
+          // Wiki links are plain `[[target|label]]` text with the brackets
+          // hidden by decorations. A naive Backspace deletes the trailing `]]`
+          // one char at a time, exposing the raw `[[target|label` path. Instead,
+          // when a Backspace/Delete touches a link, UNWRAP it to an editable
+          // `[[label` (visible label only, hidden path dropped) with one char
+          // removed — this drops the closing brackets so the `[[` autocomplete
+          // reopens, letting the user retype or pick a different document.
+          handleKeyDown(view, event) {
+            if (event.key !== "Backspace" && event.key !== "Delete") {
+              return false;
+            }
+            const { state } = view;
+            const sel = state.selection;
+            if (!sel.empty) return false;
+            const pos = sel.from;
+            const ranges = collectWikiLinkRanges(state.doc);
+
+            for (const r of ranges) {
+              const label = r.displayText;
+              // Backspace: caret within the link or just after it (not before).
+              // Delete: caret within the link or just before it (not after).
+              const hit =
+                event.key === "Backspace"
+                  ? pos > r.start && pos <= r.end
+                  : pos >= r.start && pos < r.end;
+              if (!hit) continue;
+
+              // Drop one char in the direction of the keystroke, then leave an
+              // open `[[query` so the autocomplete picks it up.
+              const trimmed =
+                event.key === "Backspace" ? label.slice(0, -1) : label.slice(1);
+              const next = `[[${trimmed}`;
+              const tr = state.tr.insertText(next, r.start, r.end);
+              const caret = r.start + next.length;
+              tr.setSelection(TextSelection.create(tr.doc, caret));
+              view.dispatch(tr.scrollIntoView());
               return true;
             }
             return false;

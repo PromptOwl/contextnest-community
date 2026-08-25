@@ -1,21 +1,32 @@
+import { createHash } from "crypto";
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
+
+// Deterministic batch_id from sorted event ids — same pending set across
+// retries yields the same id, letting TheOwl dedupe meter rows via its
+// partial unique index on (licenseKeyId, batchId, event, occurredAt).
+// See TheOwl PR #981.
+export function computeBatchId(ids: number[]): string {
+  const key = ids.slice().sort((a, b) => a - b).join(",");
+  return createHash("sha256").update(key).digest("hex").slice(0, 32);
+}
 
 /**
  * Record a telemetry event. Events are stored locally and batched to PromptOwl.
  * No document content is ever sent — only usage stats and event types.
  */
-export function trackEvent(
+export async function trackEvent(
   event: string,
   data?: Record<string, unknown>,
-): void {
+): Promise<void> {
   if (!config.TELEMETRY_ENABLED) return;
 
   try {
     const db = getDb();
-    db.prepare(
+    await db.run(
       "INSERT INTO telemetry_events (event, data_json) VALUES (?, ?)",
-    ).run(event, data ? JSON.stringify(data) : null);
+      [event, data ? JSON.stringify(data) : null],
+    );
   } catch {
     // Telemetry should never break the server
   }
@@ -32,53 +43,95 @@ export async function flushTelemetry(): Promise<void> {
 
   // Gather server stats
   const userCount =
-    (db.prepare("SELECT COUNT(*) as c FROM users").get() as { c: number })?.c ||
+    ((await db.get("SELECT COUNT(*) as c FROM users")) as { c: number })?.c ||
     0;
   const nestCount =
-    (db.prepare("SELECT COUNT(*) as c FROM nests").get() as { c: number })?.c ||
+    ((await db.get("SELECT COUNT(*) as c FROM nests")) as { c: number })?.c ||
     0;
 
   // Gather unsent events (limit batch size)
-  const events = db
-    .prepare(
+  const events = await db
+    .all(
       "SELECT id, event, data_json, created_at FROM telemetry_events WHERE sent = 0 ORDER BY id LIMIT 100",
-    )
-    .all() as Array<{
+    ) as Array<{
     id: number;
     event: string;
     data_json: string | null;
     created_at: string;
   }>;
 
-  if (events.length === 0 && userCount === 0) return;
+  if (events.length === 0 && userCount === 0) {
+    console.log("[telemetry] skip flush: no events and no users");
+    return;
+  }
+
+  const emailCache = new Map<string, string | null>();
+  const resolveEmail = async (userId: unknown): Promise<string | null> => {
+    if (typeof userId !== "string" || !userId) return null;
+    if (emailCache.has(userId)) return emailCache.get(userId) ?? null;
+    const row = await db
+      .get("SELECT email FROM users WHERE id = ?", [userId]) as { email?: string } | undefined;
+    const email = row?.email ?? null;
+    emailCache.set(userId, email);
+    return email;
+  };
+
+  // Stats-only flushes (no events) carry no meter rows, so no batch_id —
+  // otherwise sha256("") would brand every heartbeat with the same constant id.
+  const batchId =
+    events.length > 0 ? computeBatchId(events.map((e) => e.id)) : null;
+
+  const eventPayload = await Promise.all(
+    events.map(async (e) => {
+      const data = e.data_json
+        ? (JSON.parse(e.data_json) as Record<string, unknown>)
+        : null;
+      if (data && data.userId && !data.userEmail) {
+        const email = await resolveEmail(data.userId);
+        if (email) data.userEmail = email;
+      }
+      return {
+        event: e.event,
+        data,
+        at: e.created_at,
+      };
+    }),
+  );
 
   const payload = {
     server_key: config.PROMPTOWL_KEY,
+    batch_id: batchId,
     timestamp: new Date().toISOString(),
     stats: { users: userCount, nests: nestCount },
-    events: events.map((e) => ({
-      event: e.event,
-      data: e.data_json ? JSON.parse(e.data_json) : null,
-      at: e.created_at,
-    })),
+    events: eventPayload,
   };
 
+  const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
+  const url = `${promptowlUrl}/api/telemetry/ingest`;
+  console.log(
+    `[telemetry] POST ${url} events=${events.length} users=${userCount} nests=${nestCount}`,
+  );
+  console.log("[telemetry] payload:", JSON.stringify(payload, null, 2));
+
   try {
-    const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
-    const res = await fetch(`${promptowlUrl}/api/telemetry/ingest`, {
+    const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: config.PROMPTOWL_FETCH_HEADERS,
       body: JSON.stringify(payload),
     });
 
+    console.log(`[telemetry] response: ${res.status} ${res.statusText}`);
+
     if (res.ok && events.length > 0) {
       const ids = events.map((e) => e.id);
-      db.prepare(
+      await db.run(
         `UPDATE telemetry_events SET sent = 1 WHERE id IN (${ids.map(() => "?").join(",")})`,
-      ).run(...ids);
+        ids,
+      );
+      console.log(`[telemetry] marked ${ids.length} events as sent`);
     }
-  } catch {
-    // Silently fail — telemetry is best-effort
+  } catch (err) {
+    console.error("[telemetry] flush failed:", err);
   }
 }
 

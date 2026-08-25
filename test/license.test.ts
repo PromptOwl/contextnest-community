@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { join } from "path";
 import { setupTestEnv } from "./helpers";
 
 type LicenseModule = typeof import("../src/auth/license.js");
@@ -99,9 +100,10 @@ describe("validateLicense", () => {
     // network to be called even on cache hit, so age the row.
     const { getDb } = await import("../src/db/client.js");
     const db = getDb();
-    db.prepare(
+    await db.run(
       "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
-    ).run("pk_test_2");
+      ["pk_test_2"],
+    );
 
     const result = await license2.validateLicense();
     expect(fetchMock).toHaveBeenCalled();
@@ -136,11 +138,10 @@ describe("validateLicense", () => {
 
     // Age the cache so the next call goes to network, then 500
     const { getDb } = await import("../src/db/client.js");
-    getDb()
-      .prepare(
-        "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
-      )
-      .run("pk_test_5");
+    await getDb().run(
+      "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
+      ["pk_test_5"],
+    );
 
     process.env.PROMPTOWL_KEY = "pk_test_5";
     mockFetch({ ok: false, status: 500 });
@@ -199,11 +200,10 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
 
     // Force the cache to be stale so the second call hits network
     const { getDb } = await import("../src/db/client.js");
-    getDb()
-      .prepare(
-        "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
-      )
-      .run("pk_susp_2");
+    await getDb().run(
+      "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
+      ["pk_susp_2"],
+    );
 
     // Jump past the 1h confirmation window
     vi.spyOn(Date, "now").mockReturnValue(realNow + 61 * 60 * 1000);
@@ -224,14 +224,79 @@ describe("kill switch (isSuspended / two-strike confirmation)", () => {
 
     // Age cache so next call goes to network, then return suspended:false
     const { getDb } = await import("../src/db/client.js");
-    getDb()
-      .prepare(
-        "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
-      )
-      .run("pk_susp_3");
+    await getDb().run(
+      "UPDATE license_cache SET validated_at = datetime('now', '-2 days') WHERE key = ?",
+      ["pk_susp_3"],
+    );
     mockFetch({ body: { valid: true, tier: "team" } });
     await license.validateLicense();
     expect(license.isSuspended()).toBe(false);
     expect(license.getSuspensionReason()).toBeNull();
+  });
+});
+
+// Regression for the Docker license-persist bug: the in-app License Setup
+// flow wrote PROMPTOWL_KEY to $cwd/.env (= /app/.env in the image), which is
+// not on the mounted volume and not writable as the node user — so the key
+// was lost on restart, and the write failure was swallowed (UI showed
+// success). Fix: default ENV_FILE_PATH under DATA_ROOT, and surface failures.
+describe("installLicenseKey — durable persistence (Docker)", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+
+  beforeEach(() => {
+    env = setupTestEnv();
+  });
+
+  afterEach(() => {
+    env.cleanup();
+    vi.restoreAllMocks();
+    delete process.env.ENV_FILE_PATH;
+  });
+
+  it("defaults ENV_FILE_PATH to a persisted, writable path under DATA_ROOT", async () => {
+    delete process.env.ENV_FILE_PATH;
+    vi.resetModules();
+    const { config } = await import("../src/config.js");
+    expect(config.ENV_FILE_PATH).toBe(join(env.dataDir, ".env"));
+  });
+
+  it("persists the validated key to the database and reports persisted:true", async () => {
+    mockFetch({
+      body: { valid: true, tier: "team", org: "Acme", limits: { maxNests: 100, maxUsers: 25 } },
+    });
+    const { installLicenseKey } = await loadLicense();
+    const result = await installLicenseKey("pk_persist_1");
+    expect(result.valid).toBe(true);
+    expect(result.persisted).toBe(true);
+    // The key is durably stored in server_settings (survives restart + reaches
+    // every instance) rather than an ephemeral .env file.
+    const { getDb } = await import("../src/db/client.js");
+    const row = (await getDb().get(
+      "SELECT value FROM server_settings WHERE key = ?",
+      ["PROMPTOWL_KEY"],
+    )) as { value: string | null } | undefined;
+    expect(row?.value).toBe("pk_persist_1");
+  });
+
+  it("surfaces a persistence failure instead of silently keeping the key in memory", async () => {
+    // Force the DB write to throw by mocking the settings module — the license
+    // still validates in-memory, but the operator must be told it did NOT
+    // persist (the failure used to be swallowed, so the UI showed success).
+    vi.resetModules();
+    vi.doMock("../src/db/settings.js", () => ({
+      persistSetting: vi.fn(async () => {
+        throw new Error("database unavailable");
+      }),
+      loadServerSettings: vi.fn(async () => 0),
+    }));
+    mockFetch({ body: { valid: true, tier: "team", org: "Acme" } });
+    const { installLicenseKey } = await import("../src/auth/license.js");
+    const result = await installLicenseKey("pk_persist_2");
+    // Validated, so it works in-memory for this process...
+    expect(result.valid).toBe(true);
+    // ...but the operator must be told it did NOT persist.
+    expect(result.persisted).toBe(false);
+    expect(result.persistError).toBeTruthy();
+    vi.doUnmock("../src/db/settings.js");
   });
 });

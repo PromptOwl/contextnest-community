@@ -1,0 +1,482 @@
+/**
+ * Run service — the executable core of the workflow plane ("turing" track),
+ * shared by the REST routes (src/workflow/run-routes.ts) and the MCP tools
+ * (src/mcp/workflow-tools.ts) so the two surfaces can't drift.
+ *
+ * The server never executes anything: `triggerRun` hands an external runner
+ * the full bundle (agent body + reachable flow subgraph + referenced glossary
+ * definitions), and the runner reports back via `appendRunStep`/`closeRun`.
+ *
+ * These functions are permission-agnostic — every caller resolves the nest,
+ * the caller's read/write tier, suspension and license BEFORE calling in. The
+ * REST side does it in loadRunWithPermission + the nestsApp gate; the MCP side
+ * does it in workflow-tools. Keeping auth in the callers keeps this module a
+ * pure data layer.
+ */
+import { v4 as uuid } from "uuid";
+import type { NestStorage } from "@promptowl/contextnest-engine";
+import { getDb } from "../db/client.js";
+import { config } from "../config.js";
+import { ValidationError, NotFoundError, ConflictError, ForbiddenError } from "../shared/errors.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
+import { safeJson } from "../shared/json.js";
+
+export const RUNNABLE_TYPES = ["agent", "skill"];
+
+export { safeJson };
+
+export interface RunRow {
+  id: string;
+  nest_id: string;
+  agent_node: string;
+  triggered_by: string;
+  status: string;
+  inputs: string | null;
+  trace: string | null;
+  started_at: string;
+  finished_at: string | null;
+  parent_run_id: string | null;
+  depth: number;
+}
+
+/** Flow-edge subgraph reachable from the agent node (BFS, directed). */
+export async function flowSubgraph(nestId: string, agentNode: string) {
+  const db = getDb();
+  const rows = (await db.all(
+    `SELECT e.id, e.from_node, e.to_node, e.condition_mode, e.condition, e.metadata,
+            t.name as type_name, t.color as type_color
+       FROM edges e JOIN edge_types t ON t.id = e.type_id
+      WHERE e.nest_id = ? AND t.is_flow = 1`,
+    [nestId],
+  )) as Array<{
+    id: string; from_node: string; to_node: string;
+    condition_mode: string | null; condition: string | null; metadata: string | null;
+    type_name: string; type_color: string | null;
+  }>;
+  const byFrom = new Map<string, typeof rows>();
+  for (const r of rows) {
+    if (!byFrom.has(r.from_node)) byFrom.set(r.from_node, []);
+    byFrom.get(r.from_node)!.push(r);
+  }
+  const seen = new Set([agentNode]);
+  const queue = [agentNode];
+  const edges: typeof rows = [];
+  while (queue.length) {
+    const cur = queue.shift()!;
+    for (const e of byFrom.get(cur) ?? []) {
+      edges.push(e);
+      if (!seen.has(e.to_node)) {
+        seen.add(e.to_node);
+        queue.push(e.to_node);
+      }
+    }
+  }
+  return edges.map((e) => ({
+    id: e.id,
+    from_node: e.from_node,
+    to_node: e.to_node,
+    type: { name: e.type_name, color: e.type_color },
+    condition_mode: e.condition_mode,
+    condition:
+      e.condition_mode === "structured" ? safeJson(e.condition) : e.condition,
+    metadata: safeJson(e.metadata),
+  }));
+}
+
+/** Definitions referenced by structured conditions in the bundle. */
+export async function referencedDefinitions(
+  nestId: string,
+  edges: Array<{ condition_mode: string | null; condition: unknown }>,
+) {
+  const terms = new Set<string>();
+  for (const e of edges) {
+    if (e.condition_mode === "structured" && e.condition && typeof e.condition === "object") {
+      const t = (e.condition as any).term;
+      if (typeof t === "string" && t.trim()) terms.add(t.trim());
+    }
+  }
+  if (!terms.size) return [];
+  try {
+    const db = getDb();
+    // One batched lookup rather than a SELECT per term — the trigger path is
+    // what an external runner blocks on, so keep it a single round-trip.
+    const list = [...terms];
+    const placeholders = list.map(() => "LOWER(?)").join(", ");
+    const rows = (await db.all(
+      `SELECT term, definition, linked_tag FROM definitions
+        WHERE nest_id = ? AND LOWER(term) IN (${placeholders})`,
+      [nestId, ...list],
+    )) as unknown[];
+    return rows;
+  } catch {
+    /* definitions table not on this deployment yet — bundle ships without */
+    return [];
+  }
+}
+
+/**
+ * Sub-agent recursion guard (FEATURE_SUBAGENT_RUNS). Given a claimed parent
+ * run, validate it and return {depth}. Enforces:
+ *   - parent exists, same nest, still running (can't graft onto a closed run)
+ *   - depth ≤ SUBAGENT_MAX_DEPTH (finite tree = haltable)
+ *   - re-entrancy: the child agent isn't already anywhere in the ancestor
+ *     chain (agent A→B→A would loop forever; the per-nest flow DAG guard
+ *     can't see across run boundaries, so this is the cross-run cycle check)
+ *   - fan-out ≤ SUBAGENT_MAX_CHILDREN (depth bounds height, this bounds width)
+ * Gated: with the flag off, ANY parent_run_id is rejected. Throws
+ * ValidationError / NotFoundError / ForbiddenError / ConflictError.
+ */
+export async function resolveParentRun(
+  nestId: string,
+  parentRunId: string,
+  childAgent: string,
+): Promise<{ depth: number }> {
+  if (!config.FEATURE_SUBAGENT_RUNS) {
+    throw new ValidationError(
+      "Sub-agent runs are not enabled on this server (FEATURE_SUBAGENT_RUNS).",
+    );
+  }
+  const db = getDb();
+  let cursor: string | null = parentRunId;
+  let parentDepth = -1;
+  // Walk the ancestor chain to the root. The depth cap also bounds this walk,
+  // so a corrupted chain can't loop unbounded.
+  for (let i = 0; i <= config.SUBAGENT_MAX_DEPTH + 1; i++) {
+    if (!cursor) break;
+    const row = (await db.get(
+      "SELECT id, nest_id, agent_node, status, depth, parent_run_id FROM runs WHERE id = ?",
+      [cursor],
+    )) as
+      | { id: string; nest_id: string; agent_node: string; status: string; depth: number; parent_run_id: string | null }
+      | undefined;
+    // Cross-nest parent and nonexistent parent BOTH surface as 404: never let a
+    // write-tier caller use the status code as an oracle for whether an
+    // arbitrary run id exists in some other nest (same posture as
+    // loadRunWithPermission / loadNestRun).
+    if (!row || row.nest_id !== nestId) {
+      throw new NotFoundError(`Parent run not found: ${cursor}`);
+    }
+    if (cursor === parentRunId && row.status !== "running") {
+      throw new ConflictError(
+        `Parent run is ${row.status} — cannot spawn a sub-agent under a closed run`,
+      );
+    }
+    // Re-entrancy: the child agent must not appear anywhere in the ancestor
+    // chain (agent A→B→A would loop forever; the per-nest flow DAG guard can't
+    // see across run boundaries). Each ancestor's own agent_node is checked as
+    // we walk, so a separate "seen" set would be redundant.
+    if (row.agent_node === childAgent) {
+      throw new ConflictError(
+        `re-entrancy: "${childAgent}" is already running in this call chain — sub-agent recursion must be acyclic`,
+      );
+    }
+    if (cursor === parentRunId) parentDepth = row.depth;
+    cursor = row.parent_run_id;
+  }
+  const depth = parentDepth + 1;
+  if (depth > config.SUBAGENT_MAX_DEPTH) {
+    throw new ForbiddenError(
+      `sub-agent depth ${depth} exceeds the limit of ${config.SUBAGENT_MAX_DEPTH}`,
+    );
+  }
+  // The fan-out cap (SUBAGENT_MAX_CHILDREN) that bounds tree WIDTH is enforced
+  // in triggerRun, inside the same transaction as the child INSERT — counting
+  // here would be a TOCTOU check (concurrent spawns could both pass it before
+  // either row lands). Depth and re-entrancy above are chain-shape invariants
+  // that don't race with sibling inserts, so they stay here.
+  return { depth };
+}
+
+/** Load one run row (no permission check — the caller gates). */
+export async function loadRun(runId: string): Promise<RunRow | undefined> {
+  return (await getDb().get("SELECT * FROM runs WHERE id = ?", [runId])) as
+    | RunRow
+    | undefined;
+}
+
+export interface RunBundle {
+  run_id: string;
+  parent_run_id: string | null;
+  depth: number;
+  agent: {
+    id: string;
+    title: string;
+    type: string;
+    schedule: unknown;
+    content: string;
+  };
+  edges: Awaited<ReturnType<typeof flowSubgraph>>;
+  definitions: unknown[];
+  trace_hint: { retrieval: string; steps: string };
+}
+
+/**
+ * Create a run record and return the executable bundle in one shot.
+ * `triggeredBy` MUST be derived from auth by the caller (never client-supplied)
+ * — it's the accountability field. Throws NotFoundError / ValidationError.
+ */
+export async function triggerRun(opts: {
+  nestId: string;
+  agentNode: string;
+  inputs: unknown;
+  triggeredBy: string;
+  storage: NestStorage;
+  parentRunId?: unknown;
+}): Promise<RunBundle> {
+  const { nestId, inputs, triggeredBy, storage } = opts;
+  // SECURITY: agentNode is caller-supplied and untrusted (the MCP workflow_run
+  // tool passes `args.agent` straight through). Validate containment BEFORE it
+  // reaches storage.readDocument — the same chokepoint the REST route and edge
+  // creation use — or a `../otherNest/nodes/secret` id reads another tenant's
+  // file. Doing it here covers every surface, not just REST. (See node-id.ts.)
+  const agentNode = assertSafeNodeId(opts.agentNode);
+  let doc;
+  try {
+    doc = await storage.readDocument(agentNode);
+  } catch {
+    throw new NotFoundError(`Agent node not found: ${agentNode}`);
+  }
+  const nodeType = (doc.frontmatter.type as string) || "document";
+  if (!RUNNABLE_TYPES.includes(nodeType)) {
+    throw new ValidationError(
+      `"${agentNode}" is type "${nodeType}" — only agent/skill nodes are runnable`,
+    );
+  }
+
+  // Sub-agent (nested) run? Validate the parent chain before creating anything
+  // — the guard bounds depth, fan-out, and cross-run cycles (and is the flag
+  // gate). A plain top-level run leaves parent null / depth 0.
+  let parentRunId: string | null = null;
+  let depth = 0;
+  if (opts.parentRunId !== undefined && opts.parentRunId !== null) {
+    if (typeof opts.parentRunId !== "string") {
+      throw new ValidationError("parent_run_id must be a string");
+    }
+    ({ depth } = await resolveParentRun(nestId, opts.parentRunId, agentNode));
+    parentRunId = opts.parentRunId;
+  }
+
+  const edges = await flowSubgraph(nestId, agentNode);
+  const definitions = await referencedDefinitions(nestId, edges);
+
+  const id = `run_${uuid()}`;
+  const db = getDb();
+  await db.transaction(async (tx) => {
+    // Fan-out cap, enforced atomically against concurrent sibling spawns.
+    // Depth bounds the tree's HEIGHT; this bounds its WIDTH — together they cap
+    // total tree size so a runner can't fork-bomb the DB. The count+INSERT must
+    // be one atomic unit or two concurrent children can both read the same
+    // pre-insert count and both pass. On Postgres, lock the parent row first
+    // (FOR UPDATE) so those two transactions serialise; SQLite already
+    // serialises writers (BEGIN IMMEDIATE), so the pair is atomic there.
+    if (parentRunId) {
+      if (db.dialect === "postgres") {
+        await tx.get("SELECT id FROM runs WHERE id = ? FOR UPDATE", [parentRunId]);
+      }
+      const kids = (await tx.get(
+        "SELECT COUNT(*) as c FROM runs WHERE parent_run_id = ?",
+        [parentRunId],
+      )) as { c: number | string };
+      if (Number(kids.c) >= config.SUBAGENT_MAX_CHILDREN) {
+        throw new ForbiddenError(
+          `parent run already has ${kids.c} children (limit ${config.SUBAGENT_MAX_CHILDREN})`,
+        );
+      }
+    }
+    await tx.run(
+      `INSERT INTO runs (id, nest_id, agent_node, triggered_by, status, inputs, started_at, parent_run_id, depth)
+       VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`,
+      [
+        id,
+        nestId,
+        agentNode,
+        triggeredBy,
+        inputs === undefined ? null : JSON.stringify(inputs),
+        new Date().toISOString(),
+        parentRunId,
+        depth,
+      ],
+    );
+  });
+
+  return {
+    run_id: id,
+    parent_run_id: parentRunId,
+    depth,
+    agent: {
+      id: agentNode,
+      title: String(doc.frontmatter.title ?? agentNode),
+      type: nodeType,
+      schedule: (doc.frontmatter.metadata as any)?.schedule ?? null,
+      content: doc.body || "",
+    },
+    edges,
+    definitions,
+    trace_hint: {
+      retrieval:
+        "POST /context is deterministic — record selector+hops per read so the run replays to the identical read-set",
+      steps: "POST /runs/{run_id}/steps per action; PATCH /runs/{run_id} to close",
+    },
+  };
+}
+
+const STEP_ACTIONS = ["read", "write", "branch", "notify", "external"];
+
+/**
+ * Append a step to a run. seq is server-assigned inside a transaction (never
+ * client-supplied): the ordered trace is what replay depends on, so
+ * status-recheck + max + insert must be atomic. Re-reading status inside the
+ * tx closes the window where a concurrent close could terminate the run after
+ * the caller's earlier read — a step must never land on a closed run. A
+ * UNIQUE(run_id, seq) index (migration 017) backstops the seq assignment. The
+ * per-run step count is capped at RUN_MAX_STEPS (checked inside the same tx) so
+ * a runaway runner can't grow one run's trace without bound.
+ * Throws ValidationError / ConflictError.
+ */
+export async function appendRunStep(
+  runId: string,
+  input: { action?: unknown; node_id?: unknown; edge_id?: unknown; detail?: unknown },
+): Promise<{ seq: number }> {
+  if (typeof input.action !== "string" || !input.action.trim()) {
+    throw new ValidationError("action is required (read|write|branch|notify|external)");
+  }
+  const action = input.action.trim();
+  if (!STEP_ACTIONS.includes(action)) {
+    throw new ValidationError(
+      "action must be read | write | branch | notify | external",
+    );
+  }
+  const nodeId = typeof input.node_id === "string" ? input.node_id : null;
+  const edgeId = typeof input.edge_id === "string" ? input.edge_id : null;
+  const detail = input.detail === undefined ? null : JSON.stringify(input.detail);
+
+  const db = getDb();
+  let seq = 0;
+  await db.transaction(async (tx) => {
+    const cur = (await tx.get("SELECT status FROM runs WHERE id = ?", [runId])) as
+      | { status: string }
+      | undefined;
+    if (!cur) throw new NotFoundError("Run not found");
+    if (cur.status !== "running") {
+      throw new ConflictError(
+        `Run is ${cur.status} — steps can't be appended`,
+      );
+    }
+    const last = (await tx.get(
+      "SELECT MAX(seq) as m FROM run_steps WHERE run_id = ?",
+      [runId],
+    )) as { m: number | null };
+    seq = (Number(last.m) || 0) + 1;
+    // Hard cap on the step log so a runaway/hostile runner can't grow a single
+    // run's trace unbounded. Checked inside the tx alongside the seq assignment
+    // so the bound holds under concurrent appends.
+    if (seq > config.RUN_MAX_STEPS) {
+      throw new ConflictError(
+        `Run has reached the step limit of ${config.RUN_MAX_STEPS} — no more steps can be appended`,
+      );
+    }
+    await tx.run(
+      `INSERT INTO run_steps (run_id, seq, node_id, edge_id, action, detail, at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [runId, seq, nodeId, edgeId, action, detail, new Date().toISOString()],
+    );
+  });
+  return { seq };
+}
+
+const RUN_STATUSES = ["running", "succeeded", "failed", "cancelled"];
+
+/**
+ * Close or update a run's status/trace. Compare-and-swap on `status =
+ * 'running'` means two concurrent closers can't both win: exactly one mutates
+ * the row, the loser gets a ConflictError instead of a silent last-write-wins.
+ * "Terminal is final." Throws ValidationError / NotFoundError / ConflictError.
+ */
+export async function closeRun(
+  runId: string,
+  input: { status?: unknown; trace?: unknown },
+): Promise<{ status: string }> {
+  const status = input.status;
+  if (typeof status !== "string" || !RUN_STATUSES.includes(status)) {
+    throw new ValidationError("status must be running | succeeded | failed | cancelled");
+  }
+  const terminal = status !== "running";
+  const res = await getDb().run(
+    `UPDATE runs SET status = ?, trace = COALESCE(?, trace), finished_at = ?
+      WHERE id = ? AND status = 'running'`,
+    [
+      status,
+      input.trace === undefined ? null : JSON.stringify(input.trace),
+      terminal ? new Date().toISOString() : null,
+      runId,
+    ],
+  );
+  if (res.changes === 0) {
+    // Either the run doesn't exist or it's already terminal. Disambiguate so
+    // the caller returns the right 404-vs-409.
+    const run = await loadRun(runId);
+    if (!run) throw new NotFoundError("Run not found");
+    throw new ConflictError("Run already terminal — status can't be changed");
+  }
+  return { status };
+}
+
+/**
+ * Full trace for one run. `canSeeDetail` (write tier) gates the freeform
+ * payloads — run inputs, run trace, and each step's detail — same redaction
+ * posture across REST and MCP. Below it, those null out but existence, agent,
+ * status, timing and step order stay visible.
+ */
+export async function getRunTrace(
+  run: RunRow,
+  opts: { canSeeDetail: boolean },
+): Promise<{ run: unknown; steps: unknown[] }> {
+  const { canSeeDetail } = opts;
+  const steps = (await getDb().all(
+    "SELECT seq, node_id, edge_id, action, detail, at FROM run_steps WHERE run_id = ? ORDER BY seq",
+    [run.id],
+  )) as Array<{
+    seq: number; node_id: string | null; edge_id: string | null;
+    action: string; detail: string | null; at: string;
+  }>;
+  return {
+    run: {
+      ...run,
+      inputs: canSeeDetail ? safeJson(run.inputs) : null,
+      trace: canSeeDetail ? safeJson(run.trace) : null,
+    },
+    steps: steps.map((s) => ({
+      ...s,
+      detail: canSeeDetail ? safeJson(s.detail) : null,
+    })),
+  };
+}
+
+/** List runs for a nest, filtered by agent/status, redacted below write tier. */
+export async function listRuns(
+  nestId: string,
+  opts: { agent?: string; status?: string; limit?: number; canSeeDetail: boolean },
+): Promise<{ count: number; runs: unknown[] }> {
+  const db = getDb();
+  let sql = "SELECT * FROM runs WHERE nest_id = ?";
+  const args: unknown[] = [nestId];
+  if (opts.agent) {
+    sql += " AND agent_node = ?";
+    args.push(opts.agent);
+  }
+  if (opts.status) {
+    sql += " AND status = ?";
+    args.push(opts.status);
+  }
+  sql += " ORDER BY started_at DESC LIMIT ?";
+  args.push(Math.min(Math.max(Number(opts.limit) || 50, 1), 500));
+  const rows = (await db.all(sql, args as any)) as RunRow[];
+  return {
+    count: rows.length,
+    runs: rows.map((r) => ({
+      ...r,
+      inputs: opts.canSeeDetail ? safeJson(r.inputs) : null,
+      trace: opts.canSeeDetail ? safeJson(r.trace) : null,
+    })),
+  };
+}

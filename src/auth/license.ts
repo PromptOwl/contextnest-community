@@ -1,6 +1,8 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { config } from "../config.js";
 import { getDb } from "../db/client.js";
+import { insertOrReplace, nowExpr } from "../db/sql.js";
+import { persistSetting } from "../db/settings.js";
 
 export interface LicenseInfo {
   valid: boolean;
@@ -36,11 +38,12 @@ export function isLicenseAdminEmail(
   return lic.ownerEmail.toLowerCase() === email.toLowerCase();
 }
 
-export function isLicenseAdminUserId(userId: string): boolean {
+export async function isLicenseAdminUserId(userId: string): Promise<boolean> {
   try {
-    const row = getDb()
-      .prepare("SELECT email FROM users WHERE id = ?")
-      .get(userId) as { email?: string } | undefined;
+    const row = (await getDb().get(
+      "SELECT email FROM users WHERE id = ?",
+      [userId],
+    )) as { email?: string } | undefined;
     return isLicenseAdminEmail(row?.email);
   } catch {
     return false;
@@ -54,7 +57,7 @@ export function isLicenseAdminUserId(userId: string): boolean {
  *
  * Pass value=null to delete the line.
  */
-function upsertEnvVar(
+export function upsertEnvVar(
   filePath: string,
   varName: string,
   value: string | null,
@@ -79,7 +82,16 @@ function upsertEnvVar(
  * other config the operator set) and re-validate. Validation runs BEFORE
  * the file is touched, so a bad key never ends up on disk.
  */
-export async function installLicenseKey(key: string): Promise<LicenseInfo> {
+export interface InstallResult extends LicenseInfo {
+  /** Whether the validated key was durably written to the database. When false
+   *  the key works for this process but is lost on restart — the caller MUST
+   *  surface this (it was previously swallowed). */
+  persisted: boolean;
+  /** Why the write failed, when persisted is false. */
+  persistError?: string;
+}
+
+export async function installLicenseKey(key: string): Promise<InstallResult> {
   const trimmed = key.trim();
   if (!trimmed.startsWith("pk_")) {
     throw new Error("Invalid license key format. Must start with pk_.");
@@ -100,152 +112,30 @@ export async function installLicenseKey(key: string): Promise<LicenseInfo> {
     if (previousKey) {
       await validateLicense({ forceFresh: true });
     }
-    return info;
+    return { ...info, persisted: false };
   }
 
-  // Validated — write the line into .env so a restart picks it up.
+  // Validated — persist the key to the database so a restart (and every other
+  // instance) picks it up. Report (don't swallow) a write failure: the key is
+  // live in-memory now, but if it didn't reach the DB the operator is one
+  // restart away from silently losing it. The DB is durable on Cloud Run where
+  // the container filesystem is not (see db/settings.ts).
   try {
-    upsertEnvVar(config.ENV_FILE_PATH, "PROMPTOWL_KEY", trimmed);
+    await persistSetting("PROMPTOWL_KEY", trimmed);
+    return { ...info, persisted: true };
   } catch (err) {
-    console.warn("[license] failed to write .env:", err);
+    const persistError = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[license] validated but FAILED to persist to the database: ${persistError}`,
+    );
+    return { ...info, persisted: false, persistError };
   }
-
-  // Restart the watcher so it picks up the new key without a process
-  // restart.
-  startLicenseWatcher();
-  return info;
-}
-
-// ─── License watcher (long-poll) ──────────────────────────────────────
-//
-// PromptOwl exposes /api/license/listen which holds an HTTP request
-// open until the license row mutates (toggle/delete) or ~25s elapses.
-// We loop forever: open the connection, react to the response, then
-// reconnect immediately. On error we back off exponentially up to a
-// cap so a brief outage doesn't hammer the API.
-
-let watcherActive = false;
-let watcherAbort: AbortController | null = null;
-const WATCHER_BACKOFF_MIN_MS = 2 * 1000;
-const WATCHER_BACKOFF_MAX_MS = 60 * 1000;
-
-export function startLicenseWatcher(): void {
-  if (watcherActive) {
-    // Cancel any in-flight long-poll so the loop restarts with the
-    // current key. The loop guard below will pick up the new state.
-    watcherAbort?.abort();
-    return;
-  }
-  watcherActive = true;
-  void runLicenseWatcher();
-}
-
-async function runLicenseWatcher(): Promise<void> {
-  let backoff = WATCHER_BACKOFF_MIN_MS;
-  while (watcherActive) {
-    const key = config.PROMPTOWL_KEY;
-    if (!key) {
-      // Nothing to watch yet — wait a beat and check again. The
-      // install endpoint calls startLicenseWatcher() once a key is
-      // set, but this guards against startup ordering too.
-      await sleep(WATCHER_BACKOFF_MAX_MS);
-      continue;
-    }
-    try {
-      watcherAbort = new AbortController();
-      const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
-      // Cap fetch lifetime under the longest reasonable upstream hold
-      // so a stalled connection (e.g. Vercel buffering, dropped TCP)
-      // cannot pin the watcher beyond ~30s. AbortSignal.any composes
-      // the local abort (used by installLicenseKey) with the timeout.
-      const fetchTimeout = AbortSignal.timeout(30 * 1000);
-      const signal =
-        typeof (AbortSignal as { any?: unknown }).any === "function"
-          ? (AbortSignal as unknown as {
-              any: (s: AbortSignal[]) => AbortSignal;
-            }).any([watcherAbort.signal, fetchTimeout])
-          : watcherAbort.signal;
-      const res = await fetch(`${promptowlUrl}/api/license/listen`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          key,
-          since_updated_at: currentLicense
-            ? new Date().toISOString()
-            : undefined,
-        }),
-        signal,
-      });
-
-      if (!res.ok) {
-        // Upstream gateway timeouts (Vercel/Cloudflare/nginx killing
-        // the long-poll connection) carry no event payload — same
-        // semantics as "no_change". Reconnect immediately without
-        // inflating the backoff, otherwise repeated 504s ramp the
-        // retry delay to 60s and stretch revoke-detection latency
-        // to a full minute.
-        if (res.status === 504 || res.status === 408 || res.status === 502) {
-          backoff = WATCHER_BACKOFF_MIN_MS;
-          continue;
-        }
-        throw new Error(`listen returned ${res.status}`);
-      }
-
-      const data = (await res.json()) as {
-        event?: string;
-        valid?: boolean;
-      };
-
-      backoff = WATCHER_BACKOFF_MIN_MS;
-
-      // "no_change" means timed out without an event — just loop. Any
-      // other event indicates a state change, so revalidate to refresh
-      // currentLicense + clear the SQLite cache row (when valid:false
-      // comes back).
-      if (data.event && data.event !== "no_change") {
-        console.log(
-          `[license] event from PromptOwl: ${data.event} — revalidating`,
-        );
-        const wasValid = !!currentLicense?.valid;
-        // Force a network round-trip; the 24h SQLite cache would
-        // otherwise return the stale "valid" row and the revoke
-        // transition would never be detected.
-        await validateLicense({ forceFresh: true });
-        const isValid = !!currentLicense?.valid;
-        if (wasValid && !isValid) {
-          handleLicenseRevoked();
-        }
-      }
-    } catch (err) {
-      if ((err as { name?: string }).name === "AbortError") {
-        // Caller aborted (e.g. installLicenseKey reset the watcher).
-        // Loop again with fresh state.
-        continue;
-      }
-      console.warn(
-        `[license] watcher error: ${(err as Error).message}; backing off ${backoff}ms`,
-      );
-      await sleep(backoff);
-      backoff = Math.min(backoff * 2, WATCHER_BACKOFF_MAX_MS);
-    } finally {
-      watcherAbort = null;
-    }
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }
 
 // ─── Safety revalidate ────────────────────────────────────────────────
 //
-// The long-poll watcher is the primary signal, but several conditions
-// can silently drop revoke events: upstream serverless cold-starts,
-// multi-instance PromptOwl deployments where the in-process event bus
-// only fires on one instance, persistent network blackouts that
-// exhaust the backoff. This timer runs a forceFresh validate every
-// 60s as a floor on detection latency. Cheap (one HTTP call/minute)
-// and idempotent with the watcher — whichever notices first wins.
+// Periodic forceFresh validate so deactivations/revocations from
+// PromptOwl propagate within ~60s. One HTTP call per minute, idempotent.
 
 let safetyPollHandle: NodeJS.Timeout | null = null;
 const SAFETY_POLL_INTERVAL_MS = 60 * 1000;
@@ -260,7 +150,7 @@ export function startLicenseSafetyPoll(): void {
       const isValid = !!currentLicense?.valid;
       if (wasValid && !isValid) {
         console.log("[license] safety poll detected revocation");
-        handleLicenseRevoked();
+        await handleLicenseRevoked();
       }
     } catch (err) {
       // Don't escalate — the watcher and next safety tick will retry.
@@ -277,14 +167,14 @@ export function startLicenseSafetyPoll(): void {
 /**
  * Hard cleanup when PromptOwl revokes/deactivates the installed
  * license. Wipes all browser sessions so existing logins lose their
- * cookies, deletes the on-disk license env file so a restart doesn't
+ * cookies, tombstones the persisted license key so a restart doesn't
  * resurrect the dead key, and clears the in-process PROMPTOWL_KEY so
  * the next validate call starts from "unlicensed".
  */
-function handleLicenseRevoked(): void {
+async function handleLicenseRevoked(): Promise<void> {
   try {
     const db = getDb();
-    const result = db.prepare("DELETE FROM sessions").run();
+    const result = await db.run("DELETE FROM sessions");
     console.warn(
       `[license] revoked — wiped ${result.changes} active session(s).`,
     );
@@ -292,12 +182,12 @@ function handleLicenseRevoked(): void {
     console.warn("[license] failed to wipe sessions:", err);
   }
   try {
-    upsertEnvVar(config.ENV_FILE_PATH, "PROMPTOWL_KEY", null);
+    await persistSetting("PROMPTOWL_KEY", null);
     console.warn(
-      `[license] revoked — removed PROMPTOWL_KEY from ${config.ENV_FILE_PATH}`,
+      "[license] revoked — cleared persisted PROMPTOWL_KEY from the database",
     );
   } catch (err) {
-    console.warn("[license] failed to strip key from .env:", err);
+    console.warn("[license] failed to clear persisted key:", err);
   }
   process.env.PROMPTOWL_KEY = "";
   currentLicense = {
@@ -378,9 +268,10 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
 
   // Check local cache
   const db = getDb();
-  const cached = db
-    .prepare("SELECT * FROM license_cache WHERE key = ?")
-    .get(key) as
+  const cached = (await db.get(
+    "SELECT * FROM license_cache WHERE key = ?",
+    [key],
+  )) as
     | {
       tier: string;
       org: string;
@@ -410,7 +301,7 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
     const promptowlUrl = config.PROMPTOWL_API_URL.replace(/\/$/, "");
     const res = await fetch(`${promptowlUrl}/api/license/validate`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: config.PROMPTOWL_FETCH_HEADERS,
       body: JSON.stringify({ key }),
     });
 
@@ -500,7 +391,7 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
       // the key is no longer valid. Clear any cached row so a subsequent
       // outage can't resurrect this license under the grace-period
       // fallback above.
-      db.prepare("DELETE FROM license_cache WHERE key = ?").run(key);
+      await db.run("DELETE FROM license_cache WHERE key = ?", [key]);
       return {
         valid: false,
         tier: "none",
@@ -515,15 +406,21 @@ async function _validateLicenseImpl(forceFresh: boolean): Promise<LicenseInfo> {
     // Cache valid licenses
     if (data.valid) {
       const limitsJson = data.limits ? JSON.stringify(data.limits) : null;
-      db.prepare(
-        `INSERT OR REPLACE INTO license_cache (key, tier, org, limits_json, owner_email, validated_at)
-         VALUES (?, ?, ?, ?, ?, datetime('now'))`,
-      ).run(
-        key,
-        data.tier || "community",
-        data.org || null,
-        limitsJson,
-        data.owner_email || null,
+      await db.run(
+        insertOrReplace(
+          db,
+          `INSERT INTO license_cache (key, tier, org, limits_json, owner_email, validated_at)
+           VALUES (?, ?, ?, ?, ?, ${nowExpr(db)})`,
+          ["key"],
+          `tier = excluded.tier, org = excluded.org, limits_json = excluded.limits_json, owner_email = excluded.owner_email, validated_at = ${nowExpr(db)}`,
+        ),
+        [
+          key,
+          data.tier || "community",
+          data.org || null,
+          limitsJson,
+          data.owner_email || null,
+        ],
       );
     }
 

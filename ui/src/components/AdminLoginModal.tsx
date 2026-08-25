@@ -3,7 +3,7 @@
  * email/password fallback. Admin role is gated by the installed
  * Community License key, so there is no in-app "claim" flow.
  */
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Dialog,
   DialogContent,
@@ -18,6 +18,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Shield, AlertCircle, Loader2, ExternalLink, Copy, Check, KeyRound, Eye, EyeOff } from "lucide-react";
 import * as api from "../lib/api";
 import type { ClaimBlocked } from "../lib/api";
+import { copyTextWithToast } from "../lib/clipboard";
 import { useAuth } from "../auth/AuthContext";
 
 interface AdminLoginModalProps {
@@ -43,10 +44,38 @@ export function AdminLoginModal({
     info: ClaimBlocked;
     attemptedEmail: string;
   } | null>(null);
+  // Mirror Login.tsx: respect the PromptOwl sign-in gate. "disabled" hides the
+  // PromptOwl option entirely; "admin-only" hides it unless ?admin is set. The
+  // server enforces this regardless — this keeps the modal honest. It's the
+  // login a logged-out shared-doc viewer sees, so it must honor the flag too.
+  const [promptowlGate, setPromptowlGate] = useState<
+    "open" | "admin-only" | "disabled"
+  >("open");
+  const adminMode =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).has("admin");
+  const showPromptOwl =
+    promptowlGate === "open" || (promptowlGate === "admin-only" && adminMode);
+  // When PromptOwl sign-in is hidden, force the email/password view regardless
+  // of the toggle state (the default mode is "promptowl").
+  const effectiveMode = showPromptOwl ? mode : "password";
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getHealth()
+      .then((h) => {
+        if (!cancelled) setPromptowlGate(h.promptowl_sign_in_gate ?? "open");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const copyCode = async () => {
     if (!deviceCode) return;
-    await navigator.clipboard.writeText(deviceCode);
+    if (!(await copyTextWithToast(deviceCode))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -95,7 +124,7 @@ export function AdminLoginModal({
 
         const terminalMsg =
           poll.status === "denied" || poll.status === "rejected"
-            ? "Login denied. Approve the request in PromptOwl to continue, or try again."
+            ? "Login request was denied. Please try again to create a new authentication request."
             : poll.status === "expired"
               ? "Login expired. Try again."
               : poll.status === "cancelled"
@@ -218,7 +247,7 @@ export function AdminLoginModal({
             </Alert>
           )}
 
-          {mode === "promptowl" ? (
+          {effectiveMode === "promptowl" ? (
             <>
               <Button
                 onClick={handlePromptOwl}
@@ -340,13 +369,15 @@ export function AdminLoginModal({
                   "Login"
                 )}
               </Button>
-              <button
-                type="button"
-                onClick={() => setMode("promptowl")}
-                className="w-full text-xs text-muted-foreground hover:text-foreground"
-              >
-                ← Back to PromptOwl login
-              </button>
+              {showPromptOwl && (
+                <button
+                  type="button"
+                  onClick={() => setMode("promptowl")}
+                  className="w-full text-xs text-muted-foreground hover:text-foreground"
+                >
+                  ← Back to PromptOwl login
+                </button>
+              )}
             </form>
           )}
         </div>

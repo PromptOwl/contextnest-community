@@ -4,20 +4,146 @@ import type {
   VersionManager,
   ContextNode,
 } from "@promptowl/contextnest-engine";
-import { serializeDocument } from "@promptowl/contextnest-engine";
 import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
+import { canReadNode } from "../governance/access-guard.js";
+import {
+  resolveNestPermission,
+  permissionLevel,
+} from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
-import { syncNodeTags } from "../governance/tag-index-service.js";
+import { engineApi, opContext } from "../nodes/engine.js";
+import { addCollaborator } from "../nests/sharing-service.js";
+import { queryTableNode } from "../tables/query.js";
+import {
+  listUnsyncedFolders,
+  syncUnsyncedFolder,
+} from "../nests/unsynced-service.js";
+import { isServerAdminUserId } from "../shared/access.js";
+import { config } from "../config.js";
+import {
+  createNode,
+  updateNode,
+  deleteNode,
+  deleteFolder,
+  moveNode,
+  listNodesForCallerByEmail,
+  getNodeForCaller,
+  isIdUnderFolder,
+} from "../nodes/service.js";
+import { deleteNest } from "../nests/service.js";
+import { listThreads } from "../annotations/service.js";
+import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
+import { logTraceEvent } from "../telemetry/trace-log.js";
+import { isWorkflowTool, runWorkflowTool } from "./workflow-tools.js";
+
+/** Upper bound on caller-set traversal depth — real graphs terminate long
+ *  before this; the cap just fences a misbehaving client from a runaway query. */
+const MAX_HOPS = 10;
+
+/** Caller-supplied traversal depth → integer in [0, MAX_HOPS], default 2.
+ *  null/undefined/non-numeric all fall through to the default (some tool-calling
+ *  clients serialize an unset optional arg as JSON `null` rather than omitting). */
+export function normalizeHops(raw: unknown): number {
+  if (raw == null) return 2;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 2;
+  return Math.max(0, Math.min(MAX_HOPS, Math.floor(n)));
+}
+
+/**
+ * What a tool handler returns.
+ *
+ * A bare string is prose only — the historical shape, and still what most
+ * tools return. The object form carries the SAME prose plus the operation
+ * catalog's JSON payload, which the route emits as MCP `structuredContent`
+ * next to an unchanged `content` block. Chat clients keep reading the prose;
+ * machine callers (`ctx` over MCP, which JSON.parses the catalog shapes) read
+ * the structured half.
+ *
+ * Only the operations `ctx` actually drives return the object form:
+ * context_list / get / search / query / versions / create / update / delete,
+ * plus context_submit_review — which is where `ctx publish` lands on a nest
+ * that publishes through review rather than exposing context_publish.
+ *
+ * `isError` marks a denial or a not-found. Without it a refusal is a bare
+ * prose sentence with no signal at all — indistinguishable, to a machine
+ * caller, from a successful empty result ("denied" reads as "no documents").
+ * Set it via `toolError`, never by hand.
+ */
+export type ToolResult = string | { text: string; data: unknown; isError?: true };
+
+/**
+ * A denial / not-found / failure from one of the converted tools.
+ *
+ * The prose is passed through UNCHANGED — `isError` is the only thing added,
+ * and `data` carries the engine's `{code, message}` error shape (the codes are
+ * `ERROR_CODES` in `@promptowl/contextnest-engine/api`) so `ctx` can map the
+ * result back to a typed engine error instead of string-matching the sentence.
+ */
+function toolError(
+  text: string,
+  code:
+    | "DOCUMENT_NOT_FOUND"
+    | "DOCUMENT_ALREADY_EXISTS"
+    | "UNAUTHORIZED_ACTION"
+    | "VERSION_NOT_FOUND"
+    | "INTERNAL",
+): ToolResult {
+  return { text, isError: true, data: { code, message: text } };
+}
+
+/**
+ * Tool return value → MCP CallToolResult. Used by both MCP endpoints
+ * (per-nest routes.ts and server-level server-routes.ts).
+ *
+ * `content` is the prose, byte-identical to what this server has always
+ * emitted — chat clients read nothing else. A handler that also returned a
+ * catalog payload gets it attached as `structuredContent`, which is where a
+ * machine caller looks.
+ */
+export function toCallToolResult(out: ToolResult) {
+  if (typeof out === "string") {
+    return { content: [{ type: "text" as const, text: out }] };
+  }
+  return {
+    content: [{ type: "text" as const, text: out.text }],
+    structuredContent: out.data as Record<string, unknown>,
+    ...(out.isError ? { isError: true } : {}),
+  };
+}
+
+/**
+ * A ContextNode plus its ALREADY-GATED body → the catalog's `nodeSummary`
+ * (engine api/core.ts). Callers MUST pass the body that `resolveLlmBody`
+ * returned for this node, never `node.body` — that is the ungated on-disk
+ * text, which under stewardship is the unapproved draft.
+ */
+function summarizeNode(node: ContextNode, body: string | null) {
+  return {
+    id: node.id,
+    title: node.frontmatter.title,
+    description: node.frontmatter.description,
+    type: node.frontmatter.type || "document",
+    status: node.frontmatter.status || "draft",
+    tags: node.frontmatter.tags,
+    body: body ?? undefined,
+  };
+}
 
 export interface McpToolContext {
   storage: NestStorage;
   queryEngine: GraphQueryEngine;
   versionManager: VersionManager;
   nestId: string;
+  userId: string;
   userEmail: string;
+  /** Request origin, so review actions taken via MCP produce notification
+   *  emails with a working "Open document" link (no PUBLIC_BASE_URL needed). */
+  baseUrl?: string;
 }
 
 export const TOOL_DEFINITIONS = [
@@ -53,8 +179,33 @@ export const TOOL_DEFINITIONS = [
       type: "object" as const,
       properties: {
         query: { type: "string", description: "Selector query" },
+        hops: {
+          type: "number",
+          description:
+            "Graph traversal depth from the matched nodes (default: 2). Use 1 for just the matches + direct links, higher to pull in more of the neighborhood.",
+        },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "context_table_query",
+    description:
+      "Deterministic lookup against a TABLE node (CSV fact store). Fetch exact rows instead of reading the whole table: where <col> <op> <value> [and …] [select cols] [limit N]. Ops: = != > >= < <= contains. Same query + same version = same rows, always.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        table: {
+          type: "string",
+          description: 'The table node — "[[Title]]" or a node id like nodes/price-list',
+        },
+        query: {
+          type: "string",
+          description:
+            'e.g. where region = "EU" and price > 100 select sku, price limit 5. Empty = all rows.',
+        },
+      },
+      required: ["table"],
     },
   },
   {
@@ -71,12 +222,25 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_list",
     description:
-      "Browse vault contents with optional type, tag, or limit filters.",
+      "Browse vault contents with optional type, tag, status, or limit filters.",
     inputSchema: {
       type: "object" as const,
       properties: {
         type: { type: "string", description: "Filter by node type" },
-        tag: { type: "string", description: "Filter by tag" },
+        tag: {
+          type: "string",
+          description: "Filter by tag (leading # optional, case-insensitive)",
+        },
+        status: {
+          type: "string",
+          description:
+            "Filter by status: draft | pending_review | approved | published | rejected. Aliases normalized. Unlike the CLI and the OSS server, retired nodes stay in this listing whether or not you ask — here they are unpublished documents their stewards may still act on.",
+        },
+        approved_only: {
+          type: "boolean",
+          description:
+            "Return only nodes with an approved version, each served at that version rather than the live file — the view a public nest gives a stranger.",
+        },
         limit: { type: "number", description: "Max nodes to return" },
       },
     },
@@ -96,13 +260,46 @@ export const TOOL_DEFINITIONS = [
           type: "number",
           description: "Approximate token budget (default: 8000)",
         },
+        hops: {
+          type: "number",
+          description:
+            "Graph traversal depth from the matched nodes (default: 2)",
+        },
       },
       required: ["selector"],
     },
   },
   {
+    name: "context_export",
+    description:
+      "Export the ENTIRE nest as one markdown bundle — every accessible document's FULL content. Use when you need the whole nest as context rather than a targeted query. Respects an optional token budget.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        max_tokens: {
+          type: "number",
+          description:
+            "Approximate token budget; documents are included until it's reached (omit for no cap).",
+        },
+      },
+    },
+  },
+  {
+    name: "context_comments",
+    description:
+      "Get the review comments/annotations on a document — anchored quotes, threaded replies, and open/resolved status — by title or ID. Use to pull human feedback into context.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the node" },
+        id: { type: "string", description: "ID of the node" },
+      },
+    },
+  },
+  {
     name: "context_create",
-    description: "Create a new knowledge node in the vault.",
+    description:
+      "Create a new knowledge node in the vault. The title must not already be in use — these tools resolve documents by title, so a duplicate is refused rather than filed as an unreachable twin. To change an existing document use context_update; to refile it use context_move.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -113,7 +310,8 @@ export const TOOL_DEFINITIONS = [
         },
         type: {
           type: "string",
-          description: "Node type (default: document)",
+          description:
+            "Node type (default: document). Note: artifact and table can be disabled server-wide by an admin — creating a disabled type is rejected; existing nodes of that type stay readable.",
         },
         tags: {
           type: "array",
@@ -121,6 +319,11 @@ export const TOOL_DEFINITIONS = [
           description: "Tags",
         },
         scope: { type: "string", description: "Visibility scope" },
+        folder: {
+          type: "string",
+          description:
+            'Folder path under nodes/ (e.g. "gtm/deals"); segments are slugified. A leading "nodes/" is accepted and not doubled, so "nodes/gtm/deals" and "gtm/deals" mean the same folder.',
+        },
       },
       required: ["title", "content"],
     },
@@ -128,13 +331,21 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_update",
     description:
-      "Update an existing node — append, replace content, add tags.",
+      "Update an existing node — replace or append content, set tags, move it through its lifecycle. Whether the edit publishes is decided by this nest's stewardship rules, not by the caller.",
     inputSchema: {
       type: "object" as const,
       properties: {
         title: {
+          // Selects the node; it does NOT rename it. Titles are unique here
+          // precisely so MCP callers can address a document this way. Renaming
+          // is not reachable from this tool.
           type: "string",
-          description: "Title of node to update",
+          description: "Title of node to update (selects it; does not rename)",
+        },
+        id: {
+          type: "string",
+          description:
+            'Node id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two nodes share a title or the title is unknown.',
         },
         content: {
           type: "string",
@@ -146,9 +357,68 @@ export const TOOL_DEFINITIONS = [
           items: { type: "string" },
           description: "Tags to add",
         },
-        scope: { type: "string", description: "New scope" },
+        status: {
+          type: "string",
+          description:
+            "New lifecycle status: draft | pending_review | approved | published | rejected. Aliases are normalized.",
+        },
+        changeNote: {
+          type: "string",
+          description: "Why this changed — recorded in version history",
+        },
       },
-      required: ["title"],
+      // Neither is required alone — one of them is (the engine catalog's
+      // `.refine(id || title)`, which JSON Schema can't express here).
+      // `title` was required, which made this tool unreachable for `ctx`:
+      // it addresses nodes by id and never sends a title.
+    },
+  },
+  {
+    name: "context_delete",
+    // Mirrors the engine's canonical `context_delete` operation (core
+    // namespace, alias delete_document): same name, same {id, title} input,
+    // same "deleted" semantics. The engine's `uri` field is omitted — this
+    // repo has no contextnest:// resolver on any surface, so accepting one
+    // would promise a resolution it can't do.
+    description:
+      "Delete a node from the vault by title or id. Removes everything keyed to it: version history, review state, annotations, comments, watchers, schedules, trigger hooks, workflow edges, document grants, and any steward assignments scoped to it. Irreversible — the node must be recreated to come back, and it comes back clean: no history, no stewards, no shares. A node under open review is frozen unless you can approve it (owner, admin, or its reviewer).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of node to delete" },
+        id: {
+          type: "string",
+          description:
+            'Node id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two nodes share a title or the title is unknown.',
+        },
+      },
+    },
+  },
+  {
+    name: "context_move",
+    // NOT in the engine's operation catalog — `move` is a community-edition
+    // concern (the id rewrite spans governance tables the engine doesn't own).
+    // This mirrors the existing REST POST /nodes/:id/move rather than adding a
+    // new concept, so the surfaces agree. If move is ever promoted to a core
+    // operation upstream, adopt that descriptor and drop this schema.
+    description:
+      "Move a node to a different folder. The id changes; version history, review state, annotations, comments, watchers, schedules, links, and document grants all follow. The title and its [[wiki-link]] stay valid. A node under open review is frozen unless you can approve it (owner, admin, or its reviewer).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of node to move" },
+        id: {
+          type: "string",
+          description:
+            'Node id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two nodes share a title or the title is unknown.',
+        },
+        folder: {
+          type: "string",
+          description:
+            'Destination folder under nodes/ (e.g. "gtm/deals"); segments are slugified. Use "" to move to the nest root.',
+        },
+      },
+      required: ["folder"],
     },
   },
 
@@ -169,6 +439,82 @@ export const TOOL_DEFINITIONS = [
     },
   },
   {
+    // Deletion requests, mirroring the REST + UI flow: anyone who can READ a
+    // thing may ask for it to be deleted; only an owner/admin resolves it.
+    // Not in the engine catalog (1.2.1) — deletion requests live in this
+    // repo's governance tables, which the engine doesn't own. Adopt an engine
+    // descriptor here if the operation is ever promoted upstream.
+    name: "context_request_deletion",
+    description:
+      "Ask for something to be deleted when you can't delete it yourself. Flags a document, a folder (with everything in it), or the whole nest for a nest owner/admin to action. Nothing is removed by this call — it opens a request, and the person who resolves it either deletes the target or rejects it with a note. Use this instead of context_delete when that returns a permission error, or when the document belongs to someone else.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string", description: "Title of the document to flag" },
+        id: {
+          type: "string",
+          description:
+            'Document id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two documents share a title.',
+        },
+        folder: {
+          type: "string",
+          description:
+            'Flag a whole folder instead of a document — the path, e.g. "gtm/deals". Every document under it goes if the request is honoured.',
+        },
+        nest: {
+          type: "boolean",
+          description:
+            "Flag the ENTIRE nest for deletion. Only an owner/admin can honour it.",
+        },
+        reason: {
+          type: "string",
+          description:
+            "Why it should be deleted. Required — this is what the admin judges.",
+        },
+      },
+      required: ["reason"],
+    },
+  },
+  {
+    name: "context_deletion_queue",
+    description:
+      "Show deletion requests waiting on a nest owner/admin: what was flagged, who asked, and why. Use the request id with context_resolve_deletion to action one.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        status: {
+          type: "string",
+          description:
+            '"pending" (default) or "declined" — past rejections and their notes.',
+        },
+      },
+    },
+  },
+  {
+    name: "context_resolve_deletion",
+    description:
+      "Action a deletion request: delete the flagged document/folder/nest, or reject it with a note explaining why it stays. Owner/admin only. Rejecting tells the requester the verdict; deleting is irreversible.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        request_id: {
+          type: "string",
+          description: "Request id from context_deletion_queue",
+        },
+        action: {
+          type: "string",
+          description:
+            '"delete" to honour it, "decline" to reject it and keep the target',
+        },
+        note: {
+          type: "string",
+          description: 'Why you rejected it. Required when action is "decline".',
+        },
+      },
+      required: ["request_id", "action"],
+    },
+  },
+  {
     name: "context_review_queue",
     description:
       "Show documents pending review. These need a steward to approve or reject them before they become available to AI.",
@@ -180,6 +526,15 @@ export const TOOL_DEFINITIONS = [
           description: "Filter by status: pending (default), approved, rejected, cancelled",
         },
       },
+    },
+  },
+  {
+    name: "context_my_drafts",
+    description:
+      "List YOUR unsubmitted drafts in this nest — documents you wrote that were never submitted for review (plus any that came back rejected). These are invisible to the review queue and unreadable by AI queries until submitted and approved. Use context_submit_review to hand one to a steward.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
     },
   },
   {
@@ -230,8 +585,13 @@ export const TOOL_DEFINITIONS = [
       type: "object" as const,
       properties: {
         title: { type: "string", description: "Title of the node" },
+        id: {
+          type: "string",
+          description:
+            'Node id / path (e.g. "nodes/gtm/deals/win-loss-log"). Use instead of title when two nodes share a title or the title is unknown.',
+        },
       },
-      required: ["title"],
+      // One of id or title — see context_update.
     },
   },
   {
@@ -249,6 +609,69 @@ export const TOOL_DEFINITIONS = [
       required: ["email", "scope"],
     },
   },
+  {
+    name: "context_share_nest",
+    description:
+      "Share this nest with another person by granting them access. This is plain access sharing (not a steward role): viewer = read, editor = read+edit, admin = full access except deleting the nest.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        email: { type: "string", description: "Email of the person to share with" },
+        permission: {
+          type: "string",
+          description: "Access level: read (viewer, default), write (editor), or admin",
+        },
+      },
+      required: ["email"],
+    },
+  },
+  {
+    name: "context_grant",
+    description:
+      "Share a SINGLE document or a FOLDER with a person (not the whole nest). The recipient can reach exactly that document (or everything under that folder) and nothing else. read = view, write = view+edit. Owner/admin only.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        email: { type: "string", description: "Email of the person to share with" },
+        target_type: {
+          type: "string",
+          description: "'document' to share one node, or 'folder' to share a path prefix",
+        },
+        target: {
+          type: "string",
+          description:
+            "Node id (e.g. nodes/win-loss-log) for a document, or a folder prefix (e.g. nodes/gtm/deals) for a folder",
+        },
+        role: { type: "string", description: "read (default) or write" },
+      },
+      required: ["email", "target_type", "target"],
+    },
+  },
+
+  // ─── Unsynced Folder Tools ─────────────────────────────────────────
+
+  {
+    name: "context_unsynced_list",
+    description:
+      "List folders under the data root that are sync candidates — dropped in by the starter CLI or copied in manually, not yet converted into a nest. Server-admin only in non-open mode.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
+  {
+    name: "context_sync_folder",
+    description:
+      "Convert a sibling folder under the data root into a real nest. Imports its markdown, seeds governance, and removes the source folder. Use context_unsynced_list to discover folder names. Server-admin only in non-open mode.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description:
+            "Folder path relative to the data root (e.g. 'nodes/architecture'), as returned by context_unsynced_list.",
+        },
+      },
+      required: ["name"],
+    },
+  },
 ];
 
 // Resolve the LLM-visible body for a node. When the nest enforces
@@ -261,8 +684,16 @@ async function resolveLlmBody(
   ctx: McpToolContext,
   node: ContextNode,
 ): Promise<string | null> {
-  if (!isStewardshipEnabled(ctx.nestId)) return node.body || "";
-  const approved = versions.getApprovedVersion(ctx.nestId, node.id);
+  // Enforce the SAME per-node access gate as the REST retrieval path. This was
+  // missing here — MCP callers bypassed canUserAccess and could read every
+  // approved node's body regardless of document/tag/steward scope. Route through
+  // canReadNode (the REST helper); deny → return null so callers skip the node
+  // instead of leaking it. Strictly more restrictive; can only remove access.
+  if (!(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail))) {
+    return null;
+  }
+  if (!(await isStewardshipEnabled(ctx.nestId))) return node.body || "";
+  const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
   if (approved == null) return null;
   try {
     return await ctx.versionManager.reconstructVersion(node.id, approved);
@@ -272,39 +703,154 @@ async function resolveLlmBody(
   }
 }
 
+/**
+ * Public entry for every MCP tool call. Logging lives HERE (not in the route
+ * wrapper) so it covers per-nest AND server-level MCP, and so a tool that
+ * throws still produces an audit row (status 500). Best-effort:
+ * `logTraceEvent` swallows its own errors and never alters tool behavior.
+ */
 export async function handleToolCall(
   toolName: string,
   args: Record<string, any>,
   ctx: McpToolContext,
-): Promise<string> {
-  const { storage, queryEngine, versionManager, nestId, userEmail } = ctx;
+): Promise<ToolResult> {
+  const started = Date.now();
+  let status = 200;
+  try {
+    return await runTool(toolName, args, ctx);
+  } catch (err) {
+    status = 500;
+    throw err;
+  } finally {
+    void logTraceEvent({
+      kind: "mcp",
+      tool: toolName,
+      nestId: ctx.nestId,
+      userId: ctx.userId,
+      userEmail: ctx.userEmail,
+      status,
+      durationMs: Date.now() - started,
+    });
+  }
+}
+
+/**
+ * Resolve the node a title-or-id tool is aimed at. Returns the node, or the
+ * message to hand back to the caller when it can't be resolved — the tools
+ * here answer in prose, not exceptions, so a miss reads as an answer rather
+ * than a JSON-RPC error. Shared by every node-addressing tool (delete, move,
+ * update, versions) so they all accept the same two ways of naming a document
+ * — which is also what the engine's operation catalog specifies (`id | title`,
+ * `api/index.js`), and what `ctx` sends: it addresses nodes by id.
+ *
+ * An ambiguous title REFUSES rather than picking one. Titles are not unique —
+ * the same title in two folders is two different documents. Guessing would
+ * mean an agent silently acting on the wrong document with no error to notice.
+ * (context_update used to guess here, on the grounds that a wrong edit is
+ * recoverable from history. It now refuses like the rest: the message names
+ * the candidate ids, which is a better answer than a coin flip.)
+ */
+async function resolveTargetNode(
+  storage: NestStorage,
+  args: Record<string, any>,
+): Promise<ContextNode | string> {
+  if (!args.id && !args.title) return "Provide a title or an id.";
+
+  // An id IS the storage key, so read it directly. Ambiguity is impossible
+  // here and a discoverDocuments() scan would parse every document in the
+  // vault to find one the caller already named.
+  if (args.id) {
+    try {
+      // SECURITY: readDocument is join(nestRoot, id + ".md") with NO
+      // containment, so an id is a filesystem path — `../otherNest/nodes/x`
+      // reads (and for the write tools below, edits or deletes) another
+      // tenant's file. REST funnels every :nodeId through this same guard in
+      // app.ts; MCP never did, so the id branch was uncontained for
+      // context_delete/context_move too. Inside the try on purpose: a bad id
+      // answers "Node not found" in prose like every other miss here.
+      return await storage.readDocument(assertSafeNodeId(args.id));
+    } catch {
+      return `Node not found: ${args.id}`;
+    }
+  }
+
+  // Titles have no index, so this branch has to scan.
+  const docs = await storage.discoverDocuments();
+  const matches = docs.filter(
+    (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
+  );
+  if (matches.length > 1) {
+    return `${matches.length} nodes share the title "${args.title}". Re-run with one of these ids instead: ${matches
+      .map((n) => n.id)
+      .join(", ")}`;
+  }
+  return matches[0] ?? `Node not found: ${args.title}`;
+}
+
+/**
+ * SECURITY INVARIANT — new mutating tools MUST self-gate. The /mcp transport
+ * admits READ-tier callers (MCP is always POST, so the route can't
+ * distinguish reads from writes); per-tool permission checks in the cases
+ * below are the ONLY write/governance enforcement. Follow the existing
+ * patterns: canCreateInNest / canUserEdit for content writes, canUserApprove
+ * (inside review-service) for governance, explicit admin checks for
+ * stewards/sharing/sync. A mutating case without its own check ships a
+ * privilege escalation.
+ */
+async function runTool(
+  toolName: string,
+  args: Record<string, any>,
+  ctx: McpToolContext,
+): Promise<ToolResult> {
+  const { storage, queryEngine, versionManager, nestId, userId, userEmail } = ctx;
 
   switch (toolName) {
     case "context_init": {
-      const content = await storage.readContextMd();
-      if (!content)
+      const { context_md } = await engineApi.run<{ context_md: string | null }>(
+        "context_init",
+        {},
+        await opContext(nestId, userEmail),
+      );
+      if (!context_md)
         return "No CONTEXT.md found. Use context_overview to see what's available.";
-      return `# Vault Instructions (CONTEXT.md)\n\n${content}`;
+      return `# Vault Instructions (CONTEXT.md)\n\n${context_md}`;
     }
 
     case "context_overview": {
-      const docs = await storage.discoverDocuments();
+      // Counts come from the engine, which sees the whole vault; the NODE LIST
+      // must not. This tool used to dump every node's title, tags and a body
+      // excerpt straight from discoverDocuments with no gate at all — the same
+      // hole resolveLlmBody closed for context_get and context_search, still
+      // open here. Route the listing through the caller-gated path instead.
+      const { total } = await engineApi.run<{ total: number }>(
+        "context_init",
+        {},
+        await opContext(nestId, userEmail),
+      );
+
+      const visible = await listNodesForCallerByEmail(nestId, userEmail, {});
       const types: Record<string, number> = {};
       const tags: Record<string, number> = {};
-      for (const n of docs) {
-        const t = n.frontmatter.type || "document";
-        types[t] = (types[t] || 0) + 1;
-        for (const tag of n.frontmatter.tags || []) tags[tag] = (tags[tag] || 0) + 1;
+      for (const n of visible) {
+        types[n.type] = (types[n.type] || 0) + 1;
+        for (const tag of n.tags || []) tags[tag] = (tags[tag] || 0) + 1;
       }
-      const typeList = Object.entries(types).sort((a, b) => b[1] - a[1]).map(([t, c]) => `  ${t}: ${c}`).join("\n");
-      const tagList = Object.entries(tags).sort((a, b) => b[1] - a[1]).map(([t, c]) => `  ${t}: ${c}`).join("\n");
-      const nodeList = docs
+      const fmt = (counts: Record<string, number>) =>
+        Object.entries(counts)
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, c]) => `  ${k}: ${c}`)
+          .join("\n");
+      const nodeList = visible
         .map(
           (n, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).slice(0, 4).join(" ")}\n   ${(n.body || "").slice(0, 120).replace(/\n/g, " ")}`,
+            `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).slice(0, 4).join(" ")}\n   ${(n.content || "").slice(0, 120).replace(/\n/g, " ")}`,
         )
         .join("\n\n");
-      return `# Vault Overview\n**Total nodes:** ${docs.length}\n\n## Types\n${typeList}\n\n## Tags\n${tagList}\n\n## All Nodes\n\n${nodeList}`;
+      // Say so when governance is hiding things, rather than quietly reporting
+      // a smaller vault than the one that exists.
+      const withheld = total - visible.length;
+      const note = withheld > 0 ? `\n_${withheld} node(s) not visible to you._\n` : "";
+      return `# Vault Overview\n**Total nodes:** ${visible.length}\n${note}\n## Types\n${fmt(types)}\n\n## Tags\n${fmt(tags)}\n\n## All Nodes\n\n${nodeList}`;
     }
 
     case "context_search": {
@@ -328,30 +874,271 @@ export async function handleToolCall(
           .toLowerCase();
         return terms.every((t: string) => hay.includes(t));
       });
-      if (!matches.length) return `No nodes matched search: "${args.query}"`;
+      if (!matches.length)
+        return {
+          text: `No nodes matched search: "${args.query}"`,
+          data: { results: [] },
+        };
       const results = matches
         .map(
           ({ node: n, body }, i) =>
             `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}\n   ${(body || "").slice(0, 200).replace(/\n/g, " ")}`,
         )
         .join("\n\n");
-      return `Found ${matches.length} node(s) matching "${args.query}":\n\n${results}`;
+      return {
+        text: `Found ${matches.length} node(s) matching "${args.query}":\n\n${results}`,
+        // Same gated bodies the prose is built from — `resolveLlmBody`
+        // already refused everything this caller may not read. No `score`:
+        // this is a term-containment filter, not a ranked search.
+        data: {
+          results: matches.map(({ node: n, body }) => summarizeNode(n, body)),
+        },
+      };
+    }
+
+    case "context_table_query": {
+      const result = await queryTableNode(
+        nestId,
+        String(args.table ?? ""),
+        String(args.query ?? ""),
+        false,
+      );
+      // Compact CSV back out — models read it fine and it round-trips.
+      const lines = [
+        result.columns.join(","),
+        ...result.rows.map((r: string[]) => r.join(",")),
+      ];
+      return `${result.returned} of ${result.matched} matching rows (table ${result.table} v${result.version}, ${result.total} total):\n${lines.join("\n")}`;
     }
 
     case "context_query": {
-      const result = await queryEngine.query(args.query, { hops: 2 });
-      const nodes = result.documents;
-      if (!nodes.length) return `No nodes matched: ${args.query}`;
+      // hops mirrors REST POST /context — caller-controlled traversal depth.
+      // External LLM callers set this directly, so normalize junk values
+      // (negative, fractional, NaN) to a sane non-negative integer.
+      // Traversal stats describe the engine's walk and are true regardless of
+      // which documents survive the visibility filter below.
+      const { documents, traversal } = await engineApi.run<{
+        documents: Array<{
+          id: string;
+          title: string;
+          description?: string;
+          type: string;
+          status?: string;
+          tags?: string[];
+          body?: string;
+        }>;
+        traversal?: { mode: string; hops_used: number; nodes_traversed: number };
+      }>(
+        "context_query",
+        { query: args.query, hops: normalizeHops(args.hops) },
+        await opContext(nestId, userEmail),
+      );
+      // Hide nodes the caller can't see (approved-only under stewardship) so the
+      // listing doesn't leak restricted titles — same gate as context_search.
+      const visibility = await Promise.all(
+        documents.map(async (d) => ({
+          doc: d,
+          body: await resolveLlmBody(ctx, {
+            id: d.id,
+            body: d.body ?? "",
+            frontmatter: { title: d.title },
+          } as ContextNode),
+        })),
+      );
+      const visible = visibility.filter((e) => e.body !== null);
+      const nodes = visible.map((e) => e.doc);
+      if (!nodes.length)
+        return {
+          text: `No nodes matched: ${args.query}`,
+          data: { documents: [], traversal },
+        };
       const list = nodes
-        .map(
-          (n, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}`,
-        )
+        .map((n, i) => `${i + 1}. **${n.title}** [${n.type}] ${(n.tags || []).join(" ")}`)
         .join("\n\n");
-      return `Found ${nodes.length} node(s) for \`${args.query}\`:\n\n${list}`;
+      return {
+        text: `Found ${nodes.length} node(s) for \`${args.query}\`:\n\n${list}`,
+        // The engine already hands back catalog `nodeSummary` shapes — only
+        // `body` is swapped for the gated one resolveLlmBody returned.
+        // `source_nodes` is deliberately absent: this handler never gates
+        // them, so serving them would hand out content the prose refuses.
+        data: {
+          documents: visible.map((e) => ({ ...e.doc, body: e.body ?? undefined })),
+          traversal,
+        },
+      };
     }
 
     case "context_get": {
+      // Shared read. This used to load and parse EVERY file in the vault to
+      // find one node — an id lookup is a direct read, and only a title needs
+      // to search.
+      let node: ContextNode;
+      try {
+        node = await getNodeForCaller(
+          nestId,
+          args.title ? { title: args.title } : { id: args.id },
+          ctx.userId,
+          userEmail,
+        );
+      } catch {
+        // getNodeForCaller THROWS on a miss and on a denied id alike — both
+        // answer "Node not found" so probing ids can't map a governed nest.
+        // Flagging here is the only place it can be flagged: the call never
+        // returns a falsy node, so a post-call guard would be dead code.
+        return toolError(
+          `Node not found: ${args.title || args.id}`,
+          "DOCUMENT_NOT_FOUND",
+        );
+      }
+      const body = await resolveLlmBody(ctx, node);
+      if (body === null) {
+        // Covers both halves of resolveLlmBody's null: the caller may not read
+        // this node, or it has no approved version. Either way the content is
+        // withheld — UNAUTHORIZED_ACTION is the catalog code for "refused",
+        // and telling the two apart would leak which one it was.
+        return toolError(
+          `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`,
+          "UNAUTHORIZED_ACTION",
+        );
+      }
+      const meta = [
+        `**Title:** ${node.frontmatter.title}`,
+        `**Type:** ${node.frontmatter.type || "document"}`,
+        node.frontmatter.tags?.length
+          ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      return {
+        text: `${meta}\n\n---\n\n${body || "(no content)"}`,
+        // `body` is the gated one, not node.body — under stewardship that is
+        // the APPROVED snapshot, which can be older than the live draft this
+        // frontmatter came from. So the payload carries only the fields the
+        // prose above already reports, none of which claim to describe a
+        // specific version. `version`, `status`, `checksum` and the
+        // timestamps are deliberately absent: they describe the draft, and
+        // pairing them with an approved body would misdescribe it (checksum
+        // would also be a draft hash — see context_versions). `raw` is absent
+        // too: no include_raw input here (Phase 2).
+        data: {
+          id: node.id,
+          frontmatter: {
+            title: node.frontmatter.title,
+            description: node.frontmatter.description,
+            type: node.frontmatter.type || "document",
+            tags: node.frontmatter.tags,
+          },
+          body,
+        },
+      };
+    }
+
+    case "context_list": {
+      // Same per-caller gating REST/UI use: steward access, public-reader
+      // approved-only, pending/status resolution.
+      const nodes = await listNodesForCallerByEmail(nestId, userEmail, {
+        type: args.type,
+        tag: args.tag,
+        status: args.status,
+        approvedOnly: args.approved_only === true,
+        limit: args.limit || 50,
+      });
+      // No `body`: listNodesForCaller gates WHICH documents come back, but
+      // the `content` it carries is the latest on-disk text — under
+      // stewardship that is the unapproved draft resolveLlmBody would refuse.
+      // The catalog makes body optional; omitting it is the honest read.
+      const documents = nodes.map((n) => ({
+        id: n.id,
+        title: n.title,
+        description: n.description,
+        type: n.type || "document",
+        status: n.status || "draft",
+        tags: n.tags,
+      }));
+      if (!nodes.length)
+        return { text: "No nodes found with the given filters.", data: { documents } };
+      const list = nodes
+        .map((n, i) => `${i + 1}. **${n.title}** [${n.type}]`)
+        .join("\n");
+      return { text: `${nodes.length} node(s):\n\n${list}`, data: { documents } };
+    }
+
+    case "context_resolve": {
+      const result = await queryEngine.query(args.selector, {
+        hops: normalizeHops(args.hops),
+      });
+      const maxTokens = args.max_tokens || 8000;
+      const approxChars = maxTokens * 4;
+      // Gate bodies the same way context_get/search/export do — approved-only
+      // under stewardship. Raw `n.body` here would leak draft/unapproved text,
+      // and caller-set hops now widens the neighborhood pulled through this path.
+      const resolvedBodies = await Promise.all(
+        result.documents.map(async (n) => ({
+          node: n,
+          body: await resolveLlmBody(ctx, n),
+        })),
+      );
+      let total = 0;
+      const resolved: string[] = [];
+      for (const { node: n, body } of resolvedBodies) {
+        if (body === null) continue; // not visible / no approved version yet
+        const entry = `## ${n.frontmatter.title}\n\n${body}`;
+        if (total + entry.length > approxChars) break;
+        resolved.push(entry);
+        total += entry.length;
+      }
+      return resolved.join("\n\n---\n\n") || "No nodes resolved.";
+    }
+
+    case "context_export": {
+      // Whole-nest bundle: every accessible document's full body, gated the
+      // same way context_get is (approved-only under stewardship). Optional
+      // token budget; include in discovery order until it's reached.
+      const docs = await storage.discoverDocuments();
+      const approxChars = args.max_tokens ? args.max_tokens * 4 : Infinity;
+      // Resolve every approved body up front (concurrent), matching
+      // context_search, then apply the token budget over the resolved list in
+      // discovery order.
+      const resolved = await Promise.all(
+        docs.map(async (n) => ({ node: n, body: await resolveLlmBody(ctx, n) })),
+      );
+      let total = 0;
+      let budgetHit = false;
+      const parts: string[] = [];
+      for (const { node: n, body } of resolved) {
+        if (body === null) continue; // not visible / no approved version yet
+        const meta = [
+          `**Title:** ${n.frontmatter.title}`,
+          `**Type:** ${n.frontmatter.type || "document"}`,
+          n.frontmatter.tags?.length
+            ? `**Tags:** ${n.frontmatter.tags.join(" ")}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const entry = `${meta}\n\n${body || "(no content)"}`;
+        if (total + entry.length > approxChars) {
+          budgetHit = true;
+          break;
+        }
+        parts.push(entry);
+        total += entry.length;
+      }
+      if (!parts.length) {
+        return budgetHit
+          ? "Token budget reached before any document fit — raise max_tokens, or use context_query/context_resolve to target."
+          : "No documents available to export.";
+      }
+      const note = budgetHit
+        ? `\n\n_(Token budget reached — ${parts.length} of ${docs.length} documents included. Raise max_tokens, or use context_query/context_resolve to target.)_`
+        : "";
+      return `# Nest export — ${parts.length} document(s)\n\n${parts.join(
+        "\n\n---\n\n",
+      )}${note}`;
+    }
+
+    case "context_comments": {
       const docs = await storage.discoverDocuments();
       let node: ContextNode | undefined;
       if (args.title) {
@@ -363,189 +1150,183 @@ export async function handleToolCall(
         node = docs.find((n) => n.id === args.id);
       }
       if (!node) return `Node not found: ${args.title || args.id}`;
-      const body = await resolveLlmBody(ctx, node);
-      if (body === null) {
+      // Gate the same way context_get/context_export do: under stewardship a
+      // node with no approved version is invisible to AI. Its threads embed
+      // draft body text (anchor.quote) and paraphrases in comment bodies, so
+      // serving them would leak unapproved content through the side door.
+      if ((await resolveLlmBody(ctx, node)) === null) {
         return `Node "${node.frontmatter.title}" has no approved version yet — not available to AI.`;
       }
-      const meta = [
-        `**Title:** ${node.frontmatter.title}`,
-        `**Type:** ${node.frontmatter.type || "document"}`,
-        node.frontmatter.tags?.length
-          ? `**Tags:** ${node.frontmatter.tags.join(" ")}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join("\n");
-      return `${meta}\n\n---\n\n${body || "(no content)"}`;
-    }
-
-    case "context_list": {
-      let docs = await storage.discoverDocuments();
-      if (args.type)
-        docs = docs.filter((n) => n.frontmatter.type === args.type);
-      if (args.tag) {
-        const tag = args.tag.startsWith("#") ? args.tag : `#${args.tag}`;
-        docs = docs.filter((n) => n.frontmatter.tags?.includes(tag));
-      }
-      // Hide unapproved docs from the LLM-facing list under stewardship —
-      // a listing that includes them would imply they're available.
-      if (isStewardshipEnabled(nestId)) {
-        docs = docs.filter(
-          (n) => versions.getApprovedVersion(nestId, n.id) != null,
-        );
-      }
-      docs = docs.slice(0, args.limit || 50);
-      if (!docs.length) return "No nodes found with the given filters.";
-      const list = docs
-        .map(
-          (n, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}]`,
-        )
-        .join("\n");
-      return `${docs.length} node(s):\n\n${list}`;
-    }
-
-    case "context_resolve": {
-      const result = await queryEngine.query(args.selector, { hops: 2 });
-      const maxTokens = args.max_tokens || 8000;
-      const approxChars = maxTokens * 4;
-      let total = 0;
-      const resolved: string[] = [];
-      for (const n of result.documents) {
-        const entry = `## ${n.frontmatter.title}\n\n${n.body || ""}`;
-        if (total + entry.length > approxChars) break;
-        resolved.push(entry);
-        total += entry.length;
-      }
-      return resolved.join("\n\n---\n\n") || "No nodes resolved.";
+      const threads = await listThreads(nestId, node.id);
+      if (!threads.length)
+        return `No comments on "${node.frontmatter.title}".`;
+      const openCount = threads.filter((t) => t.status === "open").length;
+      const sections = threads
+        .map((t, i) => {
+          const quote = t.anchor?.quote
+            ? `> ${t.anchor.quote.replace(/\n/g, " ")}\n\n`
+            : "";
+          const head = `### ${i + 1}. [${t.status}]${t.anchor?.quote ? "" : " (whole-document)"
+            }`;
+          const comments = t.comments
+            .map((c) => `- **${c.author}** (${c.createdAt}): ${c.body}`)
+            .join("\n");
+          return `${head}\n${quote}${comments}`;
+        })
+        .join("\n\n");
+      return `# Comments on "${node.frontmatter.title}" — ${threads.length} thread(s), ${openCount} open\n\n${sections}`;
     }
 
     case "context_create": {
-      const slug = args.title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-|-$/g, "");
-      const id = `nodes/${slug}`;
-      const now = new Date().toISOString();
-      const tags = (args.tags || []).map((t: string) =>
-        t.startsWith("#") ? t : `#${t}`,
-      );
-
-      // Match the REST POST /nodes behavior: draft when stewardship is
-      // enabled, auto-approve when ungoverned.
-      const hasStewards = isStewardshipEnabled(nestId);
-      const initialStatus = hasStewards ? "draft" : "approved";
-
-      const node: ContextNode = {
-        id,
-        filePath: "",
-        frontmatter: {
-          title: args.title,
-          type: args.type || "document",
-          tags,
-          status: initialStatus as any,
-          version: 1,
-          created_at: now,
-          updated_at: now,
-          metadata: { owners: ["*"], scope: args.scope || "team" },
-        },
-        body: args.content,
-        rawContent: "",
-      };
-      await storage.writeDocument(id, serializeDocument(node));
-
-      // Tag index + version history — the REST path does both.
-      syncNodeTags(nestId, id, tags);
-      try {
-        await versionManager.createVersion(node, userEmail);
-      } catch (err) {
-        console.error("VersionManager.createVersion failed (mcp create)", err);
+      // PRIMARY write gate: the /mcp middleware admits read-tier callers
+      // (the MCP transport is always POST), so this per-tool check is what
+      // keeps creation locked to write+ collaborators and nest-scope editors.
+      if (!(await stewardship.canCreateInNest(nestId, userEmail))) {
+        return toolError(
+          "You don't have permission to create documents in this nest.",
+          "UNAUTHORIZED_ACTION",
+        );
       }
-      versions.createVersion({
-        nestId,
-        nodeId: id,
-        version: 1,
-        content: args.content,
-        author: userEmail,
-        status: initialStatus as "draft" | "approved",
-        tags,
+      // Refuse a title already used ANYWHERE in the vault, not just in the
+      // requested folder: every title-addressed tool here resolves by title, so
+      // a twin filed elsewhere is unreachable for all of them (CU-wdqcpzxcg8).
+      // Scan and create under one nest-wide key — createNode's own lock is per
+      // id, and two twins land on DIFFERENT ids, so only a shared key stops
+      // both from passing the scan before either writes.
+      const wanted = String(args.title ?? "").toLowerCase();
+      return withNodeWriteLock(nodeWriteKey(nestId, "*create*"), async () => {
+        const existingDocs = await storage.discoverDocuments();
+        const twin = existingDocs.find(
+          (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
+        );
+        if (twin) {
+          return toolError(
+            `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`,
+            "DOCUMENT_ALREADY_EXISTS",
+          );
+        }
+        const { node, version } = await createNode(
+          nestId,
+          {
+            title: args.title,
+            content: args.content,
+            type: args.type,
+            tags: args.tags,
+            scope: args.scope,
+            folder: args.folder,
+          },
+          userEmail,
+        );
+        return {
+          text: `Created node: **${args.title}** (${node.id}) — status: ${node.frontmatter.status}`,
+          // checkpoint is null by construction: this server seals nothing —
+          // a write becomes live through steward review, not a checkpoint.
+          data: {
+            id: node.id,
+            version,
+            status: node.frontmatter.status,
+            checkpoint: null,
+          },
+        };
       });
-      if (initialStatus === "approved") {
-        versions.setApprovedVersion(nestId, id, 1, userEmail);
-      }
-
-      return `Created node: **${args.title}** (${id}) — status: ${initialStatus}`;
     }
 
     case "context_update": {
-      const docs = await storage.discoverDocuments();
-      const node = docs.find(
-        (n) =>
-          n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
-      );
-      if (!node) return `Node not found: ${args.title}`;
-
-      let body = node.body || "";
-      if (args.content !== undefined) body = args.content;
-      if (args.append) body = body + "\n\n" + args.append;
-
-      let tags = node.frontmatter.tags || [];
-      if (args.tags) {
-        const newTags = args.tags.map((t: string) =>
-          t.startsWith("#") ? t : `#${t}`,
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // What the caller called it. Mirrors resolveTargetNode's precedence: an
+      // id wins, so a title sent alongside one was ignored and must not be
+      // echoed back as if it named the document. Title-only echoes verbatim.
+      const label = args.id ? node.frontmatter.title : args.title;
+      // Defense-in-depth: same per-node edit check REST resolves, so editing
+      // stays gated regardless of the /mcp middleware. Unchanged by accepting
+      // an id: resolution reaches the same nest-scoped documents either way,
+      // and this gate runs on the resolved node, not on how it was named.
+      const editCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
+      if (!editCheck.allowed) {
+        return toolError(
+          `You don't have permission to edit "${label}": ${editCheck.reason}`,
+          "UNAUTHORIZED_ACTION",
         );
-        tags = [...new Set([...tags, ...newTags])];
       }
-
-      // Bump version so the engine + governance row align.
-      const prevVersion = versions.getCurrentVersion(nestId, node.id);
-      const newVersion = prevVersion + 1;
-      const hasStewards = isStewardshipEnabled(nestId);
-      const updated: ContextNode = {
-        ...node,
-        body,
-        frontmatter: {
-          ...node.frontmatter,
-          tags,
-          version: newVersion,
-          updated_at: new Date().toISOString(),
+      // updateNode replaces tags; this tool's contract is "Tags to add", so
+      // merge against the current set here rather than in the service.
+      const mergedTags = args.tags
+        ? [...new Set([...(node.frontmatter.tags || []), ...args.tags])]
+        : undefined;
+      const { node: updated, version } = await updateNode(
+        nestId,
+        node.id,
+        {
+          content: args.content,
+          append: args.append,
+          tags: mergedTags,
+          status: args.status,
+          changeNote: args.changeNote,
+        },
+        userEmail,
+      );
+      return {
+        text: `Updated node: **${updated.frontmatter.title}** — v${version}, status: ${updated.frontmatter.status}`,
+        // checkpoint null — see context_create.
+        data: {
+          id: updated.id,
+          version,
+          status: updated.frontmatter.status,
+          checkpoint: null,
         },
       };
-      await storage.writeDocument(node.id, serializeDocument(updated));
+    }
 
-      try {
-        await versionManager.createVersion(updated, userEmail);
-      } catch (err) {
-        console.error("VersionManager.createVersion failed (mcp update)", err);
+    case "context_delete": {
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // PRIMARY write gate — the /mcp transport admits read-tier callers, so
+      // this per-tool check is the only thing standing between a viewer and a
+      // deleted document. Delete is at least as privileged as edit, so it
+      // takes the same per-node check context_update does.
+      const deleteCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
+      if (!deleteCheck.allowed) {
+        // Dead end otherwise — point at the request path the UI offers here.
+        return toolError(
+          `You don't have permission to delete "${node.frontmatter.title}": ${deleteCheck.reason}\n\nUse context_request_deletion to ask a nest owner/admin to delete it, with a reason.`,
+          "UNAUTHORIZED_ACTION",
+        );
       }
+      await deleteNode(nestId, node.id, userEmail);
+      return {
+        text: `Deleted node: **${node.frontmatter.title}** (${node.id})`,
+        data: {
+          id: node.id,
+          title: node.frontmatter.title,
+          deleted: true as const,
+        },
+      };
+    }
 
-      syncNodeTags(nestId, node.id, tags);
-      versions.createVersion({
+    case "context_move": {
+      if (typeof args.folder !== "string") {
+        return 'folder is required — a path like "gtm/deals", or "" for the nest root.';
+      }
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return node;
+      // PRIMARY write gate, same reasoning as context_delete: a move rewrites
+      // the node's id across every governance table, so it is at least as
+      // privileged as an edit.
+      const moveCheck = await stewardship.canUserEdit(nestId, node.id, userEmail);
+      if (!moveCheck.allowed) {
+        return `You don't have permission to move "${node.frontmatter.title}": ${moveCheck.reason}`;
+      }
+      const { node: moved, previousId } = await moveNode(
         nestId,
-        nodeId: node.id,
-        version: newVersion,
-        content: body,
-        author: userEmail,
-        status: hasStewards ? "draft" : "approved",
-        tags,
-      });
-
-      // Withdraw any pending review so the steward queue stays accurate
-      // — the request pointed at the old version, which no longer
-      // matches what's on disk. New version starts a fresh draft cycle.
-      if (reviews.getPendingReview(nestId, node.id)) {
-        reviews.cancelReview({
-          nestId,
-          nodeId: node.id,
-          cancelledBy: userEmail,
-        });
+        node.id,
+        args.folder,
+        userEmail,
+      );
+      if (previousId === moved.id) {
+        return `**${moved.frontmatter.title}** is already at \`${moved.id}\` — nothing to move.`;
       }
-
-      if (!hasStewards) {
-        versions.setApprovedVersion(nestId, node.id, newVersion, userEmail);
-      }
-
-      return `Updated node: **${node.frontmatter.title}**`;
+      return `Moved **${moved.frontmatter.title}**: \`${previousId}\` → \`${moved.id}\``;
     }
 
     // ─── Governance Tool Handlers ──────────────────────────────────────
@@ -558,7 +1339,7 @@ export async function handleToolCall(
           (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
         );
         const nodeId = node?.id || "";
-        const resolved = stewardship.resolveStewardsForNode(ctx.nestId, nodeId);
+        const resolved = await stewardship.resolveStewardsForNode(ctx.nestId, nodeId);
 
         if (resolved.length === 0) {
           return `No stewards configured for "${args.title}". Changes are auto-approved.`;
@@ -573,8 +1354,15 @@ export async function handleToolCall(
         return `# Stewards for "${args.title}"\n\n${list}`;
       }
 
+      // Listing the full roster is admin-only (same as REST GET /stewards).
+      // Resolving stewards for a specific node above stays open so callers
+      // can see who'd review their work.
+      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userId))) {
+        return "You don't have permission to list stewards. Only a nest admin, the nest owner, or the server admin can do this.";
+      }
+
       // List all stewards for the nest
-      const allStewards = stewardship.getStewardsForNest(ctx.nestId);
+      const allStewards = await stewardship.getStewardsForNest(ctx.nestId);
       if (allStewards.length === 0) {
         return "No stewards configured. All changes are auto-approved.\n\nTo configure stewards, add a `stewards.yaml` file to the vault root, or use `context_assign_steward`.";
       }
@@ -585,7 +1373,7 @@ export async function handleToolCall(
           ? "Nest-level"
           : s.scope === "tag"
             ? `Tag: ${s.tagName}`
-            : `Document: ${s.nodePattern}`;
+            : `Document: ${s.nodeTitle || s.nodePattern}`;
         (byScope[key] = byScope[key] || []).push(s);
       }
 
@@ -599,9 +1387,148 @@ export async function handleToolCall(
       return `# Data Stewards\n\n${sections}`;
     }
 
+    case "context_request_deletion": {
+      const reason = typeof args.reason === "string" ? args.reason.trim() : "";
+      if (!reason) {
+        return "reason is required — say why it should be deleted; that is what the admin judges.";
+      }
+
+      // Whole nest.
+      if (args.nest === true) {
+        const request = await reviews.requestDeletion({
+          nestId,
+          nodeId: nestId,
+          targetType: "nest",
+          requestedBy: userEmail,
+          reason,
+          baseUrl: ctx.baseUrl,
+        });
+        return `Requested deletion of the **entire nest**. A nest owner or admin will delete it or reject the request.\nRequest id: \`${request.id}\``;
+      }
+
+      // Folder — normalized the same way the REST route does, so two people
+      // flagging "gtm/deals" and "/nodes/gtm/deals/" collide on one request.
+      if (typeof args.folder === "string" && args.folder.trim()) {
+        const folder = args.folder
+          .trim()
+          .replace(/^\/+|\/+$/g, "")
+          .replace(/^nodes\//, "");
+        const docs = await storage.discoverDocuments();
+        const inside = docs.filter((d) => isIdUnderFolder(d.id, folder));
+        if (inside.length === 0) {
+          return `No folder "${folder}" — nothing is filed under it. Use context_list to see what exists.`;
+        }
+        const request = await reviews.requestDeletion({
+          nestId,
+          nodeId: folder,
+          targetType: "folder",
+          requestedBy: userEmail,
+          reason,
+          baseUrl: ctx.baseUrl,
+        });
+        return `Requested deletion of folder **${folder}** (${inside.length} document(s) inside). A nest owner or admin will delete it or reject the request.\nRequest id: \`${request.id}\``;
+      }
+
+      // Document — resolved by title or id like every other node tool.
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return node;
+      // Read gate: you may flag anything you can see. That is the point —
+      // whoever notices dead content usually can't delete it.
+      if (!(await canReadNode(nestId, node.id, userId, userEmail))) {
+        return `Node not found: ${node.id}`;
+      }
+      const request = await reviews.requestDeletion({
+        nestId,
+        nodeId: node.id,
+        targetType: "document",
+        requestedBy: userEmail,
+        reason,
+        baseUrl: ctx.baseUrl,
+      });
+      return `Requested deletion of **${node.frontmatter.title}**. A nest owner or admin will delete it or reject the request — nothing is removed yet.\nRequest id: \`${request.id}\``;
+    }
+
+    case "context_deletion_queue": {
+      const status = args.status === "declined" ? "declined" : "pending";
+      const requests = await reviews.listDeletionRequests({ nestId, status });
+      if (requests.length === 0) {
+        return status === "pending"
+          ? "No deletion requests waiting. All caught up!"
+          : "No rejected deletion requests.";
+      }
+      const list = requests
+        .map((r, i) => {
+          const kind = r.targetType === "document" ? "" : `${r.targetType}: `;
+          const verdict =
+            r.status === "declined"
+              ? `\n   Rejected by ${r.resolvedBy}: "${r.resolutionNote}"`
+              : "";
+          return `${i + 1}. **${kind}${r.title || r.nodeId}**\n   Asked by ${r.requestedBy}: "${r.reason}"\n   Request id: \`${r.id}\`${verdict}`;
+        })
+        .join("\n\n");
+      return `# Deletion requests (${status})\n**${requests.length} item(s)**\n\n${list}`;
+    }
+
+    case "context_resolve_deletion": {
+      const requestId = typeof args.request_id === "string" ? args.request_id : "";
+      const action = args.action === "delete" ? "delete" : args.action === "decline" ? "decline" : null;
+      if (!requestId || !action) {
+        return 'request_id and action are required — action is "delete" or "decline". Use context_deletion_queue to list request ids.';
+      }
+      const request = await reviews.getDeletionRequest(requestId);
+      if (!request || request.nestId !== nestId || request.status !== "pending") {
+        return `No pending deletion request with id ${requestId}.`;
+      }
+
+      // Resolving is the owner/admin call the UI and REST both gate on — the
+      // /mcp transport admits read-tier callers, so this per-tool check is the
+      // only thing between a viewer and a deleted nest.
+      const roles = await stewardship.resolveUserRoles(nestId, userEmail);
+      if (!roles.includes("owner") && !roles.includes("admin")) {
+        return `You don't have permission to resolve deletion requests in this nest — only a nest owner or admin can. You can add to the discussion, but the verdict is theirs.`;
+      }
+
+      const label = await reviews.deletionTargetTitle(request);
+      if (action === "decline") {
+        const note = typeof args.note === "string" ? args.note.trim() : "";
+        if (!note) {
+          return "note is required when rejecting — the requester is told why it stays.";
+        }
+        await reviews.declineDeletion({
+          nestId,
+          id: requestId,
+          declinedBy: userEmail,
+          note,
+          baseUrl: ctx.baseUrl,
+        });
+        return `Rejected the deletion request for **${label}**. It stays, and ${request.requestedBy} has been told why.`;
+      }
+
+      if (request.targetType === "nest") {
+        await deleteNest(nestId);
+      } else if (request.targetType === "folder") {
+        await deleteFolder(nestId, request.nodeId, userEmail);
+        await reviews.dropDeletionRequest(request.id);
+      } else {
+        await deleteNode(nestId, request.nodeId, userEmail);
+      }
+      await reviews.notifyDeletionResolved({
+        nestId,
+        nodeId: request.nodeId,
+        docTitle: label,
+        outcome: "deleted",
+        requestedBy: request.requestedBy,
+        resolvedBy: userEmail,
+        requestId: request.id,
+        targetType: request.targetType,
+        baseUrl: ctx.baseUrl,
+      });
+      return `Deleted **${label}** — ${request.requestedBy}'s request was honoured. Irreversible.`;
+    }
+
     case "context_review_queue": {
       const status = args.status || "pending";
-      const result = reviews.getReviewQueue({
+      const result = await reviews.getReviewQueue({
         nestId: ctx.nestId,
         status: status as any,
       });
@@ -615,11 +1542,37 @@ export async function handleToolCall(
       const list = result.requests
         .map(
           (r, i) =>
-            `${i + 1}. **${r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
+            `${i + 1}. **${r.title || r.nodeId}** v${r.version} — ${r.priority} priority\n   Submitted by: ${r.requestedBy} at ${r.requestedAt}${r.requestNote ? `\n   Note: "${r.requestNote}"` : ""}`,
         )
         .join("\n\n");
 
       return `# Review Queue (${status})\n**${result.total} item(s)**\n\n${list}`;
+    }
+
+    case "context_my_drafts": {
+      // Self-scoped by construction — only rows this caller authored, in a nest
+      // they already hold read on, so no extra permission gate.
+      const { drafts, total } = await versions.listMyDrafts({
+        authorEmail: userEmail,
+        nestIds: [ctx.nestId],
+        limit: 100,
+      });
+      if (total === 0) {
+        return "No unsubmitted drafts — everything you've written here is in review or approved.";
+      }
+      const list = drafts
+        .map(
+          (d, i) =>
+            `${i + 1}. **${d.title}** v${d.version} — ${d.status}\n   Path: ${d.nodeId}\n   Last edited: ${d.updatedAt}`,
+        )
+        .join("\n\n");
+      // Say when the list is cut off rather than letting an agent read a capped
+      // page as the whole set.
+      const more =
+        total > drafts.length
+          ? `\n\n_Showing the ${drafts.length} most recent of ${total}._`
+          : "";
+      return `# My Drafts\n**${total} unsubmitted document(s)**\n\n${list}${more}\n\nSubmit one with \`context_submit_review\`.`;
     }
 
     case "context_submit_review": {
@@ -627,22 +1580,34 @@ export async function handleToolCall(
       const node = docs.find(
         (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
       );
-      if (!node) return `Node not found: ${args.title}`;
+      if (!node) return toolError(`Node not found: ${args.title}`, "DOCUMENT_NOT_FOUND");
 
-      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
-      if (currentVersion === 0) return `No versions found for "${args.title}"`;
+      // Defense-in-depth: submitting a draft for review is an edit-level
+      // action — gate it with the same per-node edit check.
+      const submitCheck = await stewardship.canUserEdit(ctx.nestId, node.id, userEmail);
+      if (!submitCheck.allowed) {
+        return toolError(
+          `You don't have permission to submit "${args.title}" for review: ${submitCheck.reason}`,
+          "UNAUTHORIZED_ACTION",
+        );
+      }
+
+      const currentVersion = await versions.getCurrentVersion(ctx.nestId, node.id);
+      if (currentVersion === 0)
+        return toolError(`No versions found for "${args.title}"`, "VERSION_NOT_FOUND");
 
       try {
-        const request = reviews.submitForReview({
+        const request = await reviews.submitForReview({
           nestId: ctx.nestId,
           nodeId: node.id,
           version: currentVersion,
           requestedBy: ctx.userEmail,
           note: args.note,
           priority: args.priority as any,
+          baseUrl: ctx.baseUrl,
         });
 
-        const resolved = stewardship.resolveStewardsForNode(
+        const resolved = await stewardship.resolveStewardsForNode(
           ctx.nestId,
           node.id,
         );
@@ -651,9 +1616,37 @@ export async function handleToolCall(
           ? `\n\n**Stewards who can review:**\n${resolved.map((r) => `- ${r.steward.userEmail} (${r.source})`).join("\n")}`
           : "";
 
-        return `Submitted "${args.title}" v${currentVersion} for review (${request.priority} priority).${stewardList}`;
+        return {
+          text: `Submitted "${args.title}" v${currentVersion} for review (${request.priority} priority).${stewardList}`,
+          // No catalog shape to conform to — `context_submit_review` is a
+          // governance-namespace operation and that namespace is declared but
+          // unimplemented in the engine (`api/index.ts`, NAMESPACES). So this
+          // is the review state the handler already computed, and nothing
+          // more: no `version`/`checkpoint` at the top level, because this
+          // operation writes no new version and seals no checkpoint — it
+          // points a review request at the version that already existed.
+          // Built from the same gated values the prose above is built from
+          // (`request`, `resolved`), never re-read past the permission check.
+          data: {
+            id: node.id,
+            submitted: true as const,
+            review: {
+              id: request.id,
+              version: request.version,
+              status: request.status,
+              priority: request.priority,
+              requested_by: request.requestedBy,
+              requested_at: request.requestedAt,
+            },
+            reviewers: resolved.map((r) => r.steward.userEmail),
+          },
+        };
       } catch (err: any) {
-        return `Failed to submit: ${err.message}`;
+        // A submit that threw (most often "a review is already pending") is a
+        // failure, not an answer. Without isError the client would parse this
+        // sentence as a payload and report a contract mismatch instead of the
+        // reason. INTERNAL is the catalog's code for an uncoded throw.
+        return toolError(`Failed to submit: ${err.message}`, "INTERNAL");
       }
     }
 
@@ -664,18 +1657,19 @@ export async function handleToolCall(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
-
       try {
+        // Report the version the resolution actually landed on (request.version),
+        // not a pre-read — an author revising their pending submission can bump
+        // it between here and the lock-protected approve.
         const request = await reviews.approve({
           nestId: ctx.nestId,
           nodeId: node.id,
-          version: currentVersion,
           approvedBy: ctx.userEmail,
           note: args.note,
+          baseUrl: ctx.baseUrl,
         });
 
-        return `Approved "${args.title}" v${currentVersion}. This version is now live for AI queries.${args.note ? `\nNote: ${args.note}` : ""}`;
+        return `Approved "${args.title}" v${request.version}. This version is now live for AI queries.${args.note ? `\nNote: ${args.note}` : ""}`;
       } catch (err: any) {
         return `Cannot approve: ${err.message}`;
       }
@@ -688,35 +1682,35 @@ export async function handleToolCall(
       );
       if (!node) return `Node not found: ${args.title}`;
 
-      const currentVersion = versions.getCurrentVersion(ctx.nestId, node.id);
-
       try {
-        const request = reviews.reject({
+        const request = await reviews.reject({
           nestId: ctx.nestId,
           nodeId: node.id,
-          version: currentVersion,
           rejectedBy: ctx.userEmail,
           note: args.note,
+          baseUrl: ctx.baseUrl,
         });
 
-        return `Rejected "${args.title}" v${currentVersion}.\nReason: ${args.note}`;
+        return `Rejected "${args.title}" v${request.version}.\nReason: ${args.note}`;
       } catch (err: any) {
         return `Cannot reject: ${err.message}`;
       }
     }
 
     case "context_versions": {
-      const docs = await storage.discoverDocuments();
-      const node = docs.find(
-        (n) => n.frontmatter.title.toLowerCase() === args.title.toLowerCase(),
-      );
-      if (!node) return `Node not found: ${args.title}`;
+      const node = await resolveTargetNode(storage, args);
+      if (typeof node === "string") return toolError(node, "DOCUMENT_NOT_FOUND");
+      // See context_update: an id wins over a title sent with it.
+      const label = args.id ? node.frontmatter.title : args.title;
 
-      const allVersions = versions.getVersions(ctx.nestId, node.id);
-      const approved = versions.getApprovedVersion(ctx.nestId, node.id);
+      const allVersions = await versions.getVersions(ctx.nestId, node.id);
+      const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
 
       if (allVersions.length === 0) {
-        return `No version history for "${args.title}".`;
+        return {
+          text: `No version history for "${label}".`,
+          data: { id: node.id, approved_version: approved ?? null, versions: [] },
+        };
       }
 
       const list = allVersions
@@ -726,7 +1720,29 @@ export async function handleToolCall(
         )
         .join("\n");
 
-      return `# Version History: ${args.title}\n**Current:** v${allVersions[0]?.version || 0} | **AI-active:** ${approved ? `v${approved}` : "none"}\n\n${list}`;
+      return {
+        text: `# Version History: ${label}\n**Current:** v${allVersions[0]?.version || 0} | **AI-active:** ${approved ? `v${approved}` : "none"}\n\n${list}`,
+        // Five catalog fields have no equivalent here and are omitted rather
+        // than faked: `keyframe_interval` and `keyframe` (content lives on
+        // disk — there is no keyframe+diff model), `chain_hash` (integrity is
+        // server-side, not a per-version chain), `content_hash` (the column
+        // exists but is conflict-detection state this tool has never served,
+        // and it is ungated), and `published_at` (a version carries a
+        // lifecycle status, not a publish timestamp). `status` and
+        // `approved_version` are the community equivalent — the same two
+        // facts the prose above reports.
+        data: {
+          id: node.id,
+          approved_version: approved ?? null,
+          versions: allVersions.map((v) => ({
+            version: v.version,
+            status: v.status,
+            edited_by: v.editedBy,
+            edited_at: v.editedAt,
+            note: v.changeNote,
+          })),
+        },
+      };
     }
 
     case "context_assign_steward": {
@@ -735,17 +1751,24 @@ export async function handleToolCall(
         return `Invalid scope "${args.scope}". Use: nest, tag, or document.`;
       }
 
+      // Same authority as REST/UI — server admin or nest owner/admin manages
+      // stewards. MCP calls don't pass through the /stewards HTTP middleware,
+      // so gate here with the shared helper.
+      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userId))) {
+        return "You don't have permission to manage stewards. Only a nest admin, the nest owner, or the server admin can do this.";
+      }
+
       try {
-        stewardship.assignSteward({
+        // Use createStewardRecord (not raw assignSteward) so MCP gets the
+        // same conflict check, email/tag normalization, and governed-mode
+        // flip the REST route uses.
+        await stewardship.createStewardRecord({
           nestId: ctx.nestId,
           scope,
-          nodePattern: scope === "document" ? args.target : undefined,
+          documentId: scope === "document" ? args.target : undefined,
           tagName: scope === "tag" ? args.target : undefined,
-          userEmail: args.email,
-          role: (args.role as any) || "reviewer",
+          users: [{ email: args.email, role: (args.role as any) || "reviewer" }],
           assignedBy: ctx.userEmail,
-          assignedAt: new Date().toISOString(),
-          isActive: true,
         });
 
         const targetDesc = scope === "nest"
@@ -758,7 +1781,129 @@ export async function handleToolCall(
       }
     }
 
+    case "context_share_nest": {
+      // Parity with REST POST /collaborators (CU-wdqcpzudw5 follow-up):
+      // write+ may invite; the escalation cap in addCollaborator stops
+      // anyone granting above their own level, so only admin/owner can
+      // hand out admin.
+      const callerPermission =
+        config.AUTH_MODE === "open"
+          ? ("owner" as const)
+          : await resolveNestPermission(ctx.nestId, ctx.userId);
+      if (permissionLevel(callerPermission) < permissionLevel("write")) {
+        return "You don't have permission to share this nest. Sharing needs write access — ask a nest admin or the owner.";
+      }
+      const permission = (args.permission as string) || "read";
+      try {
+        await addCollaborator({
+          nestId: ctx.nestId,
+          email: args.email,
+          permission,
+          grantedByEmail: ctx.userEmail,
+          callerPermission,
+        });
+        const label =
+          permission === "admin"
+            ? "admin"
+            : permission === "write"
+              ? "editor"
+              : "viewer";
+        return `Shared this nest with **${args.email}** as ${label}.`;
+      } catch (err: any) {
+        return `Failed to share nest: ${err.message}`;
+      }
+    }
+
+    case "context_grant": {
+      // Owner/admin only — same authority as steward/sharing management.
+      if (!(await stewardship.canManageStewards(ctx.nestId, ctx.userId))) {
+        return "You don't have permission to share documents in this nest (owner/admin only).";
+      }
+      const targetType = String(args.target_type || "");
+      const target = String(args.target || "").trim();
+      const role = (String(args.role || "read")) as "read" | "write";
+      if (!["document", "folder"].includes(targetType)) {
+        return "target_type must be 'document' or 'folder'.";
+      }
+      if (!target) return "target is required (a node id or folder prefix).";
+      if (!["read", "write"].includes(role)) return "role must be read or write.";
+      try {
+        const { createGrant } = await import("../governance/grants-service.js");
+        // Resolve the grantee — mint a placeholder invited user if unknown,
+        // same as collaborator/document sharing.
+        const db = (await import("../db/client.js")).getDb();
+        const { normalizeEmail } = await import("../shared/email.js");
+        const e = normalizeEmail(String(args.email || ""));
+        if (!e) return "email is required.";
+        let row = (await db.get("SELECT id FROM users WHERE LOWER(email) = ?", [e])) as
+          | { id: string }
+          | undefined;
+        if (!row) {
+          const { hashPassword } = await import("../auth/keys.js");
+          const { v4: uuid } = await import("uuid");
+          const id = uuid();
+          await db.run(
+            "INSERT INTO users (id, email, name, password_hash, is_invited) VALUES (?, ?, ?, ?, 1)",
+            [id, e, null, await hashPassword(uuid())],
+          );
+          row = { id };
+        }
+        await createGrant({
+          nestId: ctx.nestId,
+          targetType: targetType as any,
+          target,
+          userId: row.id,
+          role,
+          grantedBy: ctx.userEmail,
+        });
+        return `Shared ${targetType} \`${target}\` with **${args.email}** as ${role}.`;
+      } catch (err: any) {
+        return `Failed to share: ${err.message}`;
+      }
+    }
+
+    case "context_unsynced_list": {
+      // Same admin gate as REST GET /nests/unsynced — listing reflects
+      // server-side filesystem state, so non-admins shouldn't probe it.
+      if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
+        return "You don't have permission to list unsynced folders. Server admin only.";
+      }
+      const folders = listUnsyncedFolders();
+      if (!folders.length) return "No unsynced folders found.";
+      const list = folders
+        .map(
+          (f, i) =>
+            `${i + 1}. **${f.label}** \`${f.name}\` — ${f.mdCount} md file(s), ${f.sizeBytes} bytes`,
+        )
+        .join("\n");
+      return `# Unsynced Folders (${folders.length})\n\n${list}`;
+    }
+
+    case "context_sync_folder": {
+      // Same admin gate as REST POST /nests/unsynced/sync.
+      if (config.AUTH_MODE !== "open" && !(await isServerAdminUserId(userId))) {
+        return "You don't have permission to sync folders. Server admin only.";
+      }
+      try {
+        const { nest, documents } = await syncUnsyncedFolder(
+          userId,
+          args.name,
+          userEmail,
+        );
+        return `Synced folder "${args.name}" → nest **${nest.name}** (${nest.id}) with ${documents} document(s).`;
+      } catch (err: any) {
+        return `Failed to sync folder: ${err.message}`;
+      }
+    }
+
     default:
+      // Workflow-plane tools are registered only when FEATURE_WORKFLOW_PLANE
+      // is on (mcp/routes.ts); they share the run/edge service layer with the
+      // REST routes. Delegate here so trace logging in handleToolCall still
+      // wraps them.
+      if (isWorkflowTool(toolName)) {
+        return runWorkflowTool(toolName, args, ctx);
+      }
       return `Unknown tool: ${toolName}`;
   }
 }

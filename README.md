@@ -11,7 +11,10 @@
 ContextNest Community Edition is a self-hosted server that lets you:
 
 - Store, version, and govern markdown-based context documents ("nests")
+- Import an existing folder or vault of markdown files in one step
+- Export a nest as a portable bundle and re-import it on another self-hosted host
 - Apply stewardship workflows — draft, pending review, approved
+- Share nests with collaborators or publish them read-only to the public
 - Serve approved context to AI agents via MCP, HTTP, or CLI
 - Sync with the PromptOwl hosted platform for multi-user collaboration
 
@@ -20,17 +23,60 @@ The server runs locally or on your own infrastructure. Your PromptOwl account ha
 ## Quickstart
 
 ```bash
-# 1. Get a license key — sign up free at https://app.promptowl.ai
-#    Settings → License Keys → Create a Community Server key
+# 1. Run the community server
+npx @promptowl/contextnest-community
 
-# 2. (Optional) Scaffold a local nest with the open-source CLI
-npx @promptowl/contextnest-cli init
+# 2. Open the server in your browser
+#    http://localhost:3838
+#    On first boot with no license, it lands on the License Setup Page.
 
-# 3. Run the community server
+# 3. Paste your PromptOwl license key (pk_...) — see "License setup" below
+```
+
+The server listens on `http://localhost:3838` by default. Without a valid license the server still runs and serves reads, but write actions return `503` until you activate. See [CONFIGURATION.md](./CONFIGURATION.md) for all environment variables (port, auth mode, storage, telemetry).
+
+> **Optional:** scaffold a local nest with the open-source CLI before connecting:
+> ```bash
+> npx @promptowl/contextnest-cli init
+> ```
+
+## License setup
+
+ContextNest Community Edition requires a PromptOwl Community License key (`pk_...`). Getting and activating one:
+
+### 1. Create the key (free)
+
+1. Sign up or log in at <https://app.promptowl.ai>
+2. Open the **Overview** menu → **Community License**
+3. Click **Create a Community License key**
+4. Copy the generated key — it starts with `pk_`
+
+### 2. Activate the server
+
+Pick **one** of two ways:
+
+**A. Browser setup page (recommended for first run)**
+
+1. Start the server: `npx @promptowl/contextnest-community`
+2. Open <http://localhost:3838> — with no license installed, the server boots into **setup mode** and shows the **License Setup Page**
+3. Paste your `pk_...` key and submit
+4. The server validates it against PromptOwl, writes it to your `.env`, and exits setup mode — no restart needed
+
+**B. Environment variable (recommended for Docker / CI / scripted deploys)**
+
+```bash
 PROMPTOWL_KEY=pk_... npx @promptowl/contextnest-community
 ```
 
-The server listens on `http://localhost:3000` by default. Without a valid `PROMPTOWL_KEY` the server still runs but some features are limited. See [CONFIGURATION.md](./CONFIGURATION.md) for all environment variables (port, auth mode, storage, telemetry).
+The key is read at boot. The server validates against PromptOwl on startup; if valid, it goes straight into licensed mode.
+
+### 3. How licensing behaves at runtime
+
+- **Unlicensed / setup mode** — reads work; every non-GET (write) request returns `503` until a valid key is installed.
+- **Live revocation** — a long-poll watcher tracks license state against PromptOwl. If your key is revoked, the server blocks writes within seconds (no restart required) and returns to setup mode.
+- **Admin identity follows the license** — the admin user is whichever PromptOwl account owns the installed key, resolved live per request. Transferring the license to another account immediately promotes the new owner and demotes the old one.
+
+For redistribution, hosted-service, OEM, or regulated-industry licensing, contact **hoot@promptowl.ai**.
 
 ## System requirements
 
@@ -44,16 +90,34 @@ The server listens on `http://localhost:3000` by default. Without a valid `PROMP
 | Feature | Community Edition | Enterprise |
 |---|:---:|:---:|
 | Self-hosted context server | ✅ | ✅ |
+| SQLite or PostgreSQL / Cloud SQL backend | ✅ | ✅ |
+| Configurable nest storage (external / GCS volume mount) | ✅ | ✅ |
 | Markdown + YAML frontmatter vaults | ✅ | ✅ |
+| Import existing folder / vault | ✅ | ✅ |
+| Export nest as portable bundle (.zip) | ✅ | ✅ |
+| Markdown rendering + wiki cross-linking | ✅ | ✅ |
+| External-edit detection + version diff | ✅ | ✅ |
 | Stewardship workflow (draft/review/approve) | ✅ | ✅ |
+| Per-nest sharing + collaborators | ✅ | ✅ |
+| Public read-only nests | ✅ | ✅ |
+| Custom logo / branding | ✅ | ✅ |
+| Admin password reset + user removal (in-platform) | ✅ | ✅ |
+| Wiki backlinks, outline, hover-preview, link health | ✅ | ✅ |
+| Rich editor — tables, callouts, toggles, code highlight, find/replace, image & video upload | ✅ | ✅ |
+| Steward version revert | ✅ | ✅ |
 | MCP server for AI agents | ✅ | ✅ |
-| Multi-user governance UI | — | ✅ |
-| SSO / SAML / SCIM | — | ✅ |
+| Centralized multi-tenant admin console | — | ✅ |
+| Single sign-on (OIDC — Entra ID, Google, Okta, Keycloak) | ✅ | ✅ |
+| SAML / SCIM provisioning | — | ✅ |
 | Audit log streaming | — | ✅ |
 | Policy transforms (redaction, summarization) | — | ✅ |
 | Priority support and SLA | — | ✅ |
 
 For Enterprise pricing and features, contact **hoot@promptowl.ai** or visit <https://promptowl.ai/contextnest/>.
+
+## What's new
+
+Release notes live in [CHANGELOG.md](./CHANGELOG.md).
 
 ## Licensing
 
