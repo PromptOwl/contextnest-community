@@ -2,6 +2,7 @@ import {
   NestStorage,
   GraphQueryEngine,
   VersionManager,
+  DocumentNotFoundError,
 } from "@promptowl/contextnest-engine";
 import { createEngineApi } from "@promptowl/contextnest-engine/api";
 import type { OperationContext } from "@promptowl/contextnest-engine/api";
@@ -29,61 +30,89 @@ import { FlatNestStorage } from "./flat-storage.js";
  */
 const DISCOVERY_TTL_MS = 30_000;
 
-/** Storage methods that can change which documents discovery would return. */
-const DOCUMENT_WRITERS = [
-  "writeDocument",
-  "deleteDocument",
-  "writeVaultFile",
-  "init",
-] as const;
+/** The engine's own end-of-crawl filter for the default (non-retired) set. */
+const isLive = (node: ContextNode) => node.frontmatter.status !== "rejected";
 
 /**
- * Memoize `discoverDocuments` on one storage instance and drop the entry
- * whenever this process writes a document.
+ * Vault files discovery already ignores. Writing one cannot change which
+ * documents come back, so it must not cost the next reader a re-crawl —
+ * `regenerateIndex` writes several of them after every single mutation.
+ */
+const DERIVED_VAULT_FILES = new Set([
+  "INDEX.md",
+  "CONTEXT.md",
+  "CLAUDE.md",
+  "GEMINI.md",
+  "AGENTS.md",
+  "README.md",
+]);
+
+/**
+ * Memoize `discoverDocuments` on one storage instance and keep it in step with
+ * the documents this process writes.
  *
  * Wraps the instance rather than subclassing it so discovery semantics stay
  * owned by the engine (see the engine boundary in CLAUDE.md), and so the
  * GraphQueryEngine and VersionManager built on the same instance read through
  * the same cache instead of each re-crawling the nest.
  *
- * Entries are keyed by `includeRetired` rather than filtered down from one
- * superset: what counts as retired is the engine's call, not ours.
+ * Both keys ("all" and "live") come from one crawl: the engine reads every
+ * document and applies the retired filter only at the end, so a second pass
+ * would re-read the whole nest to throw the same rows away.
  */
 function withDiscoveryCache<S extends NestStorage>(
   storage: S,
 ): { storage: S; invalidate: () => void } {
   const entries = new Map<string, { docs: ContextNode[]; ts: number }>();
-  // Crawls in flight, keyed the same way. Cross-nest search fans out over every
-  // nest at once and the palette fires a query per keystroke, so without this
-  // the same cold nest gets crawled several times over, concurrently.
-  const inflight = new Map<string, Promise<ContextNode[]>>();
+  // The crawl in flight, if any. Cross-nest search fans out over every nest at
+  // once and the palette fires a query per keystroke, so without this the same
+  // cold nest gets crawled several times over, concurrently. One entry, not one
+  // per key, because a crawl produces both sets.
+  let inflight: Promise<{ all: ContextNode[]; live: ContextNode[] }> | null =
+    null;
   const discover = storage.discoverDocuments.bind(storage);
+  const readDoc = storage.readDocument.bind(storage);
+  // FlatNestStorage discovers an imported folder wholesale and honours no
+  // options, so for it the two key sets are the same crawl and must not be
+  // filtered down. Only the engine's own storage retires anything.
+  const filtersRetired = !(storage instanceof FlatNestStorage);
   // Bumped on every write so a crawl already in flight when one lands knows its
   // result predates the write and must not be cached (the same generation guard
   // the UI read cache uses).
   let generation = 0;
 
+  /**
+   * Crawl once, fill both keys. The engine reads every document and only then
+   * drops the retired ones, so the superset is the same work and "live" is a
+   * filter over it — a write path asks for both, back to back.
+   */
   const crawl = (
-    key: string,
     options: Parameters<typeof discover>[0],
-  ): Promise<ContextNode[]> => {
-    const existing = inflight.get(key);
-    if (existing) return existing;
+  ): Promise<{ all: ContextNode[]; live: ContextNode[] }> => {
+    if (inflight) return inflight;
     const startedAt = generation;
-    const run = discover(options)
-      .then((docs) => {
-        if (generation === startedAt) entries.set(key, { docs, ts: Date.now() });
-        return docs;
+    const run = discover({ ...options, includeRetired: true })
+      .then((crawled) => {
+        const sets = {
+          all: crawled,
+          live: filtersRetired ? crawled.filter(isLive) : crawled,
+        };
+        if (generation === startedAt) {
+          const ts = Date.now();
+          entries.set("all", { docs: sets.all, ts });
+          entries.set("live", { docs: sets.live, ts });
+        }
+        return sets;
       })
       .finally(() => {
-        if (inflight.get(key) === run) inflight.delete(key);
+        if (inflight === run) inflight = null;
       });
-    inflight.set(key, run);
+    inflight = run;
     return run;
   };
 
   storage.discoverDocuments = async (options = {}) => {
-    const key =
+    const key: "all" | "live" =
       options.includeRetired || options.includeSuperseded ? "all" : "live";
     const hit = entries.get(key);
     if (hit) {
@@ -92,40 +121,100 @@ function withDiscoveryCache<S extends NestStorage>(
       // time the entry aged out — the cross-nest search paid it per nest, for
       // any query not repeated inside the TTL. Serve what we have and refresh
       // behind the request: the set is at most one crawl older than the strict
-      // version, and a write through this process still evicts on the spot.
+      // version, and a write through this process still reconciles on the spot.
       if (Date.now() - hit.ts >= DISCOVERY_TTL_MS) {
-        void crawl(key, options).catch(() => {
+        void crawl(options).catch(() => {
           // A failed refresh keeps the previous set; the next read retries.
         });
       }
       return hit.docs;
     }
-    return crawl(key, options);
+    return (await crawl(options))[key];
   };
 
   const invalidate = () => {
     generation++;
     entries.clear();
-    // Drop in-flight crawls too, or a read arriving after the write joins one
-    // that started before it and gets pre-write content.
-    inflight.clear();
+    // Drop the in-flight crawl too, or a read arriving after the write joins
+    // one that started before it and gets pre-write content.
+    inflight = null;
   };
 
-  // Version keyframes, diffs, suggestions and INDEX/CONTEXT files all live in
-  // paths discovery already excludes, so only these four can invalidate it.
-  for (const name of DOCUMENT_WRITERS) {
+  /**
+   * Fold one written or deleted document into the cached sets instead of
+   * dropping them. Clearing made every write cost the next reader a full crawl
+   * — one MCP create pays three of those, and on a Cloud Storage mount a crawl
+   * is one network round trip per document (CU: nest writes time out at 500+).
+   * Entry timestamps are left alone, so the TTL still bounds how stale a set
+   * can get relative to another instance.
+   */
+  const patch = async (id: string): Promise<void> => {
+    // Same guard as invalidate(): a crawl already in flight predates this
+    // write, so its result must neither be cached nor handed to a reader that
+    // joins it after the fact.
+    generation++;
+    inflight = null;
+    let node: ContextNode | null = null;
+    try {
+      node = await readDoc(id);
+    } catch (err) {
+      // Only a MISSING document means it left the set. Any other failure —
+      // a transient read on a network mount, right after the write — would
+      // otherwise drop a document we just wrote until the TTL expires, so
+      // re-crawl rather than cache a set we know might be wrong.
+      if (!(err instanceof DocumentNotFoundError)) {
+        invalidate();
+        return;
+      }
+      node = null;
+    }
+    for (const [key, entry] of entries) {
+      const docs = entry.docs.filter((d) => d.id !== id);
+      // "all" keeps everything; "live" drops rejected documents, matching the
+      // filter the engine applies at the end of its own crawl.
+      if (node && (key === "all" || isLive(node))) {
+        // Discovery returns documents id-sorted; splice in at that position.
+        const at = docs.findIndex((d) => d.id > id);
+        docs.splice(at === -1 ? docs.length : at, 0, node);
+      }
+      entry.docs = docs;
+    }
+  };
+
+  /** Run `after` once the wrapped write has settled; any failure there falls
+   *  back to dropping the cache rather than leaving a wrong set in place. */
+  const wrap = (
+    name: "writeDocument" | "deleteDocument" | "writeVaultFile" | "init",
+    after: (args: unknown[]) => void | Promise<void>,
+  ) => {
     const write = (storage[name] as (...a: any[]) => Promise<unknown>).bind(storage);
     (storage as any)[name] = async (...args: unknown[]) => {
       try {
         return await write(...args);
       } finally {
-        // After the write, not before: clearing first leaves a window where a
+        // After the write, not before: patching first leaves a window where a
         // concurrent read repopulates the entry with pre-write content.
-        // `finally` so a write that threw part-way still drops the stale set.
-        invalidate();
+        // `finally` so a write that threw part-way still reconciles the set.
+        try {
+          await after(args);
+        } catch {
+          invalidate();
+        }
       }
     };
-  }
+  };
+
+  wrap("writeDocument", (args) => patch(String(args[0])));
+  wrap("deleteDocument", (args) => patch(String(args[0])));
+  wrap("init", () => invalidate());
+  wrap("writeVaultFile", (args) => {
+    // Derived files (INDEX.md, context.yaml, agent configs) are outside
+    // discovery; anything else written through this path could be a document.
+    const rel = String(args[0] ?? "");
+    const base = rel.split(/[/\\]/).pop() || "";
+    if (rel.endsWith(".md") && !DERIVED_VAULT_FILES.has(base)) invalidate();
+  });
+
   return { storage, invalidate };
 }
 
