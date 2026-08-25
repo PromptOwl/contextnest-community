@@ -5,6 +5,7 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
+import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -2904,10 +2905,9 @@ function FolderStepPicker({
   onPick: (next: string) => void;
 }) {
   const [newName, setNewName] = useState("");
-  // Server caps folders at 8 segments deep (src/nodes/service.ts). Existing
-  // folders are already within that, so only a brand-new subfolder can push
-  // past it — block that here once the current path is at the limit.
-  const MAX_FOLDER_DEPTH = 8;
+  // Existing folders are already within the server's depth cap, so only a
+  // brand-new subfolder can push past it — block that here once the current
+  // path is at the limit.
   const atDepthLimit =
     folder.split("/").filter(Boolean).length >= MAX_FOLDER_DEPTH;
   const children = useMemo(() => {

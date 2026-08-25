@@ -48,7 +48,7 @@ import {
 import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
-import { ANON_USER_ID } from "../shared/constants.js";
+import { ANON_USER_ID, MAX_FOLDER_DEPTH } from "../shared/constants.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { config } from "../config.js";
 
@@ -183,8 +183,10 @@ function folderToSegments(folder: string): string[] {
   // in create and move separately. Cost: a folder literally named "nodes"
   // under the root is unaddressable — nobody wants nodes/nodes/.
   if (segments[0] === "nodes") segments.shift();
-  if (segments.length > 8) {
-    throw new ValidationError("folder may nest at most 8 levels deep");
+  if (segments.length > MAX_FOLDER_DEPTH) {
+    throw new ValidationError(
+      `folder may nest at most ${MAX_FOLDER_DEPTH} levels deep`,
+    );
   }
   if (segments.some((seg) => seg.length > 100)) {
     throw new ValidationError(

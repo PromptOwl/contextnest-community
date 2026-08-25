@@ -7,6 +7,7 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
+import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
@@ -433,10 +434,7 @@ export function NestView({
   const [newFolderPath, setNewFolderPath] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
 
-  // Folder-nesting ceiling. Mirrors the server's folderToSegments guard
-  // (src/nodes/service.ts) — the leaf document doesn't count, only the folder
-  // segments. Kept in sync by hand; the server stays authoritative.
-  const MAX_FOLDER_DEPTH = 8;
+  // The ceiling counts folder segments only — the leaf document doesn't count.
   const newFolderDepth = newFolderPath
     .split("/")
     .map((s) => s.trim())
