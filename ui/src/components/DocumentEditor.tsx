@@ -1612,7 +1612,9 @@ export function DocumentEditor({
             // One Delete entry: the author (and the admin/owner tier) deletes
             // outright, everyone else raises a request. Hidden below that tier
             // once a flag is already open.
-            if (!isNew && canRequestDeletion && (canDeleteDirectly || !deletionRequested))
+            const showDelete =
+              !isNew && canRequestDeletion && (canDeleteDirectly || !deletionRequested);
+            if (showDelete)
               moreActions.push({
                 label: "Delete",
                 icon: Trash2,
@@ -1633,7 +1635,9 @@ export function DocumentEditor({
               moreActions.push({
                 label: "Withdraw deletion request",
                 icon: X,
-                separatorBefore: !canRequestDeletion || (canDeleteDirectly || !deletionRequested),
+                // Withdraw belongs with Delete in the destructive group, so it
+                // only opens that group when Delete isn't there to open it.
+                separatorBefore: !showDelete,
                 testId: "document-editor-withdraw-deletion",
                 onSelect: async () => {
                   try {

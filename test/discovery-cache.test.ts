@@ -99,6 +99,75 @@ describe("document discovery cache", () => {
     }
   });
 
+  /**
+   * Folding a write in means reading the one document back. On a network mount
+   * that read can fail transiently — and "unreadable" must not be mistaken for
+   * "deleted", or a document would vanish from every listing for the rest of
+   * the TTL immediately after being created.
+   */
+  it("re-crawls instead of dropping a document whose read-back fails", async () => {
+    const app = await createTestApp("key");
+    const user = await registerUser(app, "readfail@example.com");
+
+    const engineMod = await import("@promptowl/contextnest-engine");
+    let crawls = 0;
+    let armed = false;
+    let failNextRead = false;
+    const realDiscover = (engineMod.NestStorage.prototype as any).discoverDocuments;
+    const realRead = (engineMod.NestStorage.prototype as any).readDocument;
+    const realWrite = (engineMod.NestStorage.prototype as any).writeDocument;
+    (engineMod.NestStorage.prototype as any).discoverDocuments = function (...a: any[]) {
+      crawls++;
+      return realDiscover.apply(this, a);
+    };
+    // Fail the read-back that immediately follows a write — the one the cache
+    // does to fold the new document in — and nothing else.
+    (engineMod.NestStorage.prototype as any).writeDocument = async function (...a: any[]) {
+      const out = await realWrite.apply(this, a);
+      if (armed) failNextRead = true;
+      return out;
+    };
+    (engineMod.NestStorage.prototype as any).readDocument = function (...a: any[]) {
+      // Not DocumentNotFoundError — a mount hiccup, which says nothing about
+      // whether the document is there.
+      if (failNextRead) {
+        failNextRead = false;
+        return Promise.reject(new Error("EIO: read failed"));
+      }
+      return realRead.apply(this, a);
+    };
+
+    try {
+      const nest = await jsonRequest(app, "POST", "/nests", { name: "ReadFail" }, user.apiKey);
+      const nestId = nest.data.nest.id;
+      const { engineCache } = await import("../src/nodes/engine.js");
+      const { storage } = await engineCache.get(nestId);
+      await storage.discoverDocuments();
+
+      armed = true;
+      // The create writes the document; the cache's read-back of it fails.
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title: "Flaky Doc", content: "# Flaky Doc\n\nbody" },
+        user.apiKey,
+      ).catch(() => null);
+      armed = false;
+      failNextRead = false;
+
+      // Treating the failed read as a delete dropped the document from the
+      // cached set, and the rest of the create then read that set back — so
+      // the document stayed missing from every listing until the TTL expired.
+      const docs = await storage.discoverDocuments();
+      expect(docs.map((d) => d.id)).toContain("nodes/flaky-doc");
+    } finally {
+      (engineMod.NestStorage.prototype as any).discoverDocuments = realDiscover;
+      (engineMod.NestStorage.prototype as any).readDocument = realRead;
+      (engineMod.NestStorage.prototype as any).writeDocument = realWrite;
+    }
+  });
+
   it("stops listing a document once it is deleted", async () => {
     const app = await createTestApp("key");
     const user = await registerUser(app, "cache2@example.com");

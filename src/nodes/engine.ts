@@ -2,6 +2,7 @@ import {
   NestStorage,
   GraphQueryEngine,
   VersionManager,
+  DocumentNotFoundError,
 } from "@promptowl/contextnest-engine";
 import { createEngineApi } from "@promptowl/contextnest-engine/api";
 import type { OperationContext } from "@promptowl/contextnest-engine/api";
@@ -115,8 +116,16 @@ function withDiscoveryCache<S extends NestStorage>(
     let node: ContextNode | null = null;
     try {
       node = await readDoc(id);
-    } catch {
-      node = null; // deleted, or unreadable — either way it leaves the set
+    } catch (err) {
+      // Only a MISSING document means it left the set. Any other failure —
+      // a transient read on a network mount, right after the write — would
+      // otherwise drop a document we just wrote until the TTL expires, so
+      // re-crawl rather than cache a set we know might be wrong.
+      if (!(err instanceof DocumentNotFoundError)) {
+        invalidate();
+        return;
+      }
+      node = null;
     }
     for (const [key, entry] of entries) {
       const docs = entry.docs.filter((d) => d.id !== id);

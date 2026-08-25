@@ -574,6 +574,182 @@ describe("deletion requests", () => {
   });
 });
 
+// Withdrawing your own pending flag. Undoing an accidental request shouldn't
+// need an admin to decline it — but it also must not become a way to clear
+// someone else's flag, and it has to survive the requester being downgraded to
+// read-only afterwards (which is what the route's read-tier exemption is for).
+describe("withdrawing a deletion request", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let alice: { apiKey: string };
+  let bob: { apiKey: string };
+  let nestId: string;
+  let aliceCollabId: string;
+  let docA: string;
+  let docB: string;
+
+  const flag = (node: string, key: string) =>
+    jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${node}/request-deletion`,
+      { reason: "stale" },
+      key,
+    );
+
+  const withdraw = (id: string, key: string, nest = nestId) =>
+    jsonRequest(
+      app,
+      "POST",
+      `/nests/${nest}/deletion-requests/${id}/withdraw`,
+      {},
+      key,
+    );
+
+  const pendingIds = async () => {
+    const { data } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/deletion-requests?status=pending`,
+      undefined,
+      owner.apiKey,
+    );
+    return (data.requests as Array<{ id: string }>).map((r) => r.id);
+  };
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key", { superAdmins: ["owner@wd.com"] });
+    owner = await registerUser(app, "owner@wd.com", "Owner");
+    alice = await registerUser(app, "alice@wd.com", "Alice");
+    await resetAuthRateLimit();
+    bob = await registerUser(app, "bob@wd.com", "Bob");
+
+    const { data: nest } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Withdraw Vault" },
+      owner.apiKey,
+    );
+    nestId = nest.nest.id;
+
+    for (const email of ["alice@wd.com", "bob@wd.com"]) {
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/collaborators`,
+        { email, permission: "write" },
+        owner.apiKey,
+      );
+    }
+    const { data: roster } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/collaborators`,
+      undefined,
+      owner.apiKey,
+    );
+    aliceCollabId = roster.collaborators.find(
+      (c: any) => c.email === "alice@wd.com",
+    ).id;
+
+    for (const title of ["Doc A", "Doc B"]) {
+      const { data } = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title, content: `# ${title}` },
+        owner.apiKey,
+      );
+      if (title === "Doc A") docA = data.node.id;
+      else docB = data.node.id;
+    }
+  }, 30000);
+
+  afterAll(() => env.cleanup());
+
+  it("lets the requester withdraw, clearing the flag from the document", async () => {
+    const { data: made } = await flag(docA, alice.apiKey);
+    const { status, data } = await withdraw(made.request.id, alice.apiKey);
+    expect(status).toBe(200);
+    expect(data.withdrawn).toBe(true);
+
+    expect(await pendingIds()).not.toContain(made.request.id);
+    const { data: node } = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${docA}`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(node.node.deletionRequest ?? null).toBeNull();
+    // The document itself is untouched — withdrawing cancels the ask, and
+    // nothing else.
+    expect(node.node.content).toContain("Doc A");
+  });
+
+  it("refuses to withdraw someone else's flag, and leaves it pending", async () => {
+    const { data: made } = await flag(docB, alice.apiKey);
+    const other = await withdraw(made.request.id, bob.apiKey);
+    expect(other.status).toBe(404);
+    // Not even an admin gets to withdraw on the requester's behalf — declining
+    // is the admin's verdict, and it keeps a record; withdrawing keeps none.
+    const asOwner = await withdraw(made.request.id, owner.apiKey);
+    expect(asOwner.status).toBe(404);
+    expect(await pendingIds()).toContain(made.request.id);
+  });
+
+  it("404s an unknown id and one addressed through the wrong nest", async () => {
+    const { data: nest2 } = await jsonRequest(
+      app,
+      "POST",
+      "/nests",
+      { name: "Other Vault" },
+      owner.apiKey,
+    );
+    const [pending] = await pendingIds();
+    expect(pending).toBeTruthy();
+
+    const wrongNest = await withdraw(pending, alice.apiKey, nest2.nest.id);
+    expect(wrongNest.status).toBe(404);
+    expect(await pendingIds()).toContain(pending);
+
+    const unknown = await withdraw("no-such-request", alice.apiKey);
+    expect(unknown.status).toBe(404);
+  });
+
+  it("still works after the requester is downgraded to read-only", async () => {
+    // The flag was a legitimate editor's act; losing write access later must
+    // not strand it. This is what the route's read-tier exemption exists for —
+    // the generic non-GET write bump would refuse the request outright.
+    const [pending] = await pendingIds();
+    expect(pending).toBeTruthy();
+
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/collaborators/${aliceCollabId}`,
+      { permission: "read" },
+      owner.apiKey,
+    );
+    // Confirm the downgrade actually took: writing is refused now.
+    const write = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Nope", content: "# Nope" },
+      alice.apiKey,
+    );
+    expect(write.status).toBe(403);
+
+    const { status } = await withdraw(pending, alice.apiKey);
+    expect(status).toBe(200);
+    expect(await pendingIds()).not.toContain(pending);
+  });
+});
+
 // A nest whose files arrived without a top-level nodes/ dir (e.g. a folder
 // import that carried another nest's data dir) reads as FLAT layout in the
 // engine, so its document ids carry no "nodes/" prefix. Folder flagging and

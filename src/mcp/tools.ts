@@ -1200,15 +1200,17 @@ async function runTool(
           (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
         );
         if (twin) {
-          // A create that died after the document was written but before its
-          // versions were recorded leaves a twin with no history. Under
-          // stewardship that node reads as "not found" (no approved version)
-          // and never shows in a draft list, so the plain message above sent
-          // the caller after something they could not see (CU-wdqcpzzgyj).
+          // A twin with no version rows is invisible to the tools that would
+          // normally resolve it: under stewardship it has no approved version,
+          // so context_get reads "not found" and no draft list carries it. Say
+          // so rather than sending the caller after something they cannot see.
+          // The cause is NOT certain — an interrupted create leaves this state,
+          // and so does a staged import whose registration never finished — so
+          // the message offers writing into it before removing it.
           const twinVersions = await versions.getVersions(nestId, twin.id);
           if (twinVersions.length === 0) {
             return toolError(
-              `A node titled "${twin.frontmatter.title}" already exists (${twin.id}) but has no version history — an earlier create was interrupted after writing the document. Delete it with context_delete "${twin.id}" and create again, or write into it with context_update "${twin.id}".`,
+              `A node titled "${twin.frontmatter.title}" already exists (${twin.id}) but has no version history, which is why it doesn't show up in a read or a draft list. It may be an interrupted create or a document whose import never finished. Write into it with context_update "${twin.id}" to keep whatever is there, or remove it with context_delete "${twin.id}" and create again — check its content first.`,
               "DOCUMENT_ALREADY_EXISTS",
             );
           }

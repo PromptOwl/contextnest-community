@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { ANON_USER_ID } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
+import { toast } from "sonner";
 import { relTime, formatServerDate } from "../lib/dates";
 import { nestNameProblem } from "../lib/nest-name";
 import {
@@ -588,8 +589,14 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                             e.stopPropagation();
                             try {
                               await handleWithdrawDeletion(w);
-                            } catch (err) {
-                              // Silently ignore — item may already be resolved
+                              toast.success("Deletion request withdrawn");
+                            } catch (err: any) {
+                              // Same feedback the nest view and the editor give
+                              // for this action — a silent no-op left the row
+                              // sitting there with no explanation.
+                              toast.error(
+                                err?.message || "Failed to withdraw deletion request",
+                              );
                             }
                           }}
                           title="Withdraw this deletion request"

@@ -244,10 +244,12 @@ describe("MCP context_create — duplicate title", () => {
     expect(ids.filter((id: string) => id.endsWith("micromanager-ai-call-brief"))).toHaveLength(1);
   });
 
-  it("names the recovery path when the twin is a half-finished create", async () => {
-    // A create interrupted after the document was written leaves a node with no
-    // version rows. Under stewardship it reads as "not found" and never appears
-    // in a draft list, so the generic message pointed at something invisible.
+  it("names the recovery path when the twin has no version history", async () => {
+    // A node with no version rows — an interrupted create, or a staged import
+    // that never registered — reads as "not found" under stewardship and never
+    // appears in a draft list, so the generic message pointed at something
+    // invisible. The cause is unknowable from here, so the message offers
+    // update before delete rather than asserting which one happened.
     const dir = join(process.env.DATA_ROOT!, "nests", nestId, "nodes", "playbooks");
     mkdirSync(dir, { recursive: true });
     writeFileSync(
@@ -263,7 +265,8 @@ describe("MCP context_create — duplicate title", () => {
       folder: "playbooks",
     });
     expect(text).toContain("no version history");
-    expect(text).toContain("context_delete");
+    // Both recoveries named, update first — deleting is not always right.
+    expect(text.indexOf("context_update")).toBeLessThan(text.indexOf("context_delete"));
     expect(text).toContain("nodes/playbooks/signal-monitoring-playbook");
   });
 
