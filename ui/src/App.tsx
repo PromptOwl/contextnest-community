@@ -321,6 +321,12 @@ export default function App() {
       setDeepLinkProbe({ status: "missing" });
       return;
     }
+    // ?view=workflows is the one sub-page gated on a flag that arrives with
+    // /health. Deciding before it lands read the flag as its `false` default
+    // and silently dropped the parameter — the probe then settled on "ok", so
+    // the re-run below found nothing left to do and the link opened Overview.
+    // Wait for health for that link only; every other view resolves at once.
+    if (loading && params.get("view") === "workflows") return;
     // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
     // this effect first fires); the cancel guard drops the stale navigation.
     let cancelled = false;
@@ -395,7 +401,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [deepLinkProbe.status, workflowPlaneEnabled]);
+  }, [deepLinkProbe.status, workflowPlaneEnabled, loading]);
 
   // Keep the URL in sync with the current view so documents (and nests) are
   // shareable — paste the address bar and the recipient lands on the same doc.
