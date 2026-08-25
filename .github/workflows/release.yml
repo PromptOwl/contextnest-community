@@ -41,3 +41,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # setup-node's npmrc reads NODE_AUTH_TOKEN, not NPM_TOKEN. Without
+          # this, npm publishes unauthenticated and the registry masks the
+          # rejection as a 404 on the PUT.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
