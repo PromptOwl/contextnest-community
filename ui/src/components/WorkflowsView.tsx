@@ -406,11 +406,10 @@ function EdgesPanel({ nestId }: { nestId: string }) {
             <button
               key={mode}
               type="button"
-              className={`px-2.5 h-full ${i > 0 ? "border-l" : ""} ${
-                nWhen === mode
+              className={`px-2.5 h-full ${i > 0 ? "border-l" : ""} ${nWhen === mode
                   ? "bg-primary text-primary-foreground"
                   : "hover:bg-muted"
-              }`}
+                }`}
               onClick={() => setNWhen(mode)}
             >
               {label}
@@ -921,9 +920,8 @@ function RunsPanel({ nestId }: { nestId: string }) {
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") void open(r.id);
           }}
-          className={`group w-full cursor-pointer px-3 py-2 hover:bg-muted/40 ${
-            selected?.id === r.id ? "bg-muted/60" : ""
-          }`}
+          className={`group w-full cursor-pointer px-3 py-2 hover:bg-muted/40 ${selected?.id === r.id ? "bg-muted/60" : ""
+            }`}
           style={{ paddingLeft: indent }}
         >
           <div className="flex items-center gap-2">
@@ -959,22 +957,22 @@ function RunsPanel({ nestId }: { nestId: string }) {
               r.status === "running" &&
               (r.depth ?? 0) < maxDepth &&
               childCount(r.id) < maxChildren && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="ml-auto h-6 px-2 text-[11px] text-muted-foreground opacity-0 group-hover:opacity-100 shrink-0"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setSpawnParent(spawnParent === r.id ? "" : r.id);
-                  setSpawnAgent("");
-                  setSpawnInputs("");
-                  setSpawnError(null);
-                }}
-                title="Spawn a sub-agent nested under this run"
-              >
-                <Plus className="h-3 w-3 mr-1" /> sub-agent
-              </Button>
-            )}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto h-6 px-2 text-[11px] text-muted-foreground opacity-0 group-hover:opacity-100 shrink-0"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSpawnParent(spawnParent === r.id ? "" : r.id);
+                    setSpawnAgent("");
+                    setSpawnInputs("");
+                    setSpawnError(null);
+                  }}
+                  title="Spawn a sub-agent nested under this run"
+                >
+                  <Plus className="h-3 w-3 mr-1" /> sub-agent
+                </Button>
+              )}
           </div>
           <div className="text-[11px] text-muted-foreground truncate">
             {runLabel(r.agent_node)} · {timeOf(r.started_at)}
@@ -1158,7 +1156,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
               it and calls the LLM. Point it at this nest:
             </p>
             <pre className="overflow-x-auto rounded bg-background border p-2 font-mono text-[10.5px] leading-relaxed">
-{`docker run -d --name cn-runner --network host \\
+              {`docker run -d --name cn-runner --network host \\
   -e CONTEXTNEST_SERVER=http://localhost:4040 \\
   -e CONTEXTNEST_NEST=${nestId} \\
   -e CONTEXTNEST_KEY=cnst_localdev \\
@@ -1176,38 +1174,45 @@ function RunsPanel({ nestId }: { nestId: string }) {
         </details>
       </div>
 
-      {/* Run list — full width under the form. */}
-      <div className="rounded-lg border divide-y">
-        {loading ? (
-          <div className="px-3 py-6 text-center text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin inline" />
+      {/* Run list + trace side by side, so the details stay visually tied to
+          the selected row. Single column until there's a selection (and on
+          narrow screens, where there's no room for two). */}
+      <div
+        className={`grid gap-4 items-start ${selected ? "lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]" : "grid-cols-1"
+          }`}
+      >
+        <div className="rounded-lg border divide-y min-w-0">
+          {loading ? (
+            <div className="px-3 py-6 text-center text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin inline" />
+            </div>
+          ) : runs.length === 0 ? (
+            <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+              No runs yet. Trigger an agent above.
+            </div>
+          ) : (
+            roots.map((r) => renderRun(r, 0))
+          )}
+        </div>
+
+        {/* Trace / editor — right-hand pane, appears when a run is selected. */}
+        {selected && (
+          <div className="rounded-lg border p-4 min-w-0 lg:sticky lg:top-4">
+            <RunTrace
+              run={selected}
+              children={runs.filter((r) => r.parent_run_id === selected.id)}
+              parent={
+                selected.parent_run_id
+                  ? runs.find((r) => r.id === selected.parent_run_id) ?? null
+                  : null
+              }
+              label={runLabel}
+              typeOf={runType}
+              onOpen={(id) => void open(id)}
+            />
           </div>
-        ) : runs.length === 0 ? (
-          <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-            No runs yet. Trigger an agent above.
-          </div>
-        ) : (
-          roots.map((r) => renderRun(r, 0))
         )}
       </div>
-
-      {/* Trace / editor — full width, appears when a run is selected. */}
-      {selected && (
-        <div className="rounded-lg border p-4">
-          <RunTrace
-            run={selected}
-            children={runs.filter((r) => r.parent_run_id === selected.id)}
-            parent={
-              selected.parent_run_id
-                ? runs.find((r) => r.id === selected.parent_run_id) ?? null
-                : null
-            }
-            label={runLabel}
-            typeOf={runType}
-            onOpen={(id) => void open(id)}
-          />
-        </div>
-      )}
     </div>
   );
 }
@@ -1856,9 +1861,8 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                   <g key={p.id}>
                     <foreignObject x={p.x} y={p.y} width={CARD_W} height={CARD_H + 6}>
                       <div
-                        className={`rounded-lg border-2 bg-background px-2.5 py-1.5 shadow-sm cursor-pointer select-none ${
-                          isSel ? "border-primary ring-2 ring-primary/20" : "border-border"
-                        }`}
+                        className={`rounded-lg border-2 bg-background px-2.5 py-1.5 shadow-sm cursor-pointer select-none ${isSel ? "border-primary ring-2 ring-primary/20" : "border-border"
+                          }`}
                         style={{ width: CARD_W, height: CARD_H }}
                         onClick={(ev) => {
                           ev.stopPropagation();
@@ -1946,9 +1950,8 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                 <button
                   key={mode}
                   type="button"
-                  className={`px-2.5 h-full ${i > 0 ? "border-l" : ""} ${
-                    eWhen === mode ? "bg-primary text-primary-foreground" : "hover:bg-muted"
-                  }`}
+                  className={`px-2.5 h-full ${i > 0 ? "border-l" : ""} ${eWhen === mode ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+                    }`}
                   onClick={() => setEWhen(mode)}
                 >
                   {lbl}
