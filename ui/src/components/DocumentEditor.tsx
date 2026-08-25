@@ -6,6 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
+import { useRovingFocus } from "../lib/use-roving-focus";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -183,6 +184,8 @@ export function DocumentEditor({
   onJumpBreadcrumb,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
+  // Type picker: one tab stop, arrows between the choices (see the radiogroup).
+  const typeRoving = useRovingFocus<HTMLDivElement>();
   const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
@@ -2114,10 +2117,14 @@ export function DocumentEditor({
                   always on; artifact/table only when their content-type
                   toggle is on; runnable types only when the workflow plane
                   is on. */}
+              {/* A radiogroup is one tab stop by contract: Tab reaches the
+                  checked type, arrows move between the rest. */}
               <div
                 className="inline-flex rounded-md border overflow-hidden"
                 role="radiogroup"
+                aria-label="Document type"
                 data-testid="document-editor-type"
+                {...typeRoving}
               >
                 {(
                   [

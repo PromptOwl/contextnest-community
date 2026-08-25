@@ -19,6 +19,7 @@ import {
   type Editor,
 } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
+import { useRovingFocus } from "../../lib/use-roving-focus";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import TiptapImage from "@tiptap/extension-image";
@@ -1854,6 +1855,7 @@ function Toolbar({
   previewing: boolean;
   onTogglePreview: () => void;
 }) {
+  const roving = useRovingFocus<HTMLDivElement>();
   // Hidden file input driven by the "Insert table from CSV" toolbar button.
   const csvInputRef = useRef<HTMLInputElement>(null);
   const pickCsv = () => csvInputRef.current?.click();
@@ -1897,7 +1899,11 @@ function Toolbar({
   // to editing.
   if (previewing) {
     return (
-      <div className="flex items-center gap-0.5 p-1 flex-wrap">
+      <div
+        className="flex items-center gap-0.5 p-1 flex-wrap"
+        role="toolbar"
+        aria-label="Editor"
+      >
         <ToolbarButton
           active
           onClick={onTogglePreview}
@@ -1913,7 +1919,15 @@ function Toolbar({
   }
 
   return (
-    <div className="flex items-center gap-0.5 p-1 flex-wrap">
+    // One tab stop for the whole strip; arrows move between the buttons, so
+    // Tab out of the Title field reaches the writing area in one press
+    // instead of twenty-odd.
+    <div
+      className="flex items-center gap-0.5 p-1 flex-wrap"
+      role="toolbar"
+      aria-label="Formatting"
+      {...roving}
+    >
       <ToolbarButton
         active={editor.isActive("bold")}
         onClick={() => editor.chain().focus().toggleBold().run()}
