@@ -269,6 +269,14 @@ export function NestView({
     [deletionRequests],
   );
   const folderFlagPending = (path: string) => pendingFolderFlags.has(path);
+  // Map folder paths to their pending deletion request objects for withdraw.
+  const folderFlagByPath = useMemo(() => {
+    const map = new Map<string, api.DeletionRequest>();
+    for (const r of deletionRequests)
+      if (r.targetType === "folder" && r.status === "pending" && !map.has(r.nodeId))
+        map.set(r.nodeId, r);
+    return map;
+  }, [deletionRequests]);
   const nestFlag = deletionRequests.find(
     (r) => r.targetType === "nest" && r.status === "pending",
   );
@@ -1437,6 +1445,17 @@ export function NestView({
     fetchData();
   };
 
+  // Withdraw own pending deletion request — owner's "undo" before an admin acts.
+  const handleWithdrawDeletion = async (request: api.DeletionRequest) => {
+    try {
+      await api.withdrawDeletionRequest(nestId, request.id);
+      toast.success("Deletion request withdrawn");
+      fetchData();
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to withdraw deletion request");
+    }
+  };
+
   // Inline visibility toggle from the header (owner/admin only). Optimistic
   // flip with revert on failure, mirroring ShareNestDialog so the control
   // never lies about server state. Surfaces the public/private switch outside
@@ -1660,17 +1679,26 @@ export function NestView({
           )}
           {/* Same red flag a doc/folder row gets — the requester's only sign
               their nest deletion request is still waiting on an admin. */}
-          {nestFlag && (
-            <Badge
-              variant="outline"
-              className="shrink-0 gap-1 border-red-200 bg-red-50 text-red-700"
-              title={`${nestFlag.requestedBy} asked for this nest to be deleted: "${nestFlag.reason}". A nest owner or admin decides.`}
-              data-testid="nest-deletion-flag"
-            >
-              <Trash2 className="h-3 w-3" />
-              Deletion requested
-            </Badge>
-          )}
+          {nestFlag && (() => {
+            const isOwn = nestFlag.requestedBy.toLowerCase() === currentEmail;
+            return (
+              <Badge
+                variant="outline"
+                className={`shrink-0 gap-1 border-red-200 bg-red-50 text-red-700 ${isOwn ? "cursor-pointer hover:bg-red-100" : ""}`}
+                title={
+                  isOwn
+                    ? "Click to withdraw your deletion request"
+                    : `${nestFlag.requestedBy} asked for this nest to be deleted: "${nestFlag.reason}". A nest owner or admin decides.`
+                }
+                data-testid="nest-deletion-flag"
+                onClick={isOwn ? () => handleWithdrawDeletion(nestFlag) : undefined}
+              >
+                <Trash2 className="h-3 w-3" />
+                Deletion requested
+                {isOwn && <X className="h-3 w-3 ml-0.5" />}
+              </Badge>
+            );
+          })()}
           </>
         }
       >
@@ -2748,16 +2776,32 @@ export function NestView({
                               Prime
                             </span>
                           )}
-                          {flagPending && (
-                            <span
-                              className="shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-red-50 text-red-700 border-red-200"
-                              title={`${flag!.requestedBy} asked for this to be deleted: "${flag!.reason}". A nest admin decides.`}
-                              data-testid={`deletion-flag-${node.id}`}
-                            >
-                              <Trash2 className="h-3 w-3" />
-                              Deletion requested
-                            </span>
-                          )}
+                          {flagPending && (() => {
+                            const isOwnFlag = flag!.requestedBy.toLowerCase() === currentEmail;
+                            return (
+                              <span
+                                className={`shrink-0 inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide border bg-red-50 text-red-700 border-red-200 ${isOwnFlag ? "cursor-pointer hover:bg-red-100" : ""}`}
+                                title={
+                                  isOwnFlag
+                                    ? "Click to withdraw your deletion request"
+                                    : `${flag!.requestedBy} asked for this to be deleted: "${flag!.reason}". A nest admin decides.`
+                                }
+                                data-testid={`deletion-flag-${node.id}`}
+                                onClick={
+                                  isOwnFlag
+                                    ? (e) => {
+                                        e.stopPropagation();
+                                        handleWithdrawDeletion(flag!);
+                                      }
+                                    : undefined
+                                }
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                Deletion requested
+                                {isOwnFlag && <X className="h-3 w-3 ml-0.5" />}
+                              </span>
+                            );
+                          })()}
                           {cards && <div className="ml-auto">{actionMenu}</div>}
                         </div>
                         <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
@@ -3087,14 +3131,32 @@ export function NestView({
                                 <Trash2 className="h-3.5 w-3.5" />
                               </button>
                             )}
-                            {folderFlagPending(node.path) && (
-                              <span
-                                className="rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide bg-red-50 text-red-700 border border-red-200"
-                                title="Someone asked for this folder to be deleted. A nest admin decides."
-                              >
-                                Deletion requested
-                              </span>
-                            )}
+                            {folderFlagPending(node.path) && (() => {
+                              const folderFlag = folderFlagByPath.get(node.path);
+                              const isOwnFlag = folderFlag?.requestedBy.toLowerCase() === currentEmail;
+                              return (
+                                <span
+                                  className={`inline-flex items-center gap-1 rounded px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide bg-red-50 text-red-700 border border-red-200 ${isOwnFlag ? "cursor-pointer hover:bg-red-100" : ""}`}
+                                  title={
+                                    isOwnFlag
+                                      ? "Click to withdraw your deletion request"
+                                      : "Someone asked for this folder to be deleted. A nest admin decides."
+                                  }
+                                  onClick={
+                                    isOwnFlag && folderFlag
+                                      ? (e) => {
+                                          e.stopPropagation();
+                                          handleWithdrawDeletion(folderFlag);
+                                        }
+                                      : undefined
+                                  }
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                  Deletion requested
+                                  {isOwnFlag && <X className="h-3 w-3 ml-0.5" />}
+                                </span>
+                              );
+                            })()}
                           </div>
                         );
                       }}
