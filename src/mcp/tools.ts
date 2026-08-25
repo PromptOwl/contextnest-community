@@ -1200,6 +1200,18 @@ async function runTool(
           (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
         );
         if (twin) {
+          // A create that died after the document was written but before its
+          // versions were recorded leaves a twin with no history. Under
+          // stewardship that node reads as "not found" (no approved version)
+          // and never shows in a draft list, so the plain message above sent
+          // the caller after something they could not see (CU-wdqcpzzgyj).
+          const twinVersions = await versions.getVersions(nestId, twin.id);
+          if (twinVersions.length === 0) {
+            return toolError(
+              `A node titled "${twin.frontmatter.title}" already exists (${twin.id}) but has no version history — an earlier create was interrupted after writing the document. Delete it with context_delete "${twin.id}" and create again, or write into it with context_update "${twin.id}".`,
+              "DOCUMENT_ALREADY_EXISTS",
+            );
+          }
           return toolError(
             `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`,
             "DOCUMENT_ALREADY_EXISTS",

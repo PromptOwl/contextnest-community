@@ -34,6 +34,71 @@ describe("document discovery cache", () => {
     expect(after.data.nodes.some((n: any) => n.title === "Fresh Doc")).toBe(true);
   });
 
+  /**
+   * A write used to clear the whole set, so the next reader re-crawled the
+   * nest — and one MCP create asks for the set three times. On a Cloud Storage
+   * mount that is a round trip per document, which is what pushed writes past
+   * the MCP client's 60s timeout on a 500-node nest. Writes now fold the one
+   * changed document into the cached set instead.
+   */
+  it("folds a write into the cached set instead of re-crawling", async () => {
+    const app = await createTestApp("key");
+    const user = await registerUser(app, "crawl@example.com");
+
+    const engineMod = await import("@promptowl/contextnest-engine");
+    let crawls = 0;
+    const realDiscover = (engineMod.NestStorage.prototype as any).discoverDocuments;
+    (engineMod.NestStorage.prototype as any).discoverDocuments = function (...a: any[]) {
+      crawls++;
+      return realDiscover.apply(this, a);
+    };
+
+    try {
+      const nest = await jsonRequest(app, "POST", "/nests", { name: "Crawl" }, user.apiKey);
+      const nestId = nest.data.nest.id;
+      const { engineCache } = await import("../src/nodes/engine.js");
+      const { storage } = await engineCache.get(nestId);
+
+      await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title: "Warm Doc", content: "# Warm Doc\n\nbody" },
+        user.apiKey,
+      );
+      await storage.discoverDocuments();
+
+      crawls = 0;
+      const created = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title: "Second Doc", content: "# Second Doc\n\nbody" },
+        user.apiKey,
+      );
+      expect(created.status).toBe(201);
+
+      const docs = await storage.discoverDocuments();
+      expect(docs.map((d) => d.id)).toContain("nodes/second-doc");
+      // Sorted, as a real crawl returns them — callers page off this order.
+      expect(docs.map((d) => d.id)).toEqual([...docs.map((d) => d.id)].sort());
+      expect(crawls).toBe(0);
+
+      await jsonRequest(
+        app,
+        "DELETE",
+        `/nests/${nestId}/nodes/${encodeURIComponent("nodes/second-doc")}`,
+        undefined,
+        user.apiKey,
+      );
+      const after = await storage.discoverDocuments();
+      expect(after.map((d) => d.id)).not.toContain("nodes/second-doc");
+      expect(crawls).toBe(0);
+    } finally {
+      (engineMod.NestStorage.prototype as any).discoverDocuments = realDiscover;
+    }
+  });
+
   it("stops listing a document once it is deleted", async () => {
     const app = await createTestApp("key");
     const user = await registerUser(app, "cache2@example.com");

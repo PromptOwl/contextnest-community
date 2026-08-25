@@ -10,6 +10,8 @@
  *    REST keeps allowing the same title in two folders.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { mkdirSync, writeFileSync } from "fs";
+import { join } from "path";
 import { setupTestEnv, createTestApp, registerUser, jsonRequest } from "./helpers.js";
 import * as versions from "../src/governance/version-service.js";
 
@@ -240,6 +242,29 @@ describe("MCP context_create — duplicate title", () => {
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`);
     const ids = (list.data.nodes ?? []).map((n: any) => n.id);
     expect(ids.filter((id: string) => id.endsWith("micromanager-ai-call-brief"))).toHaveLength(1);
+  });
+
+  it("names the recovery path when the twin is a half-finished create", async () => {
+    // A create interrupted after the document was written leaves a node with no
+    // version rows. Under stewardship it reads as "not found" and never appears
+    // in a draft list, so the generic message pointed at something invisible.
+    const dir = join(process.env.DATA_ROOT!, "nests", nestId, "nodes", "playbooks");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "signal-monitoring-playbook.md"),
+      "---\ntitle: Signal Monitoring Playbook\ntype: document\nstatus: published\nversion: 1\ntags: []\n---\n\n# half-written\n",
+    );
+    const { engineCache } = await import("../src/nodes/engine.js");
+    (await engineCache.get(nestId)).invalidateDiscovery();
+
+    const text = await callTool(app, nestId, "context_create", {
+      title: "Signal Monitoring Playbook",
+      content: "# Retry",
+      folder: "playbooks",
+    });
+    expect(text).toContain("no version history");
+    expect(text).toContain("context_delete");
+    expect(text).toContain("nodes/playbooks/signal-monitoring-playbook");
   });
 
   it("refuses the twin even when both creates target different folders at once", async () => {
