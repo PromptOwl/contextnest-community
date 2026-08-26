@@ -285,7 +285,8 @@ export function ConnectModal({
           <DialogHeader>
             <DialogTitle>Connect to {nestName}</DialogTitle>
             <DialogDescription>
-              Point your tools at this nest to read, write, and query context.
+              Use this nest in the app you already have. New to this? Start on
+              the Hootie tab — it's the quickest way in.
             </DialogDescription>
           </DialogHeader>
 

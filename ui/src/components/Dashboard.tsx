@@ -12,6 +12,7 @@ import {
 import { ANON_USER_ID } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
 import { toast } from "sonner";
+import { AllNestsBar } from "./AllNestsBar";
 import { relTime, formatServerDate } from "../lib/dates";
 import { nestNameProblem } from "../lib/nest-name";
 import {
@@ -840,6 +841,9 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
               </Button>
             </div>
           </div>
+
+          {/* Whole-brain landing: frame every nest as one connectable brain. */}
+          {nests.length > 0 && <AllNestsBar nests={nests} />}
 
           {/* Create form */}
           {showCreate && (
