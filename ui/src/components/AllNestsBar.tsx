@@ -1,5 +1,13 @@
 import { useState } from "react";
-import { Globe2, Copy, MessageSquareText, Lock } from "lucide-react";
+import {
+  Globe2,
+  Copy,
+  MessageSquareText,
+  Lock,
+  KeyRound,
+  Loader2,
+} from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -15,6 +23,9 @@ import {
   allNestsChatPrompt,
   type NestCountRow,
 } from "../lib/connect";
+import * as api from "../lib/api";
+import { useApiKeys } from "../lib/queries";
+import { KeyRevealModal } from "./ConnectModal";
 
 const serverUrl =
   typeof window !== "undefined"
@@ -24,14 +35,39 @@ const serverUrl =
 /**
  * The "whole brain" strip that sits above the individual nests: it frames the
  * user's many nests as one thing an AI can read through a single connection.
- * Auth is untouched — the key still comes from a nest's own Connect panel; this
- * surface only shows the server-level endpoint and a ready-to-paste prompt.
+ * The key is user-level (one key works for every nest and here), so the dialog
+ * mints it inline via the existing /auth/keys endpoint — no auth-model change,
+ * and no more diving into a nest just to get a key.
  */
 export function AllNestsBar({ nests }: { nests: NestCountRow[] }) {
   const [open, setOpen] = useState(false);
+  const [minting, setMinting] = useState(false);
+  const [reveal, setReveal] = useState<{
+    apiKey: string;
+    kind: "generated" | "rotated";
+  } | null>(null);
+
+  const { data: keyData, refetch: refetchKeys } = useApiKeys();
+  const existingKey = keyData?.keys?.[0];
+
   const { nestCount, documentCount } = nestSummary(nests);
   const mcp = serverMcpUrl(serverUrl);
   const prompt = allNestsChatPrompt(serverUrl);
+
+  async function generate() {
+    setMinting(true);
+    try {
+      const { api_key } = await api.createApiKey({ label: "connect" });
+      setReveal({ apiKey: api_key, kind: "generated" });
+      refetchKeys();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Couldn't generate a key.",
+      );
+    } finally {
+      setMinting(false);
+    }
+  }
 
   return (
     <>
@@ -82,10 +118,36 @@ export function AllNestsBar({ nests }: { nests: NestCountRow[] }) {
                   <Copy className="h-3.5 w-3.5" />
                 </Button>
               </div>
+            </div>
+
+            <div>
+              <p className="mb-1.5 text-xs font-medium text-muted-foreground">
+                Your API key
+              </p>
+              {existingKey ? (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border bg-muted/40 p-2.5 text-xs">
+                  <KeyRound className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span>
+                    Active key{" "}
+                    <code className="font-mono">{existingKey.key_prefix}…</code>
+                  </span>
+                  <span className="text-muted-foreground">
+                    — works here and in every nest.
+                  </span>
+                </div>
+              ) : (
+                <Button size="sm" onClick={generate} disabled={minting}>
+                  {minting ? (
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <KeyRound className="mr-1.5 h-3.5 w-3.5" />
+                  )}
+                  Generate API key
+                </Button>
+              )}
               <p className="mt-1.5 text-xs text-muted-foreground">
-                Authenticate with your API key — generate one from any nest's{" "}
-                <span className="font-medium">Connect</span> panel. The same key
-                works here.
+                One key for your whole account — the same key authenticates
+                every nest and this connection. You'll see it once.
               </p>
             </div>
 
@@ -100,9 +162,7 @@ export function AllNestsBar({ nests }: { nests: NestCountRow[] }) {
                 variant="outline"
                 size="sm"
                 className="mt-2"
-                onClick={() =>
-                  copyTextWithToast(prompt, "Prompt copied")
-                }
+                onClick={() => copyTextWithToast(prompt, "Prompt copied")}
               >
                 <MessageSquareText className="mr-1.5 h-3.5 w-3.5" />
                 Copy "chat with all my nests"
@@ -119,6 +179,14 @@ export function AllNestsBar({ nests }: { nests: NestCountRow[] }) {
           </div>
         </DialogContent>
       </Dialog>
+
+      {reveal && (
+        <KeyRevealModal
+          apiKey={reveal.apiKey}
+          kind={reveal.kind}
+          onClose={() => setReveal(null)}
+        />
+      )}
     </>
   );
 }

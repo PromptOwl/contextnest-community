@@ -46,11 +46,13 @@ import {
   Download,
   Sparkles,
   Package,
+  MessageSquareText,
 } from "lucide-react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { copyTextWithToast } from "../lib/clipboard";
+import { nestChatPrompt, nestSetupPrompt } from "../lib/connect";
 import { useAuth } from "../auth/AuthContext";
 
 interface ConnectModalProps {
@@ -296,6 +298,47 @@ export function ConnectModal({
               sections below it sat outside the scroll area, so a short
               window squeezed the tab content into a sliver (or nothing). */}
           <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0 space-y-4">
+          {/* Quickest start: tailored prompts you paste into any assistant —
+              no keys, no config. The per-client setup lives in the tabs below. */}
+          <div className="rounded-lg border bg-muted/30 p-3">
+            <p className="text-sm font-medium">
+              Quickest start — paste a prompt into your AI
+            </p>
+            <p className="mb-2.5 mt-0.5 text-xs text-muted-foreground">
+              No setup. Drop one of these into Hootie, Claude, or any assistant.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() =>
+                  copyTextWithToast(
+                    nestChatPrompt(nestName),
+                    "Chat prompt copied",
+                  )
+                }
+              >
+                <MessageSquareText className="mr-1.5 h-3.5 w-3.5" />
+                Chat with this nest
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() =>
+                  copyTextWithToast(
+                    nestSetupPrompt(nestName, mcpUrl),
+                    "Setup prompt copied",
+                  )
+                }
+              >
+                <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                Set up an agent
+              </Button>
+            </div>
+            <p className="mt-2.5 text-xs text-muted-foreground">
+              Or configure a specific client below.
+            </p>
+          </div>
           {showLoginBanner && (
             <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
               <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
@@ -788,7 +831,7 @@ export function ConnectModal({
  * this modal closes the plaintext is gone (server only ever stored
  * sha256).
  */
-function KeyRevealModal({
+export function KeyRevealModal({
   apiKey,
   kind,
   onClose,

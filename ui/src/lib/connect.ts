@@ -52,3 +52,42 @@ export function allNestsChatPrompt(serverBaseUrl: string): string {
     "This connection reads across nests but doesn't write. Always ask before publishing anything.",
   ].join("\n");
 }
+
+/**
+ * A grounded-assistant prompt scoped to ONE nest — paste into Hootie, a Claude
+ * Project, or a custom GPT to turn it into a subject assistant over this nest.
+ * Carries no secret.
+ */
+export function nestChatPrompt(nestName: string, description?: string): string {
+  const about = description?.trim()
+    ? ` on ${description.trim().toLowerCase()}`
+    : "";
+  return [
+    `You are my assistant for the "${nestName}" nest — my governed knowledge base${about}. Treat it as the source of truth.`,
+    "",
+    "- When I ask something this nest could cover, SEARCH it first and answer from what you find; cite what you use as `nest:id`.",
+    "- If the nest doesn't cover it, say so plainly — don't invent. Offer to add it if it's worth remembering.",
+    "- If my question is ambiguous, ask one clarifying question first.",
+    "- Never publish or share anything publicly without asking me first.",
+    "",
+    `Start by telling me what "${nestName}" covers, then ask what I want to dig into.`,
+  ].join("\n");
+}
+
+/**
+ * The bootstrap brief for wiring an agent to ONE nest: connect, orient, and the
+ * standing rules. Keyless — the key is handed over separately by the user.
+ */
+export function nestSetupPrompt(nestName: string, mcpUrl: string): string {
+  return [
+    `Connect to my ContextNest nest "${nestName}" and treat it as my source of truth.`,
+    "",
+    `Add an MCP server "contextnest" at: ${mcpUrl}`,
+    "Authenticate with my ContextNest API key when your client asks for it — never print it back.",
+    "",
+    "First, call context_overview to learn this nest's types, tags and structure. Then search",
+    "(context_search / context_query) before answering; open nodes and follow [[links]]; cite as `nest:id`.",
+    "Remember durable learnings by writing them back as small, linked nodes.",
+    "Always ask before publishing or posting anything publicly.",
+  ].join("\n");
+}

@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { nestSummary, serverMcpUrl, allNestsChatPrompt } from "./connect";
+import {
+  nestSummary,
+  serverMcpUrl,
+  allNestsChatPrompt,
+  nestChatPrompt,
+  nestSetupPrompt,
+} from "./connect";
 
 // Regression tests written before the implementation (dev-loop: fail-before-build).
 // These pin the pure logic behind the "All my nests" landing + Connect-all UX,
@@ -54,5 +60,36 @@ describe("allNestsChatPrompt", () => {
   it("never embeds an API key or secret in the prompt", () => {
     // The whole point of the redesign: keys are the user's to hand over, never baked in.
     expect(allNestsChatPrompt("https://x.ai")).not.toMatch(/cnst_|api[_-]?key\s*[:=]/i);
+  });
+});
+
+describe("nestChatPrompt", () => {
+  it("names the nest and forbids inventing answers", () => {
+    const p = nestChatPrompt("GTM Strategy", "Go-to-market strategy");
+    expect(p).toContain('"GTM Strategy"');
+    expect(p).toMatch(/don't invent/i);
+  });
+
+  it("works with no description and doesn't throw", () => {
+    expect(() => nestChatPrompt("Solo")).not.toThrow();
+    expect(nestChatPrompt("Solo")).toContain('"Solo"');
+  });
+
+  it("embeds no secret", () => {
+    expect(nestChatPrompt("X", "y")).not.toMatch(/cnst_/);
+  });
+});
+
+describe("nestSetupPrompt", () => {
+  it("includes the nest's MCP url and orients before answering", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai/nests/gtm/mcp");
+    expect(p).toContain("https://x.ai/nests/gtm/mcp");
+    expect(p).toContain("context_overview");
+  });
+
+  it("never bakes in a key", () => {
+    expect(nestSetupPrompt("GTM", "https://x.ai/nests/gtm/mcp")).not.toMatch(
+      /cnst_/,
+    );
   });
 });
