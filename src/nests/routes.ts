@@ -214,10 +214,15 @@ nestRoutes.get("/", async (c) => {
   // Coerce with Number(r.c) so document_count is a real number — otherwise the
   // dashboard banner's `sum + n.document_count` concatenates ("40"+"0"+"346"…)
   // instead of adding, producing a giant nonsense total.
+  // The same grouped scan also yields the newest version timestamp per nest,
+  // which is what "recent activity" means for a nest — the nests row itself
+  // only carries created_at.
   const docRows = (await db.all(
-    "SELECT nest_id, COUNT(DISTINCT node_id) AS c FROM node_versions GROUP BY nest_id",
-  )) as Array<{ nest_id: string; c: number }>;
+    `SELECT nest_id, COUNT(DISTINCT node_id) AS c, MAX(created_at) AS last_activity
+       FROM node_versions GROUP BY nest_id`,
+  )) as Array<{ nest_id: string; c: number; last_activity: string | null }>;
   const docByNest = new Map(docRows.map((r) => [r.nest_id, Number(r.c)]));
+  const activityByNest = new Map(docRows.map((r) => [r.nest_id, r.last_activity]));
   const collabRows = (await db.all(
     "SELECT nest_id, COUNT(*) AS c FROM nest_collaborators GROUP BY nest_id",
   )) as Array<{ nest_id: string; c: number }>;
@@ -280,6 +285,7 @@ nestRoutes.get("/", async (c) => {
         }
       : {
           ...n,
+          last_activity: activityByNest.get(n.id) ?? null,
           document_count: docByNest.get(n.id) ?? 0,
           collaborator_count: collabByNest.get(n.id) ?? 0,
           steward_count: stewardByNest.get(n.id) ?? 0,
