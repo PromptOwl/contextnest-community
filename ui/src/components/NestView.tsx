@@ -7,6 +7,7 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
+import { visibleDocuments } from "../lib/visible-documents";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
@@ -543,7 +544,10 @@ export function NestView({
    * replacing beats merging). Also refreshes the nest-wide census.
    */
   const fetchLevel = useCallback(
-    async (folder: string) => {
+    async (folder: string, opts: { refresh?: boolean } = {}) => {
+      // Re-expanding a folder already on screen is not a reason to re-read
+      // it; only an explicit refresh (a mutation) is.
+      if (!opts.refresh && loadedFolders.current.has(folder)) return;
       setLoadingFolders((prev) => new Set(prev).add(folder));
       try {
         const res = await qc.fetchQuery(reads.folderNodes(nestId, folder));
@@ -552,7 +556,6 @@ export function NestView({
           ...prev.filter((n) => folderOfNode(n.id || "") !== folder),
           ...res.nodes,
         ]);
-        setCensus(res.census);
       } catch (e: any) {
         console.error("[NestView] listFolderNodes failed", nestId, folder, e);
         toast.error(e?.message || "Failed to load folder");
@@ -567,14 +570,28 @@ export function NestView({
     [nestId, qc],
   );
 
+  /** The nest-wide shape. Describes the whole nest whatever level is open,
+   *  so it is read once per nest rather than once per folder expanded. */
+  const fetchCensus = useCallback(async () => {
+    try {
+      const { census: fresh } = await qc.fetchQuery(reads.census(nestId));
+      setCensus(fresh);
+    } catch (e) {
+      console.error("[NestView] getNestCensus failed", nestId, e);
+    }
+  }, [nestId, qc]);
+
   /** Re-read every level currently on screen — used after every mutation.
    *  A no-op before the first load, which the scope effect below owns. */
   const reloadLevels = useCallback(async () => {
     // The whole-nest copy the filters use was read before this write.
     setFullNodes(null);
     if (!loadedFolders.current.size) return;
-    await Promise.all([...loadedFolders.current].map((f) => fetchLevel(f)));
-  }, [fetchLevel]);
+    await Promise.all([
+      fetchCensus(),
+      ...[...loadedFolders.current].map((f) => fetchLevel(f, { refresh: true })),
+    ]);
+  }, [fetchLevel, fetchCensus]);
 
   /** Node-id prefix for a folder share — see lib/folder-target.ts. */
   const shareTargetForFolder = (folderPath: string): string => {
@@ -886,7 +903,8 @@ export function NestView({
     setNodes([]);
     setFullNodes(null);
     void fetchLevel(folderFilter ?? "");
-  }, [nestId, folderFilter, fetchLevel]);
+    void fetchCensus();
+  }, [nestId, folderFilter, fetchLevel, fetchCensus]);
 
   // stats are built later (after reviewableQueue is computed) so the
   // Review Queue card can bind to the count the user can actually act
@@ -951,24 +969,17 @@ export function NestView({
   //
   // Unfiltered, the levels on screen ARE the answer; filtered, the answer
   // spans the nest, so use the full listing as soon as it lands.
-  const filtered = (hasActiveFilters ? (fullNodes ?? nodes) : nodes).filter((n) => {
-    // Folder scope: the doc's folder must be the scoped folder or inside it.
-    if (folderFilter !== null) {
-      const f = folderOfNode(n.id || "");
-      if (f !== folderFilter && !f.startsWith(`${folderFilter}/`)) return false;
-    }
-    if (
-      !matchesFilters(n, {
-        status: statusFilter,
-        tags: tagFilters,
-        author: authorFilter,
-        updatedAfter,
-        type: typeFilter,
-      })
-    )
-      return false;
-    if (!search) return true;
-    return matchesFilters(n, { search }) || contentHits.has(n.id);
+  const filtered = visibleDocuments({
+    levelNodes: nodes,
+    fullNodes,
+    folderFilter,
+    search,
+    status: statusFilter,
+    type: typeFilter,
+    author: authorFilter,
+    tags: tagFilters,
+    updatedAfter,
+    contentHits,
   });
 
   // Sort the filtered list. "name" = title A–Z; "edited" = most-recently

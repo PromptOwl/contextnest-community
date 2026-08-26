@@ -26,6 +26,7 @@ import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
 import {
   listNodesForCaller,
   listNestFolders,
+  nestCensus,
   RUNNABLE_NODE_TYPES,
 } from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
@@ -574,6 +575,17 @@ queryRoutes.get("/overview", async (c) => {
       snippet: (n.body || "").slice(0, 120).replace(/\n/g, " "),
     })),
   });
+});
+
+// GET /nests/:nestId/census
+//
+// Everything that describes the WHOLE nest — folder tree, counts, tags,
+// types, authors — for a client that lists one folder level at a time and
+// would otherwise have no way to show nest-wide filters or totals. Separate
+// from the listing so expanding a folder does not recompute it.
+queryRoutes.get("/census", async (c) => {
+  const census = await nestCensus(c.req.param("nestId")!, c.get("userId"));
+  return c.json({ census });
 });
 
 // GET /nests/:nestId/folders?folder=&recursive=0

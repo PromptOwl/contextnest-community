@@ -67,14 +67,25 @@ describe("folder-scoped node listing", () => {
     expect(root.data.nodes.length).toBeLessThan(6);
   });
 
-  it("omitting folder still lists the whole nest, with no census", async () => {
+  it("omitting folder still lists the whole nest", async () => {
     const { data } = await list("");
     expect(data.nodes.length).toBe(6);
-    expect(data.census).toBeUndefined();
   });
 
-  it("census describes the whole nest from any single level", async () => {
-    const { data } = await list("?folder=gtm/deals");
+  it("never bundles the nest-wide census into a level fetch", async () => {
+    // It describes the whole nest whatever level was asked for, so bundling it
+    // recomputed the same answer on every folder expand.
+    for (const q of ["", "?folder=", "?folder=gtm"]) {
+      expect((await list(q)).data.census, `census bundled into ${q || "(none)"}`)
+        .toBeUndefined();
+    }
+  });
+
+  it("census describes the whole nest, from its own endpoint", async () => {
+    const { status, data } = await jsonRequest(
+      app, "GET", `/nests/${nestId}/census`, undefined, owner.apiKey,
+    );
+    expect(status).toBe(200);
     const census = data.census;
 
     expect(census.total).toBe(6);

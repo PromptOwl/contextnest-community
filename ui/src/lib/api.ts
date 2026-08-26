@@ -808,9 +808,14 @@ export async function listNodes(nestId: string) {
  * caller can render the full folder tree without loading the documents in it.
  */
 export async function listFolderNodes(nestId: string, folder: string) {
-  return request<{ count: number; nodes: any[]; census: NestCensus }>(
+  return request<{ count: number; nodes: any[] }>(
     `/nests/${nestId}/nodes?folder=${encodeURIComponent(folder)}`,
   );
+}
+
+/** The nest-wide shape — one per nest, not per folder level. */
+export async function getNestCensus(nestId: string) {
+  return request<{ census: NestCensus }>(`/nests/${nestId}/census`);
 }
 
 /** Per-node comment (annotation thread) counts for sorting the document list. */

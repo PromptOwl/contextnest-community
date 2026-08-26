@@ -119,12 +119,10 @@ nodeRoutes.get("/", async (c) => {
     // document tree. Absent = the whole nest, as every existing caller expects.
     ...(q.folder !== undefined ? { folder: q.folder } : {}),
   });
-  // A folder-scoped caller sees one level, so it also needs the nest-wide
-  // shape — folder tree, counts, tags, authors — or its filters and stat
-  // tiles would describe only what happens to be expanded.
-  const census =
-    q.folder !== undefined ? await nestCensus(nestId, userId) : undefined;
-  return c.json({ count: nodes.length, nodes, ...(census ? { census } : {}) });
+  // The nest-wide shape is NOT bundled here: it describes the whole nest
+  // whatever level was asked for, so bundling recomputed it on every folder
+  // expand. It has its own endpoint and its own cache entry.
+  return c.json({ count: nodes.length, nodes });
 });
 
 // POST /nests/:nestId/nodes
