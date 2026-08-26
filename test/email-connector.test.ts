@@ -89,13 +89,13 @@ describe("email connector", () => {
     );
 
     // Inspect the invitee's direct email — addressed to them in the second
-    // person ("You've been given write access …"), not the third.
+    // person ("You've been given Editor access …"), not the third.
     const msg = sendMail.mock.calls.find(
       (c) => (c[0] as any).to === "bob@acme.com",
     )![0] as any;
     expect(msg.from).toBe("nest@test.local");
     expect(msg.subject).toContain("Mail Nest");
-    expect(msg.text).toContain("You've been given write access to Mail Nest");
+    expect(msg.text).toContain("You've been given Editor access to Mail Nest");
     // Multipart: a branded HTML part is sent alongside the plain-text fallback,
     // *bold* markup is rendered, and the raw shortcode markers don't leak.
     expect(msg.html).toContain("ContextNest");
