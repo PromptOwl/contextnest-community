@@ -3,7 +3,11 @@
  * whole nest, but documents arrive one folder level at a time.
  */
 import { describe, it, expect } from "vitest";
-import { visibleDocuments, hasActiveFilters } from "./visible-documents";
+import {
+  visibleDocuments,
+  hasActiveFilters,
+  documentsTabIsEmpty,
+} from "./visible-documents";
 
 const doc = (id: string, over: Record<string, any> = {}) => ({
   id,
@@ -115,5 +119,34 @@ describe("visibleDocuments", () => {
     expect(hasActiveFilters({ ...off, author: "a@b.test" })).toBe(true);
     expect(hasActiveFilters({ ...off, tags: ["#gtm"] })).toBe(true);
     expect(hasActiveFilters({ ...off, datePreset: "7d" })).toBe(true);
+  });
+});
+
+describe("documentsTabIsEmpty", () => {
+  it("is not empty when this level has no documents but folders exist", () => {
+    // The regression: an imported nest keeps everything one level down, so the
+    // root level is empty while the nest plainly is not.
+    expect(
+      documentsTabIsEmpty({ visibleCount: 0, folderCount: 4, filtering: false }),
+    ).toBe(false);
+  });
+
+  it("is empty when there is nothing at all", () => {
+    expect(
+      documentsTabIsEmpty({ visibleCount: 0, folderCount: 0, filtering: false }),
+    ).toBe(true);
+  });
+
+  it("is empty when a filter matched nothing, folders or not", () => {
+    // Showing a folder tree under "no matching documents" would be noise.
+    expect(
+      documentsTabIsEmpty({ visibleCount: 0, folderCount: 4, filtering: true }),
+    ).toBe(true);
+  });
+
+  it("is never empty while documents are visible", () => {
+    expect(
+      documentsTabIsEmpty({ visibleCount: 2, folderCount: 0, filtering: true }),
+    ).toBe(false);
   });
 });

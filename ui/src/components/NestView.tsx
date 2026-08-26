@@ -7,7 +7,7 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
-import { visibleDocuments } from "../lib/visible-documents";
+import { visibleDocuments, documentsTabIsEmpty } from "../lib/visible-documents";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
@@ -1043,6 +1043,15 @@ export function NestView({
     () => (census?.folders ?? []).map((f) => ({ path: f.path, total: f.total })),
     [census],
   );
+
+  // A folder level with no document of its own is normal — an imported nest
+  // commonly keeps everything one level down. The tab is only truly empty
+  // when there is no folder to open either, or when a filter matched nothing.
+  const nothingToShow = documentsTabIsEmpty({
+    visibleCount: filtered.length,
+    folderCount: knownFolders.length,
+    filtering: hasActiveFilters,
+  });
 
   // Orphans + broken [[links]], client-side from the loaded list.
   // Only meaningful over the whole nest: on a partial list every link into
@@ -2620,7 +2629,7 @@ export function NestView({
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
-              ) : filtered.length === 0 ? (
+              ) : nothingToShow ? (
                 hasActiveFilters || !canEditDocs ? (
                   <div className="text-center py-8 text-sm text-muted-foreground">
                     {hasActiveFilters ? "No matching documents" : "No documents yet"}
