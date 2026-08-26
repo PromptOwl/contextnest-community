@@ -83,12 +83,13 @@
   max-width: 100%;
 }
 
-/* Same guarantee for dialogs. A caller's `sm:max-w-[640px]` is a plain width
-   cap; on a window narrower than that — or on a page that scrolls sideways,
-   where the fixed dialog's percentage box is wider than the window — the panel
-   runs past the edge. This selector outranks the utility classes, so every
-   dialog stays inside the window whatever width it asks for. */
+/* Same guarantee for dialogs: on a window narrower than the caller's cap — or
+   on a page that scrolls sideways, where the fixed dialog's percentage box is
+   wider than the window — the panel runs past the edge. Clamp `width`, never
+   `max-width`: this selector outranks the utility classes, so setting
+   max-width here would beat every caller's `sm:max-w-[400px]` and stretch a
+   yes/no confirm across the whole page. */
 [role="dialog"][data-state],
 [role="alertdialog"][data-state] {
-  max-width: calc(100vw - 2rem);
+  width: min(calc(100% - 2rem), calc(100vw - 2rem));
 }
