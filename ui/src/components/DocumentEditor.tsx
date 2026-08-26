@@ -961,11 +961,9 @@ export function DocumentEditor({
   // dblclick opts in (drafts only — a locked doc can't enter edit).
   const fieldsDisabled = isLocked || mode !== "edit";
 
-  const canSave = useMemo(
-    () =>
-      title.trim().length > 0 &&
-      content.trim().length > 0 &&
-      !saving,
+  // Declared before isDirty so the save gate below can read it.
+  const hasSaveableFields = useMemo(
+    () => title.trim().length > 0 && content.trim().length > 0 && !saving,
     [title, content, saving],
   );
 
@@ -983,6 +981,20 @@ export function DocumentEditor({
     if (prime !== loadedPrimeRef.current) return true;
     return false;
   }, [touched, title, content, tags, schedule, prime]);
+
+  // Save is a no-op on a clean document (it would only bump the version), so
+  // the button says so by being disabled — the enabled/disabled pair IS the
+  // dirty indicator, alongside the badge in the header.
+  const canSave = hasSaveableFields && (isNew || isDirty);
+
+  // Reloading or closing the tab with unsaved edits loses them — the in-app
+  // leave dialog can't see a browser-level navigation, so hook it here too.
+  useEffect(() => {
+    if (!isDirty || isReviewerOnly) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty, isReviewerOnly]);
 
   // Feedback only — the schedule is saved exactly as typed either way (it's
   // opaque to this server; an external orchestrator parses it).
@@ -1445,6 +1457,16 @@ export function DocumentEditor({
                 title="Stewardship off — saving auto-publishes."
               >
                 Auto-published
+              </span>
+            )}
+            {isDirty && (
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
+                title="These edits are parked locally and not yet saved to the nest."
+                data-testid="document-editor-dirty-badge"
+              >
+                <Pencil className="h-3 w-3" />
+                Unsaved changes
               </span>
             )}
           </div>
