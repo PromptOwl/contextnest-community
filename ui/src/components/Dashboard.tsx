@@ -273,6 +273,21 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
     onOpenReview(w.nest_id, w.nest_name, w.node_id);
   };
 
+  // A notification names a document or a nest — clicking it goes there. The
+  // document is the target when the row resolves to one; otherwise the nest.
+  const openNotification = (n: api.WatcherNotification) => {
+    const nest = nests.find((x) => x.id === n.nest_id);
+    const name = nest?.name ?? "";
+    if (n.node_id) onOpenReview(n.nest_id, name, n.node_id);
+    else if (nest)
+      onSelectNest(
+        nest.id,
+        nest.name,
+        nest.is_owner ?? (nest.permission ?? "owner") === "owner",
+        nest.user_id === ANON_USER_ID,
+      );
+  };
+
   // Submit a draft straight from the list — the whole point of the tab is that
   // the doc was stranded, so the fix (hand it to a reviewer) is one click away.
   // It leaves the drafts list and shows up under "Waiting on others". Throws on
@@ -446,12 +461,17 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                   </div>
                   <div className="divide-y border-t">
                     {work.notifications!.slice(0, 8).map((n) => (
-                      <div key={n.id} className="px-4 py-2 text-xs flex items-center gap-2">
+                      <button
+                        key={n.id}
+                        type="button"
+                        onClick={() => openNotification(n)}
+                        className="w-full px-4 py-2 text-xs flex items-center gap-2 text-left hover:bg-amber-500/10"
+                      >
                         <span className="flex-1">{n.message}</span>
                         <span className="text-muted-foreground shrink-0">
                           {formatServerDate(n.created_at)}
                         </span>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 </div>

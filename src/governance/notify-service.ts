@@ -217,6 +217,8 @@ export interface Notification {
   message: string;
   created_at: string;
   read_at: string | null;
+  /** Document the row is about, when there is one — the inbox links to it. */
+  node_id: string | null;
 }
 
 export async function listNotifications(
@@ -224,11 +226,20 @@ export async function listNotifications(
   opts: { unreadOnly?: boolean; limit?: number } = {},
 ): Promise<Notification[]> {
   const limit = Math.min(opts.limit ?? 50, 200);
+  // subject_id is a review or deletion-request id, not a node id, so the
+  // document comes from those tables — resolved in the same read rather than
+  // a second round of lookups. Folder/nest deletions have no document to open.
   return (await getDb().all(
-    `SELECT id, nest_id, kind, subject_id, message, created_at, read_at
-       FROM notifications
-      WHERE LOWER(user_email) = LOWER(?)${opts.unreadOnly ? " AND read_at IS NULL" : ""}
-      ORDER BY created_at DESC LIMIT ${limit}`,
+    `SELECT n.id, n.nest_id, n.kind, n.subject_id, n.message, n.created_at, n.read_at,
+            COALESCE(
+              rr.node_id,
+              CASE WHEN dr.target_type = 'document' THEN dr.node_id END
+            ) AS node_id
+       FROM notifications n
+       LEFT JOIN review_requests rr ON rr.id = n.subject_id
+       LEFT JOIN deletion_requests dr ON dr.id = n.subject_id
+      WHERE LOWER(n.user_email) = LOWER(?)${opts.unreadOnly ? " AND n.read_at IS NULL" : ""}
+      ORDER BY n.created_at DESC LIMIT ${limit}`,
     [userEmail],
   )) as Notification[];
 }

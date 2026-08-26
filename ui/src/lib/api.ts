@@ -1930,6 +1930,8 @@ export interface WatcherNotification {
   message: string;
   created_at: string;
   read_at: string | null;
+  /** Document the row is about, when there is one — null for nest-level rows. */
+  node_id?: string | null;
 }
 
 export interface WorkPagination {
