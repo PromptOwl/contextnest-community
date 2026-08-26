@@ -224,7 +224,19 @@ export function NestView({
     },
     [],
   );
+  // Documents arrive one folder LEVEL at a time — the nest root on mount, a
+  // folder's own documents when its row is expanded. `nodes` accumulates the
+  // levels loaded so far, so it is NOT the whole nest.
   const [nodes, setNodes] = useState<any[]>([]);
+  // The nest-wide shape that rides along with every level fetch: folder tree,
+  // counts, tags, types, authors. Without it every filter and stat tile would
+  // describe only the folders the user happened to open.
+  const [census, setCensus] = useState<api.NestCensus | null>(null);
+  // A filter, a search, and link health are all questions about the WHOLE
+  // nest, which the folder levels on screen cannot answer. Fetch the full
+  // listing once, only when one of those is actually asked.
+  const [fullNodes, setFullNodes] = useState<any[] | null>(null);
+  const [fullLoading, setFullLoading] = useState(false);
   // Full roster — admin-only (listStewards 403s for non-admins → stays []).
   const [stewards, setStewards] = useState<Steward[]>([]);
   // Caller's OWN steward rows (scoped), from GET /nests/:id. Drives per-node
@@ -505,7 +517,10 @@ export function NestView({
     setActiveTabState(tab);
     onTabChange?.(tab);
   };
-  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
+  // Expanded folders, not collapsed ones: a folder's documents are fetched on
+  // first expand, so the default has to be closed.
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [loadingFolders, setLoadingFolders] = useState<Set<string>>(new Set());
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const [dropFolder, setDropFolder] = useState<string | null>(null);
 
@@ -515,6 +530,51 @@ export function NestView({
     const slash = rel.lastIndexOf("/");
     return slash > 0 ? rel.slice(0, slash) : "";
   };
+
+  const qc = useQueryClient();
+
+  // Folder levels loaded so far, so a refetch after a mutation restores
+  // exactly what is on screen. A ref, not state: it must not re-run fetchData.
+  const loadedFolders = useRef<Set<string>>(new Set());
+
+  /**
+   * Fetch ONE folder level and fold it into `nodes`, replacing whatever was
+   * previously loaded for that level (a move or delete changes ids, so
+   * replacing beats merging). Also refreshes the nest-wide census.
+   */
+  const fetchLevel = useCallback(
+    async (folder: string) => {
+      setLoadingFolders((prev) => new Set(prev).add(folder));
+      try {
+        const res = await qc.fetchQuery(reads.folderNodes(nestId, folder));
+        loadedFolders.current.add(folder);
+        setNodes((prev) => [
+          ...prev.filter((n) => folderOfNode(n.id || "") !== folder),
+          ...res.nodes,
+        ]);
+        setCensus(res.census);
+      } catch (e: any) {
+        console.error("[NestView] listFolderNodes failed", nestId, folder, e);
+        toast.error(e?.message || "Failed to load folder");
+      } finally {
+        setLoadingFolders((prev) => {
+          const next = new Set(prev);
+          next.delete(folder);
+          return next;
+        });
+      }
+    },
+    [nestId, qc],
+  );
+
+  /** Re-read every level currently on screen — used after every mutation.
+   *  A no-op before the first load, which the scope effect below owns. */
+  const reloadLevels = useCallback(async () => {
+    // The whole-nest copy the filters use was read before this write.
+    setFullNodes(null);
+    if (!loadedFolders.current.size) return;
+    await Promise.all([...loadedFolders.current].map((f) => fetchLevel(f)));
+  }, [fetchLevel]);
 
   /** Node-id prefix for a folder share — see lib/folder-target.ts. */
   const shareTargetForFolder = (folderPath: string): string => {
@@ -530,13 +590,16 @@ export function NestView({
     setActiveTab("documents");
   };
 
-  const toggleFolderCollapsed = (path: string) => {
-    setCollapsedFolders((prev) => {
+  const toggleFolderExpanded = (path: string) => {
+    const opening = !expandedFolders.has(path);
+    setExpandedFolders((prev) => {
       const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
+      if (opening) next.add(path);
+      else next.delete(path);
       return next;
     });
+    // Fetch outside the updater — React may run an updater twice.
+    if (opening) void fetchLevel(path);
   };
 
   // Dragging over a collapsed folder header for a beat expands it, so a doc
@@ -554,12 +617,11 @@ export function NestView({
     cancelDragExpand();
     dragExpandTimer.current = setTimeout(() => {
       dragExpandTimer.current = null;
-      setCollapsedFolders((prev) => {
-        if (!prev.has(path)) return prev;
-        const next = new Set(prev);
-        next.delete(path);
-        return next;
+      setExpandedFolders((prev) => {
+        if (prev.has(path)) return prev;
+        return new Set(prev).add(path);
       });
+      void fetchLevel(path);
     }, 600);
   };
 
@@ -639,8 +701,6 @@ export function NestView({
   const [moveDest, setMoveDest] = useState("");
   const [movingDoc, setMovingDoc] = useState(false);
 
-  const qc = useQueryClient();
-
   const fetchData = useCallback(async () => {
     setLoading(true);
     // Nest meta first, because it says WHICH of the reads below the caller may
@@ -659,7 +719,7 @@ export function NestView({
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
     const empty = <T,>(v: T) => Promise.resolve(v);
-    const [nodesData, stewardsData, queueData, deletionData, settingsData, externalData, countsData, feedData] =
+    const [, stewardsData, queueData, deletionData, settingsData, externalData, countsData, feedData] =
       await Promise.all([
         // The five reads below go through the shared cache (same keys and
         // invalidation as the hook-based screens) so returning from a document
@@ -667,10 +727,9 @@ export function NestView({
         // than via hooks to keep each call's own error fallback — a failing
         // node list must still let the settings response apply, per the note
         // above.
-        qc.fetchQuery(reads.nodes(nestId)).catch((e) => {
-          console.error("[NestView] listNodes failed", nestId, e);
-          return { nodes: [] };
-        }),
+        // Documents come from the folder levels currently on screen, not one
+        // whole-nest listing — see fetchLevel.
+        reloadLevels(),
         grantOnly
           ? empty({ stewards: [] as Steward[] })
           : qc.fetchQuery(reads.stewards(nestId)).catch((e) => {
@@ -744,7 +803,6 @@ export function NestView({
             }),
       ]);
     setCommentCounts(countsData.counts);
-    setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
     setDeletionRequests(deletionData.requests);
@@ -774,7 +832,7 @@ export function NestView({
     setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
     setLoading(false);
     setInitialLoad(false);
-  }, [nestId, qc]);
+  }, [nestId, qc, reloadLevels]);
 
   // Next page of comment activity, appended under the feed. Offset by the
   // rows already shown; a dedupe guard drops any row that slid into the next
@@ -820,6 +878,16 @@ export function NestView({
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  // A different nest, or a different scoped folder, is a different tree:
+  // drop the loaded levels and open just the new base.
+  useEffect(() => {
+    loadedFolders.current = new Set();
+    setExpandedFolders(new Set());
+    setNodes([]);
+    setFullNodes(null);
+    void fetchLevel(folderFilter ?? "");
+  }, [nestId, folderFilter, fetchLevel]);
+
   // stats are built later (after reviewableQueue is computed) so the
   // Review Queue card can bind to the count the user can actually act
   // on — not the raw queue size.
@@ -850,11 +918,40 @@ export function NestView({
     };
   }, [nestId, search]);
 
+  const loadFullNest = useCallback(async () => {
+    if (fullNodes || fullLoading) return;
+    setFullLoading(true);
+    try {
+      const { nodes: all } = await qc.fetchQuery(reads.nodes(nestId));
+      setFullNodes(all);
+    } catch (e: any) {
+      console.error("[NestView] listNodes failed", nestId, e);
+      toast.error(e?.message || "Failed to search the whole nest");
+    } finally {
+      setFullLoading(false);
+    }
+  }, [nestId, qc, fullNodes, fullLoading]);
+
+
+  const hasActiveFilters =
+    !!search ||
+    statusFilter !== "all" ||
+    typeFilter !== "all" ||
+    tagFilters.length > 0 ||
+    authorFilter !== "all" ||
+    dateFilter !== "any";
+
+  useEffect(() => {
+    if (hasActiveFilters) void loadFullNest();
+  }, [hasActiveFilters, loadFullNest]);
+  const updatedAfter = datePresetToEpoch(dateFilter, Date.now());
   // Status + tag filters always apply; with a query, a doc passes on an
   // instant client title/tag match OR a server content hit. Semantics of
   // the client match live in lib/node-filter (unit-tested).
-  const updatedAfter = datePresetToEpoch(dateFilter, Date.now());
-  const filtered = nodes.filter((n) => {
+  //
+  // Unfiltered, the levels on screen ARE the answer; filtered, the answer
+  // spans the nest, so use the full listing as soon as it lands.
+  const filtered = (hasActiveFilters ? (fullNodes ?? nodes) : nodes).filter((n) => {
     // Folder scope: the doc's folder must be the scoped folder or inside it.
     if (folderFilter !== null) {
       const f = folderOfNode(n.id || "");
@@ -929,44 +1026,39 @@ export function NestView({
       );
   })();
 
+  // Every folder in the nest, so the tree can show one whose documents have
+  // never been fetched. Memoised — FolderTree keys a useMemo on this.
+  const knownFolders = useMemo(
+    () => (census?.folders ?? []).map((f) => ({ path: f.path, total: f.total })),
+    [census],
+  );
+
   // Orphans + broken [[links]], client-side from the loaded list.
-  const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
+  // Only meaningful over the whole nest: on a partial list every link into
+  // an unexpanded folder reads as broken, and every unloaded source makes a
+  // loaded document look orphaned.
+  const wikiHealth = useMemo(
+    () => (fullNodes ? linkHealth(fullNodes) : { orphans: [], broken: [] }),
+    [fullNodes],
+  );
 
   // Every folder path in use (all prefixes, so intermediate levels with no
   // direct docs still appear) — options for the Move-to-folder dialog.
-  const allFolders = useMemo(() => {
-    const set = new Set<string>();
-    for (const n of nodes) {
-      const f = folderOfNode(n.id || "");
-      if (!f) continue;
-      const segs = f.split("/");
-      for (let i = 1; i <= segs.length; i++) set.add(segs.slice(0, i).join("/"));
-    }
-    return [...set].sort(byPathSegments);
-  }, [nodes]);
+  const allFolders = useMemo(
+    () => (census?.folders ?? []).map((f) => f.path).sort(byPathSegments),
+    [census],
+  );
 
   // Distinct authors for the author filter dropdown.
-  const authors = useMemo(() => {
-    const set = new Set<string>();
-    for (const n of nodes) if (n.author) set.add(n.author);
-    return [...set].sort((a, b) => a.localeCompare(b));
-  }, [nodes]);
+  const authors = census?.authors ?? [];
 
   // Distinct node types present (missing type = "document"), for the type
   // filter dropdown. Only offered when the nest actually mixes types.
-  const typesPresent = useMemo(() => {
-    const set = new Set<string>();
-    for (const n of nodes) set.add(n.type || "document");
-    return [...set].sort((a, b) => a.localeCompare(b));
-  }, [nodes]);
+  const typesPresent = useMemo(
+    () => Object.keys(census?.types ?? {}).sort((a, b) => a.localeCompare(b)),
+    [census],
+  );
 
-  const hasActiveFilters =
-    !!search ||
-    statusFilter !== "all" ||
-    typeFilter !== "all" ||
-    tagFilters.length > 0 ||
-    authorFilter !== "all" ||
-    dateFilter !== "any";
   const clearAllFilters = () => {
     setSearch("");
     setStatusFilter("all");
@@ -1050,37 +1142,21 @@ export function NestView({
     });
 
   // All tags in the nest with usage counts — the always-visible filter bar.
-  const allTags = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const n of nodes) {
-      for (const t of (n.tags ?? []) as string[]) {
-        counts.set(t, (counts.get(t) ?? 0) + 1);
-      }
-    }
-    return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .map(([tag, count]) => ({ tag, count }));
-  }, [nodes]);
+  const allTags = useMemo(
+    () =>
+      Object.entries(census?.tags ?? {})
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([tag, count]) => ({ tag, count })),
+    [census],
+  );
 
   // Quick-access strip; shown on the Overview tab as recently-edited rows.
-  const recentlyEdited = useMemo(() => {
-    return [...nodes]
-      .filter((n) => n.updated_at)
-      .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
-      .slice(0, 3);
-  }, [nodes]);
+  const recentlyEdited = census?.recent ?? [];
 
   // Genuine, non-capped metric for the Overview stat tile: how many documents
   // were edited in the last 7 days across the whole nest. The recentlyEdited
   // strip above is sliced to 3 for display, so its length is not a real count.
-  const recentlyEditedCount = useMemo(() => {
-    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    return nodes.filter((n) => {
-      if (!n.updated_at) return false;
-      const t = Date.parse(String(n.updated_at));
-      return !Number.isNaN(t) && t >= cutoff;
-    }).length;
-  }, [nodes]);
+  const recentlyEditedCount = census?.editedLast7d ?? 0;
 
   // myStewards (caller's own scoped rows) comes from GET /nests/:id, so
   // non-admin reviewers/editors keep per-node affordances without reading the
@@ -1245,14 +1321,13 @@ export function NestView({
   // (what the user can actually act on) instead of reviewQueue.length
   // (raw size, which over-promised before — see CU-86ahn99fv).
   const stats = {
-    total: nodes.length,
-    pending: nodes.filter((n) => n.status === "pending_review").length,
+    total: census?.total ?? nodes.length,
+    pending: census?.statuses?.pending_review ?? 0,
     // "published" is the engine's terminal post-approve status (approve writes
     // 'published'; no-steward creates auto-publish) — both mean AI-visible,
     // so the AI Ready card counts them together.
-    approved: nodes.filter(
-      (n) => n.status === "approved" || n.status === "published",
-    ).length,
+    approved:
+      (census?.statuses?.approved ?? 0) + (census?.statuses?.published ?? 0),
     reviewQueue: reviewQueue.length,
     reviewable: reviewableQueue.length,
   };
@@ -1298,7 +1373,7 @@ export function NestView({
 
   // Overview stat tile: Root is a synthetic tocGroups entry for docs with no
   // folder, not a user-created folder, so it's excluded from the count.
-  const folderCount = tocGroups.filter((g) => g.folder !== "Root").length;
+  const folderCount = census?.folders.length ?? 0;
 
   const openVersions = async (node: any) => {
     setVersionNode(node);
@@ -2098,7 +2173,7 @@ export function NestView({
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  {tocGroups.length === 0 ? (
+                  {stats.total === 0 ? (
                     <div className="py-8 text-center">
                       <FileText className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
                       <p className="text-sm text-muted-foreground">
@@ -2122,6 +2197,7 @@ export function NestView({
                     <FolderTree
                       className="space-y-1"
                       groups={tocGroups}
+                      known={knownFolders}
                       renderFolder={(node) => (
                         // Overview folders navigate into the Documents tab scoped to
                         // that folder — no collapse here; the whole tree stays open.
@@ -2529,7 +2605,7 @@ export function NestView({
                   ))}
                 </div>
               )}
-              {initialLoad ? (
+              {initialLoad || loadingFolders.has(baseFolder) ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
@@ -2954,7 +3030,11 @@ export function NestView({
                       className="space-y-1"
                       groups={docGroups}
                       baseFolder={baseFolder}
-                      isCollapsed={(p) => collapsedFolders.has(p)}
+                      known={knownFolders}
+                      isCollapsed={(p) =>
+                        // A filtered list shows every match, wherever it lives.
+                        hasActiveFilters ? false : !expandedFolders.has(p)
+                      }
                       renderFolder={(node, { collapsed }) => {
                         // Valid drop = a doc is being dragged and this isn't
                         // its current folder. Invalid targets get no
@@ -2968,11 +3048,12 @@ export function NestView({
                         const validDrop =
                           !!dragNodeId && folderOfNode(dragNodeId) !== node.path;
                         const isDropTarget = validDrop && dropFolder === node.path;
-                        // Only folders that DIRECTLY hold a document collapse.
-                        // A pure container (subfolders only, no node file) has
-                        // nothing of its own to hide, so it stays a static row
-                        // — no chevron, matching a file-tree's leaf folders.
-                        const collapsible = node.count > 0;
+                        // Anything with documents under it opens — the subtree
+                        // total, not the loaded count, because a folder's own
+                        // documents are only fetched once it is expanded. A
+                        // genuinely empty folder stays a static row, no chevron.
+                        const collapsible = node.total > 0;
+                        const loadingHere = loadingFolders.has(node.path);
                         return (
                           <div
                             className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none transition-colors ${collapsible ? "cursor-pointer" : ""
@@ -2982,7 +3063,7 @@ export function NestView({
                               }`}
                             onClick={
                               collapsible
-                                ? () => toggleFolderCollapsed(node.path)
+                                ? () => toggleFolderExpanded(node.path)
                                 : undefined
                             }
                             onDragOver={(e) => {
@@ -3029,7 +3110,9 @@ export function NestView({
                             }}
                             data-testid={`folder-header-${node.path}`}
                           >
-                            {collapsible ? (
+                            {loadingHere ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                            ) : collapsible ? (
                               <ChevronRight
                                 className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${collapsed ? "" : "rotate-90"
                                   }`}
@@ -3168,19 +3251,29 @@ export function NestView({
                 );
               })()}
 
-              {/* Wiki link health — orphans + broken [[links]], computed
-                  client-side. Collapsed by default; hidden when clean. */}
-              {!loading &&
-                (wikiHealth.broken.length > 0 ||
-                  wikiHealth.orphans.length > 0) && (
-                  <details className="mt-4 text-xs text-muted-foreground">
+              {/* Wiki link health — orphans + broken [[links]]. Answering it
+                  needs every document's body, so opening the block is what
+                  fetches the whole nest. */}
+              {!loading && stats.total > 0 && (
+                  <details
+                    className="mt-4 text-xs text-muted-foreground"
+                    onToggle={(e) => {
+                      if (e.currentTarget.open) void loadFullNest();
+                    }}
+                  >
                     <summary className="cursor-pointer select-none">
-                      Link health: {wikiHealth.broken.length} broken link
-                      {wikiHealth.broken.length !== 1 ? "s" : ""} ·{" "}
-                      {wikiHealth.orphans.length} orphan doc
-                      {wikiHealth.orphans.length !== 1 ? "s" : ""}
+                      {fullLoading
+                        ? "Link health: checking the whole nest…"
+                        : !fullNodes
+                          ? "Link health — check the whole nest"
+                          : `Link health: ${wikiHealth.broken.length} broken link${wikiHealth.broken.length !== 1 ? "s" : ""} · ${wikiHealth.orphans.length} orphan doc${wikiHealth.orphans.length !== 1 ? "s" : ""}`}
                     </summary>
                     <div className="mt-2 space-y-2 pl-1">
+                      {fullNodes &&
+                        wikiHealth.broken.length === 0 &&
+                        wikiHealth.orphans.length === 0 && (
+                          <div>No broken links or orphan documents.</div>
+                        )}
                       {wikiHealth.broken.length > 0 && (
                         <div>
                           <div className="font-medium mb-1">
@@ -3361,13 +3454,10 @@ export function NestView({
                   setReviewNode(node);
                   return;
                 }
-                // Orphan: review_request points to a node not in the
-                // visible list (file deleted, or filtered out by
-                // stewardship access). Without this the row click was
-                // a silent dead-end.
-                toast.error(
-                  `Can't open "${req.title || req.nodeId}" — document missing or outside your access.`,
-                );
+                // Not in the loaded levels. Under lazy loading that usually
+                // just means its folder was never expanded, so open the
+                // document itself rather than calling it missing.
+                onOpenDocument(req.nodeId);
               }}
             />
             {/* Comment activity is paged (50/page) — fetch the next page when

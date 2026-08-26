@@ -42,6 +42,7 @@ import {
   moveNode,
   deleteNode,
   listNodesForCaller,
+  nestCensus,
   getNodeForCaller,
   resolveAuthorship,
   toNodeResponse,
@@ -114,8 +115,16 @@ nodeRoutes.get("/", async (c) => {
       : {}),
     // Ignore junk rather than 400 — a bad ?limit should not fail a listing.
     ...(limit !== undefined && Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+    // Present (even as "") = one folder level only, for the lazily-expanded
+    // document tree. Absent = the whole nest, as every existing caller expects.
+    ...(q.folder !== undefined ? { folder: q.folder } : {}),
   });
-  return c.json({ count: nodes.length, nodes });
+  // A folder-scoped caller sees one level, so it also needs the nest-wide
+  // shape — folder tree, counts, tags, authors — or its filters and stat
+  // tiles would describe only what happens to be expanded.
+  const census =
+    q.folder !== undefined ? await nestCensus(nestId, userId) : undefined;
+  return c.json({ count: nodes.length, nodes, ...(census ? { census } : {}) });
 });
 
 // POST /nests/:nestId/nodes

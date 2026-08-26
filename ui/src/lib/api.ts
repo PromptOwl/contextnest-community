@@ -786,8 +786,31 @@ export async function uploadAsset(nestId: string, file: File) {
   return data as { file: string; url: string; markdown: string };
 }
 
+/** Nest-wide shape that rides along with a folder-scoped listing. */
+export interface NestCensus {
+  total: number;
+  folders: Array<{ path: string; count: number; total: number }>;
+  tags: Record<string, number>;
+  types: Record<string, number>;
+  statuses: Record<string, number>;
+  authors: string[];
+  editedLast7d: number;
+  recent: Array<{ id: string; title: string; type: string; updated_at?: string }>;
+}
+
 export async function listNodes(nestId: string) {
   return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
+}
+
+/**
+ * One folder LEVEL — the documents sitting directly in `folder` ("" is the
+ * nest root), never its subtree. The census describes the whole nest so the
+ * caller can render the full folder tree without loading the documents in it.
+ */
+export async function listFolderNodes(nestId: string, folder: string) {
+  return request<{ count: number; nodes: any[]; census: NestCensus }>(
+    `/nests/${nestId}/nodes?folder=${encodeURIComponent(folder)}`,
+  );
 }
 
 /** Per-node comment (annotation thread) counts for sorting the document list. */

@@ -609,6 +609,77 @@ export async function resolveGrantRoles(
 }
 
 /**
+ * Roles that hold across the WHOLE nest, independent of any document:
+ * super-admin, ownership, collaborator permission, team membership. Steward
+ * rows are scoped, so they are deliberately excluded — see resolveUserRoles.
+ */
+export async function resolveNestWideRoles(
+  nestId: string,
+  userEmail: string,
+): Promise<EffectiveRole[]> {
+  const roles = new Set<EffectiveRole>();
+  if (isSuperAdmin(userEmail)) roles.add("admin");
+
+  const owner = await getNestOwnerEmail(nestId);
+  if (owner && owner.toLowerCase() === userEmail.toLowerCase()) {
+    roles.add("owner");
+  }
+
+  // resolveNestPermission also yields the public-visibility 'read' fallback,
+  // so public readers resolve to viewer.
+  const userId = await userIdForEmail(userEmail);
+  if (userId) {
+    const collabRole = collabPermToRole(await resolveNestPermission(nestId, userId));
+    if (collabRole) roles.add(collabRole);
+
+    // Team roles are added raw, NOT flattened through collabPermToRole, which
+    // would collapse 'reviewer' to 'editor' and strip approval rights.
+    for (const role of await resolveTeamRolesForUser(nestId, userId)) {
+      roles.add(role);
+    }
+  }
+  return [...roles];
+}
+
+/**
+ * Which documents this user holds a steward row on, resolved for the whole
+ * nest in two queries instead of one resolve() per node. `nestWide` means a
+ * nest-scope row covers every document, so the id set is irrelevant.
+ */
+export async function stewardCoverageForUser(
+  nestId: string,
+  userEmail: string,
+): Promise<{ nestWide: boolean; nodeIds: Set<string> }> {
+  const db = getDb();
+  const rows = (await db.all(
+    `SELECT scope, node_pattern, tag_name FROM stewards
+       WHERE nest_id = ? AND is_active = 1 AND LOWER(user_email) = LOWER(?)`,
+    [nestId, userEmail],
+  )) as { scope: string; node_pattern: string | null; tag_name: string | null }[];
+
+  const nodeIds = new Set<string>();
+  const tags: string[] = [];
+  for (const r of rows) {
+    if (r.scope === "nest") return { nestWide: true, nodeIds };
+    if (r.scope === "document" && r.node_pattern) nodeIds.add(r.node_pattern);
+    else if (r.scope === "tag" && r.tag_name) tags.push(r.tag_name);
+  }
+
+  if (tags.length) {
+    // Same node_tag_index join resolve() uses for tag scope, widened from one
+    // node to every node carrying any of this user's tags.
+    const placeholders = tags.map(() => "?").join(", ");
+    const tagged = (await db.all(
+      `SELECT DISTINCT node_id FROM node_tag_index
+         WHERE nest_id = ? AND tag_name IN (${placeholders})`,
+      [nestId, ...tags],
+    )) as { node_id: string }[];
+    for (const t of tagged) nodeIds.add(t.node_id);
+  }
+  return { nestWide: false, nodeIds };
+}
+
+/**
  * Effective roles for a user on a nest, merged from collaborator access and
  * steward assignments. When `nodeId` is given, steward rows are resolved for
  * that node (document > tag > nest); otherwise every active steward row on
@@ -619,31 +690,9 @@ export async function resolveUserRoles(
   userEmail: string,
   opts?: { nodeId?: string },
 ): Promise<EffectiveRole[]> {
-  const roles = new Set<EffectiveRole>();
-
-  if (isSuperAdmin(userEmail)) roles.add("admin");
-
-  const owner = await getNestOwnerEmail(nestId);
-  if (owner && owner.toLowerCase() === userEmail.toLowerCase()) {
-    roles.add("owner");
-  }
-
-  // Collaborator access (nest-wide). resolveNestPermission also yields the
-  // public-visibility 'read' fallback, so public readers resolve to viewer.
-  const userId = await userIdForEmail(userEmail);
-  if (userId) {
-    const collabRole = collabPermToRole(await resolveNestPermission(nestId, userId));
-    if (collabRole) roles.add(collabRole);
-
-    // Team membership contributes governance roles directly (nest-wide, not
-    // node-scoped). Added as the raw member role — NOT flattened through
-    // resolveNestPermission/collabPermToRole, which would collapse 'reviewer'
-    // to 'editor' and strip approval rights. All roles the user holds across
-    // shared teams count (editor via one + reviewer via another → both).
-    for (const role of await resolveTeamRolesForUser(nestId, userId)) {
-      roles.add(role);
-    }
-  }
+  // Ownership/collaborator/team roles are the same whatever the node, so they
+  // come from the shared nest-wide resolver.
+  const roles = new Set<EffectiveRole>(await resolveNestWideRoles(nestId, userEmail));
 
   // Steward assignments — scoped to the node when one is given.
   const stewardRoles = opts?.nodeId

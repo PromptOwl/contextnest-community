@@ -31,6 +31,10 @@ export const keys = {
 
   settings: (nestId: string) => [...keys.nest(nestId), "settings"] as const,
   nodes: (nestId: string) => [...keys.nest(nestId), "nodes"] as const,
+  // Under keys.nodes so every write that drops the listing drops the lazily
+  // loaded folder levels with it — see the invalidation table below.
+  folderNodes: (nestId: string, folder: string) =>
+    [...keys.nodes(nestId), "folder", folder] as const,
   stewards: (nestId: string) => [...keys.nest(nestId), "stewards"] as const,
   collaborators: (nestId: string) =>
     [...keys.nest(nestId), "collaborators"] as const,
@@ -410,6 +414,12 @@ export const reads = {
     queryOptions({
       queryKey: keys.nodes(nestId),
       queryFn: () => api.listNodes(nestId),
+      staleTime: STALE.listing,
+    }),
+  folderNodes: (nestId: string, folder: string) =>
+    queryOptions({
+      queryKey: keys.folderNodes(nestId, folder),
+      queryFn: () => api.listFolderNodes(nestId, folder),
       staleTime: STALE.listing,
     }),
   stewards: (nestId: string) =>

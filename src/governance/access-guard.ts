@@ -6,7 +6,12 @@
 
 import { getDb } from "../db/client.js";
 import { isStewardshipEnabled } from "../nests/service.js";
-import { canUserAccess, resolveStewardsForNode } from "./stewardship-service.js";
+import {
+  canUserAccess,
+  resolveStewardsForNode,
+  resolveNestWideRoles,
+  stewardCoverageForUser,
+} from "./stewardship-service.js";
 import { isPublicReader, resolveNestPermission } from "../shared/access.js";
 import { getApprovedVersion, getApprovedVersions } from "./version-service.js";
 import {
@@ -133,14 +138,13 @@ export async function filterAccessible<T extends { id: string }>(
     if ((await resolveNestPermission(nestId, userId)) !== "none") return nodes;
     return nodes.filter((n) => grantCoversNode(grants, n.id));
   }
-  const accessible: T[] = [];
-  for (const n of nodes) {
-    if (
-      (await canUserAccess(nestId, n.id, userEmail)).allowed ||
-      grantCoversNode(grants, n.id)
-    ) {
-      accessible.push(n);
-    }
-  }
-  return accessible;
+  // Same rule as canUserAccess, resolved for the whole list instead of once
+  // per node: view rights need ANY role, so a nest-wide role (owner, super,
+  // collaborator, team) admits every document without touching steward rows.
+  if ((await resolveNestWideRoles(nestId, userEmail)).length > 0) return nodes;
+  const coverage = await stewardCoverageForUser(nestId, userEmail);
+  if (coverage.nestWide) return nodes;
+  return nodes.filter(
+    (n) => coverage.nodeIds.has(n.id) || grantCoversNode(grants, n.id),
+  );
 }
