@@ -23,7 +23,12 @@ import { countThreadsByNode } from "../annotations/service.js";
 import { permissionLevel, isPublicReader } from "../shared/access.js";
 import { exportNestBundle } from "../nests/bundle-service.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
-import { listNodesForCaller, RUNNABLE_NODE_TYPES } from "./service.js";
+import {
+  listNodesForCaller,
+  listNestFolders,
+  nestCensus,
+  RUNNABLE_NODE_TYPES,
+} from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
@@ -570,6 +575,32 @@ queryRoutes.get("/overview", async (c) => {
       snippet: (n.body || "").slice(0, 120).replace(/\n/g, " "),
     })),
   });
+});
+
+// GET /nests/:nestId/census
+//
+// Everything that describes the WHOLE nest — folder tree, counts, tags,
+// types, authors — for a client that lists one folder level at a time and
+// would otherwise have no way to show nest-wide filters or totals. Separate
+// from the listing so expanding a folder does not recompute it.
+queryRoutes.get("/census", async (c) => {
+  const census = await nestCensus(c.req.param("nestId")!, c.get("userId"));
+  return c.json({ census });
+});
+
+// GET /nests/:nestId/folders?folder=&recursive=0
+//
+// The nest's folder tree on its own, for callers that need the SHAPE of the
+// vault (a navigable tree, a folder picker) and none of its content. Reads
+// directory entries only — no document is opened, so this stays cheap on a
+// vault where listing the documents would not be.
+queryRoutes.get("/folders", async (c) => {
+  const q = c.req.query();
+  const folders = await listNestFolders(c.req.param("nestId")!, {
+    ...(q.folder !== undefined ? { folder: q.folder } : {}),
+    ...(q.recursive === "0" || q.recursive === "false" ? { recursive: false } : {}),
+  });
+  return c.json({ folders });
 });
 
 // GET /nests/:nestId/comment-counts

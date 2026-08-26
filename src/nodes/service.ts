@@ -14,6 +14,7 @@ import { rename, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
+import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
   AppError,
   NotFoundError,
@@ -45,7 +46,10 @@ import {
   listUserGrants,
   grantRoleForNode,
 } from "../governance/grants-service.js";
-import { getPendingChange } from "../governance/external-edit-service.js";
+import {
+  getPendingChange,
+  documentsWithSuggestions,
+} from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
 import { ANON_USER_ID, MAX_FOLDER_DEPTH } from "../shared/constants.js";
@@ -154,6 +158,43 @@ async function generatedSlug(
  */
 export function isIdUnderFolder(id: string, folder: string): boolean {
   return id.startsWith(`nodes/${folder}/`) || id.startsWith(`${folder}/`);
+}
+
+/**
+ * The folder a node id sits in ("" for the nest root). The storage root
+ * `nodes/` is not a user folder, so it is stripped — the UI's folderOfNode
+ * does the same, and the two must agree on what a folder path is.
+ */
+export function folderOfId(id: string): string {
+  const rel = folderPathOf(id);
+  const slash = rel.lastIndexOf("/");
+  return slash > 0 ? rel.slice(0, slash) : "";
+}
+
+/**
+ * Refuse a folder path that could climb out of the nest.
+ *
+ * The WRITE path slugifies every segment (folderToSegments), which collapses
+ * a traversal to a harmless `-`. Read paths cannot slugify: they have to
+ * match folders that already exist on disk, verbatim. So the check is
+ * explicit here instead. `..` never names a real folder, so refusing it
+ * costs nothing and does not depend on the engine also catching it.
+ */
+export function assertSafeFolder(folder: string): void {
+  if (folder.split(/[/\\]/).some((seg) => seg === "..")) {
+    throw new ValidationError(
+      `Invalid folder "${folder}": path traversal ("..") is not allowed.`,
+    );
+  }
+}
+
+/**
+ * Strip the `nodes/` storage root from a folder path — the folder twin of
+ * folderOfId. `nodes` itself is the nest root, which is "" to a caller.
+ */
+export function folderPathOf(path: string): string {
+  if (path === "nodes") return "";
+  return path.startsWith("nodes/") ? path.slice(6) : path;
 }
 
 /**
@@ -406,6 +447,26 @@ export async function resolveAuthorship(
   return result;
 }
 
+/**
+ * Does the installed engine's `context_list` understand a `folder` scope?
+ *
+ * Asked of the published JSON Schema rather than by sending the key and hoping:
+ * zod strips unknown keys, so an older engine would answer a folder request
+ * with the WHOLE vault and look like it worked. Memoised — the engine cannot
+ * change under a running process.
+ */
+let folderScopeSupported: boolean | null = null;
+function engineScopesFolders(): boolean {
+  if (folderScopeSupported === null) {
+    const op = engineApi.getOperation("context_list");
+    const properties = op
+      ? ((inputJsonSchema(op) as { properties?: Record<string, unknown> }).properties ?? {})
+      : {};
+    folderScopeSupported = "folder" in properties;
+  }
+  return folderScopeSupported;
+}
+
 export interface ListNodesFilters {
   /** One type, or several (e.g. runnable types) to keep. */
   type?: string | readonly string[];
@@ -420,6 +481,12 @@ export interface ListNodesFilters {
    */
   approvedOnly?: boolean;
   limit?: number;
+  /**
+   * Keep only documents sitting DIRECTLY in this folder ("" = the nest root).
+   * One level, not the subtree: it is what a lazily-expanded folder row asks
+   * for, and the point is to not pay for documents nobody has opened yet.
+   */
+  folder?: string;
 }
 
 /**
@@ -509,6 +576,7 @@ export async function listNodesForCaller(
   userId: string,
   filters: ListNodesFilters = {}
 ): Promise<NodeResponse[]> {
+  if (filters.folder !== undefined) assertSafeFolder(filters.folder);
   const { versions: versionManager } = await engineCache.get(nestId);
   const userEmail = await resolveCallerEmail(userId);
 
@@ -520,6 +588,14 @@ export async function listNodesForCaller(
   // `full` because the governance work below gates and renders these documents:
   // a summary would force a second read of every file. `limit` is deliberately
   // NOT passed — it applies after access filtering, further down.
+  //
+  // A `folder` scope goes to the operation when the engine understands it,
+  // which narrows the CRAWL — the engine reads only that directory instead of
+  // the whole vault. An older engine SILENTLY IGNORES an unknown key (zod
+  // strips it) and would hand back everything, so the catalog is checked
+  // rather than the parameter simply being sent; the JS filter below is what
+  // keeps the result correct either way.
+  const scopeInEngine = filters.folder !== undefined && engineScopesFolders();
   const { documents } = await engineApi.run<{
     documents: Array<{ id: string; frontmatter: ContextNode["frontmatter"]; body: string }>;
   }>(
@@ -528,6 +604,9 @@ export async function listNodesForCaller(
       ...(filters.type ? { type: filters.type } : {}),
       ...(filters.tag ? { tag: filters.tag } : {}),
       ...(filters.status ? { status: filters.status } : {}),
+      ...(scopeInEngine
+        ? { folder: filters.folder ? `nodes/${filters.folder}` : "nodes", recursive: false }
+        : {}),
       // Unlike the CLI and mcp-server, a retired node stays in this listing:
       // here it is an unpublished document its stewards may still need to act
       // on, not one removed from retrieval. An imported vault carrying
@@ -537,7 +616,15 @@ export async function listNodesForCaller(
     },
     await opContext(nestId, userEmail),
   );
-  const nodes: ContextNode[] = documents.map((d) => ({
+  // Narrow BEFORE the access gate and enrichment below — that is the whole
+  // saving, since both cost per surviving document. Still applied even when
+  // the engine already scoped the crawl: it is the correctness guarantee, and
+  // on a scoped crawl there is nothing left for it to drop.
+  const scoped =
+    filters.folder === undefined
+      ? documents
+      : documents.filter((d) => folderOfId(d.id) === filters.folder);
+  const nodes: ContextNode[] = scoped.map((d) => ({
     id: d.id,
     filePath: "",
     rawContent: "",
@@ -586,6 +673,16 @@ export async function listNodesForCaller(
   // access filtering, or a node dropped for permissions would come out of the
   // caller's quota.
   if (filters.limit) accessible = accessible.slice(0, filters.limit);
+
+  // Two whole-nest reads instead of per-node ones: display status cost a DB
+  // round trip per document and the pending-change probe a directory glob.
+  // Skipped on the approved-only path, which reads neither.
+  const [displayStatuses, driftedDocs] = approvedVersions
+    ? [null, null]
+    : await Promise.all([
+        versions.getDisplayStatuses(nestId),
+        documentsWithSuggestions(nestId),
+      ]);
 
   // Author + collaborators for exactly the post-filter set — two batched
   // queries for the whole list (see resolveAuthorship), never per-node.
@@ -641,17 +738,21 @@ export async function listNodesForCaller(
         return r;
       }
 
+      // Only documents the walk found a staged suggestion for can have a
+      // pending change, so the rest skip the read entirely.
       let pending: Awaited<ReturnType<typeof getPendingChange>> = null;
-      try {
-        pending = await getPendingChange(nestId, doc.id);
-      } catch {
-        pending = null;
+      if (driftedDocs?.has(doc.id)) {
+        try {
+          pending = await getPendingChange(nestId, doc.id);
+        } catch {
+          pending = null;
+        }
       }
       if (pending) {
         r.pendingChange = pending;
         r.status = "external_edit_pending";
       } else {
-        r.status = await versions.getDisplayStatus(nestId, r.id);
+        r.status = displayStatuses?.get(r.id) ?? "draft";
       }
       return r;
     })
@@ -660,6 +761,216 @@ export async function listNodesForCaller(
   return enriched;
 }
 
+/** A folder of documents, with direct and subtree counts. */
+export interface FolderNode {
+  path: string;
+  count: number;
+  total: number;
+}
+
+/** Roll subtree totals up from per-folder direct counts. */
+function withSubtreeTotals(
+  direct: Array<{ path: string; count: number }>,
+): FolderNode[] {
+  return direct
+    .map(({ path, count }) => ({
+      path,
+      count,
+      total: direct.reduce(
+        (sum, f) =>
+          f.path === path || f.path.startsWith(`${path}/`) ? sum + f.count : sum,
+        0,
+      ),
+    }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/**
+ * The nest's folders, WITHOUT reading any document.
+ *
+ * A navigable tree only needs directory names, and `context_folders` answers
+ * that from directory entries alone. The fallback derives the same shape from
+ * the document ids, which costs a full crawl — it exists only for an engine
+ * that predates the operation, and drops away once the pin is bumped.
+ *
+ * `folder` is a community folder path ("" = nest root), NOT an id prefix; the
+ * `nodes/` storage root is added here so callers keep speaking one dialect.
+ *
+ * No per-caller narrowing: this is a whole-nest view, and the nest middleware
+ * already withholds those from a share grantee (same rule as /overview), so
+ * everyone who reaches this handler may see the whole tree.
+ */
+export async function listNestFolders(
+  nestId: string,
+  opts: { folder?: string; recursive?: boolean } = {},
+): Promise<FolderNode[]> {
+  if (opts.folder !== undefined) assertSafeFolder(opts.folder);
+  const { storage } = await engineCache.get(nestId);
+  const base = opts.folder ? `nodes/${opts.folder}` : "nodes";
+
+  let direct: Array<{ path: string; count: number }>;
+  // Catalog lookup, not a method probe: this runs the same operation the CLI
+  // and mcp-server do, and an older engine simply doesn't publish it.
+  if (engineApi.getOperation("context_folders")) {
+    const { folders } = await engineApi.run<{
+      folders: Array<{ path: string; count: number }>;
+    }>(
+      "context_folders",
+      {
+        folder: base,
+        ...(opts.recursive === false ? { recursive: false } : {}),
+      },
+      await opContext(nestId, ""),
+    );
+    direct = folders.map((f) => ({ path: folderPathOf(f.path), count: f.count }));
+  } else {
+    const docs = await storage.discoverDocuments({ includeRetired: true });
+    const counts = new Map<string, number>();
+    for (const d of docs) {
+      const f = folderOfId(d.id);
+      if (!f) continue;
+      counts.set(f, (counts.get(f) ?? 0) + 1);
+      // Ancestors with no document of their own still need a row.
+      let parent = f;
+      while (parent.includes("/")) {
+        parent = parent.slice(0, parent.lastIndexOf("/"));
+        if (!counts.has(parent)) counts.set(parent, 0);
+      }
+    }
+    direct = [...counts].map(([path, count]) => ({ path, count }));
+  }
+
+  const scope = opts.folder ?? "";
+  const inScope = direct.filter((f) => {
+    if (scope && !f.path.startsWith(`${scope}/`)) return false;
+    if (opts.recursive === false) {
+      const rel = scope ? f.path.slice(scope.length + 1) : f.path;
+      return !rel.includes("/");
+    }
+    return true;
+  });
+  return withSubtreeTotals(inScope);
+}
+
+/**
+ * Everything the document list needs to describe the WHOLE nest without
+ * listing it: folder tree, counts, tags, types, authors, statuses.
+ *
+ * A folder-scoped listing only returns one level, so without this the tag bar,
+ * filter dropdowns and stat tiles would silently describe the handful of
+ * documents the user happened to expand. Costs no extra I/O — discovery is
+ * already cached, and statuses/authorship are batched nest-wide reads.
+ */
+export interface NestCensus {
+  total: number;
+  /** Every folder in the nest, with direct and subtree document counts. */
+  folders: Array<{ path: string; count: number; total: number }>;
+  tags: Record<string, number>;
+  types: Record<string, number>;
+  statuses: Record<string, number>;
+  authors: string[];
+  /** Documents edited in the last 7 days — the Overview stat tile. */
+  editedLast7d: number;
+  /** Newest-first, capped: the "Recently edited" strip. */
+  recent: Array<{ id: string; title: string; type: string; updated_at?: string }>;
+}
+
+const RECENT_LIMIT = 3;
+
+export async function nestCensus(
+  nestId: string,
+  userId: string,
+): Promise<NestCensus> {
+  const userEmail = await resolveCallerEmail(userId);
+  const { documents } = await engineApi.run<{
+    documents: Array<{ id: string; frontmatter: ContextNode["frontmatter"] }>;
+  }>(
+    "context_list",
+    { include_retired: true, full: true },
+    await opContext(nestId, userEmail),
+  );
+
+  // Same gate as the listing, so the counts describe what this caller can
+  // actually reach rather than what is on disk.
+  const visible = await filterAccessible(nestId, userId, userEmail, documents);
+
+  const tags: Record<string, number> = {};
+  const types: Record<string, number> = {};
+  const direct = new Map<string, number>();
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  let editedLast7d = 0;
+
+  for (const d of visible) {
+    const fm = d.frontmatter;
+    types[fm.type || "document"] = (types[fm.type || "document"] || 0) + 1;
+    for (const t of fm.tags || []) tags[String(t)] = (tags[String(t)] || 0) + 1;
+    const folder = folderOfId(d.id);
+    if (folder) direct.set(folder, (direct.get(folder) || 0) + 1);
+    const edited = Date.parse(String(fm.updated_at || ""));
+    if (!Number.isNaN(edited) && edited >= cutoff) editedLast7d++;
+  }
+
+  // Every folder, including containers holding only subfolders — a level with
+  // no document of its own still has to be expandable.
+  const paths = new Set<string>();
+  for (const folder of direct.keys()) {
+    const segs = folder.split("/");
+    for (let i = 1; i <= segs.length; i++) paths.add(segs.slice(0, i).join("/"));
+  }
+  // Same roll-up the folders endpoint uses — the two describe the same tree
+  // and must not drift.
+  const folders = withSubtreeTotals(
+    [...paths].map((path) => ({ path, count: direct.get(path) ?? 0 })),
+  );
+
+  const statusMap = await versions.getDisplayStatuses(nestId);
+  const statuses: Record<string, number> = {};
+  for (const d of visible) {
+    const st = statusMap.get(d.id) ?? "draft";
+    statuses[st] = (statuses[st] || 0) + 1;
+  }
+
+  const authorship = await resolveAuthorship(
+    nestId,
+    visible.map((d) => ({
+      id: d.id,
+      frontmatterAuthor: d.frontmatter.author ?? null,
+    })),
+  );
+  const authors = [
+    ...new Set(
+      [...authorship.values()]
+        .map((a) => a.author)
+        .filter((a): a is string => !!a),
+    ),
+  ].sort((a, b) => a.localeCompare(b));
+
+  const recent = visible
+    .filter((d) => d.frontmatter.updated_at)
+    .sort((a, b) =>
+      String(b.frontmatter.updated_at).localeCompare(
+        String(a.frontmatter.updated_at),
+      ),
+    )
+    .slice(0, RECENT_LIMIT)
+    .map((d) => ({
+      id: d.id,
+      title: String(d.frontmatter.title ?? ""),
+      type: d.frontmatter.type || "document",
+      updated_at: d.frontmatter.updated_at,
+    }));
+
+  return {
+    total: visible.length,
+    folders,
+    tags,
+    types,
+    statuses,
+    authors,
+    editedLast7d,
+    recent,
+  };
+}
 /** Email-keyed wrapper for callers that don't have userId in hand (MCP tools). */
 export async function listNodesForCallerByEmail(
   nestId: string,

@@ -7,8 +7,8 @@
  * scan / list / approve / reject.
  */
 
-import { readFile } from "fs/promises";
-import { join } from "path";
+import { readFile, readdir } from "fs/promises";
+import { join, relative, sep } from "path";
 import {
   detectDrift,
   stageSuggestion,
@@ -218,6 +218,49 @@ export async function scanNestForDrift(
   );
   const staged = results.filter((r) => r?.created).length;
   return { scanned: docs.length, staged };
+}
+
+/**
+ * Document ids with at least one staged suggestion, from ONE directory walk
+ * instead of a glob per document — a listing was opening a `_suggestions`
+ * directory for all 400 nodes of a nest that usually has zero drift.
+ *
+ * Layout is `{docDir}/_suggestions/{docName}/{id}.meta.yaml` (engine
+ * NestStorage.suggestionDir); `_archive` holds resolved ones, not staged.
+ */
+export async function documentsWithSuggestions(
+  nestId: string,
+): Promise<Set<string>> {
+  const root = resolveNestPath(nestId);
+  const ids = new Set<string>();
+  let entries;
+  try {
+    entries = await readdir(root, { recursive: true, withFileTypes: true });
+  } catch (err: any) {
+    // A missing folder genuinely means nothing is staged. Anything else
+    // (permissions, descriptor exhaustion) is NOT that, and this one walk
+    // covers every document — so a swallowed failure drops pending-edit
+    // detection for the WHOLE nest, where the per-node reads it replaced
+    // lost one document each. Still degrade rather than fail the listing:
+    // drift badges are advisory, and a transient fs error should not 500 a
+    // nest. Logged so the difference is visible instead of silent.
+    if (err?.code !== "ENOENT") {
+      console.error("[external-edit] suggestion scan failed", nestId, err);
+    }
+    return ids;
+  }
+  for (const e of entries) {
+    if (!e.isFile() || !e.name.endsWith(".meta.yaml")) continue;
+    const dir = (e as any).parentPath ?? (e as any).path ?? root;
+    const rel = relative(root, dir).split(sep).join("/");
+    const segs = rel.split("/");
+    const marker = segs.lastIndexOf("_suggestions");
+    // The doc name is the segment right after `_suggestions`; anything deeper
+    // is the archive.
+    if (marker === -1 || segs.length !== marker + 2) continue;
+    ids.add([...segs.slice(0, marker), segs[marker + 1]].filter(Boolean).join("/"));
+  }
+  return ids;
 }
 
 /** Get the latest pending external edit for a document, if any.

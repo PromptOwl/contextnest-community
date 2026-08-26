@@ -42,6 +42,7 @@ import {
   moveNode,
   deleteNode,
   listNodesForCaller,
+  nestCensus,
   getNodeForCaller,
   resolveAuthorship,
   toNodeResponse,
@@ -114,7 +115,13 @@ nodeRoutes.get("/", async (c) => {
       : {}),
     // Ignore junk rather than 400 — a bad ?limit should not fail a listing.
     ...(limit !== undefined && Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+    // Present (even as "") = one folder level only, for the lazily-expanded
+    // document tree. Absent = the whole nest, as every existing caller expects.
+    ...(q.folder !== undefined ? { folder: q.folder } : {}),
   });
+  // The nest-wide shape is NOT bundled here: it describes the whole nest
+  // whatever level was asked for, so bundling recomputed it on every folder
+  // expand. It has its own endpoint and its own cache entry.
   return c.json({ count: nodes.length, nodes });
 });
 
