@@ -23,7 +23,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  ArrowLeft, FileWarning, RefreshCw,
+  ArrowLeft, FileWarning, RefreshCw, FolderInput,
   Loader2,
   Save,
   AlertCircle,
@@ -732,6 +732,17 @@ export function DocumentEditor({
         .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
         .join(" "),
     }));
+  }, [isNew, nodeId]);
+
+  // Move to folder, from the open document — the same move the list row
+  // offers, so nobody has to navigate back out to relocate what they're
+  // reading. `null` = dialog closed.
+  const [moveTo, setMoveTo] = useState<string | null>(null);
+  const [moving, setMoving] = useState(false);
+  const currentFolder = useMemo(() => {
+    if (isNew || !nodeId) return "";
+    const rel = nodeId.startsWith("nodes/") ? nodeId.slice(6) : nodeId;
+    return rel.split("/").slice(0, -1).join("/");
   }, [isNew, nodeId]);
 
   // Docs in this nest that wiki-link to this one ("what links here").
@@ -1665,6 +1676,13 @@ export function DocumentEditor({
                     "Link copied — recipient needs access to this nest",
                   );
                 },
+              });
+            if (!isNew && canEditContent && !isLocked)
+              moreActions.push({
+                label: "Move to folder",
+                icon: FolderInput,
+                testId: "document-editor-move",
+                onSelect: () => setMoveTo(currentFolder),
               });
             // Share THIS doc first — it's the narrower, more common ask.
             // Meaningless on an unsaved doc: there's no node id to grant on.
@@ -2879,6 +2897,74 @@ export function DocumentEditor({
         excludeNodeId={isNew ? undefined : nodeId}
         onSelect={handleDocLinkInsert}
       />
+
+      <Dialog
+        open={moveTo !== null}
+        onOpenChange={(open) => {
+          if (!open && !moving) setMoveTo(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle>Move to folder</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Move <strong>{title || nodeId}</strong> to another folder. Version
+            history, review state, and [[wiki links]] follow the document.
+          </p>
+          <Select
+            value={moveTo === "" ? "__root__" : (moveTo ?? "__root__")}
+            onValueChange={(v) => setMoveTo(v === "__root__" ? "" : v)}
+          >
+            <SelectTrigger data-testid="document-editor-move-select">
+              <SelectValue placeholder="Choose a folder" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__root__">Nest root</SelectItem>
+              {folderOptions.map((f) => (
+                <SelectItem key={f} value={f}>
+                  {f}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <DialogFooter>
+            <Button variant="ghost" disabled={moving} onClick={() => setMoveTo(null)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={moving || moveTo === null || moveTo === currentFolder}
+              data-testid="document-editor-move-confirm"
+              onClick={async () => {
+                if (moveTo === null) return;
+                setMoving(true);
+                try {
+                  const { node: moved } = await api.moveNode(nestId, nodeId, moveTo);
+                  toast.success(
+                    moveTo ? `Moved to ${moveTo}` : "Moved to nest root",
+                  );
+                  setMoveTo(null);
+                  // The move rewrites the node id, so this editor's id (and
+                  // every breadcrumb entry pointing at it) is stale — leave
+                  // for the list, where the document shows in its new folder.
+                  onSaved?.(moved.id);
+                } catch (err: any) {
+                  toast.error(err?.message || "Move failed");
+                } finally {
+                  setMoving(false);
+                }
+              }}
+            >
+              {moving ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <FolderInput className="h-4 w-4 mr-2" />
+              )}
+              Move
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {showShareDoc && (
         <ShareTargetDialog
