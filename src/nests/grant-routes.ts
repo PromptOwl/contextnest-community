@@ -11,11 +11,23 @@ import { getDb } from "../db/client.js";
 import { ValidationError, ForbiddenError, NotFoundError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
-import { canManageStewards } from "../governance/stewardship-service.js";
+import {
+  canManageStewards,
+  resolveStewardsForNode,
+} from "../governance/stewardship-service.js";
+import { resolveTeamRolesForUser } from "../governance/teams-service.js";
+import { resolveNestAccess } from "../shared/access.js";
+import {
+  canEditWith,
+  collabPermToRole,
+  primaryRole,
+  type EffectiveRole,
+} from "../governance/roles.js";
 import {
   createGrant,
   listGrants,
   deleteGrant,
+  resolveNodeGrant,
   type GrantRole,
   type GrantTargetType,
 } from "../governance/grants-service.js";
@@ -49,6 +61,72 @@ async function resolveGrantee(email: string): Promise<string> {
   return id;
 }
 
+/**
+ * Refuse a share that would grant nothing. The recipient may already reach the
+ * target as the nest owner, a collaborator, a member of a team the nest is
+ * shared with, a steward assigned to it, or through a grant that already
+ * covers it — re-sharing then reads as a silent no-op.
+ *
+ * Scope matters: for a document, steward rows are resolved AGAINST THAT
+ * DOCUMENT (resolveUserRoles with nodeId), so a steward of some other document
+ * is not treated as already having access. A folder target has no document to
+ * resolve stewards against, so only the nest-wide roles (owner, collaborator,
+ * team) count there.
+ *
+ * Level matters too: viewer-tier access blocks a `read` share but not a
+ * `write` one.
+ */
+async function assertGrantAddsAccess(params: {
+  nestId: string;
+  email: string;
+  userId: string | null;
+  targetType: GrantTargetType;
+  target: string;
+  role: GrantRole;
+}): Promise<void> {
+  const { nestId, email, userId, targetType, target, role } = params;
+  const roles: EffectiveRole[] = [];
+  if (userId) {
+    const access = await resolveNestAccess(nestId, userId);
+    // Only real membership counts. resolveNestAccess also folds in the
+    // nest-shell read a steward or a public nest confers, and neither means
+    // this document is already reachable — a steward of some OTHER document
+    // sees the nest, not this node, and a public reader sees approved
+    // versions only, never the drafts a grant opens up.
+    if (access.ownerId === userId) roles.push("owner");
+    const collab = collabPermToRole(access.collaboratorPermission);
+    if (collab) roles.push(collab);
+    for (const teamRole of await resolveTeamRolesForUser(nestId, userId)) {
+      roles.push(teamRole as EffectiveRole);
+    }
+  }
+  // Steward rows are matched by email (they can be assigned before the person
+  // registers) and only when they cover THIS document. A folder has no node to
+  // resolve them against, so folder shares consider membership only.
+  if (targetType === "document") {
+    const stewards = await resolveStewardsForNode(nestId, target);
+    for (const s of stewards) {
+      if (s.steward.userEmail.toLowerCase() === email.toLowerCase()) {
+        roles.push(s.steward.role as EffectiveRole);
+      }
+    }
+  }
+  const covered = role === "write" ? canEditWith(roles) : roles.length > 0;
+  if (covered) {
+    const held = primaryRole(roles) ?? "existing";
+    throw new ValidationError(
+      `${email} already has ${held} access here, so this ${targetType} is already ${role === "write" ? "editable by" : "visible to"} them.`,
+    );
+  }
+  if (!userId) return;
+  const existing = await resolveNodeGrant(nestId, userId, target);
+  if (existing && (role === "read" || existing === "write")) {
+    throw new ValidationError(
+      `${email} has already been shared this ${targetType} (${existing === "write" ? "can edit" : "can view"}).`,
+    );
+  }
+}
+
 // POST /nests/:nestId/grants — share a document or folder with a person.
 grantRoutes.post("/", async (c) => {
   const nestId = c.req.param("nestId")!;
@@ -70,7 +148,21 @@ grantRoutes.post("/", async (c) => {
   if (!["read", "write"].includes(role)) {
     throw new ValidationError("role must be read | write");
   }
-  const userId = await resolveGrantee(body.email);
+  // Check before minting an invited user for an unknown address, so a refused
+  // share leaves no placeholder row behind.
+  const email = normalizeEmail(body.email);
+  const known = (await getDb().get("SELECT id FROM users WHERE LOWER(email) = ?", [
+    email,
+  ])) as { id: string } | undefined;
+  await assertGrantAddsAccess({
+    nestId,
+    email,
+    userId: known?.id ?? null,
+    targetType,
+    target,
+    role,
+  });
+  const userId = known?.id ?? (await resolveGrantee(body.email));
   const grant = await createGrant({
     nestId,
     targetType,
