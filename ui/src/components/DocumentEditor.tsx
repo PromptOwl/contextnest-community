@@ -953,11 +953,34 @@ export function DocumentEditor({
     if (!versionData) await loadVersions();
   }, [versionData, loadVersions]);
 
-  const compareWith = useCallback((v: number | null) => {
-    setCompareVersion(v);
-    // Always reopen compare in the default Source view, and reset on exit.
-    setDiffRendered(false);
-  }, []);
+  // The version list carries metadata only — getVersions returns content:""
+  // because bodies live on disk — so the compared body has to be fetched, or
+  // the diff runs against an empty base and paints the whole document green.
+  const [compareBody, setCompareBody] = useState<{
+    version: number;
+    content: string;
+  } | null>(null);
+  const compareWith = useCallback(
+    async (v: number | null) => {
+      setCompareVersion(v);
+      // Always reopen compare in the default Source view, and reset on exit.
+      setDiffRendered(false);
+      setCompareBody(null);
+      if (v == null) return;
+      try {
+        const { content: body } = await api.getNodeVersionContent(
+          nestId,
+          nodeId,
+          v,
+        );
+        setCompareBody({ version: v, content: body ?? "" });
+      } catch (e: any) {
+        toast.error(e?.message || `Failed to load version ${v}`);
+        setCompareVersion(null);
+      }
+    },
+    [nestId, nodeId],
+  );
   // A pending-review doc is LOCKED: the server rejects edits/deletes with
   // 423 while a review is open (nodes/routes). Plain drafts stay editable —
   // only status==='pending_review' locks, so the editor flows normally until
@@ -1602,7 +1625,7 @@ export function DocumentEditor({
                 <DropdownMenuLabel>Diff current against…</DropdownMenuLabel>
                 {compareVersion != null && (
                   <>
-                    <DropdownMenuItem onClick={() => compareWith(null)}>
+                    <DropdownMenuItem onClick={() => void compareWith(null)}>
                       <X className="h-4 w-4 mr-2" /> Exit compare
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
@@ -1622,7 +1645,7 @@ export function DocumentEditor({
                     .map((v) => (
                       <DropdownMenuItem
                         key={v.version}
-                        onClick={() => compareWith(v.version)}
+                        onClick={() => void compareWith(v.version)}
                       >
                         {compareVersion === v.version ? (
                           <Check className="h-4 w-4 mr-2" />
@@ -2501,16 +2524,17 @@ export function DocumentEditor({
                           variant="ghost"
                           size="sm"
                           className="h-7"
-                          onClick={() => compareWith(null)}
+                          onClick={() => void compareWith(null)}
                         >
                           <X className="h-4 w-4 mr-1" /> Exit diff
                         </Button>
                       </div>
                     </div>
                     {(() => {
-                      const past = versionData?.versions.find(
-                        (v) => v.version === compareVersion,
-                      );
+                      const past =
+                        compareBody && compareBody.version === compareVersion
+                          ? compareBody
+                          : null;
                       if (!past) {
                         return (
                           <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 border rounded-lg">
