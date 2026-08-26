@@ -70,6 +70,23 @@ describe("folder listing endpoint", () => {
     ]);
   });
 
+  it("refuses a folder that would climb out of the nest", async () => {
+    // The write path slugifies a traversal away; read paths take the folder
+    // verbatim to match what is on disk, so the check has to be explicit and
+    // must not rely on the engine happening to catch it downstream.
+    for (const bad of ["../..", "gtm/../../etc", "..\\.."]) {
+      const listing = await jsonRequest(
+        app, "GET",
+        `/nests/${nestId}/nodes?folder=${encodeURIComponent(bad)}`,
+        undefined, owner.apiKey,
+      );
+      expect(listing.status, `listing accepted ${bad}`).toBe(400);
+
+      const tree = await folders(`?folder=${encodeURIComponent(bad)}`);
+      expect(tree.status, `folder tree accepted ${bad}`).toBe(400);
+    }
+  });
+
   it("is withheld from a share grantee, like every whole-nest view", async () => {
     const guest = await registerUser(app, "guest@folders2.test");
     // A grant on ONE document. It buys the document, not the shape of the

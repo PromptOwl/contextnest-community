@@ -236,8 +236,18 @@ export async function documentsWithSuggestions(
   let entries;
   try {
     entries = await readdir(root, { recursive: true, withFileTypes: true });
-  } catch {
-    return ids; // no nest folder yet — nothing staged by definition
+  } catch (err: any) {
+    // A missing folder genuinely means nothing is staged. Anything else
+    // (permissions, descriptor exhaustion) is NOT that, and this one walk
+    // covers every document — so a swallowed failure drops pending-edit
+    // detection for the WHOLE nest, where the per-node reads it replaced
+    // lost one document each. Still degrade rather than fail the listing:
+    // drift badges are advisory, and a transient fs error should not 500 a
+    // nest. Logged so the difference is visible instead of silent.
+    if (err?.code !== "ENOENT") {
+      console.error("[external-edit] suggestion scan failed", nestId, err);
+    }
+    return ids;
   }
   for (const e of entries) {
     if (!e.isFile() || !e.name.endsWith(".meta.yaml")) continue;

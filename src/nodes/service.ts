@@ -172,6 +172,23 @@ export function folderOfId(id: string): string {
 }
 
 /**
+ * Refuse a folder path that could climb out of the nest.
+ *
+ * The WRITE path slugifies every segment (folderToSegments), which collapses
+ * a traversal to a harmless `-`. Read paths cannot slugify: they have to
+ * match folders that already exist on disk, verbatim. So the check is
+ * explicit here instead. `..` never names a real folder, so refusing it
+ * costs nothing and does not depend on the engine also catching it.
+ */
+export function assertSafeFolder(folder: string): void {
+  if (folder.split(/[/\\]/).some((seg) => seg === "..")) {
+    throw new ValidationError(
+      `Invalid folder "${folder}": path traversal ("..") is not allowed.`,
+    );
+  }
+}
+
+/**
  * Strip the `nodes/` storage root from a folder path — the folder twin of
  * folderOfId. `nodes` itself is the nest root, which is "" to a caller.
  */
@@ -559,6 +576,7 @@ export async function listNodesForCaller(
   userId: string,
   filters: ListNodesFilters = {}
 ): Promise<NodeResponse[]> {
+  if (filters.folder !== undefined) assertSafeFolder(filters.folder);
   const { versions: versionManager } = await engineCache.get(nestId);
   const userEmail = await resolveCallerEmail(userId);
 
@@ -786,6 +804,7 @@ export async function listNestFolders(
   nestId: string,
   opts: { folder?: string; recursive?: boolean } = {},
 ): Promise<FolderNode[]> {
+  if (opts.folder !== undefined) assertSafeFolder(opts.folder);
   const { storage } = await engineCache.get(nestId);
   const base = opts.folder ? `nodes/${opts.folder}` : "nodes";
 
@@ -898,13 +917,11 @@ export async function nestCensus(
     const segs = folder.split("/");
     for (let i = 1; i <= segs.length; i++) paths.add(segs.slice(0, i).join("/"));
   }
-  const folders = [...paths].sort().map((path) => {
-    let total = 0;
-    for (const [f, n] of direct) {
-      if (f === path || f.startsWith(`${path}/`)) total += n;
-    }
-    return { path, count: direct.get(path) ?? 0, total };
-  });
+  // Same roll-up the folders endpoint uses — the two describe the same tree
+  // and must not drift.
+  const folders = withSubtreeTotals(
+    [...paths].map((path) => ({ path, count: direct.get(path) ?? 0 })),
+  );
 
   const statusMap = await versions.getDisplayStatuses(nestId);
   const statuses: Record<string, number> = {};
