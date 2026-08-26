@@ -91,3 +91,26 @@ export function visibleDocuments(input: VisibleDocumentsInput): any[] {
     return matchesFilters(n, { search: input.search }) || input.contentHits.has(n.id);
   });
 }
+
+/**
+ * Is the Documents tab genuinely empty, or does it just have nothing at THIS
+ * folder level?
+ *
+ * Under lazy loading the two are not the same. An imported nest routinely
+ * keeps every document one level down, so the root level holds none — and
+ * treating that as "empty" replaced a browsable folder tree with a
+ * drag-files-here dropzone over a nest full of content. The tree is the thing
+ * worth showing; only a filter that matched nothing, or a nest with no folders
+ * at all, is actually empty.
+ */
+export function documentsTabIsEmpty(input: {
+  /** Documents visible after filtering at the current level. */
+  visibleCount: number;
+  /** Folders known to exist anywhere in the nest. */
+  folderCount: number;
+  filtering: boolean;
+}): boolean {
+  if (input.visibleCount > 0) return false;
+  // A filter that matched nothing IS empty — the folder tree would be noise.
+  return input.filtering || input.folderCount === 0;
+}

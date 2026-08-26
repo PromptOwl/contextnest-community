@@ -189,6 +189,19 @@ export function assertSafeFolder(folder: string): void {
 }
 
 /**
+ * The id prefix this nest's documents actually carry.
+ *
+ * A nest created in-app keeps the engine's structured layout, so every id
+ * begins `nodes/`. A nest IMPORTED from a folder keeps that folder's own
+ * layout and carries no prefix at all — assuming `nodes/` there scopes every
+ * read to a directory that does not exist, and the caller sees an empty nest.
+ */
+export async function storagePrefix(nestId: string): Promise<string> {
+  const { storage } = await engineCache.get(nestId);
+  return (await storage.detectLayout()) === "structured" ? "nodes" : "";
+}
+
+/**
  * Strip the `nodes/` storage root from a folder path — the folder twin of
  * folderOfId. `nodes` itself is the nest root, which is "" to a caller.
  */
@@ -596,6 +609,7 @@ export async function listNodesForCaller(
   // rather than the parameter simply being sent; the JS filter below is what
   // keeps the result correct either way.
   const scopeInEngine = filters.folder !== undefined && engineScopesFolders();
+  const scopePrefix = scopeInEngine ? await storagePrefix(nestId) : "";
   const { documents } = await engineApi.run<{
     documents: Array<{ id: string; frontmatter: ContextNode["frontmatter"]; body: string }>;
   }>(
@@ -605,7 +619,10 @@ export async function listNodesForCaller(
       ...(filters.tag ? { tag: filters.tag } : {}),
       ...(filters.status ? { status: filters.status } : {}),
       ...(scopeInEngine
-        ? { folder: filters.folder ? `nodes/${filters.folder}` : "nodes", recursive: false }
+        ? {
+            folder: [scopePrefix, filters.folder].filter(Boolean).join("/"),
+            recursive: false,
+          }
         : {}),
       // Unlike the CLI and mcp-server, a retired node stays in this listing:
       // here it is an unpublished document its stewards may still need to act
@@ -806,7 +823,8 @@ export async function listNestFolders(
 ): Promise<FolderNode[]> {
   if (opts.folder !== undefined) assertSafeFolder(opts.folder);
   const { storage } = await engineCache.get(nestId);
-  const base = opts.folder ? `nodes/${opts.folder}` : "nodes";
+  const prefix = await storagePrefix(nestId);
+  const base = [prefix, opts.folder].filter(Boolean).join("/");
 
   let direct: Array<{ path: string; count: number }>;
   // Catalog lookup, not a method probe: this runs the same operation the CLI
