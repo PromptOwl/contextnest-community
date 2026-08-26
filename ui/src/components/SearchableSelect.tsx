@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import {
   Command,
@@ -16,16 +16,15 @@ import { cn } from "@/lib/utils";
  * wrong interaction (every document in a nest, every tag). A plain `<Select>`
  * can't host a search field: its own typeahead swallows the keystrokes.
  *
- * The trigger renders ONE truncated line whatever the option looks like in the
- * list, so a two-line option (title + id) can't wrap the closed control.
+ * The list is pinned to the field's width (measured, not content-driven) and a
+ * long label wraps inside it, so neither the closed control nor the open list
+ * can grow past the form.
  */
 
 export interface SearchableOption {
   value: string;
-  /** Primary line, and what search matches on (with `value`). */
+  /** The line shown in the list and, truncated, in the closed control. */
   label: string;
-  /** Secondary line in the list only — an id, a path, a count. */
-  hint?: string;
 }
 
 export function SearchableSelect({
@@ -50,12 +49,24 @@ export function SearchableSelect({
   testId?: string;
 }) {
   const [open, setOpen] = useState(false);
+  // Measured on open. `--radix-popover-trigger-width` is not dependable across
+  // Radix versions, and without a fixed width the list sizes to its longest
+  // item and spills out of the dialog.
+  const [width, setWidth] = useState<number>();
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const selected = options.find((o) => o.value === value);
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        if (next) setWidth(triggerRef.current?.offsetWidth);
+        setOpen(next);
+      }}
+    >
       <PopoverTrigger asChild>
         <button
+          ref={triggerRef}
           id={id}
           type="button"
           role="combobox"
@@ -75,16 +86,13 @@ export function SearchableSelect({
           <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
         </button>
       </PopoverTrigger>
-      <PopoverContent
-        className="w-[--radix-popover-trigger-width] p-0"
-        align="start"
-      >
+      <PopoverContent className="p-0" align="start" style={{ width }}>
         <Command
-          // Match on the hint too: a document is often easier to find by its
-          // path than by its title.
+          // `value` is the id/path — searchable even though it is not shown,
+          // so a remembered path still finds the document.
           filter={(itemValue, search) => {
             const o = options.find((x) => x.value === itemValue);
-            const hay = `${o?.label ?? ""} ${o?.hint ?? ""} ${itemValue}`.toLowerCase();
+            const hay = `${o?.label ?? ""} ${itemValue}`.toLowerCase();
             return hay.includes(search.toLowerCase()) ? 1 : 0;
           }}
         >
@@ -96,6 +104,7 @@ export function SearchableSelect({
                 <CommandItem
                   key={o.value}
                   value={o.value}
+                  className="items-start"
                   onSelect={(next) => {
                     onChange(next);
                     setOpen(false);
@@ -107,14 +116,9 @@ export function SearchableSelect({
                       o.value === value ? "opacity-100" : "opacity-0",
                     )}
                   />
-                  <div className="min-w-0 flex flex-col">
-                    <span className="truncate">{o.label}</span>
-                    {o.hint && (
-                      <span className="truncate text-xs text-muted-foreground">
-                        {o.hint}
-                      </span>
-                    )}
-                  </div>
+                  <span className="min-w-0 whitespace-normal break-words">
+                    {o.label}
+                  </span>
                 </CommandItem>
               ))}
             </CommandGroup>

@@ -314,7 +314,6 @@ export function StewardModal({
                   options={nodes.map((n) => ({
                     value: n.id,
                     label: n.title || n.id,
-                    hint: n.id,
                   }))}
                   placeholder={
                     optionsLoading
@@ -323,7 +322,7 @@ export function StewardModal({
                         ? "No documents in this nest"
                         : "Select a document"
                   }
-                  searchPlaceholder="Search documents by title or path…"
+                  searchPlaceholder="Search documents…"
                   emptyText="No document matches that."
                 />
               )}
