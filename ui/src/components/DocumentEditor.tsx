@@ -63,6 +63,7 @@ import { AuthorshipChips } from "./AuthorshipChips";
 import { TableViewer } from "./TableViewer";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
+import { CodeHighlight } from "./CodeHighlight";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
@@ -986,6 +987,16 @@ export function DocumentEditor({
   // Feedback only — the schedule is saved exactly as typed either way (it's
   // opaque to this server; an external orchestrator parses it).
   const scheduleCheck = useMemo(() => validateSchedule(schedule), [schedule]);
+
+  // Live artifact preview — the draft body is HTML nobody has hosted yet, so
+  // it renders from srcDoc in the same opaque-origin sandbox the hosted
+  // ArtifactViewer uses. Debounced: an iframe reload per keystroke is unusable.
+  const [artifactPreview, setArtifactPreview] = useState("");
+  useEffect(() => {
+    if (!isArtifactDraft) return;
+    const t = setTimeout(() => setArtifactPreview(content), 400);
+    return () => clearTimeout(t);
+  }, [content, isArtifactDraft]);
 
   const addTag = useCallback(() => {
     // Split on whitespace/comma; strip leading "#" (stored bare).
@@ -2504,17 +2515,39 @@ export function DocumentEditor({
                     data-testid="document-editor-raw-markdown"
                   />
                 ) : isArtifactDraft ? (
-                  <textarea
-                    value={content}
-                    onChange={(e) => {
-                      setContent(e.target.value);
-                      setTouched(true);
-                    }}
-                    onBlur={saveOnBlur}
-                    placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
-                    spellCheck={false}
-                    className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
-                  />
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    <textarea
+                      value={content}
+                      onChange={(e) => {
+                        setContent(e.target.value);
+                        setTouched(true);
+                      }}
+                      onBlur={saveOnBlur}
+                      placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
+                      spellCheck={false}
+                      className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                    <div className="rounded-lg border overflow-hidden flex flex-col min-h-[360px]">
+                      <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                        Preview
+                      </div>
+                      {artifactPreview.trim() ? (
+                        <iframe
+                          srcDoc={artifactPreview}
+                          title="Artifact preview"
+                          // Same isolation as the hosted viewer: no
+                          // allow-same-origin → opaque origin, no host storage.
+                          sandbox="allow-scripts allow-popups allow-modals"
+                          className="w-full flex-1 bg-white"
+                          data-testid="artifact-draft-preview"
+                        />
+                      ) : (
+                        <p className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
+                          Paste HTML to see it render here.
+                        </p>
+                      )}
+                    </div>
+                  </div>
                 ) : (commentMode || mode === "view") &&
                   (isSourceOnly || !looksLikeHtml(content)) ? (
                   /* isSourceOnly bypasses the looksLikeHtml guard: a tool body
@@ -2532,14 +2565,9 @@ export function DocumentEditor({
                         <TableViewer nestId={nestId} nodeId={nodeId} csv={content} />
                       </div>
                     ) : effectiveType === "tool" ? (
-                      /* Code block, dependency-free: no syntax highlighting,
-                         just monospace + horizontal scroll. */
-                      <pre
-                        className="overflow-x-auto p-4 font-mono text-xs leading-relaxed whitespace-pre"
-                        data-testid="tool-source-view"
-                      >
-                        <code>{content}</code>
-                      </pre>
+                      /* Highlighted with lowlight (language auto-detected) —
+                         same tokens the editor's code blocks use. */
+                      <CodeHighlight code={content} data-testid="tool-source-view" />
                     ) : (
                       <DocumentViewer
                         content={content}
