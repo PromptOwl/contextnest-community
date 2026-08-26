@@ -6,6 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
+import { normalizeTagInput } from "../lib/tag-policy";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
 import { Button } from "@/components/ui/button";
@@ -1011,14 +1012,20 @@ export function DocumentEditor({
   }, [content, isArtifactDraft]);
 
   const addTag = useCallback(() => {
-    // Split on whitespace/comma; strip leading "#" (stored bare).
-    const tokens = tagInput
-      .split(/[\s,]+/)
-      .map((t) => t.trim().replace(/^#+/, ""))
-      .filter(Boolean);
-    if (tokens.length === 0) return;
+    // Split on whitespace/comma, then hold each token to the tag policy
+    // (length cap, letters/digits/._- only) and say what it changed.
+    const candidates = tagInput.split(/[\s,]+/).map(normalizeTagInput);
+    const notes = candidates.map((c) => c.note).filter(Boolean) as string[];
+    const accepted = candidates
+      .map((c) => c.tag)
+      .filter((t): t is string => !!t);
+    for (const note of notes) toast.warning(note);
+    if (accepted.length === 0) {
+      setTagInput("");
+      return;
+    }
     const next = [...tags];
-    for (const t of tokens) {
+    for (const t of accepted) {
       if (!next.includes(t)) next.push(t);
     }
     setTags(next);
@@ -2027,9 +2034,11 @@ export function DocumentEditor({
                           "inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs" +
                           (tagClickable ? " cursor-pointer hover:bg-secondary/80" : "")
                         }
-                        title={tagClickable ? `Filter nest by ${t}` : undefined}
+                        title={tagClickable ? `Filter nest by ${t}` : t}
                       >
-                        {t}
+                        {/* Long tags truncate rather than eat the row; the
+                            full value stays in the chip's title. */}
+                        <span className="truncate max-w-[16rem]">{t}</span>
                         {!fieldsDisabled && (
                           <button
                             type="button"
