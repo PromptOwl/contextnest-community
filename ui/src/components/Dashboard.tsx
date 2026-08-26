@@ -1106,9 +1106,17 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                           )}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <h3 className="font-medium truncate">{nest.name}</h3>
+                          {/* Truncated names hide the part that tells two
+                              similarly prefixed nests apart — keep the full
+                              value reachable on hover/focus. */}
+                          <h3 className="font-medium truncate" title={nest.name}>
+                            {nest.name}
+                          </h3>
                           {nest.description && (
-                            <p className="text-sm text-muted-foreground truncate mt-0.5">
+                            <p
+                              className="text-sm text-muted-foreground truncate mt-0.5"
+                              title={nest.description}
+                            >
                               {nest.description}
                             </p>
                           )}
