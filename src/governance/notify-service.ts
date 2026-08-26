@@ -13,6 +13,7 @@
 import { v4 as uuid } from "uuid";
 import { getDb } from "../db/client.js";
 import { describeNode } from "./title-resolver.js";
+import { permissionLabel } from "./roles.js";
 
 export interface Watcher {
   id: string;
@@ -199,7 +200,7 @@ export async function notifyNestInvite(params: {
         nestId,
         inviteeEmail.toLowerCase(),
         nestId,
-        `You were added to "${nestName}" as ${permission}`,
+        `You were added to "${nestName}" as ${permissionLabel(permission)}`,
         new Date().toISOString(),
       ],
     );
