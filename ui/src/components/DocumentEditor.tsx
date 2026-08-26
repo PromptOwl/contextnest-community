@@ -23,7 +23,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  ArrowLeft,
+  ArrowLeft, FileWarning, RefreshCw,
   Loader2,
   Save,
   AlertCircle,
@@ -774,6 +774,9 @@ export function DocumentEditor({
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The document couldn't be loaded (stale link, deleted doc, no access). The
+  // editor must not fall through to a blank, saveable document in that case.
+  const [loadFailed, setLoadFailed] = useState(false);
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
   const [touched, setTouched] = useState(false);
 
@@ -845,6 +848,7 @@ export function DocumentEditor({
   const loadNode = useCallback(async () => {
     if (isNew) return;
     setLoading(true);
+    setLoadFailed(false);
     try {
       const { node } = await qc.fetchQuery(reads.node(nestId, nodeId));
       // Coerce to strings — YAML frontmatter can parse `title: 123` as a
@@ -902,6 +906,7 @@ export function DocumentEditor({
       }
     } catch (err: any) {
       setError(err.message);
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -1350,6 +1355,34 @@ export function DocumentEditor({
       // Search failed; don't auto-create on top of error.
     }
   };
+
+  // A document that failed to load has nothing to edit. Rendering the editor
+  // anyway gave a stale or mistyped link a blank, saveable document, which
+  // quietly created a second document at that path.
+  if (!isNew && !loading && loadFailed) {
+    return (
+      <div className="mt-14 md:mt-0" data-testid="document-not-found">
+        <div className="max-w-xl mx-auto py-16 text-center space-y-4">
+          <FileWarning className="h-10 w-10 mx-auto text-muted-foreground" />
+          <h2 className="text-xl font-semibold">Document not found</h2>
+          <p className="text-sm text-muted-foreground">
+            {error ??
+              `Nothing lives at ${nodeId} in this nest — the link may be stale or the document may have been moved or deleted.`}
+          </p>
+          <div className="flex items-center justify-center gap-2">
+            <Button variant="outline" onClick={() => void loadNode()}>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Try again
+            </Button>
+            <Button onClick={onBack}>
+              <ArrowLeft className="h-4 w-4 mr-2" />
+              Back to documents
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Artifact nodes are hosted HTML, not markdown — render the sandboxed
   // viewer + annotation surface instead of the editor. Gated on a loaded node
