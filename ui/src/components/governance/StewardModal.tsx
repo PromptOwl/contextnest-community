@@ -37,6 +37,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { SearchableSelect } from "../SearchableSelect";
 import type { Steward, StewardshipScope } from "./StewardList";
 
 export type StewardRole = "editor" | "reviewer" | "viewer";
@@ -282,51 +283,48 @@ export function StewardModal({
                 {scope === "tag" ? "Tag" : scopeConfig[scope].label}
               </Label>
 
+              {/* Both target lists are searchable: a real nest has more
+                  documents and tags than anyone wants to scroll, and the
+                  trigger keeps the selection to one truncated line. */}
               {scope === "tag" ? (
-                <Select value={target} onValueChange={setTarget} disabled={loading || optionsLoading}>
-                  <SelectTrigger id="target">
-                    <SelectValue
-                      placeholder={
-                        optionsLoading
-                          ? "Loading tags..."
-                          : tags.length === 0
-                            ? "No tags in this nest"
-                            : "Select a tag"
-                      }
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {tags.map((t) => (
-                      <SelectItem key={t} value={t}>
-                        #{t}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <SearchableSelect
+                  id="target"
+                  testId="steward-tag-select"
+                  value={target}
+                  onChange={setTarget}
+                  disabled={loading || optionsLoading}
+                  options={tags.map((t) => ({ value: t, label: `#${t}` }))}
+                  placeholder={
+                    optionsLoading
+                      ? "Loading tags..."
+                      : tags.length === 0
+                        ? "No tags in this nest"
+                        : "Select a tag"
+                  }
+                  searchPlaceholder="Search tags…"
+                  emptyText="No tag matches that."
+                />
               ) : (
-                <Select value={target} onValueChange={setTarget} disabled={loading || optionsLoading}>
-                  <SelectTrigger id="target">
-                    <SelectValue
-                      placeholder={
-                        optionsLoading
-                          ? "Loading documents..."
-                          : nodes.length === 0
-                            ? "No documents in this nest"
-                            : "Select a document"
-                      }
-                    />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {nodes.map((n) => (
-                      <SelectItem key={n.id} value={n.id}>
-                        <div className="flex flex-col">
-                          <span>{n.title}</span>
-                          <span className="text-xs text-muted-foreground">{n.id}</span>
-                        </div>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <SearchableSelect
+                  id="target"
+                  testId="steward-document-select"
+                  value={target}
+                  onChange={setTarget}
+                  disabled={loading || optionsLoading}
+                  options={nodes.map((n) => ({
+                    value: n.id,
+                    label: n.title || n.id,
+                  }))}
+                  placeholder={
+                    optionsLoading
+                      ? "Loading documents..."
+                      : nodes.length === 0
+                        ? "No documents in this nest"
+                        : "Select a document"
+                  }
+                  searchPlaceholder="Search documents…"
+                  emptyText="No document matches that."
+                />
               )}
 
               <p className="text-xs text-muted-foreground">

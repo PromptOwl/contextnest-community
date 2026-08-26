@@ -8,11 +8,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
 import { visibleDocuments, documentsTabIsEmpty } from "../lib/visible-documents";
-import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
 import { folderGrantTarget } from "../lib/folder-target";
+import { checkFolderPath } from "../lib/folder-path";
 import { parseServerDate, formatServerDate } from "../lib/dates";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -455,24 +455,16 @@ export function NestView({
   const [newFolderPath, setNewFolderPath] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
 
-  // The ceiling counts folder segments only — the leaf document doesn't count.
-  const newFolderDepth = newFolderPath
-    .split("/")
-    .map((s) => s.trim())
-    .filter(Boolean).length;
-  const newFolderTooDeep = newFolderDepth > MAX_FOLDER_DEPTH;
-  // The server derives folder paths by slugifying to a-z0-9, so a name with
-  // none of those ("!!!", "...", or a purely non-Latin name) slugifies away and
-  // the starter doc silently lands in the nest root instead of a folder.
-  const newFolderUnusable =
-    !!newFolderPath.trim() && !/[a-z0-9]/i.test(newFolderPath);
+  // Depth, slugifiability, reserved names — the same rules the server applies,
+  // run as you type so the resulting path is visible before anything exists.
+  const newFolderCheck = checkFolderPath(newFolderPath);
 
   const createFolder = async () => {
-    const folder = newFolderPath.trim().replace(/^\/+|\/+$/g, "");
+    const folder = newFolderCheck.path;
     if (!folder) return;
     // Block what the server would reject before the round-trip, so the user
     // gets the reason inline instead of a swallowed 400.
-    if (newFolderTooDeep || newFolderUnusable) return;
+    if (newFolderCheck.error) return;
     setCreatingFolder(true);
     try {
       // Folders are path-derived — seed one with a starter node so it appears
@@ -717,6 +709,13 @@ export function NestView({
   const [moveTarget, setMoveTarget] = useState<any | null>(null);
   const [moveDest, setMoveDest] = useState("");
   const [movingDoc, setMovingDoc] = useState(false);
+  // A nest with no folders yet has nowhere to move a document to, so the
+  // dialog can name a new destination itself — folders are path-derived, the
+  // move creates it. "" = not creating one.
+  const [moveNewFolder, setMoveNewFolder] = useState<string | null>(null);
+  const moveNewFolderCheck = checkFolderPath(moveNewFolder ?? "");
+  const moveResolvedDest =
+    moveNewFolder === null ? moveDest : moveNewFolderCheck.path;
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -2718,6 +2717,7 @@ export function NestView({
                       hasRoleOnNode(node, "reviewer"));
                   const openMoveDialog = () => {
                     setMoveDest(folderOfNode(node.id));
+                    setMoveNewFolder(null);
                     setMoveTarget(node);
                   };
                   // A doc row is a drop proxy for the folder it sits in: drag
@@ -3908,19 +3908,16 @@ export function NestView({
             placeholder="e.g. gtm/deals"
             className="font-mono"
           />
-          {newFolderTooDeep && (
-            <p className="text-xs text-destructive">
-              Folders may nest at most {MAX_FOLDER_DEPTH} levels deep — this path
-              is {newFolderDepth}. Remove {newFolderDepth - MAX_FOLDER_DEPTH}{" "}
-              level{newFolderDepth - MAX_FOLDER_DEPTH === 1 ? "" : "s"}.
+          {newFolderCheck.error ? (
+            <p className="text-xs text-destructive" data-testid="new-folder-error">
+              {newFolderCheck.error}
             </p>
-          )}
-          {newFolderUnusable && (
-            <p className="text-xs text-destructive">
-              Folder paths are built from a-z and 0-9, so the name needs at least
-              one of those.
+          ) : newFolderCheck.rewritten && newFolderCheck.path ? (
+            <p className="text-xs text-muted-foreground" data-testid="new-folder-preview">
+              Will be created as{" "}
+              <code className="font-mono">{newFolderCheck.path}</code>
             </p>
-          )}
+          ) : null}
           <DialogFooter>
             <Button variant="ghost" onClick={() => setShowNewFolder(false)}>
               Cancel
@@ -3928,10 +3925,7 @@ export function NestView({
             <Button
               onClick={() => void createFolder()}
               disabled={
-                creatingFolder ||
-                !newFolderPath.trim() ||
-                newFolderTooDeep ||
-                newFolderUnusable
+                creatingFolder || !newFolderCheck.path || !!newFolderCheck.error
               }
             >
               {creatingFolder ? (
@@ -3965,8 +3959,21 @@ export function NestView({
             document.
           </p>
           <Select
-            value={moveDest === "" ? "__root__" : moveDest}
-            onValueChange={(v) => setMoveDest(v === "__root__" ? "" : v)}
+            value={
+              moveNewFolder !== null
+                ? "__new__"
+                : moveDest === ""
+                  ? "__root__"
+                  : moveDest
+            }
+            onValueChange={(v) => {
+              if (v === "__new__") {
+                setMoveNewFolder("");
+                return;
+              }
+              setMoveNewFolder(null);
+              setMoveDest(v === "__root__" ? "" : v);
+            }}
           >
             <SelectTrigger data-testid="move-folder-select">
               <SelectValue placeholder="Choose a folder" />
@@ -3978,8 +3985,35 @@ export function NestView({
                   {prettyFolderPath(f)}
                 </SelectItem>
               ))}
+              <SelectItem value="__new__">New folder…</SelectItem>
             </SelectContent>
           </Select>
+          {moveNewFolder !== null && (
+            <>
+              <Input
+                autoFocus
+                value={moveNewFolder}
+                onChange={(e) => setMoveNewFolder(e.target.value)}
+                placeholder="e.g. gtm/deals"
+                className="font-mono"
+                data-testid="move-folder-new-path"
+              />
+              {moveNewFolderCheck.error ? (
+                <p className="text-xs text-destructive">
+                  {moveNewFolderCheck.error}
+                </p>
+              ) : moveNewFolderCheck.rewritten && moveNewFolderCheck.path ? (
+                <p className="text-xs text-muted-foreground">
+                  Will be created as{" "}
+                  <code className="font-mono">{moveNewFolderCheck.path}</code>
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  The folder is created by the move — nest it with a slash.
+                </p>
+              )}
+            </>
+          )}
           <DialogFooter>
             <Button
               variant="ghost"
@@ -3992,12 +4026,14 @@ export function NestView({
               disabled={
                 movingDoc ||
                 !moveTarget ||
-                folderOfNode(moveTarget.id) === moveDest
+                folderOfNode(moveTarget.id) === moveResolvedDest ||
+                (moveNewFolder !== null &&
+                  (!moveNewFolderCheck.path || !!moveNewFolderCheck.error))
               }
               onClick={async () => {
                 if (!moveTarget) return;
                 setMovingDoc(true);
-                const ok = await handleMoveNode(moveTarget.id, moveDest);
+                const ok = await handleMoveNode(moveTarget.id, moveResolvedDest);
                 setMovingDoc(false);
                 if (ok) setMoveTarget(null);
               }}

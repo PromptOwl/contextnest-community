@@ -58,8 +58,8 @@ describe("renderEmail", () => {
       link: "https://nest.acme.com/?nest=n1",
     });
     expect(subject).toBe("You've been added to Marketing");
-    expect(text).toContain("You've been given write access to Marketing by owner@acme.com");
-    expect(html).toContain("<strong>write</strong>");
+    expect(text).toContain("You've been given Editor access to Marketing by owner@acme.com");
+    expect(html).toContain("<strong>Editor</strong>");
     expect(html).toContain(">Open nest<");
     // Details show the invitee's role, not a generic "Shared" badge.
     expect(html).toContain(">Role<");

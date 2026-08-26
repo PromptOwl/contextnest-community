@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent } from "react";
 import { Upload } from "lucide-react";
 import { toast } from "sonner";
@@ -6,10 +6,12 @@ import { Button } from "@/components/ui/button";
 import {
   looksLikeDelimitedRow,
   looksLikeDelimitedTable,
+  parseDelimited,
   readUploadedTable,
   rowsToCsv,
   uploadedTableErrorMessage,
 } from "../lib/csv-table";
+import { TableGrid } from "./TableViewer";
 
 /**
  * Source editor for TABLE nodes — a monospace textarea over the node's
@@ -51,6 +53,19 @@ export function TableSourceEditor({
   // isn't silently discarded when the upload resolves.
   const [uploading, setUploading] = useState(false);
   const locked = readOnly || uploading;
+
+  // Live grid under the source: CSV is hard to proofread as text, and the
+  // reader sees a table. Comment lines and header directives are stripped the
+  // same way the read view strips them.
+  const preview = useMemo(() => {
+    const rows = parseDelimited(value, ",").filter(
+      (r) => !(r[0] ?? "").trimStart().startsWith("#") && r.some((c) => c.trim() !== ""),
+    );
+    return {
+      columns: (rows[0] ?? []).map((h) => h.split(":")[0].trim()),
+      rows: rows.slice(1),
+    };
+  }, [value]);
 
   const replaceWith = (next: string, summary: string) => {
     const prev = value;
@@ -182,6 +197,15 @@ export function TableSourceEditor({
         className="w-full min-h-[360px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
         data-testid="table-source-textarea"
       />
+      {preview.columns.length > 0 && (
+        <div className="mt-3" data-testid="table-source-preview">
+          <p className="mb-1 text-xs font-medium text-muted-foreground">
+            Preview — {preview.rows.length.toLocaleString()} data row
+            {preview.rows.length === 1 ? "" : "s"}
+          </p>
+          <TableGrid columns={preview.columns} rows={preview.rows} limit={50} />
+        </div>
+      )}
     </div>
   );
 }
