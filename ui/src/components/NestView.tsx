@@ -13,6 +13,7 @@ import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
 import { folderGrantTarget } from "../lib/folder-target";
+import { checkFolderPath } from "../lib/folder-path";
 import { parseServerDate, formatServerDate } from "../lib/dates";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -717,6 +718,13 @@ export function NestView({
   const [moveTarget, setMoveTarget] = useState<any | null>(null);
   const [moveDest, setMoveDest] = useState("");
   const [movingDoc, setMovingDoc] = useState(false);
+  // A nest with no folders yet has nowhere to move a document to, so the
+  // dialog can name a new destination itself — folders are path-derived, the
+  // move creates it. "" = not creating one.
+  const [moveNewFolder, setMoveNewFolder] = useState<string | null>(null);
+  const moveNewFolderCheck = checkFolderPath(moveNewFolder ?? "");
+  const moveResolvedDest =
+    moveNewFolder === null ? moveDest : moveNewFolderCheck.path;
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -2709,6 +2717,7 @@ export function NestView({
                       hasRoleOnNode(node, "reviewer"));
                   const openMoveDialog = () => {
                     setMoveDest(folderOfNode(node.id));
+                    setMoveNewFolder(null);
                     setMoveTarget(node);
                   };
                   // A doc row is a drop proxy for the folder it sits in: drag
@@ -3956,8 +3965,21 @@ export function NestView({
             document.
           </p>
           <Select
-            value={moveDest === "" ? "__root__" : moveDest}
-            onValueChange={(v) => setMoveDest(v === "__root__" ? "" : v)}
+            value={
+              moveNewFolder !== null
+                ? "__new__"
+                : moveDest === ""
+                  ? "__root__"
+                  : moveDest
+            }
+            onValueChange={(v) => {
+              if (v === "__new__") {
+                setMoveNewFolder("");
+                return;
+              }
+              setMoveNewFolder(null);
+              setMoveDest(v === "__root__" ? "" : v);
+            }}
           >
             <SelectTrigger data-testid="move-folder-select">
               <SelectValue placeholder="Choose a folder" />
@@ -3969,8 +3991,30 @@ export function NestView({
                   {prettyFolderPath(f)}
                 </SelectItem>
               ))}
+              <SelectItem value="__new__">New folder…</SelectItem>
             </SelectContent>
           </Select>
+          {moveNewFolder !== null && (
+            <>
+              <Input
+                autoFocus
+                value={moveNewFolder}
+                onChange={(e) => setMoveNewFolder(e.target.value)}
+                placeholder="e.g. gtm/deals"
+                className="font-mono"
+                data-testid="move-folder-new-path"
+              />
+              {moveNewFolderCheck.error ? (
+                <p className="text-xs text-destructive">
+                  {moveNewFolderCheck.error}
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  The folder is created by the move — nest it with a slash.
+                </p>
+              )}
+            </>
+          )}
           <DialogFooter>
             <Button
               variant="ghost"
@@ -3983,12 +4027,14 @@ export function NestView({
               disabled={
                 movingDoc ||
                 !moveTarget ||
-                folderOfNode(moveTarget.id) === moveDest
+                folderOfNode(moveTarget.id) === moveResolvedDest ||
+                (moveNewFolder !== null &&
+                  (!moveNewFolderCheck.path || !!moveNewFolderCheck.error))
               }
               onClick={async () => {
                 if (!moveTarget) return;
                 setMovingDoc(true);
-                const ok = await handleMoveNode(moveTarget.id, moveDest);
+                const ok = await handleMoveNode(moveTarget.id, moveResolvedDest);
                 setMovingDoc(false);
                 if (ok) setMoveTarget(null);
               }}
