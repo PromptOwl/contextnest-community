@@ -341,6 +341,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
         CHECK(access_mode IN ('public','email','code','invite')),
       code_hash TEXT,
       comments_enabled INTEGER NOT NULL DEFAULT 0,
+      watermark INTEGER NOT NULL DEFAULT 0,
+      no_download INTEGER NOT NULL DEFAULT 0,
       created_by TEXT NOT NULL,
       created_at TEXT NOT NULL,
       expires_at TEXT,
@@ -361,6 +363,11 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_access_grant_publish ON access_grant(publish_id, kind);
     CREATE INDEX IF NOT EXISTS idx_access_grant_token ON access_grant(token_hash);
+
+    -- Viewer overlays, declared inline above; explicit ALTERs so a database
+    -- created by an earlier build of 035 still gets them on upgrade.
+    ALTER TABLE publish ADD COLUMN IF NOT EXISTS watermark INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE publish ADD COLUMN IF NOT EXISTS no_download INTEGER NOT NULL DEFAULT 0;
 
     CREATE TABLE IF NOT EXISTS teams (
       id TEXT PRIMARY KEY,

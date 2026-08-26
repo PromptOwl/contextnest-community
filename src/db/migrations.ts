@@ -1310,6 +1310,8 @@ export function runMigrations(db: Database.Database): void {
             CHECK(access_mode IN ('public','email','code','invite')),
           code_hash TEXT,
           comments_enabled INTEGER NOT NULL DEFAULT 0,
+          watermark INTEGER NOT NULL DEFAULT 0,
+          no_download INTEGER NOT NULL DEFAULT 0,
           created_by TEXT NOT NULL,
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           expires_at TEXT,
@@ -1334,6 +1336,22 @@ export function runMigrations(db: Database.Database): void {
       `);
     })();
     recordMigration("035_publish");
+  }
+
+  // 035b: the viewer overlays (watermark / no-download). Declared inline in the
+  // CREATE TABLE above, so this ALTER only fires for a database that ran an
+  // earlier build of 035 — same inline-plus-explicit-ALTER pattern the teams
+  // and prime columns use.
+  {
+    const publishCols = (
+      db.prepare("PRAGMA table_info(publish)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (publishCols.length && !publishCols.includes("watermark")) {
+      db.exec("ALTER TABLE publish ADD COLUMN watermark INTEGER NOT NULL DEFAULT 0");
+    }
+    if (publishCols.length && !publishCols.includes("no_download")) {
+      db.exec("ALTER TABLE publish ADD COLUMN no_download INTEGER NOT NULL DEFAULT 0");
+    }
   }
 }
 

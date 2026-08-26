@@ -10,15 +10,17 @@
  */
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
-import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
+import { ForbiddenError, NotFoundError } from "../shared/errors.js";
 import { canManageStewards } from "../governance/stewardship-service.js";
 import { requestBaseUrl } from "../shared/base-url.js";
+import { sendEmailToRecipient } from "../notify/email.js";
 import {
   createPublish,
   listPublish,
   getPublishById,
   revokePublish,
   listViews,
+  listAllowlist,
   toPublishResponse,
   type PublishMode,
 } from "./publish-service.js";
@@ -41,6 +43,8 @@ publishRoutes.post("/", async (c) => {
     node_id?: string;
     access_mode?: string;
     comments_enabled?: boolean;
+    watermark?: boolean;
+    no_download?: boolean;
     code?: string | null;
     allowlist?: string[];
     expires_at?: string | null;
@@ -52,12 +56,30 @@ publishRoutes.post("/", async (c) => {
     nodeId: (body.node_id ?? "").trim(),
     mode,
     commentsEnabled: !!body.comments_enabled,
+    watermark: !!body.watermark,
+    noDownload: !!body.no_download,
     code: body.code ?? null,
     allowlist: Array.isArray(body.allowlist) ? body.allowlist : [],
     expiresAt: body.expires_at ?? null,
     createdBy: c.get("userId"),
   });
   const link = `${requestBaseUrl(c.req.url)}/p/${row.slug}`;
+
+  // Invite mode is useless without the invitation: an allow-listed reader who
+  // never receives the link has no way to reach the document. Fire-and-forget,
+  // like every other notification here — a dead SMTP config must not fail the
+  // publish (the link still works for anyone who has it).
+  if (mode === "invite") {
+    for (const email of await listAllowlist(row.id)) {
+      void sendEmailToRecipient(email, {
+        status: "shared",
+        docTitle: "A document has been shared with you",
+        path: "PromptOwl · ContextNest",
+        permission: "view",
+        link,
+      });
+    }
+  }
   return c.json({ publish: toPublishResponse(row), link }, 201);
 });
 

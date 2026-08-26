@@ -35,6 +35,7 @@ import {
   Table2,
   Pencil,
   Users,
+  Share2,
   Link as LinkIcon,
   History,
   Code2,
@@ -60,6 +61,7 @@ import { TableViewer } from "./TableViewer";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { PublishDialog } from "./PublishDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
   buildTextIndex,
@@ -174,6 +176,7 @@ export function DocumentEditor({
   // looking at a real nest the caller can administer.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
+  const [showPublish, setShowPublish] = useState(false);
   const qc = useQueryClient();
   // Caller's resolved steward role for this node (null = none / not a steward).
   // Drives read-only gating for reviewer/viewer roles on Save + Submit.
@@ -1468,6 +1471,15 @@ export function DocumentEditor({
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
               });
+            // Publishing hosts THIS document on the open web, so it sits with
+            // sharing rather than with the editing actions above.
+            if (canShare && !isNew)
+              moreActions.push({
+                label: "Publish",
+                icon: Share2,
+                testId: "document-editor-publish",
+                onSelect: () => setShowPublish(true),
+              });
             // Below admin only: this opens the REQUEST dialog, not a delete.
             // Admins delete from the nest list — this page has never carried a
             // real delete. Hidden once a flag is already pending.
@@ -2586,6 +2598,14 @@ export function DocumentEditor({
             /* Sharing changes don't alter this document's content; nothing
                to reload here. The nest list re-reads on next visit. */
           }}
+        />
+      )}
+      {showPublish && (
+        <PublishDialog
+          nestId={nestId}
+          nodeId={nodeId}
+          nodeTitle={title || nodeId}
+          onClose={() => setShowPublish(false)}
         />
       )}
       {leaveIntent && (

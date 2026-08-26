@@ -22,7 +22,7 @@ import {
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
-  Activity,
+  Activity, Share2,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
@@ -62,6 +62,7 @@ export function NodeTypeIcon({
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { PublishDialog } from "./PublishDialog";
 import { NestPageHeader } from "./NestPageHeader";
 import { deriveNestCaps } from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
@@ -411,6 +412,7 @@ export function NestView({
     setTypeFilter(f.type ?? "all");
   };
   const [reviewNode, setReviewNode] = useState<any | null>(null);
+  const [publishNode, setPublishNode] = useState<any | null>(null);
   const [submitNode, setSubmitNode] = useState<any | null>(null);
   const [versionNode, setVersionNode] = useState<any | null>(null);
   const [versionData, setVersionData] = useState<{
@@ -2569,6 +2571,12 @@ export function NestView({
                             <History className="h-3.5 w-3.5 mr-2" />
                             History
                           </DropdownMenuItem>
+                          {canManage && (
+                            <DropdownMenuItem onSelect={() => setPublishNode(node)}>
+                              <Share2 className="h-3.5 w-3.5 mr-2" />
+                              Publish
+                            </DropdownMenuItem>
+                          )}
                           <DropdownMenuSeparator />
                           {showDeleteAction && (
                             <DropdownMenuItem
@@ -3800,6 +3808,15 @@ export function NestView({
             setReviewNode(null);
             onOpenDocument(nodeId);
           }}
+        />
+      )}
+
+      {publishNode && (
+        <PublishDialog
+          nestId={nestId}
+          nodeId={publishNode.id}
+          nodeTitle={publishNode.title || publishNode.id}
+          onClose={() => setPublishNode(null)}
         />
       )}
 

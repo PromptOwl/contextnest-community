@@ -24,8 +24,9 @@
  *   view    — an access-log entry (email may be null for public views)
  */
 import { v4 as uuid } from "uuid";
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { getDb } from "../db/client.js";
+import { hashPassword, verifyPassword } from "../auth/keys.js";
 import { ValidationError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
 import { assertSafeNodeId } from "../shared/node-id.js";
@@ -40,6 +41,8 @@ export interface PublishRow {
   access_mode: PublishMode;
   code_hash: string | null;
   comments_enabled: number; // 0 | 1
+  watermark: number; // 0 | 1 — stamp the viewer's email across the page
+  no_download: number; // 0 | 1 — discourage print/copy
   created_by: string;
   created_at: string;
   expires_at: string | null;
@@ -52,14 +55,6 @@ const SESSION_TTL_SECONDS = 24 * 60 * 60; // viewing session 24h
 
 function sha256Hex(s: string): string {
   return createHash("sha256").update(s).digest("hex");
-}
-
-/** Constant-time compare of two hex-encoded digests of equal length. */
-function safeEqualHex(a: string, b: string): boolean {
-  const ab = Buffer.from(a, "hex");
-  const bb = Buffer.from(b, "hex");
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
 }
 
 /** URL-safe unguessable slug (~11 chars of base64url over 8 random bytes). */
@@ -89,6 +84,8 @@ export function toPublishResponse(row: PublishRow) {
     node_id: row.node_id,
     access_mode: row.access_mode,
     comments_enabled: row.comments_enabled === 1,
+    watermark: row.watermark === 1,
+    no_download: row.no_download === 1,
     created_at: row.created_at,
     expires_at: row.expires_at,
     revoked_at: row.revoked_at,
@@ -102,6 +99,8 @@ export async function createPublish(params: {
   nodeId: string;
   mode: PublishMode;
   commentsEnabled?: boolean;
+  watermark?: boolean;
+  noDownload?: boolean;
   code?: string | null;
   allowlist?: string[];
   expiresAt?: string | null;
@@ -128,13 +127,17 @@ export async function createPublish(params: {
   const id = uuid();
   const slug = newSlug();
   const created = nowIso();
-  const codeHash = mode === "code" && params.code ? sha256Hex(params.code.trim()) : null;
+  // A passcode is a human-chosen secret, so it gets the password treatment
+  // (bcrypt), not the fast hash we use for high-entropy random tokens —
+  // see the rationale in auth/keys.ts.
+  const codeHash =
+    mode === "code" && params.code ? await hashPassword(params.code.trim()) : null;
 
   await db.run(
     `INSERT INTO publish
        (id, nest_id, node_id, slug, access_mode, code_hash, comments_enabled,
-        created_by, created_at, expires_at, revoked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        watermark, no_download, created_by, created_at, expires_at, revoked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
     [
       id,
       nestId,
@@ -143,6 +146,8 @@ export async function createPublish(params: {
       mode,
       codeHash,
       params.commentsEnabled ? 1 : 0,
+      params.watermark ? 1 : 0,
+      params.noDownload ? 1 : 0,
       createdBy,
       created,
       params.expiresAt ?? null,
@@ -201,9 +206,9 @@ export async function revokePublish(nestId: string, id: string): Promise<boolean
 
 // ─── Gate primitives (used by the public /p render routes) ───────────────
 
-export function verifyCode(row: PublishRow, code: string): boolean {
+export async function verifyCode(row: PublishRow, code: string): Promise<boolean> {
   if (row.access_mode !== "code" || !row.code_hash) return false;
-  return safeEqualHex(row.code_hash, sha256Hex((code || "").trim()));
+  return (await verifyPassword((code || "").trim(), row.code_hash)).ok;
 }
 
 export async function isAllowlisted(publishId: string, email: string): Promise<boolean> {
@@ -266,13 +271,21 @@ export async function createSession(
   return token;
 }
 
-export async function verifySession(publishId: string, token: string): Promise<boolean> {
-  if (!token) return false;
+/** Resolve a session cookie to its viewer, or null when the token is unknown
+ *  or expired. `email` is null for a code gate — a shared passcode identifies
+ *  nobody. Returning the email (rather than a bare boolean) is what lets every
+ *  view of an email/invite publish be logged against the person who opened it. */
+export async function verifySession(
+  publishId: string,
+  token: string,
+): Promise<{ email: string | null } | null> {
+  if (!token) return null;
   const row = (await getDb().get(
-    "SELECT expires_at FROM access_grant WHERE publish_id = ? AND kind = 'session' AND token_hash = ?",
+    "SELECT email, expires_at FROM access_grant WHERE publish_id = ? AND kind = 'session' AND token_hash = ?",
     [publishId, sha256Hex(token)],
-  )) as { expires_at: string | null } | undefined;
-  return !!row && !isPast(row.expires_at);
+  )) as { email: string | null; expires_at: string | null } | undefined;
+  if (!row || isPast(row.expires_at)) return null;
+  return { email: row.email };
 }
 
 // ─── View log ────────────────────────────────────────────────────────────
@@ -283,6 +296,15 @@ export async function logView(publishId: string, email: string | null): Promise<
      VALUES (?, ?, 'view', ?, NULL, NULL, NULL, ?)`,
     [uuid(), publishId, email, nowIso()],
   );
+}
+
+/** Allow-listed emails for an invite publish (owner-facing + invite sending). */
+export async function listAllowlist(publishId: string): Promise<string[]> {
+  const rows = (await getDb().all(
+    "SELECT email FROM access_grant WHERE publish_id = ? AND kind = 'invite' ORDER BY created_at ASC",
+    [publishId],
+  )) as Array<{ email: string | null }>;
+  return rows.map((r) => r.email ?? "").filter(Boolean);
 }
 
 export async function listViews(
