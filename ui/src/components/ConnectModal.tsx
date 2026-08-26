@@ -47,6 +47,8 @@ import {
   Sparkles,
   Package,
   MessageSquareText,
+  ChevronDown,
+  Terminal,
 } from "lucide-react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
@@ -87,6 +89,9 @@ export function ConnectModal({
   const [downloadingBundle, setDownloadingBundle] = useState(false);
   const [bundleOpen, setBundleOpen] = useState(false);
   const [includeDrafts, setIncludeDrafts] = useState(false);
+  // Per-client config is collapsed by default — the quick-start prompts above
+  // cover most people; power users expand to configure a specific client.
+  const [showClients, setShowClients] = useState(false);
 
   const [hasExistingKey, setHasExistingKey] = useState<boolean | null>(null);
   const [existingPrefix, setExistingPrefix] = useState<string | null>(null);
@@ -463,8 +468,23 @@ export function ConnectModal({
                 </span>
               </button>
             )}
+            <button
+              type="button"
+              onClick={() => setShowClients((v) => !v)}
+              aria-expanded={showClients}
+              className="flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-sm hover:bg-muted/40"
+            >
+              <span className="font-medium">Configure a specific client</span>
+              <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                Hootie · Claude · Cursor · CLI
+                <ChevronDown
+                  className={`h-4 w-4 transition-transform ${showClients ? "rotate-180" : ""}`}
+                />
+              </span>
+            </button>
+            {showClients && (
             <Tabs defaultValue="hootie" className="w-full min-w-0">
-              <TabsList className="grid w-full grid-cols-4 sticky top-0 z-10">
+              <TabsList className="grid w-full grid-cols-5 sticky top-0 z-10">
                 <TabsTrigger value="hootie">
                   <Bot className="h-3.5 w-3.5 mr-1" />
                   Hootie
@@ -475,6 +495,10 @@ export function ConnectModal({
                 </TabsTrigger>
                 <TabsTrigger value="mcp">MCP</TabsTrigger>
                 <TabsTrigger value="api">API</TabsTrigger>
+                <TabsTrigger value="cli">
+                  <Terminal className="h-3.5 w-3.5 mr-1" />
+                  CLI
+                </TabsTrigger>
               </TabsList>
 
               {/* Hootie */}
@@ -686,7 +710,73 @@ export function ConnectModal({
                 </div>
               </TabsContent>
 
+              {/* CLI — intentionally minimal: the canonical ctx surface lives
+                  upstream in ContextNest, so we show the one remote command +
+                  a pointer, not a full (drift-prone) copy of the CLI docs. */}
+              <TabsContent value="cli" className="space-y-4 pt-4">
+                <div>
+                  <p className="text-sm mb-3">
+                    Push a local vault into this nest with the{" "}
+                    <code className="text-xs bg-muted px-1 py-0.5 rounded">
+                      ctx
+                    </code>{" "}
+                    CLI:
+                  </p>
+                  <Snippet
+                    label="Install"
+                    value="npm i -g @promptowl/contextnest-cli"
+                  />
+                  <Snippet
+                    label="Push this vault"
+                    value={
+                      showOpenModeBanner
+                        ? `ctx push --server ${serverUrl} --nest ${nestId}`
+                        : `CONTEXTNEST_API_KEY=<your-key> ctx push --server ${serverUrl} --nest ${nestId}`
+                    }
+                    multiline
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Only <code className="text-[10px]">ctx push</code> talks to a
+                  remote server; other <code className="text-[10px]">ctx</code>{" "}
+                  commands operate on your local vault. Full CLI reference lives
+                  in the ContextNest docs.
+                </p>
+              </TabsContent>
+
             </Tabs>
+            )}
+            {showClients && (
+              <div className="border-t pt-3">
+                <p className="mb-2 text-sm font-medium">Get the apps</p>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <a
+                    href="https://promptowl.ai/download"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2 rounded-lg border px-3 py-2.5 text-sm hover:border-primary hover:bg-muted/40"
+                  >
+                    <Monitor className="h-4 w-4 shrink-0" /> Desktop app
+                  </a>
+                  <a
+                    href="https://www.npmjs.com/package/@promptowl/contextnest-cli"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2 rounded-lg border px-3 py-2.5 text-sm hover:border-primary hover:bg-muted/40"
+                  >
+                    <Terminal className="h-4 w-4 shrink-0" /> ctx CLI
+                  </a>
+                  <a
+                    href="https://github.com/PromptOwl/ContextNest"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2 rounded-lg border px-3 py-2.5 text-sm hover:border-primary hover:bg-muted/40"
+                  >
+                    <Package className="h-4 w-4 shrink-0" /> Self-hosted
+                  </a>
+                </div>
+              </div>
+            )}
 
           {/* Export — markdown egress. The URL is what agents fetch; the
               button downloads it as a file. Approved content only (server-side). */}
