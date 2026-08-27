@@ -558,11 +558,17 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
   const nestScope =
     "nest_id" in body ? body.nest_id || null : prior.nest_id;
 
-  await db.transaction(async (tx) => {
-    await tx.run("DELETE FROM api_keys WHERE id = ? AND user_id = ?", [
-      prior.id,
-      userId,
-    ]);
+  // verifyKeyRequest resolved `prior` outside this transaction, so the row can
+  // be gone by the time we get here — a concurrent rotate or revoke of the same
+  // key. Insisting the DELETE actually removed something keeps rotate a
+  // replacement: without it the INSERT would still run and leave an extra live
+  // key, which is the opposite of what a rotate promises.
+  const replaced = await db.transaction(async (tx) => {
+    const removed = await tx.run(
+      "DELETE FROM api_keys WHERE id = ? AND user_id = ?",
+      [prior.id, userId],
+    );
+    if (removed.changes === 0) return false;
     await tx.run(
       "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, nest_id, label) VALUES (?, ?, ?, ?, ?, ?)",
       [
@@ -574,7 +580,15 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
         check.label ?? prior.label,
       ],
     );
+    return true;
   });
+
+  if (!replaced) {
+    return c.json(
+      { error: "That key no longer exists — reload and try again." },
+      404,
+    );
+  }
 
   return c.json({
     id: keyId,

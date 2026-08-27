@@ -76,6 +76,7 @@ describe("multiple API keys per user", () => {
   });
 
   it("rotating one key by id leaves the others working", async () => {
+    const before = (await list()).length;
     const keep = (
       await jsonRequest(app, "POST", "/auth/keys", { label: "keep" }, user.apiKey)
     ).data.api_key;
@@ -112,6 +113,9 @@ describe("multiple API keys per user", () => {
     expect(
       (await jsonRequest(app, "GET", "/nests", undefined, keep)).status,
     ).toBe(200);
+
+    // Rotate replaces, it never adds: two keys minted, one rotated in place.
+    expect((await list()).length).toBe(before + 2);
   });
 
   it("refuses an ambiguous rotate rather than picking a key", async () => {
