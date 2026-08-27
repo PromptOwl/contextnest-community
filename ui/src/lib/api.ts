@@ -806,14 +806,35 @@ export interface NestCensus {
   recent: Array<{ id: string; title: string; type: string; updated_at?: string }>;
 }
 
+/**
+ * The whole nest, WITH document bodies.
+ *
+ * `content=1` is not optional here: wiki-link analysis is the reason this call
+ * exists at its widest. Backlinks, unlinked mentions, stale alias links,
+ * related-doc scoring and the orphan/broken-link panel all read `[[targets]]`
+ * out of every document's body, and a nest-wide listing is the only place they
+ * get it. Without the flag they degrade to empty silently — no error, no failed
+ * request, just a permanently blank panel.
+ *
+ * Every caller shares one react-query key, so this is a single cached payload
+ * rather than a fetch per consumer. NOT used by the nest detail page's document
+ * tree — that goes through listFolderNodes, which stays body-free on purpose.
+ */
 export async function listNodes(nestId: string) {
-  return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
+  return request<{ count: number; nodes: any[] }>(
+    `/nests/${nestId}/nodes?content=1`,
+  );
 }
 
 /**
  * One folder LEVEL — the documents sitting directly in `folder` ("" is the
  * nest root), never its subtree. The census describes the whole nest so the
  * caller can render the full folder tree without loading the documents in it.
+ *
+ * Deliberately WITHOUT `content=1`, unlike listNodes: this is the nest detail
+ * page's tree fetch, it renders name/tags/status and no body, and it is the one
+ * request path the node index exists to keep off the filesystem. Anything here
+ * that needs a body should fetch that document.
  */
 export async function listFolderNodes(nestId: string, folder: string) {
   return request<{ count: number; nodes: any[] }>(

@@ -2003,6 +2003,16 @@ export async function moveNode(
     // Repoint every node-keyed table for the source doc and its derived
     // annotations node, plus the run traces delete keeps. One transaction: a
     // half-moved node would be worse than a failed move.
+    //
+    // rewriteNodeKeyedRows only moves the keyed column, so it does NOT
+    // recompute node_index.folder. That is fine for both rows here:
+    //   - the source doc has no node_index row left to rewrite — its write to
+    //     newId and its delete of nodeId both ran above, each folding through
+    //     the index write-through, so this is a no-op on an already-correct row;
+    //   - the derived annotations row is repointed with its pre-move folder,
+    //     then replaced outright a few lines below when its document is written
+    //     at newDerived, which recomputes the folder. Stale only within this
+    //     transaction, and never on a path that serves a read.
     const oldDerived = derivedIdOf(nodeId);
     const newDerived = derivedIdOf(newId);
     const db = getDb();
@@ -2031,6 +2041,23 @@ export async function moveNode(
       await storage.deleteDocument(oldDerived);
     } catch {
       /* no derived annotations node */
+    }
+
+    // Regenerate the derived vault files. A move writes and deletes through raw
+    // storage rather than the operation catalog, so unlike create/update/
+    // publish/delete nothing here refreshed them — the SOURCE folder's INDEX.md
+    // kept listing a document that had left, the DESTINATION's never learned it
+    // arrived, and context.yaml (which graph-mode reads seed from) stayed on the
+    // old id until some unrelated write in the nest happened to trigger a regen.
+    //
+    // Best-effort: the move itself is already committed to disk and to the
+    // index, and derived files are regenerated from that truth. Failing the
+    // whole move because a generated file could not be rewritten would be the
+    // worse outcome; the next mutation, or a reindex, restores them.
+    try {
+      await storage.regenerateIndex();
+    } catch (err) {
+      console.error("[move] regenerateIndex failed", nestId, nodeId, newId, err);
     }
 
     await trackEvent("node.move", { nestId, nodeId, newId });

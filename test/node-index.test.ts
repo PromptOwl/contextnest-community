@@ -149,6 +149,37 @@ describe("node_index — write-through", () => {
     ).toBe(false);
   });
 
+  it("regenerates INDEX.md on both sides of a move", async () => {
+    // A move writes and deletes through raw storage, not the operation
+    // catalog, so nothing refreshed the derived files: the source folder kept
+    // listing a document that had left and the destination never learned it
+    // arrived, until some unrelated write in the nest triggered a regen.
+    await createNode("Relocating", { folder: "alpha" });
+    const abcIndex = vaultPath("nodes", "alpha", "INDEX.md");
+    expect(readFileSync(abcIndex, "utf-8")).toContain("relocating");
+
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${encodeURIComponent("nodes/alpha/relocating")}/move`,
+      { folder: "beta" },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(200);
+
+    // Left the source listing...
+    expect(readFileSync(abcIndex, "utf-8")).not.toContain("relocating");
+    // ...and arrived in the destination's.
+    expect(
+      readFileSync(vaultPath("nodes", "beta", "INDEX.md"), "utf-8"),
+    ).toContain("relocating");
+    // The DB agrees — it always did; only the derived files lagged.
+    expect(
+      (await indexRows()).find((r) => r.node_id === "nodes/beta/relocating")
+        ?.folder,
+    ).toBe("beta");
+  });
+
   it("drops every row when a whole folder is deleted", async () => {
     await createNode("Temp One", { folder: "scratch" });
     await createNode("Temp Two", { folder: "scratch" });
