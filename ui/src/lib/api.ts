@@ -247,6 +247,17 @@ export interface AdminSettings {
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */
   oidc_client_secret?: string | null;
+  /** Agent SSO / token-exchange (POST /auth/token-exchange). Signing secret is
+   *  write-only — only its presence (mcp_signing_secret_set) comes back. */
+  sso_token_exchange_enabled: boolean;
+  mcp_signing_secret_set?: boolean;
+  mcp_signing_secret?: string | null;
+  mcp_token_ttl_seconds: number;
+  ms_token_exchange_enabled: boolean;
+  ms_client_id: string;
+  ms_tenant_id: string;
+  google_token_exchange_enabled: boolean;
+  google_client_id: string;
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;

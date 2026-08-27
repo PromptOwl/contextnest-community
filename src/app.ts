@@ -573,6 +573,16 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
+    // presence is reported, never the value (same discipline as the OIDC secret).
+    sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
+    mcp_signing_secret_set: !!config.MCP_SIGNING_SECRET,
+    mcp_token_ttl_seconds: config.MCP_TOKEN_TTL_SECONDS,
+    ms_token_exchange_enabled: config.MS_TOKEN_EXCHANGE_ENABLED,
+    ms_client_id: config.MS_CLIENT_ID,
+    ms_tenant_id: config.MS_TENANT_ID,
+    google_token_exchange_enabled: config.GOOGLE_TOKEN_EXCHANGE_ENABLED,
+    google_client_id: config.GOOGLE_CLIENT_ID,
     // Live readiness (enabled AND issuer+id+secret present) — the SAVED state,
     // i.e. whether the login button is currently live. The Settings UI derives
     // its own "enabled but not configured" warning from the unsaved draft
@@ -822,6 +832,56 @@ export function createApp(): Hono<AuthEnv> {
         name: "OIDC_DEPARTMENT_TAGGING",
         value: body.oidc_department_tagging ? "true" : null,
       });
+    }
+    // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
+    // Default-off toggles persist "false" as null (unset already = off). The
+    // MCP signing secret is write-only, same discipline as oidc_client_secret.
+    if ("sso_token_exchange_enabled" in body) {
+      pending.push({
+        name: "SSO_TOKEN_EXCHANGE_ENABLED",
+        value: body.sso_token_exchange_enabled ? "true" : null,
+      });
+    }
+    if ("mcp_signing_secret" in body) {
+      const v = body.mcp_signing_secret;
+      if (v === null || v === "") {
+        pending.push({ name: "MCP_SIGNING_SECRET", value: null });
+      } else if (typeof v !== "string") {
+        addError("mcp_signing_secret", "MCP signing secret must be a string (or empty to clear it).");
+      } else if (v.trim().length < 16) {
+        addError("mcp_signing_secret", "MCP signing secret should be a long random string (16+ characters).");
+      } else {
+        pending.push({ name: "MCP_SIGNING_SECRET", value: v.trim() });
+      }
+    }
+    if ("mcp_token_ttl_seconds" in body) {
+      const n = Number(body.mcp_token_ttl_seconds);
+      if (!Number.isFinite(n) || n < 30 || n > 3600) {
+        addError("mcp_token_ttl_seconds", "Token lifetime must be between 30 and 3600 seconds.");
+      } else {
+        pending.push({ name: "MCP_TOKEN_TTL_SECONDS", value: String(Math.floor(n)) });
+      }
+    }
+    if ("ms_token_exchange_enabled" in body) {
+      pending.push({
+        name: "MS_TOKEN_EXCHANGE_ENABLED",
+        value: body.ms_token_exchange_enabled ? "true" : null,
+      });
+    }
+    if ("ms_client_id" in body) {
+      pending.push({ name: "MS_CLIENT_ID", value: String(body.ms_client_id ?? "").trim() || null });
+    }
+    if ("ms_tenant_id" in body) {
+      pending.push({ name: "MS_TENANT_ID", value: String(body.ms_tenant_id ?? "").trim() || null });
+    }
+    if ("google_token_exchange_enabled" in body) {
+      pending.push({
+        name: "GOOGLE_TOKEN_EXCHANGE_ENABLED",
+        value: body.google_token_exchange_enabled ? "true" : null,
+      });
+    }
+    if ("google_client_id" in body) {
+      pending.push({ name: "GOOGLE_CLIENT_ID", value: String(body.google_client_id ?? "").trim() || null });
     }
     // Effective post-PATCH OIDC state: what this request sets, falling back
     // to current config for fields it doesn't touch. Shared by the enable

@@ -78,6 +78,14 @@ const TABS: {
       "oidc_allowed_domains",
       "oidc_auto_provision",
       "oidc_department_tagging",
+      "sso_token_exchange_enabled",
+      "mcp_signing_secret",
+      "mcp_token_ttl_seconds",
+      "ms_token_exchange_enabled",
+      "ms_client_id",
+      "ms_tenant_id",
+      "google_token_exchange_enabled",
+      "google_client_id",
     ],
   },
   {
@@ -265,7 +273,11 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
       // Write-only keys: the server hands back only a mask/presence flag, so
       // there's no value to diff against — "staged" means a non-empty string
       // (set) or null (clear). Everything else diffs by value like normal.
-      if (k === "anthropic_api_key" || k === "oidc_client_secret") {
+      if (
+        k === "anthropic_api_key" ||
+        k === "oidc_client_secret" ||
+        k === "mcp_signing_secret"
+      ) {
         const v = draft[k];
         return (typeof v === "string" && v.trim() !== "") || v === null;
       }
@@ -910,6 +922,182 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                       allowed email domains above, or turn auto-provision off.
                     </div>
                   )}
+              </CardContent>
+            </Card>
+
+            {/* Agent SSO — token exchange. Reuses the domain allowlist +
+                auto-provision above; adds a self-hosted signing secret + the
+                two providers. Security-critical, OFF by default. */}
+            <Card>
+              <CardHeader>
+                <CardTitle>Agent SSO — token exchange</CardTitle>
+                <CardDescription>
+                  Let an external agent, acting for a user your IdP already
+                  authenticated (Microsoft Entra / Google), exchange that IdP's
+                  ID token for a short-lived MCP bearer — no second login. Uses
+                  the domain allowlist and auto-provision settings above.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-sm">
+                    {draft.sso_token_exchange_enabled ? "On" : "Off"}
+                  </span>
+                  <Switch
+                    checked={draft.sso_token_exchange_enabled}
+                    onCheckedChange={(v) =>
+                      set({ sso_token_exchange_enabled: v })
+                    }
+                  />
+                </div>
+
+                {(() => {
+                  const secretPresent =
+                    draft.mcp_signing_secret === null
+                      ? false
+                      : typeof draft.mcp_signing_secret === "string" &&
+                          draft.mcp_signing_secret.trim() !== ""
+                        ? true
+                        : !!settings?.mcp_signing_secret_set;
+                  const providerOn =
+                    draft.ms_token_exchange_enabled ||
+                    draft.google_token_exchange_enabled;
+                  if (
+                    !draft.sso_token_exchange_enabled ||
+                    (secretPresent && providerOn)
+                  )
+                    return null;
+                  return (
+                    <div
+                      role="alert"
+                      className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+                    >
+                      Enabled but not ready — the endpoint stays disabled until a
+                      signing secret and at least one provider are set.
+                    </div>
+                  );
+                })()}
+
+                <div>
+                  <div className="text-sm font-medium mb-1">
+                    MCP signing secret
+                  </div>
+                  <div className="text-xs text-muted-foreground mb-2">
+                    {draft.mcp_signing_secret === null
+                      ? "Will be cleared when you save."
+                      : settings?.mcp_signing_secret_set
+                        ? "A signing secret is set. Paste a new one to replace it."
+                        : "Not set. Use a long random string — this signs the MCP tokens the exchange mints."}
+                  </div>
+                  <TextField
+                    type="password"
+                    value={
+                      typeof draft.mcp_signing_secret === "string"
+                        ? draft.mcp_signing_secret
+                        : ""
+                    }
+                    placeholder="Paste to set or replace (16+ characters)"
+                    onChange={(v) => set({ mcp_signing_secret: v })}
+                  />
+                  {settings?.mcp_signing_secret_set &&
+                    draft.mcp_signing_secret !== null && (
+                      <button
+                        type="button"
+                        className="mt-2 text-xs text-destructive hover:underline"
+                        onClick={() => set({ mcp_signing_secret: null })}
+                      >
+                        Clear secret
+                      </button>
+                    )}
+                  {draft.mcp_signing_secret === null && (
+                    <button
+                      type="button"
+                      className="mt-2 text-xs text-muted-foreground hover:underline"
+                      onClick={() => set({ mcp_signing_secret: undefined })}
+                    >
+                      Keep current secret
+                    </button>
+                  )}
+                </div>
+
+                <div>
+                  <div className="text-sm font-medium mb-1">
+                    Token lifetime (seconds)
+                  </div>
+                  <TextField
+                    type="number"
+                    value={String(draft.mcp_token_ttl_seconds ?? 300)}
+                    placeholder="300"
+                    onChange={(v) =>
+                      set({ mcp_token_ttl_seconds: Number(v) || 0 })
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    30–3600. Short by design — a minted token expires quickly.
+                  </p>
+                </div>
+
+                <div className="border-t pt-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium">Microsoft Entra</span>
+                    <Switch
+                      checked={draft.ms_token_exchange_enabled}
+                      onCheckedChange={(v) =>
+                        set({ ms_token_exchange_enabled: v })
+                      }
+                    />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium mb-1">
+                      Client (application) ID
+                    </div>
+                    <TextField
+                      value={draft.ms_client_id ?? ""}
+                      placeholder="Entra app (client) ID — the token audience"
+                      onChange={(v) => set({ ms_client_id: v })}
+                    />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium mb-1">Tenant ID</div>
+                    <TextField
+                      value={draft.ms_tenant_id ?? ""}
+                      placeholder="Directory (tenant) ID — builds the issuer"
+                      onChange={(v) => set({ ms_tenant_id: v })}
+                    />
+                  </div>
+                </div>
+
+                <div className="border-t pt-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium">Google</span>
+                    <Switch
+                      checked={draft.google_token_exchange_enabled}
+                      onCheckedChange={(v) =>
+                        set({ google_token_exchange_enabled: v })
+                      }
+                    />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium mb-1">
+                      OAuth client ID
+                    </div>
+                    <TextField
+                      value={draft.google_client_id ?? ""}
+                      placeholder="Google OAuth client ID — the token audience"
+                      onChange={(v) => set({ google_client_id: v })}
+                    />
+                  </div>
+                </div>
+
+                <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                  Your agent calls{" "}
+                  <code className="text-[11px]">POST /auth/token-exchange</code>{" "}
+                  with the IdP ID token and receives a short-lived MCP bearer for{" "}
+                  <code className="text-[11px]">/mcp</code> and{" "}
+                  <code className="text-[11px]">/index</code>. The token is
+                  verified by signature, issuer, audience (the client id above)
+                  and expiry. Security-critical — keep it off until reviewed.
+                </div>
               </CardContent>
             </Card>
           </TabsContent>
