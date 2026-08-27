@@ -29,6 +29,7 @@ import {
   type NestStorage,
 } from "@promptowl/contextnest-engine";
 import { engineCache } from "../nodes/engine.js";
+import { setSuggestionFlag } from "../nodes/node-index.js";
 import { getDb } from "../db/client.js";
 import { resolveNestPath } from "../shared/paths.js";
 
@@ -188,7 +189,12 @@ async function scanDocumentForDriftInternal(
 
   const existing = await listSuggestions(storage, documentId);
   const dup = existing.find((s) => s.proposed_hash === drift.actualHash);
-  if (dup) return { meta: dup, created: false };
+  if (dup) {
+    // Already staged — but the flag may predate this table (or a rebuild that
+    // never ran), so assert it rather than assume it.
+    await setSuggestionFlag(nestId, documentId, true);
+    return { meta: dup, created: false };
+  }
 
   const result = await stageSuggestion({
     storage,
@@ -199,7 +205,30 @@ async function scanDocumentForDriftInternal(
     actor,
     docTier: "standard",
   });
+  // The listing reads this flag instead of walking the vault for
+  // `_suggestions/` directories, so staging has to record it.
+  await setSuggestionFlag(nestId, documentId, true);
   return { meta: result.meta, created: true };
+}
+
+/**
+ * Re-derive one document's staged-suggestion flag from disk.
+ *
+ * After a verdict, because approving or rejecting ONE suggestion does not mean
+ * the document has none left. One directory read for one document, on a write
+ * path — not the whole-vault walk the listing used to pay on every request.
+ */
+async function refreshSuggestionFlag(
+  nestId: string,
+  storage: NestStorage,
+  documentId: string,
+): Promise<void> {
+  try {
+    const remaining = await listSuggestions(storage, documentId);
+    await setSuggestionFlag(nestId, documentId, remaining.length > 0);
+  } catch (err) {
+    console.error("[external-edit] flag refresh failed", nestId, documentId, err);
+  }
 }
 
 /** Scan every document in a nest. Returns count of newly-staged suggestions. */
@@ -536,6 +565,7 @@ export async function approveExternalEdit(input: {
   // either, even though the content change itself is already committed.
   const historyRecorded = await recordVerdict(input.nestId, result.chainEvent);
 
+  await refreshSuggestionFlag(input.nestId, storage, input.documentId);
   return { ...result, historyRecorded };
 }
 
@@ -597,6 +627,7 @@ export async function rejectExternalEdit(input: {
     );
   }
 
+  await refreshSuggestionFlag(input.nestId, storage, input.documentId);
   return { ...result, historyRecorded };
 }
 

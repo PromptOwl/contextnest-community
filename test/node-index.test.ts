@@ -7,7 +7,7 @@
  * a rebuild reconciles it.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "fs";
+import { mkdirSync, writeFileSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
 import {
   setupTestEnv,
@@ -340,6 +340,71 @@ describe("node_index — staying in sync with disk", () => {
       owner.apiKey,
     );
     expect(list.data.nodes.some((n: any) => n.id === racer.id)).toBe(true);
+  });
+
+  it("tracks staged external edits without walking the vault", async () => {
+    const doc = await createNode("Drifty", { folder: "beta" });
+    const mdPath = vaultPath("nodes", "beta", "drifty.md");
+    writeFileSync(
+      mdPath,
+      readFileSync(mdPath, "utf-8").replace(
+        "body of Drifty",
+        "edited outside the app entirely.",
+      ),
+      "utf-8",
+    );
+    const scan = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/external-edits/scan`,
+      {},
+      owner.apiKey,
+    );
+    expect(scan.data.staged).toBe(1);
+
+    // Staging recorded it in the DB, so the listing's pending badge is a
+    // SELECT rather than a recursive readdir of the whole nest.
+    const flagged = (await getDb().all(
+      "SELECT node_id FROM node_suggestions WHERE nest_id = ?",
+      [nestId],
+    )) as Array<{ node_id: string }>;
+    expect(flagged.map((r) => r.node_id)).toContain(doc.id);
+
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes?folder=beta`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(
+      list.data.nodes.find((n: any) => n.id === doc.id).status,
+    ).toBe("external_edit_pending");
+  });
+
+  it("a write to another document does not clear the flag", async () => {
+    // The reason this lives in its own table: node_index rows are upserted
+    // with a full-row replace on every document write, which would reset a
+    // column the write does not carry.
+    await createNode("Unrelated", { folder: "alpha" });
+    const still = (await getDb().all(
+      "SELECT node_id FROM node_suggestions WHERE nest_id = ?",
+      [nestId],
+    )) as Array<{ node_id: string }>;
+    expect(still.map((r) => r.node_id)).toContain("nodes/beta/drifty");
+  });
+
+  it("a rebuild reconciles the flag against disk", async () => {
+    await getDb().run("DELETE FROM node_suggestions WHERE nest_id = ?", [
+      nestId,
+    ]);
+    await jsonRequest(app, "POST", `/nests/${nestId}/reindex`, {}, owner.apiKey);
+
+    const restored = (await getDb().all(
+      "SELECT node_id FROM node_suggestions WHERE nest_id = ?",
+      [nestId],
+    )) as Array<{ node_id: string }>;
+    expect(restored.map((r) => r.node_id)).toContain("nodes/beta/drifty");
   });
 
   it("POST /reindex restores an index emptied behind its back", async () => {

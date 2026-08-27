@@ -290,6 +290,14 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_node_index_folder
       ON node_index(nest_id, folder);
 
+    -- node_suggestions (migration 036). Which documents have an external edit
+    -- staged — so the listing's pending badge is a SELECT, not a vault walk.
+    CREATE TABLE IF NOT EXISTS node_suggestions (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      PRIMARY KEY (nest_id, node_id)
+    );
+
     -- sessions (migration 003).
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,

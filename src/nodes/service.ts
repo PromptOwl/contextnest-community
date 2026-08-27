@@ -47,10 +47,7 @@ import {
   listUserGrants,
   grantRoleForNode,
 } from "../governance/grants-service.js";
-import {
-  getPendingChange,
-  documentsWithSuggestions,
-} from "../governance/external-edit-service.js";
+import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
 import { ANON_USER_ID, MAX_FOLDER_DEPTH } from "../shared/constants.js";
@@ -60,6 +57,7 @@ import {
   ensureNodeIndex,
   readIndexedNodes,
   indexedFolderCounts,
+  nodesWithSuggestions,
 } from "./node-index.js";
 import { config } from "../config.js";
 
@@ -736,7 +734,10 @@ export async function listNodesForCaller(
     ? [null, null]
     : await Promise.all([
         versions.getDisplayStatuses(nestId),
-        documentsWithSuggestions(nestId),
+        // From the DB, not a vault walk. The disk truth behind it is
+        // reconciled by the index rebuild and kept current by the stage /
+        // approve / reject paths.
+        nodesWithSuggestions(nestId),
       ]);
 
   // Author + collaborators for exactly the post-filter set — two batched
@@ -1846,6 +1847,7 @@ export const NODE_KEYED_TABLES = [
   ["comments", "node_id"],
   ["node_tag_index", "node_id"],
   ["node_index", "node_id"],
+  ["node_suggestions", "node_id"],
   ["watchers", "node_id"],
   ["schedules", "agent_node"],
   // A live capability token bound to one agent node — deleting the agent must

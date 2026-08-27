@@ -1341,6 +1341,20 @@ export function runMigrations(db: Database.Database): void {
         );
         CREATE INDEX IF NOT EXISTS idx_node_index_folder
           ON node_index(nest_id, folder);
+
+        -- Which documents have an external edit staged against them.
+        --
+        -- Its own table rather than a node_index column: node_index rows are
+        -- upserted with INSERT OR REPLACE on every document write, which
+        -- resets any column the write does not carry — and a suggestion's
+        -- existence has nothing to do with the document write that would
+        -- clobber it. Kept in step at the three points that stage, approve or
+        -- reject a suggestion, and refreshed wholesale by a rebuild.
+        CREATE TABLE IF NOT EXISTS node_suggestions (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          PRIMARY KEY (nest_id, node_id)
+        );
       `);
     })();
     recordMigration("036_node_index");

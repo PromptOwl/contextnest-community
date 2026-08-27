@@ -23,7 +23,7 @@
 
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { getDb } from "../db/client.js";
-import { insertOrReplace, nowExpr } from "../db/sql.js";
+import { insertOrIgnore, insertOrReplace, nowExpr } from "../db/sql.js";
 import type { Querier, SqlParam } from "../db/adapter.js";
 import { folderOfId } from "../shared/node-id.js";
 
@@ -192,6 +192,9 @@ export async function rebuildNodeIndex(nestId: string): Promise<number> {
   // Imported lazily: engine.ts writes through to this module, and a static
   // import back into it would close the cycle at module-evaluation time.
   const { engineCache } = await import("./engine.js");
+  const { documentsWithSuggestions } = await import(
+    "../governance/external-edit-service.js"
+  );
   const { storage, dropDiscoveryCache } = await engineCache.get(nestId);
   // A rebuild exists to reconcile with what is actually on disk — a write
   // another instance made, an edit from outside the app — so the memoized
@@ -201,6 +204,9 @@ export async function rebuildNodeIndex(nestId: string): Promise<number> {
   dropDiscoveryCache();
   const startedAt = writeGeneration.get(nestId) ?? 0;
   const documents = await storage.discoverDocuments({ includeRetired: true });
+  // The one place the whole-vault suggestion walk still runs: once per rebuild,
+  // reconciling the badge flags against disk, instead of once per listing.
+  const staged = await documentsWithSuggestions(nestId);
 
   const db = getDb();
   const insertSql = insertOrReplace(
@@ -209,10 +215,18 @@ export async function rebuildNodeIndex(nestId: string): Promise<number> {
     ["nest_id", "node_id"],
     UPSERT_SET,
   );
+  const stagedSql = insertOrIgnore(
+    db,
+    "INSERT INTO node_suggestions (nest_id, node_id) VALUES (?, ?)",
+  );
   await db.transaction(async (tx: Querier) => {
     await tx.run("DELETE FROM node_index WHERE nest_id = ?", [nestId]);
     for (const doc of documents) {
       await tx.run(insertSql, [nestId, ...rowValues(doc)]);
+    }
+    await tx.run("DELETE FROM node_suggestions WHERE nest_id = ?", [nestId]);
+    for (const id of staged) {
+      await tx.run(stagedSql, [nestId, id]);
     }
     // Stamped inside the transaction: a crash between the rows and the stamp
     // would otherwise leave a complete mirror flagged stale forever, or —
@@ -231,6 +245,57 @@ export async function rebuildNodeIndex(nestId: string): Promise<number> {
   });
 
   return documents.length;
+}
+
+/**
+ * Record (or clear) the fact that a document has an external edit staged.
+ *
+ * Called from the three points that stage, approve or reject a suggestion.
+ * Never throws — a wrong badge must not fail a governance write, and the next
+ * rebuild reconciles the whole nest against disk anyway.
+ */
+export async function setSuggestionFlag(
+  nestId: string,
+  nodeId: string,
+  present: boolean,
+): Promise<void> {
+  try {
+    const db = getDb();
+    if (!present) {
+      await db.run(
+        "DELETE FROM node_suggestions WHERE nest_id = ? AND node_id = ?",
+        [nestId, nodeId],
+      );
+      return;
+    }
+    await db.run(
+      insertOrIgnore(
+        db,
+        "INSERT INTO node_suggestions (nest_id, node_id) VALUES (?, ?)",
+      ),
+      [nestId, nodeId],
+    );
+  } catch (err) {
+    console.error("[node-index] suggestion flag failed", nestId, nodeId, err);
+  }
+}
+
+/**
+ * The documents in this nest with an external edit staged.
+ *
+ * The DB twin of `documentsWithSuggestions`, which answers the same question
+ * by walking the whole vault — including one `.versions/<doc>/` directory per
+ * document — and did so on EVERY listing request, for a condition that is
+ * empty on almost every row.
+ */
+export async function nodesWithSuggestions(
+  nestId: string,
+): Promise<Set<string>> {
+  const rows = (await getDb().all(
+    "SELECT node_id FROM node_suggestions WHERE nest_id = ?",
+    [nestId],
+  )) as Array<{ node_id: string }>;
+  return new Set(rows.map((r) => r.node_id));
 }
 
 /**
