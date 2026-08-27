@@ -5,6 +5,7 @@ import {
   allNestsChatPrompt,
   nestChatPrompt,
   nestSetupPrompt,
+  envFileContents,
 } from "./connect";
 
 // Regression tests written before the implementation (dev-loop: fail-before-build).
@@ -81,15 +82,43 @@ describe("nestChatPrompt", () => {
 });
 
 describe("nestSetupPrompt", () => {
-  it("includes the nest's MCP url and orients before answering", () => {
-    const p = nestSetupPrompt("GTM", "https://x.ai/nests/gtm/mcp");
+  it("builds the per-nest MCP url from server + nestId and orients before answering", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai/", "gtm");
     expect(p).toContain("https://x.ai/nests/gtm/mcp");
     expect(p).toContain("context_overview");
   });
 
+  it("is one-shot: tells the agent to self-install the CLI and ask for the key", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toContain("npm i -g @promptowl/contextnest-cli");
+    expect(p).toMatch(/ask me (only )?for the api key/i);
+  });
+
   it("never bakes in a key", () => {
-    expect(nestSetupPrompt("GTM", "https://x.ai/nests/gtm/mcp")).not.toMatch(
-      /cnst_/,
-    );
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).not.toMatch(/cnst_/);
+  });
+});
+
+describe("envFileContents", () => {
+  it("includes server + key, and the nest line when a nestId is given", () => {
+    const e = envFileContents({
+      serverUrl: "https://x.ai/",
+      apiKey: "cnst_abc",
+      nestId: "n1",
+    });
+    expect(e).toContain("CONTEXTNEST_SERVER=https://x.ai");
+    expect(e).toContain("CONTEXTNEST_API_KEY=cnst_abc");
+    expect(e).toContain("CONTEXTNEST_NEST=n1");
+  });
+
+  it("omits the nest line when no nestId (all-nests key)", () => {
+    const e = envFileContents({ serverUrl: "https://x.ai", apiKey: "cnst_abc" });
+    expect(e).not.toContain("CONTEXTNEST_NEST");
+  });
+
+  it("warns not to commit the file", () => {
+    expect(
+      envFileContents({ serverUrl: "https://x.ai", apiKey: "k" }),
+    ).toMatch(/do not commit/i);
   });
 });

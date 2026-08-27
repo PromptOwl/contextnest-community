@@ -54,7 +54,11 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { copyTextWithToast } from "../lib/clipboard";
-import { nestChatPrompt, nestSetupPrompt } from "../lib/connect";
+import {
+  nestChatPrompt,
+  nestSetupPrompt,
+  envFileContents,
+} from "../lib/connect";
 import { useAuth } from "../auth/AuthContext";
 
 interface ConnectModalProps {
@@ -62,9 +66,6 @@ interface ConnectModalProps {
   onClose: () => void;
   nestId: string;
   nestName: string;
-  /** Opens the Add-with-AI (generate) flow — Connect is the front door for
-   *  every way content gets in or out, including the AI one. */
-  onGenerate?: () => void;
 }
 
 const KEY_PLACEHOLDER = "<paste-your-api-key-here>";
@@ -74,7 +75,6 @@ export function ConnectModal({
   onClose,
   nestId,
   nestName,
-  onGenerate,
 }: ConnectModalProps) {
   const { authenticated, authMode } = useAuth();
   const serverUrl =
@@ -306,18 +306,20 @@ export function ConnectModal({
               sections below it sat outside the scroll area, so a short
               window squeezed the tab content into a sliver (or nothing). */}
           <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0 space-y-4">
-          {/* Quickest start: tailored prompts you paste into any assistant —
-              no keys, no config. The per-client setup lives in the tabs below. */}
-          <div className="rounded-lg border bg-muted/30 p-3">
-            <p className="text-sm font-medium">
-              Quickest start — paste a prompt into your AI
+          {/* Primary path: generate a key, then paste one of these into your AI
+              agent/harness — it self-installs, connects, and asks for the key.
+              Per-client config is the fallback (collapsed below). */}
+          <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-3.5">
+            <p className="text-sm font-semibold">
+              Now paste into your AI agent or harness
             </p>
-            <p className="mb-2.5 mt-0.5 text-xs text-muted-foreground">
-              No setup. Drop one of these into Hootie, Claude, or any assistant.
+            <p className="mb-3 mt-0.5 text-xs text-muted-foreground">
+              Generate a key below, then drop one of these into Claude, Cursor,
+              Hootie, or any agent. It self-installs, connects, and asks you for
+              the key — one paste, all-purpose.
             </p>
             <div className="flex flex-wrap gap-2">
               <Button
-                variant="secondary"
                 size="sm"
                 onClick={() =>
                   copyTextWithToast(
@@ -330,11 +332,10 @@ export function ConnectModal({
                 Chat with this nest
               </Button>
               <Button
-                variant="secondary"
                 size="sm"
                 onClick={() =>
                   copyTextWithToast(
-                    nestSetupPrompt(nestName, mcpUrl),
+                    nestSetupPrompt(nestName, serverUrl, nestId),
                     "Setup prompt copied",
                   )
                 }
@@ -343,9 +344,6 @@ export function ConnectModal({
                 Set up an agent
               </Button>
             </div>
-            <p className="mt-2.5 text-xs text-muted-foreground">
-              Or configure a specific client below.
-            </p>
           </div>
           {showLoginBanner && (
             <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
@@ -454,23 +452,6 @@ export function ConnectModal({
             </div>
           )}
 
-            {onGenerate && (
-              <button
-                type="button"
-                onClick={onGenerate}
-                className="w-full flex items-center gap-2 rounded-lg border border-dashed px-3 py-2.5 text-sm hover:border-primary hover:bg-muted/40 text-left"
-                data-testid="connect-add-with-ai"
-              >
-                <Sparkles className="h-4 w-4 text-violet-500 shrink-0" />
-                <span>
-                  <span className="font-medium">Add with AI</span>
-                  <span className="text-muted-foreground">
-                    {" "}— point an agent at a repo/topic and push generated
-                    context into this nest
-                  </span>
-                </span>
-              </button>
-            )}
             <button
               type="button"
               onClick={() => setShowClients((v) => !v)}
@@ -875,6 +856,7 @@ export function ConnectModal({
         <KeyRevealModal
           apiKey={revealedKey}
           kind={revealKind}
+          nestId={nestId}
           onClose={closeReveal}
         />
       )}
@@ -946,16 +928,36 @@ export function KeyRevealModal({
   apiKey,
   kind,
   onClose,
+  nestId,
 }: {
   apiKey: string;
   kind: "generated" | "rotated";
   onClose: () => void;
+  nestId?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const copy = async () => {
     if (!(await copyTextWithToast(apiKey))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
+  };
+  const downloadEnv = () => {
+    const serverUrl =
+      typeof window !== "undefined"
+        ? window.location.origin
+        : "http://localhost:3838";
+    const url = URL.createObjectURL(
+      new Blob([envFileContents({ serverUrl, apiKey, nestId })], {
+        type: "text/plain",
+      }),
+    );
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "contextnest.env";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   };
   return (
     <Dialog open onOpenChange={onClose}>
@@ -992,10 +994,19 @@ export function KeyRevealModal({
               )}
             </Button>
           </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full"
+            onClick={downloadEnv}
+          >
+            <Download className="mr-1.5 h-3.5 w-3.5" />
+            Download .env
+          </Button>
           <p className="text-xs text-muted-foreground">
-            Paste it into Hootie / Claude Desktop wherever the snippets
-            in the Connect dialog show{" "}
-            <code className="text-[11px]">{KEY_PLACEHOLDER}</code>.
+            Copy it, or download a ready{" "}
+            <code className="text-[11px]">.env</code> (server URL + key) to hand
+            your agent. Keep it secret — don't commit it.
           </p>
         </div>
 
