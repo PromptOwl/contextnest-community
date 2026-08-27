@@ -497,6 +497,8 @@ Optional query params, applied before the per-node enrichment:
 | `status` | `draft` \| `pending_review` \| `approved` \| `published` \| `rejected`; aliases normalized. Retired docs stay in this listing regardless — here they are unpublished docs their stewards may still act on. |
 | `approved_only` | `1`/`true` — only docs with an approved version, each served at that version rather than the live file. The view a public nest gives a stranger, so an owner can preview what going public would expose. |
 | `limit` | Max nodes to return. A non-numeric value is ignored, not an error. |
+| `folder` | Present (even as `""`) → that one folder level only, for a lazily-expanded document tree. Absent → the whole nest. |
+| `content` | `1`/`true` — include document bodies. **Off by default:** the listing is served from the nest's document index, which holds metadata only, so bodies cost a vault crawl and are opt-in. |
 ```json
 {
   "count": 1,
@@ -511,7 +513,7 @@ Optional query params, applied before the per-node enrichment:
     "collaborators": ["editor@x.com", "grantee@x.com"],
     "created_at": "...",
     "updated_at": "...",
-    "content": "# md body",
+    "content": "# md body — only with ?content=1",
     "schedule": "0 6 * * *"
   }]
 }
@@ -1323,6 +1325,55 @@ Nest-level summary stats.
 
 ### GET `/nests/:nestId/context`
 Returns CONTEXT.md content.
+
+### GET `/nests/:nestId/folders`
+The nest's folder tree on its own, for callers that want the *shape* of the vault
+(a navigable tree, a folder picker) and none of its content. Reads folder rows out
+of the document index — no document is opened, so this stays cheap on a vault where
+listing the documents would not be.
+
+Query: `?folder=<path>` (that subtree only; defaults to the whole nest),
+`?recursive=0` (direct children of `folder` only).
+
+```json
+{ "folders": [{ "path": "specs", "count": 4, "total": 11 }] }
+```
+
+`count` = documents filed directly in that folder; `total` = the whole subtree
+beneath it. A level that holds only subfolders still gets a row, so it stays
+expandable.
+
+### GET `/nests/:nestId/census`
+One call for everything a nest overview needs to describe the *whole* nest,
+whatever folder is open — counts by tag, type and status, the folder tree, the
+author roster, and the recently-edited strip. Gated by the same `filterAccessible`
+pass as the listing, so the numbers describe what this caller can actually reach.
+
+```json
+{
+  "census": {
+    "total": 42,
+    "folders": [{ "path": "specs", "count": 4, "total": 11 }],
+    "tags": { "#api": 7 },
+    "types": { "document": 40, "agent": 2 },
+    "statuses": { "approved": 30, "draft": 12 },
+    "authors": ["a@x.com"],
+    "editedLast7d": 5,
+    "recent": [{ "id": "nodes/foo", "title": "Foo", "type": "document", "updated_at": "..." }]
+  }
+}
+```
+
+### POST `/nests/:nestId/reindex` (write+)
+Force-rebuild the nest's document index from the vault, and return how many
+documents were indexed: `{ "indexed": 42 }`.
+
+The index heals itself — anything that could leave it out of step with disk (an
+out-of-band edit, an import, a write that could not be mirrored) marks the nest
+stale, and the next read rebuilds before answering. This is the manual lever for
+when an operator wants that to happen *now*. A rebuild crawls the whole vault, so
+it is write-tier rather than something a read-only caller can trigger at will;
+below that the answer is `403`.
 
 ### GET `/nests/:nestId/graph` (read+)
 Ontology graph — a read-only assembly over data the nest already holds, for the
