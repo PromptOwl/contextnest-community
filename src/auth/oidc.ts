@@ -73,7 +73,7 @@ const NONCE_COOKIE = "cnst_oidc_nonce";
 const VERIFIER_COOKIE = "cnst_oidc_verifier";
 const FLOW_COOKIE_TTL_SECS = 10 * 60; // 10 minutes
 
-interface DiscoveryDoc {
+export interface DiscoveryDoc {
   issuer: string;
   authorization_endpoint: string;
   token_endpoint: string;
@@ -106,7 +106,7 @@ export function isOidcReady(): boolean {
   );
 }
 
-async function discover(issuer: string): Promise<{
+export async function discover(issuer: string): Promise<{
   doc: DiscoveryDoc;
   jwks: ReturnType<typeof createRemoteJWKSet>;
 }> {
