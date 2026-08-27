@@ -92,6 +92,9 @@ export function ConnectModal({
   // Per-client config is collapsed by default — the quick-start prompts above
   // cover most people; power users expand to configure a specific client.
   const [showClients, setShowClients] = useState(false);
+  // Export / portability / nest-id are utilities, not part of connecting —
+  // collapsed by default too.
+  const [showMore, setShowMore] = useState(false);
 
   const [hasExistingKey, setHasExistingKey] = useState<boolean | null>(null);
   const [existingPrefix, setExistingPrefix] = useState<string | null>(null);
@@ -778,6 +781,22 @@ export function ConnectModal({
               </div>
             )}
 
+          <button
+            type="button"
+            onClick={() => setShowMore((v) => !v)}
+            aria-expanded={showMore}
+            className="flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-sm hover:bg-muted/40"
+          >
+            <span className="font-medium">Export &amp; nest details</span>
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              Markdown · .zip · Nest ID
+              <ChevronDown
+                className={`h-4 w-4 transition-transform ${showMore ? "rotate-180" : ""}`}
+              />
+            </span>
+          </button>
+          {showMore && (
+          <>
           {/* Export — markdown egress. The URL is what agents fetch; the
               button downloads it as a file. Approved content only (server-side). */}
           <div className="border-t pt-3 space-y-2">
@@ -846,6 +865,8 @@ export function ConnectModal({
               <CopyButton value={nestId} />
             </div>
           </div>
+          </>
+          )}
           </div>
         </DialogContent>
       </Dialog>
