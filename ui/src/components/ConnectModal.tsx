@@ -168,6 +168,9 @@ export function ConnectModal({
       setRevealKind("generated");
       setRevealedKey(api_key);
       setJustActed("generated");
+      // Other surfaces (AllNestsBar) read the same cached key list; without
+      // this they keep offering "Generate" for up to staleTime and 409.
+      qc.invalidateQueries({ queryKey: reads.apiKeys().queryKey });
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -190,6 +193,7 @@ export function ConnectModal({
       setRevealKind("rotated");
       setRevealedKey(api_key);
       setJustActed("rotated");
+      qc.invalidateQueries({ queryKey: reads.apiKeys().queryKey });
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -335,7 +339,7 @@ export function ConnectModal({
                 size="sm"
                 onClick={() =>
                   copyTextWithToast(
-                    nestSetupPrompt(nestName, serverUrl, nestId),
+                    nestSetupPrompt(nestName, serverUrl, nestId, showOpenModeBanner),
                     "Setup prompt copied",
                   )
                 }
@@ -715,7 +719,7 @@ export function ConnectModal({
                     value={
                       showOpenModeBanner
                         ? `ctx push --server ${serverUrl} --nest ${nestId}`
-                        : `CONTEXTNEST_API_KEY=<your-key> ctx push --server ${serverUrl} --nest ${nestId}`
+                        : `ctx push --server ${serverUrl} --nest ${nestId} --key ${KEY_PLACEHOLDER}`
                     }
                     multiline
                   />

@@ -26,6 +26,7 @@ import {
 import * as api from "../lib/api";
 import { useApiKeys } from "../lib/queries";
 import { KeyRevealModal } from "./ConnectModal";
+import { useAuth } from "../auth/AuthContext";
 
 const serverUrl =
   typeof window !== "undefined"
@@ -47,24 +48,39 @@ export function AllNestsBar({ nests }: { nests: NestCountRow[] }) {
     kind: "generated" | "rotated";
   } | null>(null);
 
-  const { data: keyData, refetch: refetchKeys } = useApiKeys();
+  const { authenticated, authMode } = useAuth();
+  // AUTH_MODE=open servers need no credential — mirror ConnectModal and hide
+  // the whole key section (and drop key talk from the prompt) there.
+  const openMode = authMode === "open";
+  const showKeySection = authenticated && !openMode;
+
+  // Deferred to dialog-open: this component mounts with the dashboard, and an
+  // unconditional fetch would hit /auth/keys on every visit.
+  const {
+    data: keyData,
+    isLoading: keysLoading,
+    refetch: refetchKeys,
+  } = useApiKeys({ enabled: open && showKeySection });
   const existingKey = keyData?.keys?.[0];
 
   const { nestCount, documentCount } = nestSummary(nests);
   const mcp = serverMcpUrl(serverUrl);
-  const prompt = allNestsChatPrompt(serverUrl);
+  const prompt = allNestsChatPrompt(serverUrl, openMode);
 
   async function generate() {
     setMinting(true);
     try {
       const { api_key } = await api.createApiKey({ label: "connect" });
       setReveal({ apiKey: api_key, kind: "generated" });
-      refetchKeys();
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Couldn't generate a key.",
       );
     } finally {
+      // Either way the server is the truth: a 409 means a key already exists,
+      // so refetching flips this panel to the "Active key" state instead of
+      // leaving a dead Generate button.
+      void refetchKeys();
       setMinting(false);
     }
   }
@@ -120,16 +136,22 @@ export function AllNestsBar({ nests }: { nests: NestCountRow[] }) {
               </div>
             </div>
 
+            {showKeySection && (
             <div>
               <p className="mb-1.5 text-xs font-medium text-muted-foreground">
                 Your API key
               </p>
-              {existingKey ? (
+              {keysLoading ? (
+                <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-2.5 text-xs text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Checking your key…
+                </div>
+              ) : existingKey ? (
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border bg-muted/40 p-2.5 text-xs">
                   <KeyRound className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                   <span>
                     Active key{" "}
-                    <code className="font-mono">{existingKey.key_prefix}…</code>
+                    <code className="font-mono">{existingKey.key_prefix}</code>
                   </span>
                   <span className="text-muted-foreground">
                     — works here and in every nest.
@@ -147,9 +169,11 @@ export function AllNestsBar({ nests }: { nests: NestCountRow[] }) {
               )}
               <p className="mt-1.5 text-xs text-muted-foreground">
                 One key for your whole account — the same key authenticates
-                every nest and this connection. You'll see it once.
+                every nest and this connection. You'll see it once; open a
+                nest's Connect panel to rotate it.
               </p>
             </div>
+            )}
 
             <div>
               <p className="mb-1.5 text-xs font-medium text-muted-foreground">
@@ -172,8 +196,9 @@ export function AllNestsBar({ nests }: { nests: NestCountRow[] }) {
             <div className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-2.5 text-xs text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-200">
               <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>
-                Reads across every nest you can see. Writing stays per-nest —
-                open a nest and use its Connect panel to let an agent contribute.
+                Reads across every nest you can see. It can also start a new
+                nest or add a document when you ask — everything else (editing,
+                approving, publishing) stays inside a nest's own Connect panel.
               </span>
             </div>
           </div>

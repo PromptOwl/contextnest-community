@@ -4,8 +4,14 @@
  * repo's node-only vitest setup (see connect.test.ts).
  *
  * Auth is deliberately out of scope here: nothing in this module mints, stores,
- * or embeds a key. The server-level /mcp endpoint is read-across-every-nest;
- * writing stays per-nest (enforced server-side).
+ * or embeds a key. The server-level /mcp endpoint reads across every nest the
+ * caller can see and carries two bootstrap writes (nest_create,
+ * context_create) — see src/mcp/server-routes.ts. Prompts must not claim it is
+ * read-only.
+ *
+ * `openMode` mirrors AUTH_MODE=open deployments, where no key exists: the
+ * generated prompts must not tell an agent to send an Authorization header or
+ * ask the user for a credential that does not exist.
  */
 
 export interface NestCountRow {
@@ -37,19 +43,25 @@ export function serverMcpUrl(serverBaseUrl: string): string {
  * of the user's nests. Contains no secret — the key is handed over separately,
  * by the user, when their client asks for it.
  */
-export function allNestsChatPrompt(serverBaseUrl: string): string {
+export function allNestsChatPrompt(
+  serverBaseUrl: string,
+  openMode = false,
+): string {
   const mcp = serverMcpUrl(serverBaseUrl);
   return [
     "Connect to all my ContextNest nests and treat them as my source of truth.",
     "",
     `Add one MCP server "contextnest" at: ${mcp}`,
-    "Authenticate with my ContextNest API key when your client asks for it — never print it back.",
+    openMode
+      ? "This server needs no credential — connect directly."
+      : "Authenticate with my ContextNest API key when your client asks for it — never print it back.",
     "",
     "Call nest_index first to see every nest (name, description, size), then pull from",
     "whichever nest fits each question. Search before answering; cite what you use as",
     "`nest:id`; say plainly when something isn't covered.",
     "",
-    "This connection reads across nests but doesn't write. Always ask before publishing anything.",
+    "This connection is read-first: it can also create a new nest or a new document",
+    "(nest_create, context_create). Never write, publish, or share anything without asking me first.",
   ].join("\n");
 }
 
@@ -106,11 +118,12 @@ export function nestSetupPrompt(
   nestName: string,
   serverUrl: string,
   nestId: string,
+  openMode = false,
 ): string {
   const base = serverUrl.replace(/\/+$/, "");
   const mcp = `${base}/nests/${nestId}/mcp`;
   return [
-    `Connect to my ContextNest nest "${nestName}" and treat it as my source of truth. Set it up yourself where you can; ask me only for the API key.`,
+    `Connect to my ContextNest nest "${nestName}" and treat it as my source of truth. Set it up yourself where you can;${openMode ? " it needs no credential." : " ask me only for the API key."}`,
     "",
     "RULE — do NOT claim you're connected until you've pulled LIVE data: prove it by showing the nest's real node count and a few real node titles. If you can't retrieve anything, STOP — don't guess, don't summarise — and give me the manual steps below instead.",
     "",
@@ -119,16 +132,26 @@ export function nestSetupPrompt(
     "CONNECT — pick what fits you:",
     "• Shell / coding agent (Claude Code, Codex, Cursor): the fastest working read is a direct call —",
     `    curl -s -X POST ${base}/nests/${nestId}/context \\`,
-    '      -H "Authorization: Bearer <key>" -H "Content-Type: application/json" \\',
+    openMode
+      ? '      -H "Content-Type: application/json" \\'
+      : '      -H "Authorization: Bearer <key>" -H "Content-Type: application/json" \\',
     "      -d '{\"selector\":\"type:document\",\"hops\":1,\"max_tokens\":2000}'",
-    `  You can also add an MCP server "contextnest" at ${mcp} (Bearer header) — but its tools don't load until you RESTART the session, so use the curl above to confirm now.`,
-    `  Push a local folder of notes up: npx -y @promptowl/contextnest-cli@latest push --server ${base} --nest ${nestId} (reads CONTEXTNEST_API_KEY from the env).`,
+    `  You can also add an MCP server "contextnest" at ${mcp}${openMode ? "" : " (Bearer header)"} — but its tools don't load until you RESTART the session, so use the curl above to confirm now.`,
+    // ctx reads no API-key env var (verified against CLI 1.2.1) — the key has
+    // to be passed with --key or the push 401s.
+    `  Push a local folder of notes up: npx -y @promptowl/contextnest-cli@latest push --server ${base} --nest ${nestId}${openMode ? "." : " --key <key>"}`,
     "• Claude Desktop / claude.ai / ChatGPT (no shell): you can't connect yourself from chat. Tell me to do this: Settings → Connectors → Add custom connector →",
-    `    URL ${mcp}  ·  header "Authorization: Bearer <key>", then restart.`,
-    "  Put the key in that config — never in our chat.",
+    openMode
+      ? `    URL ${mcp}, then restart.`
+      : `    URL ${mcp}  ·  header "Authorization: Bearer <key>", then restart.`,
+    openMode ? null : "  Put the key in that config — never in our chat.",
     "",
-    "KEY — ask me for my ContextNest API key. Put it in the env/config above; don't print it back.",
-    "",
+    openMode
+      ? null
+      : "KEY — ask me for my ContextNest API key. Put it in the env/config above; don't print it back.",
+    openMode ? null : "",
     "THEN (only after the proof above) — search before answering, cite what you use as `nest:id`, remember durable learnings as small linked nodes, and always ask before publishing anything public.",
-  ].join("\n");
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
 }

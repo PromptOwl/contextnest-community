@@ -843,7 +843,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
           </div>
 
           {/* Whole-brain landing: frame every nest as one connectable brain. */}
-          {nests.length > 0 && <AllNestsBar nests={nests} />}
+          {allNests.length > 0 && <AllNestsBar nests={allNests} />}
 
           {/* Create form */}
           {showCreate && (

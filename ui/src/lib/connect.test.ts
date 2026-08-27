@@ -128,3 +128,56 @@ describe("envFileContents", () => {
     ).toMatch(/do not commit/i);
   });
 });
+
+describe("open-mode prompts (AUTH_MODE=open)", () => {
+  it("allNestsChatPrompt drops every credential instruction", () => {
+    const p = allNestsChatPrompt("https://x.ai", true);
+    expect(p).not.toMatch(/api key/i);
+    expect(p).toContain("no credential");
+    expect(p).toContain("https://x.ai/mcp");
+  });
+
+  it("nestSetupPrompt drops the Bearer header and the KEY section", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm", true);
+    expect(p).not.toMatch(/authorization: bearer/i);
+    expect(p).not.toMatch(/api key/i);
+    // still fully usable: the proof gate and both connect paths survive
+    expect(p).toContain("https://x.ai/nests/gtm/context");
+    expect(p).toMatch(/settings . connectors/i);
+  });
+
+  it("key mode is unchanged (default arg)", () => {
+    expect(nestSetupPrompt("GTM", "https://x.ai", "gtm")).toMatch(
+      /Authorization: Bearer/,
+    );
+    expect(allNestsChatPrompt("https://x.ai")).toMatch(/api key/i);
+  });
+});
+
+describe("write honesty (ticket AC: no false read-only claims)", () => {
+  it("does not claim the server-level connection is read-only", () => {
+    const p = allNestsChatPrompt("https://x.ai");
+    expect(p).not.toMatch(/does ?n'?t write|read-only/i);
+    // server-routes.ts exposes nest_create + context_create on /mcp
+    expect(p).toContain("nest_create");
+    expect(p).toContain("context_create");
+    expect(p).toMatch(/asking me first/i);
+  });
+});
+
+describe("ctx CLI contract (verified against contextnest-cli 1.2.1)", () => {
+  // `ctx push` takes --server/--nest/--key and reads NO api-key env var.
+  // Telling an agent to export CONTEXTNEST_API_KEY produced a silent 401.
+  it("passes the key as a --key flag, never as an env var", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toContain("push --server https://x.ai --nest gtm");
+    expect(p).toContain("--key");
+    expect(p).not.toContain("CONTEXTNEST_API_KEY");
+  });
+
+  it("omits the key flag entirely in open mode", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm", true);
+    expect(p).toContain("push --server https://x.ai --nest gtm");
+    expect(p).not.toContain("--key");
+  });
+});
