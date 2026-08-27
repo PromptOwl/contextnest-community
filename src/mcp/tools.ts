@@ -828,7 +828,12 @@ async function runTool(
         await opContext(nestId, userEmail),
       );
 
-      const visible = await listNodesForCallerByEmail(nestId, userEmail, {});
+      // `withContent` for the body previews below. An explicit whole-vault
+      // call, so paying for the crawl here is honest; the document tree and
+      // context_list do not, and read from the index instead.
+      const visible = await listNodesForCallerByEmail(nestId, userEmail, {
+        withContent: true,
+      });
       const types: Record<string, number> = {};
       const tags: Record<string, number> = {};
       for (const n of visible) {
