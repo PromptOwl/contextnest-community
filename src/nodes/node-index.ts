@@ -310,6 +310,21 @@ export async function nodesWithSuggestions(
  * Ordered by id, matching what discovery returns, so callers that assumed a
  * sorted set keep getting one.
  */
+/**
+ * Just the node ids this nest has indexed.
+ *
+ * For callers that already hold the on-disk set and want to know whether the
+ * mirror still describes the same documents — cheaper than rehydrating every
+ * row's frontmatter to answer a membership question.
+ */
+export async function indexedNodeIds(nestId: string): Promise<Set<string>> {
+  const rows = (await getDb().all(
+    "SELECT node_id FROM node_index WHERE nest_id = ?",
+    [nestId],
+  )) as Array<{ node_id: string }>;
+  return new Set(rows.map((r) => r.node_id));
+}
+
 export async function readIndexedNodes(
   nestId: string,
   filters: { folder?: string } = {},

@@ -315,6 +315,94 @@ describe("node_index — staying in sync with disk", () => {
     ).toBe(false);
   });
 
+  it("a drift scan that finds nothing leaves the index fresh", async () => {
+    // The drift scanner runs on a timer over every nest. Marking the index
+    // stale on every tick left each nest permanently stale, so every listing
+    // paid a full rebuild crawl — the exact cost this index removes. A scan
+    // that finds nothing has proven the mirror right, not wrong.
+    await jsonRequest(app, "POST", `/nests/${nestId}/reindex`, {}, owner.apiKey);
+    expect(await syncedAt()).not.toBeNull();
+
+    const scan = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/external-edits/scan`,
+      {},
+      owner.apiKey,
+    );
+    expect(scan.data.staged).toBe(0);
+    expect(await syncedAt()).not.toBeNull();
+  });
+
+  it("a drift scan that stages an edit marks the index stale", async () => {
+    const doc = await createNode("Scanned Drift", { folder: "beta" });
+    await jsonRequest(app, "POST", `/nests/${nestId}/reindex`, {}, owner.apiKey);
+    expect(await syncedAt()).not.toBeNull();
+
+    const mdPath = vaultPath("nodes", "beta", "scanned-drift.md");
+    writeFileSync(
+      mdPath,
+      readFileSync(mdPath, "utf-8").replace(
+        "body of Scanned Drift",
+        "changed on disk, behind the app.",
+      ),
+      "utf-8",
+    );
+    const scan = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/external-edits/scan`,
+      {},
+      owner.apiKey,
+    );
+    expect(scan.data.staged).toBe(1);
+    // Content moved out of band, so the mirror's frontmatter may be wrong.
+    expect(await syncedAt()).toBeNull();
+
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes?folder=beta`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(
+      list.data.nodes.find((n: any) => n.id === doc.id).status,
+    ).toBe("external_edit_pending");
+  });
+
+  it("a file appearing on disk out of band marks the index stale", async () => {
+    await jsonRequest(app, "POST", `/nests/${nestId}/reindex`, {}, owner.apiKey);
+    expect(await syncedAt()).not.toBeNull();
+
+    // Drift detection only visits documents discovery already found, so a NEW
+    // file is invisible to it — membership has to be checked separately.
+    writeFileSync(
+      vaultPath("nodes", "alpha", "appeared.md"),
+      `---\ntitle: Appeared\ntype: document\nstatus: draft\n---\n\nout of band\n`,
+      "utf-8",
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/external-edits/scan`,
+      {},
+      owner.apiKey,
+    );
+    expect(await syncedAt()).toBeNull();
+
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes?folder=alpha`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(
+      list.data.nodes.some((n: any) => n.id === "nodes/alpha/appeared"),
+    ).toBe(true);
+  });
+
   it("does not lose a write that lands while a rebuild is crawling", async () => {
     // The rebuild replaces every row for the nest with the set it read from
     // disk. A create racing it would be wiped by that swap — and the stamp

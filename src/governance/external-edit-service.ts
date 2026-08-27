@@ -29,7 +29,11 @@ import {
   type NestStorage,
 } from "@promptowl/contextnest-engine";
 import { engineCache } from "../nodes/engine.js";
-import { setSuggestionFlag } from "../nodes/node-index.js";
+import {
+  setSuggestionFlag,
+  markIndexStale,
+  indexedNodeIds,
+} from "../nodes/node-index.js";
 import { getDb } from "../db/client.js";
 import { resolveNestPath } from "../shared/paths.js";
 
@@ -236,16 +240,39 @@ export async function scanNestForDrift(
   nestId: string,
   actor: string = "system:scanner",
 ): Promise<{ scanned: number; staged: number }> {
-  const { storage, invalidateDiscovery } = await engineCache.get(nestId);
+  const { storage, dropDiscoveryCache } = await engineCache.get(nestId);
   // Edits made outside this process are the whole point of the scan, so it
   // reads disk directly rather than the cached document set — which by
   // definition cannot contain a write this server never made.
-  invalidateDiscovery();
+  //
+  // The memory-only invalidator, NOT invalidateDiscovery. This scan runs on a
+  // timer over EVERY nest (DRIFT_SCAN_INTERVAL_MS, 30s by default), so marking
+  // the DB index stale here left every nest permanently stale — and every
+  // listing then paid a full rebuild crawl, which is the exact cost the index
+  // exists to remove. A scan that finds nothing has proven the mirror right,
+  // not wrong; it is only what the scan FINDS that can invalidate it.
+  dropDiscoveryCache();
   const docs = await storage.discoverDocuments();
   const results = await Promise.all(
     docs.map((doc) => scanDocumentForDriftInternal(nestId, doc.id, actor)),
   );
   const staged = results.filter((r) => r?.created).length;
+
+  // Two ways this scan can prove the mirror wrong, both cheap to check now
+  // that the vault has just been read:
+  //   - it staged an edit, so a document's bytes (and likely its frontmatter)
+  //     moved out of band;
+  //   - the document SET differs, i.e. a file was added or removed outside the
+  //     app — which drift detection alone never reports, since it only visits
+  //     documents discovery already found.
+  // `includeRetired` to match what the index stores; it is a cache hit on the
+  // crawl above, not a second walk.
+  const onDisk = await storage.discoverDocuments({ includeRetired: true });
+  const indexed = await indexedNodeIds(nestId);
+  const membershipMoved =
+    indexed.size !== onDisk.length || onDisk.some((d) => !indexed.has(d.id));
+  if (staged > 0 || membershipMoved) await markIndexStale(nestId);
+
   return { scanned: docs.length, staged };
 }
 
