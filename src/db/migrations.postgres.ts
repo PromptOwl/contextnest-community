@@ -393,6 +393,15 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_only_review INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_tags TEXT NOT NULL DEFAULT 'prime-document';
 
+    -- node_index freshness stamp: same inline-plus-explicit-ALTER pattern. The
+    -- inline declaration only reaches a database created after it shipped, and
+    -- EVERY listing reads this column to decide whether to rebuild — so on an
+    -- existing deployment its absence is not a degraded index, it is a 500 on
+    -- the document list. NULL is the correct starting value: it means "rebuild
+    -- from disk before answering", which is exactly right for a nest whose
+    -- index has never been built.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS index_synced_at TEXT;
+
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,
       nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
