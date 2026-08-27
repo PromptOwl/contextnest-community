@@ -82,16 +82,22 @@ describe("nestChatPrompt", () => {
 });
 
 describe("nestSetupPrompt", () => {
-  it("builds the per-nest MCP url from server + nestId and orients before answering", () => {
+  it("gives an immediate REST read and the MCP url, both per-nest", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai/", "gtm");
+    expect(p).toContain("https://x.ai/nests/gtm/context");
     expect(p).toContain("https://x.ai/nests/gtm/mcp");
-    expect(p).toContain("context_overview");
   });
 
-  it("is one-shot: tells the agent to self-install the CLI and ask for the key", () => {
+  it("has an anti-hallucination proof gate and a no-shell handoff", () => {
     const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
-    expect(p).toContain("npm i -g @promptowl/contextnest-cli");
-    expect(p).toMatch(/ask me (only )?for the api key/i);
+    expect(p).toMatch(/do NOT claim you'?re connected/i);
+    expect(p).toMatch(/settings . connectors/i); // no-shell handoff path
+  });
+
+  it("uses npx (not a global install) and asks for the key", () => {
+    const p = nestSetupPrompt("GTM", "https://x.ai", "gtm");
+    expect(p).toContain("npx -y @promptowl/contextnest-cli");
+    expect(p).toMatch(/ask me only for the api key/i);
   });
 
   it("never bakes in a key", () => {
