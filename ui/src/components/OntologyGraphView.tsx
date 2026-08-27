@@ -128,6 +128,15 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
     | null
   >(null);
 
+  // Has the user moved the viewport since this graph loaded? Toggling a layer
+  // rebuilds the node set, which re-runs the layout below — and re-fitting
+  // there threw away whatever region they had zoomed into. Reset when a new
+  // graph arrives (nothing to preserve) and when the canvas resizes (the
+  // layout recentres on the new size, so an old viewport can leave it
+  // off-screen entirely).
+  const userMoved = useRef(false);
+  const fittedSize = useRef({ w: 0, h: 0 });
+
   // client px → world coords (undo pan + zoom), for node dragging.
   const toWorld = (clientX: number, clientY: number) => {
     const r = svgRef.current!.getBoundingClientRect();
@@ -160,6 +169,7 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
   // Zoom by a factor about a screen anchor (default: viewport centre), keeping
   // the world point under the anchor fixed.
   const zoomBy = (factor: number, ax = size.w / 2, ay = size.h / 2) => {
+    userMoved.current = true;
     setView((v) => {
       const k = clamp(v.k * factor, MIN_ZOOM, MAX_ZOOM);
       const wx = (ax - v.x) / v.k;
@@ -206,6 +216,7 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
       const dy = e.clientY - d.py;
       d.px = e.clientX;
       d.py = e.clientY;
+      userMoved.current = true;
       setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
     } else {
       d.moved = true;
@@ -231,7 +242,12 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
     let cancelled = false;
     setLoading(true);
     getNestGraph(nestId)
-      .then((g) => !cancelled && setGraph(g))
+      .then((g) => {
+        if (cancelled) return;
+        // A different graph: no viewport worth keeping, so let it fit.
+        userMoved.current = false;
+        setGraph(g);
+      })
       .catch((e) => !cancelled && setError(e?.message || "Failed to load graph"))
       .finally(() => !cancelled && setLoading(false));
     return () => {
@@ -386,8 +402,16 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
       .stop();
     for (let i = 0; i < 300; i++) simulation.tick();
     setSim({ nodes, links });
-    // Fit the fresh layout into the viewport so a large graph never spills off.
-    fitView(nodes, size.w, size.h);
+    // Fit the fresh layout so a large graph never spills off — but not over a
+    // viewport the user chose. A layer toggle lands here with the same canvas,
+    // so it keeps their pan and zoom; a resize refits, since the layout is
+    // recentred on the new size and the old viewport may not contain it.
+    const resized =
+      fittedSize.current.w !== size.w || fittedSize.current.h !== size.h;
+    if (!userMoved.current || resized) {
+      fitView(nodes, size.w, size.h);
+      fittedSize.current = { w: size.w, h: size.h };
+    }
   }, [data, size.w, size.h]);
 
   const radius = (n: GNode) => 3 + n.val;
@@ -451,7 +475,11 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setView({ x: 0, y: 0, k: 1 })}
+            onClick={() => {
+              // Back to untouched: the next layout fits again, as on load.
+              userMoved.current = false;
+              setView({ x: 0, y: 0, k: 1 });
+            }}
             title="Reset pan & zoom"
           >
             Reset view

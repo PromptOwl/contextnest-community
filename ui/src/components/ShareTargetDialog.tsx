@@ -88,6 +88,18 @@ export function ShareTargetDialog({
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email.trim()) return;
+    // The grant endpoint upserts, so a repeat share succeeds silently and
+    // looks like nothing happened. The roster below is already loaded — say
+    // it plainly instead of re-sending the same row.
+    const already = grants.find(
+      (g) => (g.email ?? "").toLowerCase() === email.trim().toLowerCase(),
+    );
+    if (already) {
+      setError(
+        `This ${targetType} is already shared with ${already.email} (${already.role === "write" ? "can edit" : "can view"}).`,
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -172,7 +184,10 @@ export function ShareTargetDialog({
                 type="email"
                 placeholder="teammate@example.com"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (error) setError(null);
+                }}
                 disabled={busy}
                 className="flex-1 min-w-0"
                 data-testid="share-target-email"

@@ -461,7 +461,9 @@ export async function resetUserPassword(userId: string, password?: string) {
   });
 }
 
-// ─── External-client API keys (one per user) ───────────────────────────
+// ─── External-client API keys ──────────────────────────────────────────
+// A user can hold several — one per place they connect from — so rotating
+// the key for one client doesn't disconnect the others.
 
 export interface ApiKeyMeta {
   id: string;
@@ -476,24 +478,30 @@ export async function listApiKeys() {
   return request<{ keys: ApiKeyMeta[] }>("/auth/keys");
 }
 
-/**
- * Mint the caller's external-client API key. Returns 409 if a key
- * already exists — UI should prompt the user to rotate instead.
- */
+export interface ApiKeyMinted {
+  id: string;
+  api_key: string;
+  key_prefix: string;
+  label: string | null;
+}
+
+/** Mint another external-client API key. 409s only at the per-user ceiling. */
 export async function createApiKey(opts?: { label?: string; nest_id?: string }) {
-  return request<{ api_key: string; key_prefix: string }>("/auth/keys", {
+  return request<ApiKeyMinted>("/auth/keys", {
     method: "POST",
     body: JSON.stringify(opts || {}),
   });
 }
 
-/** Rotate the caller's existing key — atomic DELETE + INSERT.
- *  nest_id: null explicitly clears a per-nest scope; omitting keeps it. */
+/** Rotate ONE key — atomic DELETE + INSERT, other keys untouched.
+ *  key_id picks the target; omitting it works only when the account holds
+ *  exactly one key. nest_id: null clears a per-nest scope, omitting keeps it. */
 export async function rotateApiKey(opts?: {
   label?: string;
   nest_id?: string | null;
+  key_id?: string;
 }) {
-  return request<{ api_key: string; key_prefix: string }>("/auth/keys/rotate", {
+  return request<ApiKeyMinted>("/auth/keys/rotate", {
     method: "POST",
     body: JSON.stringify(opts || {}),
   });
@@ -786,8 +794,57 @@ export async function uploadAsset(nestId: string, file: File) {
   return data as { file: string; url: string; markdown: string };
 }
 
+/** Nest-wide shape that rides along with a folder-scoped listing. */
+export interface NestCensus {
+  total: number;
+  folders: Array<{ path: string; count: number; total: number }>;
+  tags: Record<string, number>;
+  types: Record<string, number>;
+  statuses: Record<string, number>;
+  authors: string[];
+  editedLast7d: number;
+  recent: Array<{ id: string; title: string; type: string; updated_at?: string }>;
+}
+
+/**
+ * The whole nest, WITH document bodies.
+ *
+ * `content=1` is not optional here: wiki-link analysis is the reason this call
+ * exists at its widest. Backlinks, unlinked mentions, stale alias links,
+ * related-doc scoring and the orphan/broken-link panel all read `[[targets]]`
+ * out of every document's body, and a nest-wide listing is the only place they
+ * get it. Without the flag they degrade to empty silently — no error, no failed
+ * request, just a permanently blank panel.
+ *
+ * Every caller shares one react-query key, so this is a single cached payload
+ * rather than a fetch per consumer. NOT used by the nest detail page's document
+ * tree — that goes through listFolderNodes, which stays body-free on purpose.
+ */
 export async function listNodes(nestId: string) {
-  return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
+  return request<{ count: number; nodes: any[] }>(
+    `/nests/${nestId}/nodes?content=1`,
+  );
+}
+
+/**
+ * One folder LEVEL — the documents sitting directly in `folder` ("" is the
+ * nest root), never its subtree. The census describes the whole nest so the
+ * caller can render the full folder tree without loading the documents in it.
+ *
+ * Deliberately WITHOUT `content=1`, unlike listNodes: this is the nest detail
+ * page's tree fetch, it renders name/tags/status and no body, and it is the one
+ * request path the node index exists to keep off the filesystem. Anything here
+ * that needs a body should fetch that document.
+ */
+export async function listFolderNodes(nestId: string, folder: string) {
+  return request<{ count: number; nodes: any[] }>(
+    `/nests/${nestId}/nodes?folder=${encodeURIComponent(folder)}`,
+  );
+}
+
+/** The nest-wide shape — one per nest, not per folder level. */
+export async function getNestCensus(nestId: string) {
+  return request<{ census: NestCensus }>(`/nests/${nestId}/census`);
 }
 
 /** Per-node comment (annotation thread) counts for sorting the document list. */
@@ -1902,6 +1959,8 @@ export interface WatcherNotification {
   message: string;
   created_at: string;
   read_at: string | null;
+  /** Document the row is about, when there is one — null for nest-level rows. */
+  node_id?: string | null;
 }
 
 export interface WorkPagination {
@@ -1991,9 +2050,17 @@ export interface RunSummary {
   finished_at: string | null;
   depth?: number;
   parent_run_id?: string | null;
+  /** Set when a runner claims the run (GET /runs/:id/bundle). Until then the
+      run is only *queued* — the wire status says "running" from creation. */
+  claimed_by?: string | null;
+  claimed_at?: string | null;
   /** Write-tier only; null for read-tier callers. */
   trace?: { error?: string; [k: string]: unknown } | null;
 }
+
+/** A run is only really running once a runner has claimed it. */
+export const isQueued = (r: Pick<RunSummary, "status" | "claimed_by">) =>
+  r.status === "running" && !r.claimed_by;
 
 export interface RunStep {
   seq: number;
@@ -2294,6 +2361,17 @@ export async function getRun(runId: string) {
     `/runs/${runId}`,
   );
   return { ...r.run, steps: r.steps };
+}
+
+/** Cancel a queued or running run (PATCH is rejected once terminal). */
+export async function cancelRun(runId: string, reason?: string) {
+  return request<{ ok: true; status: string }>(`/runs/${runId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      status: "cancelled",
+      trace: { error: reason ?? "Cancelled from the Runs page" },
+    }),
+  });
 }
 
 /** Trigger an agent — returns the run bundle (the runner's entry point). */

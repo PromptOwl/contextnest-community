@@ -77,3 +77,12 @@ export function primaryRole(roles: EffectiveRole[]): EffectiveRole | null {
   for (const r of PRECEDENCE) if (roles.includes(r)) return r;
   return null;
 }
+
+/**
+ * User-facing label for a collaborator permission ("read" → "Viewer"). Raw
+ * permission tokens must never reach user copy — the UI names these roles.
+ */
+export function permissionLabel(permission: string | null | undefined): string {
+  const role = collabPermToRole(permission);
+  return role ? role[0].toUpperCase() + role.slice(1) : "Collaborator";
+}

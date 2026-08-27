@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { folderGrantTarget } from "./folder-target";
+import { folderGrantTarget, slugifyFolderPath } from "./folder-target";
 
 // A folder grant is matched by node-id prefix. Getting this wrong is silent:
 // the share is created, the roster shows the person, and they can reach
@@ -34,5 +34,36 @@ describe("folderGrantTarget", () => {
     const target = folderGrantTarget("campaigns", "nodes/campaigns/doc");
     expect(target.startsWith("nodes/")).toBe(true);
     expect("nodes/campaigns/doc".startsWith(`${target}/`)).toBe(true);
+  });
+});
+
+// The board keys a new folder column by this, and the server writes the id by
+// its own slugify. A disagreement is silent and permanent: the typed column
+// sits empty next to the real one the dropped card created.
+describe("slugifyFolderPath", () => {
+  it("matches what the server writes for a typed name", () => {
+    expect(slugifyFolderPath("New Folder")).toBe("new-folder");
+    expect(slugifyFolderPath("GTM / Deals")).toBe("gtm/deals");
+  });
+
+  it("keeps an accented name's letters", () => {
+    expect(slugifyFolderPath("Café Notes")).toBe("cafe-notes");
+  });
+
+  it("drops the storage root a caller may have typed", () => {
+    // Ids start with nodes/, so it is the natural thing to write — and the
+    // server strips it rather than filing under nodes/nodes.
+    expect(slugifyFolderPath("nodes/signals")).toBe("signals");
+  });
+
+  it("returns empty for a name with nothing to derive a path from", () => {
+    expect(slugifyFolderPath("###")).toBe("");
+    expect(slugifyFolderPath("   ")).toBe("");
+    expect(slugifyFolderPath("日本語")).toBe("");
+  });
+
+  it("drops empty segments, so a stray slash cannot escape the vault", () => {
+    expect(slugifyFolderPath("/gtm//deals/")).toBe("gtm/deals");
+    expect(slugifyFolderPath("../gtm")).toBe("gtm");
   });
 });

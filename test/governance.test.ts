@@ -440,6 +440,11 @@ describe("governance: rejection workflow", () => {
     expect(data.versions.length).toBeGreaterThanOrEqual(1);
     expect(data.versions[0].status).toBe("rejected");
     expect(data.approvedVersion).toBeNull();
+    // The reviewer's reason rides along, so the history row can show it
+    // instead of hiding it behind a click.
+    expect(data.versions[0].resolvedBy).toBe("reviewer@acme.com");
+    expect(data.versions[0].resolutionStatus).toBe("rejected");
+    expect(data.versions[0].resolutionNote).toBe("Missing error codes section");
   });
 });
 

@@ -1,7 +1,7 @@
 /**
  * Dashboard — landing page with server info + nest list.
  */
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
@@ -12,6 +12,7 @@ import {
 import { ANON_USER_ID } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
 import { toast } from "sonner";
+import { AllNestsBar } from "./AllNestsBar";
 import { relTime, formatServerDate } from "../lib/dates";
 import { nestNameProblem } from "../lib/nest-name";
 import {
@@ -36,6 +37,10 @@ import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { ImportFolderModal } from "./ImportFolderModal";
 
+/** How many nest cards render before "Show more" — a 50-nest account should
+ *  not mount 50 cards on load. */
+const NEST_PAGE_SIZE = 24;
+
 // relTime / formatServerDate live in lib/dates: SQL-default timestamps arrive
 // as UTC with no zone, which new Date() would read as local time.
 
@@ -49,9 +54,12 @@ interface DashboardProps {
   onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
   /** Opens the cross-nest search palette (the same one Cmd/Ctrl+K opens). */
   onOpenSearch?: () => void;
+  /** Opens the API keys page — keys are minted and rotated there, never
+   *  inline in a connect dialog. */
+  onManageKeys?: () => void;
 }
 
-export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: DashboardProps) {
+export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKeys }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const [work, setWork] = useState<{
@@ -83,7 +91,37 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
     isLoading: loading,
     refetch: refetchNests,
   } = useNests();
-  const nests = nestsData?.nests ?? [];
+  const allNests = nestsData?.nests ?? [];
+  // Grid controls — a long account is otherwise one unbroken scroll. Filtering
+  // and sorting are client-side over the list already in hand; the page size
+  // just bounds how many cards are mounted at once.
+  const [nestQuery, setNestQuery] = useState("");
+  const [nestSort, setNestSort] = useState<"activity" | "name">("activity");
+  const [nestScope, setNestScope] = useState<"all" | "owned" | "shared" | "public">("all");
+  const [nestPageSize, setNestPageSize] = useState(NEST_PAGE_SIZE);
+  const nestOwned = (n: any): boolean =>
+    n.is_owner ?? (n.permission ?? "owner") === "owner";
+  const filteredNests = useMemo(() => {
+    const q = nestQuery.trim().toLowerCase();
+    const matched = allNests.filter((n: any) => {
+      if (nestScope === "owned" && !nestOwned(n)) return false;
+      if (nestScope === "shared" && nestOwned(n)) return false;
+      if (nestScope === "public" && n.visibility !== "public") return false;
+      if (!q) return true;
+      return (
+        (n.name ?? "").toLowerCase().includes(q) ||
+        (n.description ?? "").toLowerCase().includes(q)
+      );
+    });
+    return [...matched].sort((a: any, b: any) =>
+      nestSort === "name"
+        ? String(a.name ?? "").localeCompare(String(b.name ?? ""))
+        : String(b.last_activity ?? b.created_at ?? "").localeCompare(
+            String(a.last_activity ?? a.created_at ?? ""),
+          ),
+    );
+  }, [allNests, nestQuery, nestScope, nestSort]);
+  const nests = filteredNests.slice(0, nestPageSize);
   const qc = useQueryClient();
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
@@ -273,6 +311,21 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
     onOpenReview(w.nest_id, w.nest_name, w.node_id);
   };
 
+  // A notification names a document or a nest — clicking it goes there. The
+  // document is the target when the row resolves to one; otherwise the nest.
+  const openNotification = (n: api.WatcherNotification) => {
+    const nest = allNests.find((x) => x.id === n.nest_id);
+    const name = nest?.name ?? "";
+    if (n.node_id) onOpenReview(n.nest_id, name, n.node_id);
+    else if (nest)
+      onSelectNest(
+        nest.id,
+        nest.name,
+        nest.is_owner ?? (nest.permission ?? "owner") === "owner",
+        nest.user_id === ANON_USER_ID,
+      );
+  };
+
   // Submit a draft straight from the list — the whole point of the tab is that
   // the doc was stranded, so the fix (hand it to a reviewer) is one click away.
   // It leaves the drafts list and shows up under "Waiting on others". Throws on
@@ -357,7 +410,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
             <div className="flex gap-6 text-center">
               <div>
                 <div className="text-2xl font-bold">
-                  {loading ? <CountSkeleton /> : nests.length}
+                  {loading ? <CountSkeleton /> : allNests.length}
                 </div>
                 <div className="text-xs text-muted-foreground">Nests</div>
               </div>
@@ -366,7 +419,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                   {loading ? (
                     <CountSkeleton />
                   ) : (
-                    nests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)
+                    allNests.reduce((sum, n) => sum + Number(n.document_count ?? 0), 0)
                   )}
                 </div>
                 <div className="text-xs text-muted-foreground">Documents</div>
@@ -446,12 +499,17 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                   </div>
                   <div className="divide-y border-t">
                     {work.notifications!.slice(0, 8).map((n) => (
-                      <div key={n.id} className="px-4 py-2 text-xs flex items-center gap-2">
+                      <button
+                        key={n.id}
+                        type="button"
+                        onClick={() => openNotification(n)}
+                        className="w-full px-4 py-2 text-xs flex items-center gap-2 text-left hover:bg-amber-500/10"
+                      >
                         <span className="flex-1">{n.message}</span>
                         <span className="text-muted-foreground shrink-0">
                           {formatServerDate(n.created_at)}
                         </span>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 </div>
@@ -787,6 +845,11 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
             </div>
           </div>
 
+          {/* Whole-brain landing: frame every nest as one connectable brain. */}
+          {allNests.length > 0 && (
+            <AllNestsBar nests={allNests} onManageKeys={onManageKeys} />
+          )}
+
           {/* Create form */}
           {showCreate && (
             <Card>
@@ -830,9 +893,74 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
             </Card>
           )}
 
+          {/* Grid controls — filter/sort the cards in place, the way the
+              in-nest Documents browser does. Hidden until there are enough
+              nests for it to matter. */}
+          {!loading && allNests.length > 5 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                value={nestQuery}
+                onChange={(e) => {
+                  setNestQuery(e.target.value);
+                  setNestPageSize(NEST_PAGE_SIZE);
+                }}
+                placeholder="Filter nests by name or description…"
+                className="h-9 max-w-xs"
+                data-testid="nest-filter-input"
+              />
+              <select
+                value={nestScope}
+                onChange={(e) => {
+                  setNestScope(e.target.value as typeof nestScope);
+                  setNestPageSize(NEST_PAGE_SIZE);
+                }}
+                className="h-9 rounded-md border bg-background px-2 text-sm"
+                aria-label="Filter nests by access"
+                data-testid="nest-scope-select"
+              >
+                <option value="all">All nests</option>
+                <option value="owned">Owned by me</option>
+                <option value="shared">Shared with me</option>
+                <option value="public">Public</option>
+              </select>
+              <select
+                value={nestSort}
+                onChange={(e) => setNestSort(e.target.value as typeof nestSort)}
+                className="h-9 rounded-md border bg-background px-2 text-sm"
+                aria-label="Sort nests"
+                data-testid="nest-sort-select"
+              >
+                <option value="activity">Recent activity</option>
+                <option value="name">Name (A–Z)</option>
+              </select>
+              <span className="text-xs text-muted-foreground">
+                {filteredNests.length} of {allNests.length}
+              </span>
+            </div>
+          )}
+
           {/* Nest list */}
           {loading ? (
             <div className="text-center py-12 text-muted-foreground">Loading...</div>
+          ) : allNests.length > 0 && filteredNests.length === 0 ? (
+            <Card>
+              <CardContent className="text-center py-12">
+                <p className="font-medium">No nests match this filter</p>
+                <p className="text-sm text-muted-foreground mb-4">
+                  {allNests.length} nest{allNests.length === 1 ? "" : "s"} are hidden by
+                  the current filter.
+                </p>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setNestQuery("");
+                    setNestScope("all");
+                  }}
+                >
+                  Clear filters
+                </Button>
+              </CardContent>
+            </Card>
           ) : nests.length === 0 && unsynced.length === 0 ? (
             <Card>
               <CardContent className="text-center py-12">
@@ -1086,9 +1214,17 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                           )}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <h3 className="font-medium truncate">{nest.name}</h3>
+                          {/* Truncated names hide the part that tells two
+                              similarly prefixed nests apart — keep the full
+                              value reachable on hover/focus. */}
+                          <h3 className="font-medium truncate" title={nest.name}>
+                            {nest.name}
+                          </h3>
                           {nest.description && (
-                            <p className="text-sm text-muted-foreground truncate mt-0.5">
+                            <p
+                              className="text-sm text-muted-foreground truncate mt-0.5"
+                              title={nest.description}
+                            >
                               {nest.description}
                             </p>
                           )}
@@ -1223,6 +1359,17 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
                   );
                 })}
               </div>
+              {filteredNests.length > nests.length && (
+                <div className="flex justify-center">
+                  <Button
+                    variant="outline"
+                    onClick={() => setNestPageSize((n) => n + NEST_PAGE_SIZE)}
+                    data-testid="nest-show-more"
+                  >
+                    Show more ({filteredNests.length - nests.length} left)
+                  </Button>
+                </div>
+              )}
             </>
           )}
         </TabsContent>

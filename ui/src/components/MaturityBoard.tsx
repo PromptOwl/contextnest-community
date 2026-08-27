@@ -31,6 +31,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import { deriveNestCaps } from "../lib/nest-caps";
+import { MAX_FOLDER_DEPTH } from "../lib/constants";
+import { slugifyFolderPath } from "../lib/folder-target";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -294,10 +296,41 @@ export function MaturityBoard({
     [effectiveConfig.hiddenColumns, updateLayout],
   );
 
-  const addTagColumn = useCallback(
+  /**
+   * Add a column that holds no cards yet.
+   *
+   * For tags that is a tag value; for folders it is a folder path, and the
+   * folder itself is created by the first card dropped into it (moveNode
+   * writes the path server-side) — so a nest whose documents all sit in Root
+   * has somewhere to drag them, which is the one interaction the board's own
+   * instructions describe. It is layout-only until then, and removable with
+   * the × while it holds no cards.
+   *
+   * The folder key is slugified here because the server slugifies the path it
+   * writes: keyed on the typed text, "New Folder" would sit empty next to the
+   * `new-folder` column the dropped card actually created.
+   */
+  const addColumn = useCallback(
     (value: string) => {
-      const v = value.trim();
+      const v =
+        effectiveConfig.dimension === "folder"
+          ? slugifyFolderPath(value)
+          : value.trim();
+      if (effectiveConfig.dimension === "folder" && !v) {
+        // Slugifying to nothing is the same bound the server enforces: a name
+        // with no letter or digit has no path to derive.
+        if (value.trim()) {
+          toast("A folder name needs at least one letter or digit.");
+        }
+        return;
+      }
       if (!v) return;
+      if (effectiveConfig.dimension === "folder") {
+        if (v.split("/").length > MAX_FOLDER_DEPTH) {
+          toast(`Folders may nest at most ${MAX_FOLDER_DEPTH} levels deep.`);
+          return;
+        }
+      }
       updateLayout({
         // Append to the order (a key in columnOrder shows even with no cards)
         // and un-hide it if it was removed earlier.
@@ -308,7 +341,12 @@ export function MaturityBoard({
       });
       setNewColumn("");
     },
-    [orderedKeys, effectiveConfig.hiddenColumns, updateLayout],
+    [
+      orderedKeys,
+      effectiveConfig.dimension,
+      effectiveConfig.hiddenColumns,
+      updateLayout,
+    ],
   );
 
   // Distinct tag values present in the nest — suggestions for the add-column box.
@@ -348,33 +386,47 @@ export function MaturityBoard({
               title="Optional. Empty groups by every tag; a namespace like 'stage' groups by stage:<value> tags only."
             />
           )}
-          {config.dimension === "tag" && (
+          {/* Add a column: a tag value, or — for writers on the folder board —
+              a folder. Without this a nest whose documents all sit in Root has
+              a single column and nowhere to drag them. */}
+          {(config.dimension === "tag" ||
+            (effectiveConfig.dimension === "folder" && canEditDocs)) && (
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                addTagColumn(newColumn);
+                addColumn(newColumn);
               }}
               className="flex items-center gap-1"
             >
               <Input
                 value={newColumn}
                 onChange={(e) => setNewColumn(e.target.value)}
-                placeholder="add column…"
-                list="board-tag-values"
+                placeholder={
+                  config.dimension === "tag" ? "add column…" : "new folder…"
+                }
+                list={config.dimension === "tag" ? "board-tag-values" : undefined}
                 className="h-8 w-32"
-                title="Add a tag column — pick an existing tag or type a new value"
+                title={
+                  config.dimension === "tag"
+                    ? "Add a tag column — pick an existing tag or type a new value"
+                    : "Add a folder column — drag a card into it to file the document there (nest with parent/child)"
+                }
               />
-              <datalist id="board-tag-values">
-                {availableTagValues.map((v) => (
-                  <option key={v} value={v} />
-                ))}
-              </datalist>
+              {config.dimension === "tag" && (
+                <datalist id="board-tag-values">
+                  {availableTagValues.map((v) => (
+                    <option key={v} value={v} />
+                  ))}
+                </datalist>
+              )}
               <Button
                 type="submit"
                 variant="outline"
                 size="sm"
                 disabled={!newColumn.trim()}
-                title="Add column"
+                title={
+                  config.dimension === "tag" ? "Add column" : "Add folder column"
+                }
               >
                 <Plus className="h-3.5 w-3.5" />
               </Button>
@@ -441,6 +493,23 @@ export function MaturityBoard({
             </li>
             <li>Ask the nest owner for write access to rearrange the board.</li>
           </>
+        ) : columns.length < 2 ? (
+          // One column means every document sits in Root, so there is nothing
+          // to drag a card to yet — describe the step that unblocks that
+          // instead of an interaction the board can't offer.
+          <>
+            <li>
+              Every document is in{" "}
+              <span className="font-medium text-foreground">Root</span>. Type a
+              name in{" "}
+              <span className="font-medium text-foreground">new folder</span>{" "}
+              above to add a column.
+            </li>
+            <li>
+              Then <span className="font-medium text-foreground">drag a card</span>{" "}
+              into it — that files the document in the folder.
+            </li>
+          </>
         ) : (
           <>
             <li>
@@ -452,6 +521,10 @@ export function MaturityBoard({
                 Drag a column header
               </span>{" "}
               to reorder.
+            </li>
+            <li>
+              <span className="font-medium text-foreground">new folder</span>{" "}
+              adds a column; it sticks once a card lands in it.
             </li>
           </>
         )}
@@ -535,13 +608,22 @@ export function MaturityBoard({
                     <span className="text-xs text-muted-foreground tabular-nums">
                       {cards.length}
                     </span>
-                    {effectiveConfig.dimension === "tag" &&
-                      col.key !== UNCATEGORIZED && (
+                    {/* Tag columns are removable outright. A folder column is
+                        only removable while it is still empty — one added by
+                        mistake, holding no documents to lose. */}
+                    {col.key !== UNCATEGORIZED &&
+                      (effectiveConfig.dimension === "tag" ||
+                        (effectiveConfig.dimension === "folder" &&
+                          cards.length === 0)) && (
                         <button
                           type="button"
                           onClick={() => hideColumn(col.key)}
                           className="text-muted-foreground/50 hover:text-foreground"
-                          title="Remove this column — its cards move to Uncategorized"
+                          title={
+                            effectiveConfig.dimension === "folder"
+                              ? "Remove this empty column"
+                              : "Remove this column — its cards move to Uncategorized"
+                          }
                         >
                           <X className="h-3.5 w-3.5" />
                         </button>

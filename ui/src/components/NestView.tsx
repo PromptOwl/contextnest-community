@@ -4,13 +4,15 @@
  */
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
+import { visibleDocuments, documentsTabIsEmpty } from "../lib/visible-documents";
 import { resolveWikiTarget } from "../lib/wiki-preview";
 import { activityTimestamp } from "../lib/node-sort";
 import { linkHealth } from "../lib/link-health";
 import { folderGrantTarget } from "../lib/folder-target";
+import { checkFolderPath } from "../lib/folder-path";
 import { parseServerDate, formatServerDate } from "../lib/dates";
 import {
   datePresetToEpoch, upsertFilter, removeFilter,
@@ -142,6 +144,8 @@ interface NestViewProps {
   ) => void;
   /** Open this nest's activity trace (owner/nest-admin only). */
   onOpenTrace?: () => void;
+  /** Open the account-level API keys page. */
+  onManageKeys?: () => void;
   /** Seed the search filter on mount. Used when arriving from a tag
    *  click on a document detail page. */
   initialSearch?: string;
@@ -164,6 +168,7 @@ export function NestView({
   onBack,
   onOpenDocument,
   onOpenTrace,
+  onManageKeys,
   initialSearch,
   initialTags,
   initialFolder,
@@ -223,7 +228,19 @@ export function NestView({
     },
     [],
   );
+  // Documents arrive one folder LEVEL at a time — the nest root on mount, a
+  // folder's own documents when its row is expanded. `nodes` accumulates the
+  // levels loaded so far, so it is NOT the whole nest.
   const [nodes, setNodes] = useState<any[]>([]);
+  // The nest-wide shape that rides along with every level fetch: folder tree,
+  // counts, tags, types, authors. Without it every filter and stat tile would
+  // describe only the folders the user happened to open.
+  const [census, setCensus] = useState<api.NestCensus | null>(null);
+  // A filter, a search, and link health are all questions about the WHOLE
+  // nest, which the folder levels on screen cannot answer. Fetch the full
+  // listing once, only when one of those is actually asked.
+  const [fullNodes, setFullNodes] = useState<any[] | null>(null);
+  const [fullLoading, setFullLoading] = useState(false);
   // Full roster — admin-only (listStewards 403s for non-admins → stays []).
   const [stewards, setStewards] = useState<Steward[]>([]);
   // Caller's OWN steward rows (scoped), from GET /nests/:id. Drives per-node
@@ -441,27 +458,16 @@ export function NestView({
   const [newFolderPath, setNewFolderPath] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
 
-  // Folder-nesting ceiling. Mirrors the server's folderToSegments guard
-  // (src/nodes/service.ts) — the leaf document doesn't count, only the folder
-  // segments. Kept in sync by hand; the server stays authoritative.
-  const MAX_FOLDER_DEPTH = 8;
-  const newFolderDepth = newFolderPath
-    .split("/")
-    .map((s) => s.trim())
-    .filter(Boolean).length;
-  const newFolderTooDeep = newFolderDepth > MAX_FOLDER_DEPTH;
-  // The server derives folder paths by slugifying to a-z0-9, so a name with
-  // none of those ("!!!", "...", or a purely non-Latin name) slugifies away and
-  // the starter doc silently lands in the nest root instead of a folder.
-  const newFolderUnusable =
-    !!newFolderPath.trim() && !/[a-z0-9]/i.test(newFolderPath);
+  // Depth, slugifiability, reserved names — the same rules the server applies,
+  // run as you type so the resulting path is visible before anything exists.
+  const newFolderCheck = checkFolderPath(newFolderPath);
 
   const createFolder = async () => {
-    const folder = newFolderPath.trim().replace(/^\/+|\/+$/g, "");
+    const folder = newFolderCheck.path;
     if (!folder) return;
     // Block what the server would reject before the round-trip, so the user
     // gets the reason inline instead of a swallowed 400.
-    if (newFolderTooDeep || newFolderUnusable) return;
+    if (newFolderCheck.error) return;
     setCreatingFolder(true);
     try {
       // Folders are path-derived — seed one with a starter node so it appears
@@ -507,7 +513,10 @@ export function NestView({
     setActiveTabState(tab);
     onTabChange?.(tab);
   };
-  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
+  // Expanded folders, not collapsed ones: a folder's documents are fetched on
+  // first expand, so the default has to be closed.
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [loadingFolders, setLoadingFolders] = useState<Set<string>>(new Set());
   const [dragNodeId, setDragNodeId] = useState<string | null>(null);
   const [dropFolder, setDropFolder] = useState<string | null>(null);
 
@@ -517,6 +526,67 @@ export function NestView({
     const slash = rel.lastIndexOf("/");
     return slash > 0 ? rel.slice(0, slash) : "";
   };
+
+  const qc = useQueryClient();
+
+  // Folder levels loaded so far, so a refetch after a mutation restores
+  // exactly what is on screen. A ref, not state: it must not re-run fetchData.
+  const loadedFolders = useRef<Set<string>>(new Set());
+
+  /**
+   * Fetch ONE folder level and fold it into `nodes`, replacing whatever was
+   * previously loaded for that level (a move or delete changes ids, so
+   * replacing beats merging). Also refreshes the nest-wide census.
+   */
+  const fetchLevel = useCallback(
+    async (folder: string, opts: { refresh?: boolean } = {}) => {
+      // Re-expanding a folder already on screen is not a reason to re-read
+      // it; only an explicit refresh (a mutation) is.
+      if (!opts.refresh && loadedFolders.current.has(folder)) return;
+      setLoadingFolders((prev) => new Set(prev).add(folder));
+      try {
+        const res = await qc.fetchQuery(reads.folderNodes(nestId, folder));
+        loadedFolders.current.add(folder);
+        setNodes((prev) => [
+          ...prev.filter((n) => folderOfNode(n.id || "") !== folder),
+          ...res.nodes,
+        ]);
+      } catch (e: any) {
+        console.error("[NestView] listFolderNodes failed", nestId, folder, e);
+        toast.error(e?.message || "Failed to load folder");
+      } finally {
+        setLoadingFolders((prev) => {
+          const next = new Set(prev);
+          next.delete(folder);
+          return next;
+        });
+      }
+    },
+    [nestId, qc],
+  );
+
+  /** The nest-wide shape. Describes the whole nest whatever level is open,
+   *  so it is read once per nest rather than once per folder expanded. */
+  const fetchCensus = useCallback(async () => {
+    try {
+      const { census: fresh } = await qc.fetchQuery(reads.census(nestId));
+      setCensus(fresh);
+    } catch (e) {
+      console.error("[NestView] getNestCensus failed", nestId, e);
+    }
+  }, [nestId, qc]);
+
+  /** Re-read every level currently on screen — used after every mutation.
+   *  A no-op before the first load, which the scope effect below owns. */
+  const reloadLevels = useCallback(async () => {
+    // The whole-nest copy the filters use was read before this write.
+    setFullNodes(null);
+    if (!loadedFolders.current.size) return;
+    await Promise.all([
+      fetchCensus(),
+      ...[...loadedFolders.current].map((f) => fetchLevel(f, { refresh: true })),
+    ]);
+  }, [fetchLevel, fetchCensus]);
 
   /** Node-id prefix for a folder share — see lib/folder-target.ts. */
   const shareTargetForFolder = (folderPath: string): string => {
@@ -532,13 +602,16 @@ export function NestView({
     setActiveTab("documents");
   };
 
-  const toggleFolderCollapsed = (path: string) => {
-    setCollapsedFolders((prev) => {
+  const toggleFolderExpanded = (path: string) => {
+    const opening = !expandedFolders.has(path);
+    setExpandedFolders((prev) => {
       const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
+      if (opening) next.add(path);
+      else next.delete(path);
       return next;
     });
+    // Fetch outside the updater — React may run an updater twice.
+    if (opening) void fetchLevel(path);
   };
 
   // Dragging over a collapsed folder header for a beat expands it, so a doc
@@ -556,12 +629,11 @@ export function NestView({
     cancelDragExpand();
     dragExpandTimer.current = setTimeout(() => {
       dragExpandTimer.current = null;
-      setCollapsedFolders((prev) => {
-        if (!prev.has(path)) return prev;
-        const next = new Set(prev);
-        next.delete(path);
-        return next;
+      setExpandedFolders((prev) => {
+        if (prev.has(path)) return prev;
+        return new Set(prev).add(path);
       });
+      void fetchLevel(path);
     }, 600);
   };
 
@@ -640,8 +712,13 @@ export function NestView({
   const [moveTarget, setMoveTarget] = useState<any | null>(null);
   const [moveDest, setMoveDest] = useState("");
   const [movingDoc, setMovingDoc] = useState(false);
-
-  const qc = useQueryClient();
+  // A nest with no folders yet has nowhere to move a document to, so the
+  // dialog can name a new destination itself — folders are path-derived, the
+  // move creates it. "" = not creating one.
+  const [moveNewFolder, setMoveNewFolder] = useState<string | null>(null);
+  const moveNewFolderCheck = checkFolderPath(moveNewFolder ?? "");
+  const moveResolvedDest =
+    moveNewFolder === null ? moveDest : moveNewFolderCheck.path;
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -661,7 +738,7 @@ export function NestView({
     // single Promise.all + outer try/catch meant a node-list error silently
     // dropped the settings update, so toggling stewardship appeared to revert.
     const empty = <T,>(v: T) => Promise.resolve(v);
-    const [nodesData, stewardsData, queueData, deletionData, settingsData, externalData, countsData, feedData] =
+    const [, stewardsData, queueData, deletionData, settingsData, externalData, countsData, feedData] =
       await Promise.all([
         // The five reads below go through the shared cache (same keys and
         // invalidation as the hook-based screens) so returning from a document
@@ -669,10 +746,9 @@ export function NestView({
         // than via hooks to keep each call's own error fallback — a failing
         // node list must still let the settings response apply, per the note
         // above.
-        qc.fetchQuery(reads.nodes(nestId)).catch((e) => {
-          console.error("[NestView] listNodes failed", nestId, e);
-          return { nodes: [] };
-        }),
+        // Documents come from the folder levels currently on screen, not one
+        // whole-nest listing — see fetchLevel.
+        reloadLevels(),
         grantOnly
           ? empty({ stewards: [] as Steward[] })
           : qc.fetchQuery(reads.stewards(nestId)).catch((e) => {
@@ -746,7 +822,6 @@ export function NestView({
             }),
       ]);
     setCommentCounts(countsData.counts);
-    setNodes(nodesData.nodes);
     setStewards(stewardsData.stewards);
     setReviewQueue(queueData.requests);
     setDeletionRequests(deletionData.requests);
@@ -776,7 +851,7 @@ export function NestView({
     setMyStewards((nestMeta?.myStewards ?? []) as Steward[]);
     setLoading(false);
     setInitialLoad(false);
-  }, [nestId, qc]);
+  }, [nestId, qc, reloadLevels]);
 
   // Next page of comment activity, appended under the feed. Offset by the
   // rows already shown; a dedupe guard drops any row that slid into the next
@@ -822,6 +897,17 @@ export function NestView({
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  // A different nest, or a different scoped folder, is a different tree:
+  // drop the loaded levels and open just the new base.
+  useEffect(() => {
+    loadedFolders.current = new Set();
+    setExpandedFolders(new Set());
+    setNodes([]);
+    setFullNodes(null);
+    void fetchLevel(folderFilter ?? "");
+    void fetchCensus();
+  }, [nestId, folderFilter, fetchLevel, fetchCensus]);
+
   // stats are built later (after reviewableQueue is computed) so the
   // Review Queue card can bind to the count the user can actually act
   // on — not the raw queue size.
@@ -852,28 +938,50 @@ export function NestView({
     };
   }, [nestId, search]);
 
+  const loadFullNest = useCallback(async () => {
+    if (fullNodes || fullLoading) return;
+    setFullLoading(true);
+    try {
+      const { nodes: all } = await qc.fetchQuery(reads.nodes(nestId));
+      setFullNodes(all);
+    } catch (e: any) {
+      console.error("[NestView] listNodes failed", nestId, e);
+      toast.error(e?.message || "Failed to search the whole nest");
+    } finally {
+      setFullLoading(false);
+    }
+  }, [nestId, qc, fullNodes, fullLoading]);
+
+
+  const hasActiveFilters =
+    !!search ||
+    statusFilter !== "all" ||
+    typeFilter !== "all" ||
+    tagFilters.length > 0 ||
+    authorFilter !== "all" ||
+    dateFilter !== "any";
+
+  useEffect(() => {
+    if (hasActiveFilters) void loadFullNest();
+  }, [hasActiveFilters, loadFullNest]);
+  const updatedAfter = datePresetToEpoch(dateFilter, Date.now());
   // Status + tag filters always apply; with a query, a doc passes on an
   // instant client title/tag match OR a server content hit. Semantics of
   // the client match live in lib/node-filter (unit-tested).
-  const updatedAfter = datePresetToEpoch(dateFilter, Date.now());
-  const filtered = nodes.filter((n) => {
-    // Folder scope: the doc's folder must be the scoped folder or inside it.
-    if (folderFilter !== null) {
-      const f = folderOfNode(n.id || "");
-      if (f !== folderFilter && !f.startsWith(`${folderFilter}/`)) return false;
-    }
-    if (
-      !matchesFilters(n, {
-        status: statusFilter,
-        tags: tagFilters,
-        author: authorFilter,
-        updatedAfter,
-        type: typeFilter,
-      })
-    )
-      return false;
-    if (!search) return true;
-    return matchesFilters(n, { search }) || contentHits.has(n.id);
+  //
+  // Unfiltered, the levels on screen ARE the answer; filtered, the answer
+  // spans the nest, so use the full listing as soon as it lands.
+  const filtered = visibleDocuments({
+    levelNodes: nodes,
+    fullNodes,
+    folderFilter,
+    search,
+    status: statusFilter,
+    type: typeFilter,
+    author: authorFilter,
+    tags: tagFilters,
+    updatedAfter,
+    contentHits,
   });
 
   // Sort the filtered list. "name" = title A–Z; "edited" = most-recently
@@ -931,44 +1039,48 @@ export function NestView({
       );
   })();
 
+  // Every folder in the nest, so the tree can show one whose documents have
+  // never been fetched. Memoised — FolderTree keys a useMemo on this.
+  const knownFolders = useMemo(
+    () => (census?.folders ?? []).map((f) => ({ path: f.path, total: f.total })),
+    [census],
+  );
+
+  // A folder level with no document of its own is normal — an imported nest
+  // commonly keeps everything one level down. The tab is only truly empty
+  // when there is no folder to open either, or when a filter matched nothing.
+  const nothingToShow = documentsTabIsEmpty({
+    visibleCount: filtered.length,
+    folderCount: knownFolders.length,
+    filtering: hasActiveFilters,
+  });
+
   // Orphans + broken [[links]], client-side from the loaded list.
-  const wikiHealth = useMemo(() => linkHealth(nodes), [nodes]);
+  // Only meaningful over the whole nest: on a partial list every link into
+  // an unexpanded folder reads as broken, and every unloaded source makes a
+  // loaded document look orphaned.
+  const wikiHealth = useMemo(
+    () => (fullNodes ? linkHealth(fullNodes) : { orphans: [], broken: [] }),
+    [fullNodes],
+  );
 
   // Every folder path in use (all prefixes, so intermediate levels with no
   // direct docs still appear) — options for the Move-to-folder dialog.
-  const allFolders = useMemo(() => {
-    const set = new Set<string>();
-    for (const n of nodes) {
-      const f = folderOfNode(n.id || "");
-      if (!f) continue;
-      const segs = f.split("/");
-      for (let i = 1; i <= segs.length; i++) set.add(segs.slice(0, i).join("/"));
-    }
-    return [...set].sort(byPathSegments);
-  }, [nodes]);
+  const allFolders = useMemo(
+    () => (census?.folders ?? []).map((f) => f.path).sort(byPathSegments),
+    [census],
+  );
 
   // Distinct authors for the author filter dropdown.
-  const authors = useMemo(() => {
-    const set = new Set<string>();
-    for (const n of nodes) if (n.author) set.add(n.author);
-    return [...set].sort((a, b) => a.localeCompare(b));
-  }, [nodes]);
+  const authors = census?.authors ?? [];
 
   // Distinct node types present (missing type = "document"), for the type
   // filter dropdown. Only offered when the nest actually mixes types.
-  const typesPresent = useMemo(() => {
-    const set = new Set<string>();
-    for (const n of nodes) set.add(n.type || "document");
-    return [...set].sort((a, b) => a.localeCompare(b));
-  }, [nodes]);
+  const typesPresent = useMemo(
+    () => Object.keys(census?.types ?? {}).sort((a, b) => a.localeCompare(b)),
+    [census],
+  );
 
-  const hasActiveFilters =
-    !!search ||
-    statusFilter !== "all" ||
-    typeFilter !== "all" ||
-    tagFilters.length > 0 ||
-    authorFilter !== "all" ||
-    dateFilter !== "any";
   const clearAllFilters = () => {
     setSearch("");
     setStatusFilter("all");
@@ -1052,37 +1164,21 @@ export function NestView({
     });
 
   // All tags in the nest with usage counts — the always-visible filter bar.
-  const allTags = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const n of nodes) {
-      for (const t of (n.tags ?? []) as string[]) {
-        counts.set(t, (counts.get(t) ?? 0) + 1);
-      }
-    }
-    return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .map(([tag, count]) => ({ tag, count }));
-  }, [nodes]);
+  const allTags = useMemo(
+    () =>
+      Object.entries(census?.tags ?? {})
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([tag, count]) => ({ tag, count })),
+    [census],
+  );
 
   // Quick-access strip; shown on the Overview tab as recently-edited rows.
-  const recentlyEdited = useMemo(() => {
-    return [...nodes]
-      .filter((n) => n.updated_at)
-      .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
-      .slice(0, 3);
-  }, [nodes]);
+  const recentlyEdited = census?.recent ?? [];
 
   // Genuine, non-capped metric for the Overview stat tile: how many documents
   // were edited in the last 7 days across the whole nest. The recentlyEdited
   // strip above is sliced to 3 for display, so its length is not a real count.
-  const recentlyEditedCount = useMemo(() => {
-    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    return nodes.filter((n) => {
-      if (!n.updated_at) return false;
-      const t = Date.parse(String(n.updated_at));
-      return !Number.isNaN(t) && t >= cutoff;
-    }).length;
-  }, [nodes]);
+  const recentlyEditedCount = census?.editedLast7d ?? 0;
 
   // myStewards (caller's own scoped rows) comes from GET /nests/:id, so
   // non-admin reviewers/editors keep per-node affordances without reading the
@@ -1247,14 +1343,13 @@ export function NestView({
   // (what the user can actually act on) instead of reviewQueue.length
   // (raw size, which over-promised before — see CU-86ahn99fv).
   const stats = {
-    total: nodes.length,
-    pending: nodes.filter((n) => n.status === "pending_review").length,
+    total: census?.total ?? nodes.length,
+    pending: census?.statuses?.pending_review ?? 0,
     // "published" is the engine's terminal post-approve status (approve writes
     // 'published'; no-steward creates auto-publish) — both mean AI-visible,
     // so the AI Ready card counts them together.
-    approved: nodes.filter(
-      (n) => n.status === "approved" || n.status === "published",
-    ).length,
+    approved:
+      (census?.statuses?.approved ?? 0) + (census?.statuses?.published ?? 0),
     reviewQueue: reviewQueue.length,
     reviewable: reviewableQueue.length,
   };
@@ -1300,7 +1395,7 @@ export function NestView({
 
   // Overview stat tile: Root is a synthetic tocGroups entry for docs with no
   // folder, not a user-created folder, so it's excluded from the count.
-  const folderCount = tocGroups.filter((g) => g.folder !== "Root").length;
+  const folderCount = census?.folders.length ?? 0;
 
   const openVersions = async (node: any) => {
     setVersionNode(node);
@@ -1702,15 +1797,22 @@ export function NestView({
           </>
         }
       >
-          {/* Connect is the front door for every read/write surface (CLI,
-              API, MCP, Add-with-AI) — a first-class button, not a menu item. */}
-          <Button variant="outline" onClick={() => setShowConnect(true)}>
-            <Link2 className="h-4 w-4 mr-2" />
+          {/* Connect (external clients) and Add-with-AI (seed content) are
+              distinct first-class actions — Connect wires tools, Add-with-AI
+              generates context into the nest. */}
+          <Button variant="outline" size="sm" onClick={() => setShowConnect(true)}>
+            <Link2 className="h-3.5 w-3.5 mr-1.5" />
             Connect
           </Button>
+          {!isReadOnly && (
+            <Button variant="outline" size="sm" onClick={() => setShowGenerate(true)}>
+              <Sparkles className="h-3.5 w-3.5 mr-1.5" />
+              Add with AI
+            </Button>
+          )}
           {canManage && (
-            <Button variant="outline" onClick={() => setShowShare(true)}>
-              <Users className="h-4 w-4 mr-2" />
+            <Button variant="outline" size="sm" onClick={() => setShowShare(true)}>
+              <Users className="h-3.5 w-3.5 mr-1.5" />
               Share
             </Button>
           )}
@@ -1743,8 +1845,8 @@ export function NestView({
               />
               <DropdownMenu modal={false}>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline" data-testid="nest-import-files">
-                    <Upload className="h-4 w-4 mr-2" />
+                  <Button variant="outline" size="sm" data-testid="nest-import-files">
+                    <Upload className="h-3.5 w-3.5 mr-1.5" />
                     Import
                   </Button>
                 </DropdownMenuTrigger>
@@ -1757,8 +1859,8 @@ export function NestView({
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-              <Button onClick={() => onOpenDocument("new")}>
-                <Plus className="h-4 w-4 mr-2" />
+              <Button size="sm" onClick={() => onOpenDocument("new")}>
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
                 New Document
               </Button>
             </>
@@ -1829,7 +1931,13 @@ export function NestView({
                 onSelect: () =>
                   canDeleteNest ? setShowDelete(true) : setNestFlagOpen(true),
               });
-            return <OverflowMenu actions={actions} variant="outline" />;
+            return (
+              <OverflowMenu
+                actions={actions}
+                variant="outline"
+                className="h-8 w-8"
+              />
+            );
           })()}
       </NestPageHeader>
 
@@ -1933,11 +2041,15 @@ export function NestView({
       {/* Tabbed layout — Documents / Review Queue / Stewards.
           When stewardship is off the latter two tabs are hidden because
           their data is empty by definition. */}
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full min-w-0">
         {/* New Folder sits beside the tab row — it acts on the content area
-            below (Overview/Documents), not on the nest as a whole. */}
-        <div className="flex items-center gap-2 mb-4">
-          <TabsList>
+            below (Overview/Documents), not on the nest as a whole.
+            The triggers never wrap, so on a narrow window the row scrolls
+            inside itself rather than making the whole page scroll sideways —
+            page-level overflow drags fixed UI (toasts, dialogs) off-screen
+            with it. */}
+        <div className="flex items-center gap-2 mb-4 min-w-0">
+          <TabsList className="max-w-full justify-start overflow-x-auto">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="documents">Documents</TabsTrigger>
             {/* Governance tabs hidden for view-only. */}
@@ -1982,7 +2094,7 @@ export function NestView({
             <Button
               variant="outline"
               size="sm"
-              className="ml-auto text-muted-foreground"
+              className="ml-auto shrink-0 text-muted-foreground"
               onClick={() => setShowNewFolder(true)}
               title="Create a folder (nest with parent/child)"
             >
@@ -2096,7 +2208,7 @@ export function NestView({
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  {tocGroups.length === 0 ? (
+                  {stats.total === 0 ? (
                     <div className="py-8 text-center">
                       <FileText className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
                       <p className="text-sm text-muted-foreground">
@@ -2120,6 +2232,7 @@ export function NestView({
                     <FolderTree
                       className="space-y-1"
                       groups={tocGroups}
+                      known={knownFolders}
                       renderFolder={(node) => (
                         // Overview folders navigate into the Documents tab scoped to
                         // that folder — no collapse here; the whole tree stays open.
@@ -2527,11 +2640,11 @@ export function NestView({
                   ))}
                 </div>
               )}
-              {initialLoad ? (
+              {initialLoad || loadingFolders.has(baseFolder) ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
-              ) : filtered.length === 0 ? (
+              ) : nothingToShow ? (
                 hasActiveFilters || !canEditDocs ? (
                   <div className="text-center py-8 text-sm text-muted-foreground">
                     {hasActiveFilters ? "No matching documents" : "No documents yet"}
@@ -2620,6 +2733,7 @@ export function NestView({
                       hasRoleOnNode(node, "reviewer"));
                   const openMoveDialog = () => {
                     setMoveDest(folderOfNode(node.id));
+                    setMoveNewFolder(null);
                     setMoveTarget(node);
                   };
                   // A doc row is a drop proxy for the folder it sits in: drag
@@ -2952,7 +3066,11 @@ export function NestView({
                       className="space-y-1"
                       groups={docGroups}
                       baseFolder={baseFolder}
-                      isCollapsed={(p) => collapsedFolders.has(p)}
+                      known={knownFolders}
+                      isCollapsed={(p) =>
+                        // A filtered list shows every match, wherever it lives.
+                        hasActiveFilters ? false : !expandedFolders.has(p)
+                      }
                       renderFolder={(node, { collapsed }) => {
                         // Valid drop = a doc is being dragged and this isn't
                         // its current folder. Invalid targets get no
@@ -2966,11 +3084,12 @@ export function NestView({
                         const validDrop =
                           !!dragNodeId && folderOfNode(dragNodeId) !== node.path;
                         const isDropTarget = validDrop && dropFolder === node.path;
-                        // Only folders that DIRECTLY hold a document collapse.
-                        // A pure container (subfolders only, no node file) has
-                        // nothing of its own to hide, so it stays a static row
-                        // — no chevron, matching a file-tree's leaf folders.
-                        const collapsible = node.count > 0;
+                        // Anything with documents under it opens — the subtree
+                        // total, not the loaded count, because a folder's own
+                        // documents are only fetched once it is expanded. A
+                        // genuinely empty folder stays a static row, no chevron.
+                        const collapsible = node.total > 0;
+                        const loadingHere = loadingFolders.has(node.path);
                         return (
                           <div
                             className={`group/fh flex items-center gap-1.5 py-1.5 px-2 rounded-md select-none transition-colors ${collapsible ? "cursor-pointer" : ""
@@ -2980,7 +3099,7 @@ export function NestView({
                               }`}
                             onClick={
                               collapsible
-                                ? () => toggleFolderCollapsed(node.path)
+                                ? () => toggleFolderExpanded(node.path)
                                 : undefined
                             }
                             onDragOver={(e) => {
@@ -3027,7 +3146,9 @@ export function NestView({
                             }}
                             data-testid={`folder-header-${node.path}`}
                           >
-                            {collapsible ? (
+                            {loadingHere ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                            ) : collapsible ? (
                               <ChevronRight
                                 className={`h-3.5 w-3.5 text-muted-foreground transition-transform ${collapsed ? "" : "rotate-90"
                                   }`}
@@ -3166,19 +3287,29 @@ export function NestView({
                 );
               })()}
 
-              {/* Wiki link health — orphans + broken [[links]], computed
-                  client-side. Collapsed by default; hidden when clean. */}
-              {!loading &&
-                (wikiHealth.broken.length > 0 ||
-                  wikiHealth.orphans.length > 0) && (
-                  <details className="mt-4 text-xs text-muted-foreground">
+              {/* Wiki link health — orphans + broken [[links]]. Answering it
+                  needs every document's body, so opening the block is what
+                  fetches the whole nest. */}
+              {!loading && stats.total > 0 && (
+                  <details
+                    className="mt-4 text-xs text-muted-foreground"
+                    onToggle={(e) => {
+                      if (e.currentTarget.open) void loadFullNest();
+                    }}
+                  >
                     <summary className="cursor-pointer select-none">
-                      Link health: {wikiHealth.broken.length} broken link
-                      {wikiHealth.broken.length !== 1 ? "s" : ""} ·{" "}
-                      {wikiHealth.orphans.length} orphan doc
-                      {wikiHealth.orphans.length !== 1 ? "s" : ""}
+                      {fullLoading
+                        ? "Link health: checking the whole nest…"
+                        : !fullNodes
+                          ? "Link health — check the whole nest"
+                          : `Link health: ${wikiHealth.broken.length} broken link${wikiHealth.broken.length !== 1 ? "s" : ""} · ${wikiHealth.orphans.length} orphan doc${wikiHealth.orphans.length !== 1 ? "s" : ""}`}
                     </summary>
                     <div className="mt-2 space-y-2 pl-1">
+                      {fullNodes &&
+                        wikiHealth.broken.length === 0 &&
+                        wikiHealth.orphans.length === 0 && (
+                          <div>No broken links or orphan documents.</div>
+                        )}
                       {wikiHealth.broken.length > 0 && (
                         <div>
                           <div className="font-medium mb-1">
@@ -3359,13 +3490,10 @@ export function NestView({
                   setReviewNode(node);
                   return;
                 }
-                // Orphan: review_request points to a node not in the
-                // visible list (file deleted, or filtered out by
-                // stewardship access). Without this the row click was
-                // a silent dead-end.
-                toast.error(
-                  `Can't open "${req.title || req.nodeId}" — document missing or outside your access.`,
-                );
+                // Not in the loaded levels. Under lazy loading that usually
+                // just means its folder was never expanded, so open the
+                // document itself rather than calling it missing.
+                onOpenDocument(req.nodeId);
               }}
             />
             {/* Comment activity is paged (50/page) — fetch the next page when
@@ -3679,12 +3807,15 @@ export function NestView({
         <ConnectModal
           isOpen={showConnect}
           onClose={() => setShowConnect(false)}
-          onGenerate={() => {
-            setShowConnect(false);
-            setShowGenerate(true);
-          }}
           nestId={nestId}
           nestName={nestName}
+          onManageKeys={
+            onManageKeys &&
+            (() => {
+              setShowConnect(false);
+              onManageKeys();
+            })
+          }
         />
       )}
 
@@ -3796,19 +3927,16 @@ export function NestView({
             placeholder="e.g. gtm/deals"
             className="font-mono"
           />
-          {newFolderTooDeep && (
-            <p className="text-xs text-destructive">
-              Folders may nest at most {MAX_FOLDER_DEPTH} levels deep — this path
-              is {newFolderDepth}. Remove {newFolderDepth - MAX_FOLDER_DEPTH}{" "}
-              level{newFolderDepth - MAX_FOLDER_DEPTH === 1 ? "" : "s"}.
+          {newFolderCheck.error ? (
+            <p className="text-xs text-destructive" data-testid="new-folder-error">
+              {newFolderCheck.error}
             </p>
-          )}
-          {newFolderUnusable && (
-            <p className="text-xs text-destructive">
-              Folder paths are built from a-z and 0-9, so the name needs at least
-              one of those.
+          ) : newFolderCheck.rewritten && newFolderCheck.path ? (
+            <p className="text-xs text-muted-foreground" data-testid="new-folder-preview">
+              Will be created as{" "}
+              <code className="font-mono">{newFolderCheck.path}</code>
             </p>
-          )}
+          ) : null}
           <DialogFooter>
             <Button variant="ghost" onClick={() => setShowNewFolder(false)}>
               Cancel
@@ -3816,10 +3944,7 @@ export function NestView({
             <Button
               onClick={() => void createFolder()}
               disabled={
-                creatingFolder ||
-                !newFolderPath.trim() ||
-                newFolderTooDeep ||
-                newFolderUnusable
+                creatingFolder || !newFolderCheck.path || !!newFolderCheck.error
               }
             >
               {creatingFolder ? (
@@ -3853,8 +3978,21 @@ export function NestView({
             document.
           </p>
           <Select
-            value={moveDest === "" ? "__root__" : moveDest}
-            onValueChange={(v) => setMoveDest(v === "__root__" ? "" : v)}
+            value={
+              moveNewFolder !== null
+                ? "__new__"
+                : moveDest === ""
+                  ? "__root__"
+                  : moveDest
+            }
+            onValueChange={(v) => {
+              if (v === "__new__") {
+                setMoveNewFolder("");
+                return;
+              }
+              setMoveNewFolder(null);
+              setMoveDest(v === "__root__" ? "" : v);
+            }}
           >
             <SelectTrigger data-testid="move-folder-select">
               <SelectValue placeholder="Choose a folder" />
@@ -3866,8 +4004,35 @@ export function NestView({
                   {prettyFolderPath(f)}
                 </SelectItem>
               ))}
+              <SelectItem value="__new__">New folder…</SelectItem>
             </SelectContent>
           </Select>
+          {moveNewFolder !== null && (
+            <>
+              <Input
+                autoFocus
+                value={moveNewFolder}
+                onChange={(e) => setMoveNewFolder(e.target.value)}
+                placeholder="e.g. gtm/deals"
+                className="font-mono"
+                data-testid="move-folder-new-path"
+              />
+              {moveNewFolderCheck.error ? (
+                <p className="text-xs text-destructive">
+                  {moveNewFolderCheck.error}
+                </p>
+              ) : moveNewFolderCheck.rewritten && moveNewFolderCheck.path ? (
+                <p className="text-xs text-muted-foreground">
+                  Will be created as{" "}
+                  <code className="font-mono">{moveNewFolderCheck.path}</code>
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  The folder is created by the move — nest it with a slash.
+                </p>
+              )}
+            </>
+          )}
           <DialogFooter>
             <Button
               variant="ghost"
@@ -3880,12 +4045,14 @@ export function NestView({
               disabled={
                 movingDoc ||
                 !moveTarget ||
-                folderOfNode(moveTarget.id) === moveDest
+                folderOfNode(moveTarget.id) === moveResolvedDest ||
+                (moveNewFolder !== null &&
+                  (!moveNewFolderCheck.path || !!moveNewFolderCheck.error))
               }
               onClick={async () => {
                 if (!moveTarget) return;
                 setMovingDoc(true);
-                const ok = await handleMoveNode(moveTarget.id, moveDest);
+                const ok = await handleMoveNode(moveTarget.id, moveResolvedDest);
                 setMovingDoc(false);
                 if (ok) setMoveTarget(null);
               }}
@@ -4141,6 +4308,17 @@ function ReviewDocumentModal({
   const [linkError, setLinkError] = useState<string | null>(null);
   const qc = useQueryClient();
 
+  // The row that opened this modal comes from the document list, which carries
+  // metadata only — a body per row costs a file read per row, and nothing in
+  // the list renders one. A reviewer decides on the TEXT, so fetch it for this
+  // one document, on open. Falls back to a body the caller already had, so a
+  // row that does carry one renders without a round trip.
+  const { data: full, isLoading: bodyLoading } = useQuery({
+    ...reads.node(nestId, node.id),
+    enabled: !node.content,
+  });
+  const body = node.content || full?.node?.content || "";
+
   // Resolve `[[Title]]` clicks to a node id and jump straight to that
   // doc. Without this the wiki-link decoration renders but click does
   // nothing — `MarkdownEditor` only wires nav when `onWikiLinkClick`
@@ -4190,19 +4368,24 @@ function ReviewDocumentModal({
           </div>
         )}
         <div className="flex-1 overflow-y-auto rounded-md">
-          {node.content ? (
+          {body ? (
             <MarkdownEditor
               // Remount when the reviewer switches between docs in the
               // queue. Same modal instance otherwise → TipTap keeps its
               // previous doc's editor state and the body briefly shows
               // the wrong content on swap.
               key={node.id}
-              content={node.content}
+              content={body}
               onChange={() => { }}
               editable={false}
               nestId={nestId}
               onWikiLinkClick={handleWikiLinkClick}
             />
+          ) : bodyLoading ? (
+            // Distinct from "(no content)": approving on the strength of an
+            // empty box that was merely still loading is the one mistake this
+            // modal must not invite.
+            <p className="text-sm text-muted-foreground p-4">Loading content…</p>
           ) : (
             <p className="text-sm text-muted-foreground p-4">(no content)</p>
           )}

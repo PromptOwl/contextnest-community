@@ -5,6 +5,7 @@ import { NestView } from "./components/NestView";
 import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
+import { ApiKeysPage } from "./components/ApiKeysPage";
 import { TeamsPage } from "./components/TeamsPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { WorkflowsView } from "./components/WorkflowsView";
@@ -94,6 +95,7 @@ type View =
        *  also arrives via the ?thread= URL param). */
       initialThreadId?: string;
     }
+  | { page: "api-keys" }
   | { page: "teammates" }
   | { page: "teams" }
   | { page: "settings" }
@@ -321,6 +323,12 @@ export default function App() {
       setDeepLinkProbe({ status: "missing" });
       return;
     }
+    // ?view=workflows is the one sub-page gated on a flag that arrives with
+    // /health. Deciding before it lands read the flag as its `false` default
+    // and silently dropped the parameter — the probe then settled on "ok", so
+    // the re-run below found nothing left to do and the link opened Overview.
+    // Wait for health for that link only; every other view resolves at once.
+    if (loading && params.get("view") === "workflows") return;
     // Re-runs if workflowPlaneEnabled resolves mid-probe (health may land after
     // this effect first fires); the cancel guard drops the stale navigation.
     let cancelled = false;
@@ -395,7 +403,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [deepLinkProbe.status, workflowPlaneEnabled]);
+  }, [deepLinkProbe.status, workflowPlaneEnabled, loading]);
 
   // Keep the URL in sync with the current view so documents (and nests) are
   // shareable — paste the address bar and the recipient lands on the same doc.
@@ -826,6 +834,7 @@ export default function App() {
               <UserMenu
                 me={adminStatus.me}
                 isAdmin={isAdmin}
+                onApiKeys={() => setView({ page: "api-keys" })}
                 onTeammates={() => setView({ page: "teammates" })}
                 onTeams={() => setView({ page: "teams" })}
                 onSettings={() => setView({ page: "settings" })}
@@ -893,10 +902,16 @@ export default function App() {
       {/* Content */}
       {/* <main> owns page padding for every view — page roots must not add
           their own md:py-*, or one section sits lower than the next. */}
-      <main className={`${shellWidth} mx-auto px-4 py-4`}>
+      {/* min-w-0 + clip: a page section that refuses to shrink (a nowrap row,
+          a wide grid) must not widen the document. Page-level sideways scroll
+          also drags fixed UI — toasts, dialogs — off the window, since their
+          percentage boxes resolve against the wider block. `clip` (not
+          `hidden`) keeps sticky headers inside pages working. */}
+      <main className={`${shellWidth} mx-auto px-4 py-4 min-w-0 overflow-x-clip`}>
         {view.page === "dashboard" && (
           <Dashboard
             onOpenSearch={() => setShowQuickOpen(true)}
+            onManageKeys={() => setView({ page: "api-keys" })}
             onSelectNest={(id, name, isOwner, isAnonOwned) =>
               setView({
                 page: "nest",
@@ -928,6 +943,7 @@ export default function App() {
             initialTags={view.initialTags}
             initialFolder={view.initialFolder}
             initialTab={view.tab}
+            onManageKeys={() => setView({ page: "api-keys" })}
             onTabChange={(tab) => setView({ ...view, tab })}
             onBack={leaveNest}
             onOpenDocument={(nodeId, opts) =>
@@ -1122,6 +1138,9 @@ export default function App() {
             }
           />
         )}
+        {view.page === "api-keys" && (
+          <ApiKeysPage onBack={() => setView({ page: "dashboard" })} />
+        )}
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}
@@ -1191,6 +1210,7 @@ export default function App() {
 interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
+  onApiKeys: () => void;
   onTeammates: () => void;
   onTeams: () => void;
   onSettings: () => void;
@@ -1203,6 +1223,7 @@ interface UserMenuProps {
 function UserMenu({
   me,
   isAdmin,
+  onApiKeys,
   onTeammates,
   onTeams,
   onSettings,
@@ -1273,6 +1294,14 @@ function UserMenu({
           </>
         )}
         <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onSelect={onApiKeys}
+          className="cursor-pointer"
+          data-testid="user-menu-api-keys"
+        >
+          <KeyRound className="h-3.5 w-3.5 mr-2" />
+          API keys
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={onTeams} className="cursor-pointer">
           <Users className="h-3.5 w-3.5 mr-2" />
           Teams

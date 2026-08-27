@@ -5,6 +5,9 @@ import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
+import { MAX_FOLDER_DEPTH } from "../lib/constants";
+import { normalizeTagInput } from "../lib/tag-policy";
+import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,7 +23,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  ArrowLeft,
+  ArrowLeft, FileWarning, RefreshCw, FolderInput,
   Loader2,
   Save,
   AlertCircle,
@@ -61,6 +64,7 @@ import { AuthorshipChips } from "./AuthorshipChips";
 import { TableViewer } from "./TableViewer";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
+import { CodeHighlight } from "./CodeHighlight";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
@@ -183,6 +187,8 @@ export function DocumentEditor({
   onJumpBreadcrumb,
 }: DocumentEditorProps) {
   const isNew = nodeId === "new";
+  // Type picker: one tab stop, arrows between the choices (see the radiogroup).
+  const typeRoving = useRovingFocus<HTMLDivElement>();
   const { adminStatus, isAdmin, workflowPlaneEnabled, typeArtifactEnabled, typeTableEnabled } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   // Inline sharing from the document view — "add folks to a context where
@@ -728,6 +734,17 @@ export function DocumentEditor({
     }));
   }, [isNew, nodeId]);
 
+  // Move to folder, from the open document — the same move the list row
+  // offers, so nobody has to navigate back out to relocate what they're
+  // reading. `null` = dialog closed.
+  const [moveTo, setMoveTo] = useState<string | null>(null);
+  const [moving, setMoving] = useState(false);
+  const currentFolder = useMemo(() => {
+    if (isNew || !nodeId) return "";
+    const rel = nodeId.startsWith("nodes/") ? nodeId.slice(6) : nodeId;
+    return rel.split("/").slice(0, -1).join("/");
+  }, [isNew, nodeId]);
+
   // Docs in this nest that wiki-link to this one ("what links here").
   const backlinks = useMemo(
     () => (isNew ? [] : findBacklinks(nestNodes, { id: nodeId, title })),
@@ -768,6 +785,9 @@ export function DocumentEditor({
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The document couldn't be loaded (stale link, deleted doc, no access). The
+  // editor must not fall through to a blank, saveable document in that case.
+  const [loadFailed, setLoadFailed] = useState(false);
   // User-edited flag; raw diff is unreliable because TipTap normalizes loaded HTML.
   const [touched, setTouched] = useState(false);
 
@@ -839,6 +859,7 @@ export function DocumentEditor({
   const loadNode = useCallback(async () => {
     if (isNew) return;
     setLoading(true);
+    setLoadFailed(false);
     try {
       const { node } = await qc.fetchQuery(reads.node(nestId, nodeId));
       // Coerce to strings — YAML frontmatter can parse `title: 123` as a
@@ -896,6 +917,7 @@ export function DocumentEditor({
       }
     } catch (err: any) {
       setError(err.message);
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -931,11 +953,34 @@ export function DocumentEditor({
     if (!versionData) await loadVersions();
   }, [versionData, loadVersions]);
 
-  const compareWith = useCallback((v: number | null) => {
-    setCompareVersion(v);
-    // Always reopen compare in the default Source view, and reset on exit.
-    setDiffRendered(false);
-  }, []);
+  // The version list carries metadata only — getVersions returns content:""
+  // because bodies live on disk — so the compared body has to be fetched, or
+  // the diff runs against an empty base and paints the whole document green.
+  const [compareBody, setCompareBody] = useState<{
+    version: number;
+    content: string;
+  } | null>(null);
+  const compareWith = useCallback(
+    async (v: number | null) => {
+      setCompareVersion(v);
+      // Always reopen compare in the default Source view, and reset on exit.
+      setDiffRendered(false);
+      setCompareBody(null);
+      if (v == null) return;
+      try {
+        const { content: body } = await api.getNodeVersionContent(
+          nestId,
+          nodeId,
+          v,
+        );
+        setCompareBody({ version: v, content: body ?? "" });
+      } catch (e: any) {
+        toast.error(e?.message || `Failed to load version ${v}`);
+        setCompareVersion(null);
+      }
+    },
+    [nestId, nodeId],
+  );
   // A pending-review doc is LOCKED: the server rejects edits/deletes with
   // 423 while a review is open (nodes/routes). Plain drafts stay editable —
   // only status==='pending_review' locks, so the editor flows normally until
@@ -956,11 +1001,9 @@ export function DocumentEditor({
   // dblclick opts in (drafts only — a locked doc can't enter edit).
   const fieldsDisabled = isLocked || mode !== "edit";
 
-  const canSave = useMemo(
-    () =>
-      title.trim().length > 0 &&
-      content.trim().length > 0 &&
-      !saving,
+  // Declared before isDirty so the save gate below can read it.
+  const hasSaveableFields = useMemo(
+    () => title.trim().length > 0 && content.trim().length > 0 && !saving,
     [title, content, saving],
   );
 
@@ -979,19 +1022,49 @@ export function DocumentEditor({
     return false;
   }, [touched, title, content, tags, schedule, prime]);
 
+  // Save is a no-op on a clean document (it would only bump the version), so
+  // the button says so by being disabled — the enabled/disabled pair IS the
+  // dirty indicator, alongside the badge in the header.
+  const canSave = hasSaveableFields && (isNew || isDirty);
+
+  // Reloading or closing the tab with unsaved edits loses them — the in-app
+  // leave dialog can't see a browser-level navigation, so hook it here too.
+  useEffect(() => {
+    if (!isDirty || isReviewerOnly) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [isDirty, isReviewerOnly]);
+
   // Feedback only — the schedule is saved exactly as typed either way (it's
   // opaque to this server; an external orchestrator parses it).
   const scheduleCheck = useMemo(() => validateSchedule(schedule), [schedule]);
 
+  // Live artifact preview — the draft body is HTML nobody has hosted yet, so
+  // it renders from srcDoc in the same opaque-origin sandbox the hosted
+  // ArtifactViewer uses. Debounced: an iframe reload per keystroke is unusable.
+  const [artifactPreview, setArtifactPreview] = useState("");
+  useEffect(() => {
+    if (!isArtifactDraft) return;
+    const t = setTimeout(() => setArtifactPreview(content), 400);
+    return () => clearTimeout(t);
+  }, [content, isArtifactDraft]);
+
   const addTag = useCallback(() => {
-    // Split on whitespace/comma; strip leading "#" (stored bare).
-    const tokens = tagInput
-      .split(/[\s,]+/)
-      .map((t) => t.trim().replace(/^#+/, ""))
-      .filter(Boolean);
-    if (tokens.length === 0) return;
+    // Split on whitespace/comma, then hold each token to the tag policy
+    // (length cap, letters/digits/._- only) and say what it changed.
+    const candidates = tagInput.split(/[\s,]+/).map(normalizeTagInput);
+    const notes = candidates.map((c) => c.note).filter(Boolean) as string[];
+    const accepted = candidates
+      .map((c) => c.tag)
+      .filter((t): t is string => !!t);
+    for (const note of notes) toast.warning(note);
+    if (accepted.length === 0) {
+      setTagInput("");
+      return;
+    }
     const next = [...tags];
-    for (const t of tokens) {
+    for (const t of accepted) {
       if (!next.includes(t)) next.push(t);
     }
     setTags(next);
@@ -1317,6 +1390,34 @@ export function DocumentEditor({
     }
   };
 
+  // A document that failed to load has nothing to edit. Rendering the editor
+  // anyway gave a stale or mistyped link a blank, saveable document, which
+  // quietly created a second document at that path.
+  if (!isNew && !loading && loadFailed) {
+    return (
+      <div className="mt-14 md:mt-0" data-testid="document-not-found">
+        <div className="max-w-xl mx-auto py-16 text-center space-y-4">
+          <FileWarning className="h-10 w-10 mx-auto text-muted-foreground" />
+          <h2 className="text-xl font-semibold">Document not found</h2>
+          <p className="text-sm text-muted-foreground">
+            {error ??
+              `Nothing lives at ${nodeId} in this nest — the link may be stale or the document may have been moved or deleted.`}
+          </p>
+          <div className="flex items-center justify-center gap-2">
+            <Button variant="outline" onClick={() => void loadNode()}>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Try again
+            </Button>
+            <Button onClick={onBack}>
+              <ArrowLeft className="h-4 w-4 mr-2" />
+              Back to documents
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Artifact nodes are hosted HTML, not markdown — render the sandboxed
   // viewer + annotation surface instead of the editor. Gated on a loaded node
   // so all hooks above still run unconditionally (rules-of-hooks).
@@ -1432,6 +1533,16 @@ export function DocumentEditor({
                 Auto-published
               </span>
             )}
+            {isDirty && (
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
+                title="These edits are parked locally and not yet saved to the nest."
+                data-testid="document-editor-dirty-badge"
+              >
+                <Pencil className="h-3 w-3" />
+                Unsaved changes
+              </span>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -1446,7 +1557,13 @@ export function DocumentEditor({
               Submit for review
             </Button>
           )}
-          {!isViewOnly && canReviewHere && (
+          {/* NOT gated on isViewOnly: that flag answers "may this caller
+              author?", and a reviewer-only steward is view-only by definition
+              yet is exactly the person meant to act here. Gating approval on it
+              hid Approve/Reject from every reviewer who was not also an editor,
+              leaving the document page with no way to resolve a review.
+              canReviewHere already carries the full approval check. */}
+          {canReviewHere && (
             <ReviewActions
               documentTitle={title}
               version={baseVersion ?? 1}
@@ -1514,7 +1631,7 @@ export function DocumentEditor({
                 <DropdownMenuLabel>Diff current against…</DropdownMenuLabel>
                 {compareVersion != null && (
                   <>
-                    <DropdownMenuItem onClick={() => compareWith(null)}>
+                    <DropdownMenuItem onClick={() => void compareWith(null)}>
                       <X className="h-4 w-4 mr-2" /> Exit compare
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
@@ -1534,7 +1651,7 @@ export function DocumentEditor({
                     .map((v) => (
                       <DropdownMenuItem
                         key={v.version}
-                        onClick={() => compareWith(v.version)}
+                        onClick={() => void compareWith(v.version)}
                       >
                         {compareVersion === v.version ? (
                           <Check className="h-4 w-4 mr-2" />
@@ -1588,6 +1705,13 @@ export function DocumentEditor({
                     "Link copied — recipient needs access to this nest",
                   );
                 },
+              });
+            if (!isNew && canEditContent && !isLocked)
+              moreActions.push({
+                label: "Move to folder",
+                icon: FolderInput,
+                testId: "document-editor-move",
+                onSelect: () => setMoveTo(currentFolder),
               });
             // Share THIS doc first — it's the narrower, more common ask.
             // Meaningless on an unsaved doc: there's no node id to grant on.
@@ -1990,9 +2114,11 @@ export function DocumentEditor({
                           "inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs" +
                           (tagClickable ? " cursor-pointer hover:bg-secondary/80" : "")
                         }
-                        title={tagClickable ? `Filter nest by ${t}` : undefined}
+                        title={tagClickable ? `Filter nest by ${t}` : t}
                       >
-                        {t}
+                        {/* Long tags truncate rather than eat the row; the
+                            full value stays in the chip's title. */}
+                        <span className="truncate max-w-[16rem]">{t}</span>
                         {!fieldsDisabled && (
                           <button
                             type="button"
@@ -2135,10 +2261,14 @@ export function DocumentEditor({
                   always on; artifact/table only when their content-type
                   toggle is on; runnable types only when the workflow plane
                   is on. */}
+                  {/* A radiogroup is one tab stop by contract: Tab reaches the
+                      checked type, arrows move between the rest. */}
                   <div
                     className="inline-flex rounded-md border overflow-hidden"
                     role="radiogroup"
+                    aria-label="Document type"
                     data-testid="document-editor-type"
+                    {...typeRoving}
                   >
                     {(
                       [
@@ -2400,16 +2530,17 @@ export function DocumentEditor({
                           variant="ghost"
                           size="sm"
                           className="h-7"
-                          onClick={() => compareWith(null)}
+                          onClick={() => void compareWith(null)}
                         >
                           <X className="h-4 w-4 mr-1" /> Exit diff
                         </Button>
                       </div>
                     </div>
                     {(() => {
-                      const past = versionData?.versions.find(
-                        (v) => v.version === compareVersion,
-                      );
+                      const past =
+                        compareBody && compareBody.version === compareVersion
+                          ? compareBody
+                          : null;
                       if (!past) {
                         return (
                           <div className="flex items-center gap-2 text-sm text-muted-foreground p-4 border rounded-lg">
@@ -2496,17 +2627,39 @@ export function DocumentEditor({
                     data-testid="document-editor-raw-markdown"
                   />
                 ) : isArtifactDraft ? (
-                  <textarea
-                    value={content}
-                    onChange={(e) => {
-                      setContent(e.target.value);
-                      setTouched(true);
-                    }}
-                    onBlur={saveOnBlur}
-                    placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
-                    spellCheck={false}
-                    className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
-                  />
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    <textarea
+                      value={content}
+                      onChange={(e) => {
+                        setContent(e.target.value);
+                        setTouched(true);
+                      }}
+                      onBlur={saveOnBlur}
+                      placeholder="Paste the artifact's HTML (a self-contained slide deck, dashboard, infographic)…"
+                      spellCheck={false}
+                      className="w-full min-h-[360px] rounded-lg border bg-background p-3 font-mono text-xs leading-relaxed shadow-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                    />
+                    <div className="rounded-lg border overflow-hidden flex flex-col min-h-[360px]">
+                      <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                        Preview
+                      </div>
+                      {artifactPreview.trim() ? (
+                        <iframe
+                          srcDoc={artifactPreview}
+                          title="Artifact preview"
+                          // Same isolation as the hosted viewer: no
+                          // allow-same-origin → opaque origin, no host storage.
+                          sandbox="allow-scripts allow-popups allow-modals"
+                          className="w-full flex-1 bg-white"
+                          data-testid="artifact-draft-preview"
+                        />
+                      ) : (
+                        <p className="flex-1 flex items-center justify-center text-xs text-muted-foreground">
+                          Paste HTML to see it render here.
+                        </p>
+                      )}
+                    </div>
+                  </div>
                 ) : (commentMode || mode === "view") &&
                   (isSourceOnly || !looksLikeHtml(content)) ? (
                   /* isSourceOnly bypasses the looksLikeHtml guard: a tool body
@@ -2524,14 +2677,9 @@ export function DocumentEditor({
                         <TableViewer nestId={nestId} nodeId={nodeId} csv={content} />
                       </div>
                     ) : effectiveType === "tool" ? (
-                      /* Code block, dependency-free: no syntax highlighting,
-                         just monospace + horizontal scroll. */
-                      <pre
-                        className="overflow-x-auto p-4 font-mono text-xs leading-relaxed whitespace-pre"
-                        data-testid="tool-source-view"
-                      >
-                        <code>{content}</code>
-                      </pre>
+                      /* Highlighted with lowlight (language auto-detected) —
+                         same tokens the editor's code blocks use. */
+                      <CodeHighlight code={content} data-testid="tool-source-view" />
                     ) : (
                       <DocumentViewer
                         content={content}
@@ -2780,6 +2928,74 @@ export function DocumentEditor({
         onSelect={handleDocLinkInsert}
       />
 
+      <Dialog
+        open={moveTo !== null}
+        onOpenChange={(open) => {
+          if (!open && !moving) setMoveTo(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[440px]">
+          <DialogHeader>
+            <DialogTitle>Move to folder</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Move <strong>{title || nodeId}</strong> to another folder. Version
+            history, review state, and [[wiki links]] follow the document.
+          </p>
+          <Select
+            value={moveTo === "" ? "__root__" : (moveTo ?? "__root__")}
+            onValueChange={(v) => setMoveTo(v === "__root__" ? "" : v)}
+          >
+            <SelectTrigger data-testid="document-editor-move-select">
+              <SelectValue placeholder="Choose a folder" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__root__">Nest root</SelectItem>
+              {folderOptions.map((f) => (
+                <SelectItem key={f} value={f}>
+                  {f}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <DialogFooter>
+            <Button variant="ghost" disabled={moving} onClick={() => setMoveTo(null)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={moving || moveTo === null || moveTo === currentFolder}
+              data-testid="document-editor-move-confirm"
+              onClick={async () => {
+                if (moveTo === null) return;
+                setMoving(true);
+                try {
+                  const { node: moved } = await api.moveNode(nestId, nodeId, moveTo);
+                  toast.success(
+                    moveTo ? `Moved to ${moveTo}` : "Moved to nest root",
+                  );
+                  setMoveTo(null);
+                  // The move rewrites the node id, so this editor's id (and
+                  // every breadcrumb entry pointing at it) is stale — leave
+                  // for the list, where the document shows in its new folder.
+                  onSaved?.(moved.id);
+                } catch (err: any) {
+                  toast.error(err?.message || "Move failed");
+                } finally {
+                  setMoving(false);
+                }
+              }}
+            >
+              {moving ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <FolderInput className="h-4 w-4 mr-2" />
+              )}
+              Move
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {showShareDoc && (
         <ShareTargetDialog
           nestId={nestId}
@@ -2937,10 +3153,9 @@ function FolderStepPicker({
   onPick: (next: string) => void;
 }) {
   const [newName, setNewName] = useState("");
-  // Server caps folders at 8 segments deep (src/nodes/service.ts). Existing
-  // folders are already within that, so only a brand-new subfolder can push
-  // past it — block that here once the current path is at the limit.
-  const MAX_FOLDER_DEPTH = 8;
+  // Existing folders are already within the server's depth cap, so only a
+  // brand-new subfolder can push past it — block that here once the current
+  // path is at the limit.
   const atDepthLimit =
     folder.split("/").filter(Boolean).length >= MAX_FOLDER_DEPTH;
   const children = useMemo(() => {

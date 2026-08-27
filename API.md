@@ -49,24 +49,33 @@ Body:
 Clears session cookie. 200.
 
 ### POST `/auth/keys` (auth required)
-Mints an API key for the caller. 409 if one already exists — use rotate.
+Mints an API key for the caller. A user may hold **several** keys — one per place they connect from — so rotating the key for one client doesn't disconnect the rest.
+
+`label` is **required** and must be unique among the caller's keys (compared case-insensitively, after trimming): once the plaintext is gone the name is the only thing that tells two keys apart, so a list of identical entries makes revoking a guess. **400** if it's missing, blank, not a string, or longer than 60 characters; **409** on a duplicate name or at the per-user ceiling (20). Keys created before this rule keep their existing (possibly absent) label.
 ```json
 { "label": "cli", "nest_id": "optional — scope the key to one nest" }
 ```
 Response (201):
 ```json
-{ "api_key": "cnst_...", "id": "uuid", "label": "cli" }
+{ "api_key": "cnst_...", "id": "uuid", "key_prefix": "cnst_abc123...", "label": "cli" }
 ```
 **Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the Connect dialog mints); a nest-scoped key is rejected on other nests' MCP/API paths.
 
 ### POST `/auth/keys/rotate` (auth required)
-Replaces existing key, returns new plaintext. Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label).
+Replaces **one** key and returns its new plaintext; the caller's other keys are untouched.
+
+`key_id` names the target. Omitting it is only accepted when the account holds exactly one key (pre-multi-key clients) — with several keys and no `key_id` the server answers **400** rather than guessing which to replace. **404** if the id isn't the caller's.
+
+Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label). Supplying a `label` that matches a *different* key of the caller's is **409**; renaming a key to what it is already called is fine.
+```json
+{ "key_id": "uuid", "label": "optional", "nest_id": "optional" }
+```
 
 ### GET `/auth/keys` (auth required)
-Lists key prefixes (no plaintext).
+Lists the caller's keys — id, prefix, label, `nest_id`, `created_at`, `last_used_at` — oldest first. Never returns plaintext.
 
 ### DELETE `/auth/keys/:keyId` (auth required)
-Revoke a key.
+Revoke one key. 404 if the id isn't the caller's. Anything still using it stops working immediately.
 
 ### POST `/auth/password` (auth required)
 ```json
@@ -488,6 +497,8 @@ Optional query params, applied before the per-node enrichment:
 | `status` | `draft` \| `pending_review` \| `approved` \| `published` \| `rejected`; aliases normalized. Retired docs stay in this listing regardless — here they are unpublished docs their stewards may still act on. |
 | `approved_only` | `1`/`true` — only docs with an approved version, each served at that version rather than the live file. The view a public nest gives a stranger, so an owner can preview what going public would expose. |
 | `limit` | Max nodes to return. A non-numeric value is ignored, not an error. |
+| `folder` | Present (even as `""`) → that one folder level only, for a lazily-expanded document tree. Absent → the whole nest. |
+| `content` | `1`/`true` — include document bodies. **Off by default:** the listing is served from the nest's document index, which holds metadata only, so bodies cost a vault crawl and are opt-in. |
 ```json
 {
   "count": 1,
@@ -502,7 +513,7 @@ Optional query params, applied before the per-node enrichment:
     "collaborators": ["editor@x.com", "grantee@x.com"],
     "created_at": "...",
     "updated_at": "...",
-    "content": "# md body",
+    "content": "# md body — only with ?content=1",
     "schedule": "0 6 * * *"
   }]
 }
@@ -1314,6 +1325,55 @@ Nest-level summary stats.
 
 ### GET `/nests/:nestId/context`
 Returns CONTEXT.md content.
+
+### GET `/nests/:nestId/folders`
+The nest's folder tree on its own, for callers that want the *shape* of the vault
+(a navigable tree, a folder picker) and none of its content. Reads folder rows out
+of the document index — no document is opened, so this stays cheap on a vault where
+listing the documents would not be.
+
+Query: `?folder=<path>` (that subtree only; defaults to the whole nest),
+`?recursive=0` (direct children of `folder` only).
+
+```json
+{ "folders": [{ "path": "specs", "count": 4, "total": 11 }] }
+```
+
+`count` = documents filed directly in that folder; `total` = the whole subtree
+beneath it. A level that holds only subfolders still gets a row, so it stays
+expandable.
+
+### GET `/nests/:nestId/census`
+One call for everything a nest overview needs to describe the *whole* nest,
+whatever folder is open — counts by tag, type and status, the folder tree, the
+author roster, and the recently-edited strip. Gated by the same `filterAccessible`
+pass as the listing, so the numbers describe what this caller can actually reach.
+
+```json
+{
+  "census": {
+    "total": 42,
+    "folders": [{ "path": "specs", "count": 4, "total": 11 }],
+    "tags": { "#api": 7 },
+    "types": { "document": 40, "agent": 2 },
+    "statuses": { "approved": 30, "draft": 12 },
+    "authors": ["a@x.com"],
+    "editedLast7d": 5,
+    "recent": [{ "id": "nodes/foo", "title": "Foo", "type": "document", "updated_at": "..." }]
+  }
+}
+```
+
+### POST `/nests/:nestId/reindex` (write+)
+Force-rebuild the nest's document index from the vault, and return how many
+documents were indexed: `{ "indexed": 42 }`.
+
+The index heals itself — anything that could leave it out of step with disk (an
+out-of-band edit, an import, a write that could not be mirrored) marks the nest
+stale, and the next read rebuilds before answering. This is the manual lever for
+when an operator wants that to happen *now*. A rebuild crawls the whole vault, so
+it is write-tier rather than something a read-only caller can trigger at will;
+below that the answer is `403`.
 
 ### GET `/nests/:nestId/graph` (read+)
 Ontology graph — a read-only assembly over data the nest already holds, for the

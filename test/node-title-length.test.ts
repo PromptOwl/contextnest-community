@@ -132,10 +132,10 @@ describe("title length bound", () => {
     expect(rename.status).toBe(400);
   });
 
-  it("rejects a title with no slug-able characters, on create and on rename", async () => {
-    // "###" slugifies to "" — the derived id was a bare `nodes/`, which wrote a
-    // ghost at nodes/.md: absent from the list, unopenable, undeletable, and
-    // colliding with the next symbols-only title.
+  it("rejects a title with no letter or number, on create and on rename", async () => {
+    // The engine refuses such a title outright (nothing for search or wiki
+    // links to read back), and the derived id would be a bare `nodes/` — a
+    // ghost at nodes/.md. Refused here as a 400, not a 500 from the publish.
     for (const title of ["###", "...", "!!!", "   "]) {
       const res = await jsonRequest(
         app,
@@ -145,11 +145,9 @@ describe("title length bound", () => {
         alice.apiKey,
       );
       expect(res.status).toBe(400);
-      expect(JSON.stringify(res.data)).toMatch(/needs at least one of those/i);
+      expect(JSON.stringify(res.data)).toMatch(/at least one letter or number/i);
     }
 
-    // Nothing was created, so the list is unchanged and a later create at the
-    // same (empty) slug is not blocked.
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/nodes`, undefined, alice.apiKey);
     expect(list.data.nodes.some((n: any) => n.id === `nodes/` || n.id.endsWith("/"))).toBe(false);
 
@@ -168,22 +166,41 @@ describe("title length bound", () => {
       alice.apiKey,
     );
     expect(rename.status).toBe(400);
-    expect(JSON.stringify(rename.data)).toMatch(/needs at least one of those/i);
+    expect(JSON.stringify(rename.data)).toMatch(/at least one letter or number/i);
   });
 
-  it("refuses an all-non-latin title, naming the a-z0-9 id rule", async () => {
-    // The slug is ASCII, so "日本語のみ" derives nothing and would leave the same
-    // ghost document "###" does. It IS letters, though, so the message points
-    // at the id rule rather than claiming the title has none.
+  it("accepts an all-non-latin title, falling back to a generated id", async () => {
+    // 日本語 IS letters — only the id has to be ASCII, so the title stands and
+    // the id falls back to the next free document-N.
+    const ids: string[] = [];
+    for (const title of ["日本語のみ", "测试文档", "Тест"]) {
+      const res = await jsonRequest(
+        app,
+        "POST",
+        `/nests/${nestId}/nodes`,
+        { title, content: "body" },
+        alice.apiKey,
+      );
+      expect(res.status).toBe(201);
+      expect(res.data.node.id).toMatch(/^nodes\/document-\d+$/);
+      expect(res.data.node.title).toBe(title);
+      ids.push(res.data.node.id);
+    }
+    // Each falls to its own id — no collision between them.
+    expect(new Set(ids).size).toBe(3);
+  });
+
+  it("transliterates accents instead of dropping the letters", async () => {
     const res = await jsonRequest(
       app,
       "POST",
       `/nests/${nestId}/nodes`,
-      { title: "日本語のみ", content: "body" },
+      { title: "Café Résumé", content: "body" },
       alice.apiKey,
     );
-    expect(res.status).toBe(400);
-    expect(JSON.stringify(res.data)).toMatch(/built from the title using a-z and 0-9/i);
+    expect(res.status).toBe(201);
+    expect(res.data.node.id).toBe("nodes/cafe-resume");
+    expect(res.data.node.title).toBe("Café Résumé");
   });
 
   it("still projects the derived annotations node for an at-cap artifact title", async () => {
