@@ -144,6 +144,8 @@ interface NestViewProps {
   ) => void;
   /** Open this nest's activity trace (owner/nest-admin only). */
   onOpenTrace?: () => void;
+  /** Open the account-level API keys page. */
+  onManageKeys?: () => void;
   /** Seed the search filter on mount. Used when arriving from a tag
    *  click on a document detail page. */
   initialSearch?: string;
@@ -166,6 +168,7 @@ export function NestView({
   onBack,
   onOpenDocument,
   onOpenTrace,
+  onManageKeys,
   initialSearch,
   initialTags,
   initialFolder,
@@ -3800,6 +3803,13 @@ export function NestView({
           onClose={() => setShowConnect(false)}
           nestId={nestId}
           nestName={nestName}
+          onManageKeys={
+            onManageKeys &&
+            (() => {
+              setShowConnect(false);
+              onManageKeys();
+            })
+          }
         />
       )}
 

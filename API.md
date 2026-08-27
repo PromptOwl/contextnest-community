@@ -49,24 +49,31 @@ Body:
 Clears session cookie. 200.
 
 ### POST `/auth/keys` (auth required)
-Mints an API key for the caller. 409 if one already exists — use rotate.
+Mints an API key for the caller. A user may hold **several** keys — one per place they connect from — so rotating the key for one client doesn't disconnect the rest. 409 only at the per-user ceiling (20); 400 if `label` isn't a string of at most 60 characters.
 ```json
 { "label": "cli", "nest_id": "optional — scope the key to one nest" }
 ```
 Response (201):
 ```json
-{ "api_key": "cnst_...", "id": "uuid", "label": "cli" }
+{ "api_key": "cnst_...", "id": "uuid", "key_prefix": "cnst_abc123...", "label": "cli" }
 ```
 **Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the Connect dialog mints); a nest-scoped key is rejected on other nests' MCP/API paths.
 
 ### POST `/auth/keys/rotate` (auth required)
-Replaces existing key, returns new plaintext. Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label).
+Replaces **one** key and returns its new plaintext; the caller's other keys are untouched.
+
+`key_id` names the target. Omitting it is only accepted when the account holds exactly one key (pre-multi-key clients) — with several keys and no `key_id` the server answers **400** rather than guessing which to replace. **404** if the id isn't the caller's.
+
+Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label).
+```json
+{ "key_id": "uuid", "label": "optional", "nest_id": "optional" }
+```
 
 ### GET `/auth/keys` (auth required)
-Lists key prefixes (no plaintext).
+Lists the caller's keys — id, prefix, label, `nest_id`, `created_at`, `last_used_at` — oldest first. Never returns plaintext.
 
 ### DELETE `/auth/keys/:keyId` (auth required)
-Revoke a key.
+Revoke one key. 404 if the id isn't the caller's. Anything still using it stops working immediately.
 
 ### POST `/auth/password` (auth required)
 ```json

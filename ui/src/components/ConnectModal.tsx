@@ -2,16 +2,17 @@
  * ConnectModal — copy-paste snippets for connecting external clients
  * (Hootie, Claude Desktop, raw MCP) to a nest.
  *
- * Key-secrecy model: this dialog NEVER renders the plaintext api_key in
- * its snippets — every snippet shows a placeholder that the user must
- * substitute manually after copying. The plaintext is shown exactly
- * once, in the separate KeyRevealModal that pops up after Generate /
- * Rotate. Once that modal closes the plaintext is dropped from React
- * state forever (server stores only sha256, so neither side can recover
- * it later — only Rotate to mint a fresh one).
+ * Key-secrecy model: this dialog shows no key at all — not the plaintext,
+ * not the prefix. Every snippet carries a placeholder the user substitutes
+ * after copying, so snippets are reusable templates that leak no secret.
  *
- * Snippets are therefore reusable copy templates — copy them as often
- * as you like; they leak no secret.
+ * Creating and rotating keys lives on the API keys page (`onManageKeys`),
+ * not here. Per-nest rotation was a trap: an account holds several keys,
+ * one per place it connects from, and a rotate fired from whichever nest
+ * happened to be open would kill clients wired to the others. Plaintext is
+ * still revealed exactly once, by KeyRevealModal (exported below, rendered
+ * by that page); the server stores only sha256, so a lost key can only be
+ * replaced, never recovered.
  */
 import { useEffect, useState } from "react";
 import {
@@ -27,21 +28,13 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
-import {
   Copy,
   Check,
   Monitor,
   Bot,
   AlertCircle,
-  CheckCircle2,
   Key,
   Loader2,
-  RefreshCw,
   ShieldAlert,
   Download,
   Sparkles,
@@ -51,8 +44,6 @@ import {
   Terminal,
 } from "lucide-react";
 import * as api from "../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
-import { reads } from "../lib/queries";
 import { copyTextWithToast } from "../lib/clipboard";
 import {
   nestChatPrompt,
@@ -66,6 +57,9 @@ interface ConnectModalProps {
   onClose: () => void;
   nestId: string;
   nestName: string;
+  /** Opens the API keys page. Keys are created and rotated there, never from
+   *  inside a nest — a rotate started here used to kill every other client. */
+  onManageKeys?: () => void;
 }
 
 const KEY_PLACEHOLDER = "<paste-your-api-key-here>";
@@ -75,6 +69,7 @@ export function ConnectModal({
   onClose,
   nestId,
   nestName,
+  onManageKeys,
 }: ConnectModalProps) {
   const { authenticated, authMode } = useAuth();
   const serverUrl =
@@ -85,7 +80,6 @@ export function ConnectModal({
   const exportUrl = `${serverUrl}/nests/${nestId}/export?format=markdown`;
 
   const [downloading, setDownloading] = useState(false);
-  const qc = useQueryClient();
   const [downloadingBundle, setDownloadingBundle] = useState(false);
   const [bundleOpen, setBundleOpen] = useState(false);
   const [includeDrafts, setIncludeDrafts] = useState(false);
@@ -96,120 +90,12 @@ export function ConnectModal({
   // collapsed by default too.
   const [showMore, setShowMore] = useState(false);
 
-  const [hasExistingKey, setHasExistingKey] = useState<boolean | null>(null);
-  const [existingPrefix, setExistingPrefix] = useState<string | null>(null);
-
-  // Plaintext lives ONLY inside the reveal popup. Closing the popup
-  // wipes it. Snippets in this dialog never see the real value.
-  const [revealedKey, setRevealedKey] = useState<string | null>(null);
-  const [revealKind, setRevealKind] = useState<"generated" | "rotated" | null>(
-    null,
-  );
-
-  const [busy, setBusy] = useState<"loading" | "mint" | "rotate" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Transient confirmation surfaced after a successful Generate/Rotate.
-  // Auto-clears so the panel reverts to its neutral resting state instead
-  // of leaving a stale "click Rotate" prompt visible after the user has
-  // already rotated.
-  const [justActed, setJustActed] = useState<"generated" | "rotated" | null>(
-    null,
-  );
 
-  // Probe key state when dialog opens / reopens.
+  // Clear a stale export error when the dialog reopens.
   useEffect(() => {
-    if (!isOpen) {
-      setError(null);
-      setJustActed(null);
-      return;
-    }
-    if (!authenticated || authMode === "open") {
-      setHasExistingKey(false);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      setBusy("loading");
-      try {
-        const { keys } = await qc.fetchQuery(reads.apiKeys());
-        if (cancelled) return;
-        const head = keys[0];
-        setHasExistingKey(!!head);
-        setExistingPrefix(head?.key_prefix ?? null);
-      } catch (err: any) {
-        if (!cancelled) {
-          setError(err.message);
-          setHasExistingKey(false);
-        }
-      } finally {
-        if (!cancelled) setBusy(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [isOpen, authenticated, authMode]);
-
-  // User-level key (no nest_id): one key works for every nest these
-  // credentials can read — including shared nests and the server-level /mcp
-  // endpoint. Scoping the key to the nest this dialog happened to be opened
-  // from was a trap: one key per user means generating from nest B rotated
-  // away the key an external client (e.g. PromptOwl) had stored for nest A
-  // (401), and the replacement was scoped to B so it 403'd on A.
-  const generateKey = async () => {
-    setError(null);
-    setBusy("mint");
-    try {
-      const { api_key, key_prefix } = await api.createApiKey({
-        label: "connect",
-      });
-      setExistingPrefix(key_prefix);
-      setHasExistingKey(true);
-      setRevealKind("generated");
-      setRevealedKey(api_key);
-      setJustActed("generated");
-      // Other surfaces (AllNestsBar) read the same cached key list; without
-      // this they keep offering "Generate" for up to staleTime and 409.
-      qc.invalidateQueries({ queryKey: reads.apiKeys().queryKey });
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const rotateKey = async () => {
-    setError(null);
-    setBusy("rotate");
-    try {
-      // nest_id: null explicitly CLEARS any stale per-nest scope a key minted
-      // by an older build carries (omitting the field would keep it).
-      const { api_key, key_prefix } = await api.rotateApiKey({
-        nest_id: null,
-        label: "connect",
-      });
-      setExistingPrefix(key_prefix);
-      setHasExistingKey(true);
-      setRevealKind("rotated");
-      setRevealedKey(api_key);
-      setJustActed("rotated");
-      qc.invalidateQueries({ queryKey: reads.apiKeys().queryKey });
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  // Auto-clear the transient confirmation. Keeps the panel honest: once
-  // enough time has passed for the user to absorb the success state, we
-  // fall back to neutral copy so a later glance doesn't misread it as a
-  // fresh, unacknowledged action.
-  useEffect(() => {
-    if (!justActed) return;
-    const t = setTimeout(() => setJustActed(null), 6000);
-    return () => clearTimeout(t);
-  }, [justActed]);
+    if (!isOpen) setError(null);
+  }, [isOpen]);
 
   // Download the whole nest as a single markdown file (approved content only,
   // server-side). Same URL agents fetch — surfaced here as a one-click action.
@@ -246,13 +132,6 @@ export function ConnectModal({
     } finally {
       setDownloading(false);
     }
-  };
-
-  const closeReveal = () => {
-    // Drop plaintext from memory. Once gone, only Rotate can mint a new
-    // one — the old one stays valid server-side until then.
-    setRevealedKey(null);
-    setRevealKind(null);
   };
 
   // Claude Desktop only speaks stdio in claude_desktop_config.json — it has no
@@ -310,17 +189,17 @@ export function ConnectModal({
               sections below it sat outside the scroll area, so a short
               window squeezed the tab content into a sliver (or nothing). */}
           <div className="flex-1 overflow-y-auto overflow-x-hidden min-w-0 space-y-4">
-          {/* Primary path: generate a key, then paste one of these into your AI
-              agent/harness — it self-installs, connects, and asks for the key.
-              Per-client config is the fallback (collapsed below). */}
+          {/* Primary path: paste one of these into your AI agent/harness — it
+              self-installs, connects, and asks you for the key. Per-client
+              config is the fallback (collapsed below). */}
           <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-3.5">
             <p className="text-sm font-semibold">
               Now paste into your AI agent or harness
             </p>
             <p className="mb-3 mt-0.5 text-xs text-muted-foreground">
-              Generate a key below, then drop one of these into Claude, Cursor,
-              Hootie, or any agent. It self-installs, connects, and asks you for
-              the key — one paste, all-purpose.
+              Drop one of these into Claude, Cursor, Hootie, or any agent. It
+              self-installs, connects, and asks you for your API key — one
+              paste, all-purpose.
             </p>
             <div className="flex flex-wrap gap-2">
               <Button
@@ -377,82 +256,36 @@ export function ConnectModal({
             </div>
           )}
 
+          {/* Keys are managed in one place, not per nest. This panel points
+              there rather than minting or rotating inline — a rotate started
+              from whichever nest happened to be open is how people silently
+              disconnected every other client they'd wired up. */}
           {authenticated && !showOpenModeBanner && (
             <div className="rounded-md border bg-card p-3 space-y-2">
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-2 text-sm min-w-0">
                   <Key className="h-3.5 w-3.5 shrink-0" />
-                  <span className="font-medium truncate">External-client API key</span>
+                  <span className="font-medium truncate">
+                    External-client API key
+                  </span>
                 </div>
-                {hasExistingKey ? (
-                  <TooltipProvider delayDuration={200}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={rotateKey}
-                          disabled={busy !== null}
-                          aria-label="Rotate API key — invalidates the current key and mints a fresh one"
-                        >
-                          {busy === "rotate" ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <>
-                              <RefreshCw className="h-3.5 w-3.5 mr-1" />
-                              Rotate
-                            </>
-                          )}
-                        </Button>
-                      </TooltipTrigger>
-                      <TooltipContent side="left" className="max-w-[260px]">
-                        <p className="text-xs">
-                          Mints a fresh API key and immediately invalidates the
-                          current one. Use only if the existing key is lost or
-                          compromised — external clients will need the new
-                          value to keep working.
-                        </p>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                ) : (
+                {onManageKeys && (
                   <Button
+                    variant="outline"
                     size="sm"
-                    onClick={generateKey}
-                    disabled={busy !== null}
+                    className="shrink-0"
+                    onClick={onManageKeys}
                   >
-                    {busy === "mint" ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      "Generate Key"
-                    )}
+                    Manage API keys
                   </Button>
                 )}
               </div>
-
-              {hasExistingKey && justActed && (
-                <p className="flex items-start gap-1.5 text-xs text-green-700">
-                  <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                  <span>
-                    {justActed === "rotated" ? "Key rotated" : "Key generated"} ·
-                    new prefix{" "}
-                    <code className="font-mono">{existingPrefix}</code>
-                    {justActed === "rotated" && " · previous key revoked"}.
-                  </span>
-                </p>
-              )}
-              {hasExistingKey && !justActed && (
-                <p className="text-xs text-muted-foreground">
-                  Active key prefix:{" "}
-                  <code className="font-mono">{existingPrefix}</code>.
-                </p>
-              )}
-              {!hasExistingKey && (
-                <p className="text-xs text-muted-foreground">
-                  No key yet. Generate one to use the snippets below. You'll
-                  see the plaintext exactly once.
-                </p>
-              )}
+              <p className="text-xs text-muted-foreground">
+                Use the key you already have — any of your keys works on every
+                nest you can see. Need a new one, or lost the plaintext? Create
+                or rotate it on the API keys page; keys are shown only once,
+                when they're created.
+              </p>
             </div>
           )}
 
@@ -855,15 +688,6 @@ export function ConnectModal({
           </div>
         </DialogContent>
       </Dialog>
-
-      {revealedKey && revealKind && (
-        <KeyRevealModal
-          apiKey={revealedKey}
-          kind={revealKind}
-          nestId={nestId}
-          onClose={closeReveal}
-        />
-      )}
 
       <Dialog open={bundleOpen} onOpenChange={(o) => !downloadingBundle && setBundleOpen(o)}>
         <DialogContent className="sm:max-w-[420px]">

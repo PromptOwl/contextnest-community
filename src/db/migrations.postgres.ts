@@ -68,6 +68,7 @@ const HISTORICAL_MIGRATIONS = [
   "032_deletion_requests",
   "033_deletion_request_targets",
   "034_versions_author_status_index",
+  "035_multiple_api_keys_per_user",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -119,8 +120,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_keys_user ON api_keys(user_id);
     CREATE INDEX IF NOT EXISTS idx_keys_hash ON api_keys(key_hash);
-    -- One api_key row per user (migration 003).
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_unique ON api_keys(user_id);
+    -- Migration 003 capped this at one row per user; 035 lifted it so a user
+    -- can hold one key per place they connect from and rotate them singly.
+    DROP INDEX IF EXISTS idx_api_keys_user_unique;
 
     CREATE TABLE IF NOT EXISTS nest_collaborators (
       id TEXT PRIMARY KEY,

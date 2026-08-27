@@ -54,9 +54,12 @@ interface DashboardProps {
   onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
   /** Opens the cross-nest search palette (the same one Cmd/Ctrl+K opens). */
   onOpenSearch?: () => void;
+  /** Opens the API keys page — keys are minted and rotated there, never
+   *  inline in a connect dialog. */
+  onManageKeys?: () => void;
 }
 
-export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: DashboardProps) {
+export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKeys }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const [work, setWork] = useState<{
@@ -843,7 +846,9 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch }: Dashboar
           </div>
 
           {/* Whole-brain landing: frame every nest as one connectable brain. */}
-          {allNests.length > 0 && <AllNestsBar nests={allNests} />}
+          {allNests.length > 0 && (
+            <AllNestsBar nests={allNests} onManageKeys={onManageKeys} />
+          )}
 
           {/* Create form */}
           {showCreate && (
