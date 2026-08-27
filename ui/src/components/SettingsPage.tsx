@@ -1097,6 +1097,8 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   <code className="text-[11px]">/index</code>. The token is
                   verified by signature, issuer, audience (the client id above)
                   and expiry. Security-critical — keep it off until reviewed.
+                  For a public IdP like Google, set the allowed email domains
+                  above so only your organization can exchange.
                 </div>
               </CardContent>
             </Card>
