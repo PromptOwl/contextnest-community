@@ -1292,6 +1292,18 @@ export function runMigrations(db: Database.Database): void {
     `);
     recordMigration("034_versions_author_status_index");
   }
+
+  // 035: Undo 003's one-key-per-user cap.
+  //
+  // A single key made rotation destructive at a distance: a user who had
+  // wired four clients and lost the plaintext had to rotate to get a
+  // readable key, which silently killed all four. Many keys means one per
+  // place, and rotating one leaves the others alone. The non-unique
+  // idx_keys_user index (created above) still covers lookups by user.
+  if (!hasMigration("035_multiple_api_keys_per_user")) {
+    db.exec(`DROP INDEX IF EXISTS idx_api_keys_user_unique;`);
+    recordMigration("035_multiple_api_keys_per_user");
+  }
 }
 
 /**

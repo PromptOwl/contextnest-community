@@ -144,6 +144,8 @@ interface NestViewProps {
   ) => void;
   /** Open this nest's activity trace (owner/nest-admin only). */
   onOpenTrace?: () => void;
+  /** Open the account-level API keys page. */
+  onManageKeys?: () => void;
   /** Seed the search filter on mount. Used when arriving from a tag
    *  click on a document detail page. */
   initialSearch?: string;
@@ -166,6 +168,7 @@ export function NestView({
   onBack,
   onOpenDocument,
   onOpenTrace,
+  onManageKeys,
   initialSearch,
   initialTags,
   initialFolder,
@@ -1797,19 +1800,19 @@ export function NestView({
           {/* Connect (external clients) and Add-with-AI (seed content) are
               distinct first-class actions — Connect wires tools, Add-with-AI
               generates context into the nest. */}
-          <Button variant="outline" onClick={() => setShowConnect(true)}>
-            <Link2 className="h-4 w-4 mr-2" />
+          <Button variant="outline" size="sm" onClick={() => setShowConnect(true)}>
+            <Link2 className="h-3.5 w-3.5 mr-1.5" />
             Connect
           </Button>
           {!isReadOnly && (
-            <Button variant="outline" onClick={() => setShowGenerate(true)}>
-              <Sparkles className="h-4 w-4 mr-2" />
+            <Button variant="outline" size="sm" onClick={() => setShowGenerate(true)}>
+              <Sparkles className="h-3.5 w-3.5 mr-1.5" />
               Add with AI
             </Button>
           )}
           {canManage && (
-            <Button variant="outline" onClick={() => setShowShare(true)}>
-              <Users className="h-4 w-4 mr-2" />
+            <Button variant="outline" size="sm" onClick={() => setShowShare(true)}>
+              <Users className="h-3.5 w-3.5 mr-1.5" />
               Share
             </Button>
           )}
@@ -1842,8 +1845,8 @@ export function NestView({
               />
               <DropdownMenu modal={false}>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline" data-testid="nest-import-files">
-                    <Upload className="h-4 w-4 mr-2" />
+                  <Button variant="outline" size="sm" data-testid="nest-import-files">
+                    <Upload className="h-3.5 w-3.5 mr-1.5" />
                     Import
                   </Button>
                 </DropdownMenuTrigger>
@@ -1856,8 +1859,8 @@ export function NestView({
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-              <Button onClick={() => onOpenDocument("new")}>
-                <Plus className="h-4 w-4 mr-2" />
+              <Button size="sm" onClick={() => onOpenDocument("new")}>
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
                 New Document
               </Button>
             </>
@@ -1928,7 +1931,13 @@ export function NestView({
                 onSelect: () =>
                   canDeleteNest ? setShowDelete(true) : setNestFlagOpen(true),
               });
-            return <OverflowMenu actions={actions} variant="outline" />;
+            return (
+              <OverflowMenu
+                actions={actions}
+                variant="outline"
+                className="h-8 w-8"
+              />
+            );
           })()}
       </NestPageHeader>
 
@@ -3800,6 +3809,13 @@ export function NestView({
           onClose={() => setShowConnect(false)}
           nestId={nestId}
           nestName={nestName}
+          onManageKeys={
+            onManageKeys &&
+            (() => {
+              setShowConnect(false);
+              onManageKeys();
+            })
+          }
         />
       )}
 

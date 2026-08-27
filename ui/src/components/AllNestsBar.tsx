@@ -1,13 +1,5 @@
 import { useState } from "react";
-import {
-  Globe2,
-  Copy,
-  MessageSquareText,
-  Lock,
-  KeyRound,
-  Loader2,
-} from "lucide-react";
-import { toast } from "sonner";
+import { Globe2, Copy, MessageSquareText, Lock, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -23,9 +15,6 @@ import {
   allNestsChatPrompt,
   type NestCountRow,
 } from "../lib/connect";
-import * as api from "../lib/api";
-import { useApiKeys } from "../lib/queries";
-import { KeyRevealModal } from "./ConnectModal";
 import { useAuth } from "../auth/AuthContext";
 
 const serverUrl =
@@ -36,54 +25,29 @@ const serverUrl =
 /**
  * The "whole brain" strip that sits above the individual nests: it frames the
  * user's many nests as one thing an AI can read through a single connection.
- * The key is user-level (one key works for every nest and here), so the dialog
- * mints it inline via the existing /auth/keys endpoint — no auth-model change,
- * and no more diving into a nest just to get a key.
+ *
+ * Deliberately does not touch keys. A key is one credential per place you
+ * connect from, which is a thing to manage in one place — so this dialog
+ * points at the API keys page instead of minting, revealing, or rotating
+ * anything here.
  */
-export function AllNestsBar({ nests }: { nests: NestCountRow[] }) {
+export function AllNestsBar({
+  nests,
+  onManageKeys,
+}: {
+  nests: NestCountRow[];
+  onManageKeys?: () => void;
+}) {
   const [open, setOpen] = useState(false);
-  const [minting, setMinting] = useState(false);
-  const [reveal, setReveal] = useState<{
-    apiKey: string;
-    kind: "generated" | "rotated";
-  } | null>(null);
-
   const { authenticated, authMode } = useAuth();
-  // AUTH_MODE=open servers need no credential — mirror ConnectModal and hide
-  // the whole key section (and drop key talk from the prompt) there.
+  // AUTH_MODE=open servers need no credential at all — mirror ConnectModal
+  // and drop key talk from both the panel and the prompt.
   const openMode = authMode === "open";
   const showKeySection = authenticated && !openMode;
-
-  // Deferred to dialog-open: this component mounts with the dashboard, and an
-  // unconditional fetch would hit /auth/keys on every visit.
-  const {
-    data: keyData,
-    isLoading: keysLoading,
-    refetch: refetchKeys,
-  } = useApiKeys({ enabled: open && showKeySection });
-  const existingKey = keyData?.keys?.[0];
 
   const { nestCount, documentCount } = nestSummary(nests);
   const mcp = serverMcpUrl(serverUrl);
   const prompt = allNestsChatPrompt(serverUrl, openMode);
-
-  async function generate() {
-    setMinting(true);
-    try {
-      const { api_key } = await api.createApiKey({ label: "connect" });
-      setReveal({ apiKey: api_key, kind: "generated" });
-    } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "Couldn't generate a key.",
-      );
-    } finally {
-      // Either way the server is the truth: a 409 means a key already exists,
-      // so refetching flips this panel to the "Active key" state instead of
-      // leaving a dead Generate button.
-      void refetchKeys();
-      setMinting(false);
-    }
-  }
 
   return (
     <>
@@ -137,42 +101,33 @@ export function AllNestsBar({ nests }: { nests: NestCountRow[] }) {
             </div>
 
             {showKeySection && (
-            <div>
-              <p className="mb-1.5 text-xs font-medium text-muted-foreground">
-                Your API key
-              </p>
-              {keysLoading ? (
-                <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-2.5 text-xs text-muted-foreground">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Checking your key…
-                </div>
-              ) : existingKey ? (
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border bg-muted/40 p-2.5 text-xs">
-                  <KeyRound className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                  <span>
-                    Active key{" "}
-                    <code className="font-mono">{existingKey.key_prefix}</code>
-                  </span>
-                  <span className="text-muted-foreground">
-                    — works here and in every nest.
-                  </span>
-                </div>
-              ) : (
-                <Button size="sm" onClick={generate} disabled={minting}>
-                  {minting ? (
-                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <KeyRound className="mr-1.5 h-3.5 w-3.5" />
+              <div>
+                <p className="mb-1.5 text-xs font-medium text-muted-foreground">
+                  Your API key
+                </p>
+                <div className="flex flex-col gap-2 rounded-md border bg-muted/40 p-2.5 sm:flex-row sm:items-center sm:justify-between">
+                  <p className="flex items-start gap-2 text-xs text-muted-foreground">
+                    <KeyRound className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      Paste in the key you already use — any of your keys works
+                      here and on every nest. Need a new one?
+                    </span>
+                  </p>
+                  {onManageKeys && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() => {
+                        setOpen(false);
+                        onManageKeys();
+                      }}
+                    >
+                      Manage API keys
+                    </Button>
                   )}
-                  Generate API key
-                </Button>
-              )}
-              <p className="mt-1.5 text-xs text-muted-foreground">
-                One key for your whole account — the same key authenticates
-                every nest and this connection. You'll see it once; open a
-                nest's Connect panel to rotate it.
-              </p>
-            </div>
+                </div>
+              </div>
             )}
 
             <div>
@@ -204,14 +159,6 @@ export function AllNestsBar({ nests }: { nests: NestCountRow[] }) {
           </div>
         </DialogContent>
       </Dialog>
-
-      {reveal && (
-        <KeyRevealModal
-          apiKey={reveal.apiKey}
-          kind={reveal.kind}
-          onClose={() => setReveal(null)}
-        />
-      )}
     </>
   );
 }

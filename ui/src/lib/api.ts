@@ -461,7 +461,9 @@ export async function resetUserPassword(userId: string, password?: string) {
   });
 }
 
-// ─── External-client API keys (one per user) ───────────────────────────
+// ─── External-client API keys ──────────────────────────────────────────
+// A user can hold several — one per place they connect from — so rotating
+// the key for one client doesn't disconnect the others.
 
 export interface ApiKeyMeta {
   id: string;
@@ -476,24 +478,30 @@ export async function listApiKeys() {
   return request<{ keys: ApiKeyMeta[] }>("/auth/keys");
 }
 
-/**
- * Mint the caller's external-client API key. Returns 409 if a key
- * already exists — UI should prompt the user to rotate instead.
- */
+export interface ApiKeyMinted {
+  id: string;
+  api_key: string;
+  key_prefix: string;
+  label: string | null;
+}
+
+/** Mint another external-client API key. 409s only at the per-user ceiling. */
 export async function createApiKey(opts?: { label?: string; nest_id?: string }) {
-  return request<{ api_key: string; key_prefix: string }>("/auth/keys", {
+  return request<ApiKeyMinted>("/auth/keys", {
     method: "POST",
     body: JSON.stringify(opts || {}),
   });
 }
 
-/** Rotate the caller's existing key — atomic DELETE + INSERT.
- *  nest_id: null explicitly clears a per-nest scope; omitting keeps it. */
+/** Rotate ONE key — atomic DELETE + INSERT, other keys untouched.
+ *  key_id picks the target; omitting it works only when the account holds
+ *  exactly one key. nest_id: null clears a per-nest scope, omitting keeps it. */
 export async function rotateApiKey(opts?: {
   label?: string;
   nest_id?: string | null;
+  key_id?: string;
 }) {
-  return request<{ api_key: string; key_prefix: string }>("/auth/keys/rotate", {
+  return request<ApiKeyMinted>("/auth/keys/rotate", {
     method: "POST",
     body: JSON.stringify(opts || {}),
   });
