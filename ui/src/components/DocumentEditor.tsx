@@ -1557,7 +1557,13 @@ export function DocumentEditor({
               Submit for review
             </Button>
           )}
-          {!isViewOnly && canReviewHere && (
+          {/* NOT gated on isViewOnly: that flag answers "may this caller
+              author?", and a reviewer-only steward is view-only by definition
+              yet is exactly the person meant to act here. Gating approval on it
+              hid Approve/Reject from every reviewer who was not also an editor,
+              leaving the document page with no way to resolve a review.
+              canReviewHere already carries the full approval check. */}
+          {canReviewHere && (
             <ReviewActions
               documentTitle={title}
               version={baseVersion ?? 1}

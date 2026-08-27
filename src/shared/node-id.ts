@@ -40,3 +40,26 @@ export function assertSafeNodeId(rawId: string): string {
   }
   return id;
 }
+
+/**
+ * Strip the `nodes/` storage root from a folder path — the folder twin of
+ * folderOfId. `nodes` itself is the nest root, which is "" to a caller.
+ */
+export function folderPathOf(path: string): string {
+  if (path === "nodes") return "";
+  return path.startsWith("nodes/") ? path.slice(6) : path;
+}
+
+/**
+ * The folder a node id sits in ("" for the nest root). The storage root
+ * `nodes/` is not a user folder, so it is stripped — the UI's folderOfNode
+ * does the same, and the two must agree on what a folder path is.
+ *
+ * Lives here rather than in nodes/service so the node index can derive a
+ * row's folder without importing the service that reads from it.
+ */
+export function folderOfId(id: string): string {
+  const rel = folderPathOf(id);
+  const slash = rel.lastIndexOf("/");
+  return slash > 0 ? rel.slice(0, slash) : "";
+}

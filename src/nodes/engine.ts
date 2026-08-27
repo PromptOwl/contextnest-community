@@ -9,6 +9,7 @@ import type { OperationContext } from "@promptowl/contextnest-engine/api";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { resolveNestPath, isImportedNest } from "../nests/service.js";
 import { FlatNestStorage } from "./flat-storage.js";
+import { syncIndexedNode, markIndexStale } from "./node-index.js";
 
 /**
  * How long a nest's discovered-document set stays cached, in ms.
@@ -61,8 +62,9 @@ const DERIVED_VAULT_FILES = new Set([
  * would re-read the whole nest to throw the same rows away.
  */
 function withDiscoveryCache<S extends NestStorage>(
+  nestId: string,
   storage: S,
-): { storage: S; invalidate: () => void } {
+): { storage: S; invalidate: () => void; desync: () => void } {
   const entries = new Map<string, { docs: ContextNode[]; ts: number }>();
   // The crawl in flight, if any. Cross-nest search fans out over every nest at
   // once and the palette fires a query per keystroke, so without this the same
@@ -114,6 +116,15 @@ function withDiscoveryCache<S extends NestStorage>(
   storage.discoverDocuments = async (options = {}) => {
     const key: "all" | "live" =
       options.includeRetired || options.includeSuperseded ? "all" : "live";
+    // A folder-scoped crawl describes ONE directory, and both the entries and
+    // the in-flight promise are keyed only by retired-ness. Caching it would
+    // publish that one folder as the nest-wide set — and joining an in-flight
+    // scoped crawl would hand the same partial answer to an unscoped caller.
+    // Scoped crawls are narrow by definition, so they simply run uncached.
+    if (options.folder !== undefined) {
+      const crawled = await discover({ ...options, includeRetired: true });
+      return key === "all" || !filtersRetired ? crawled : crawled.filter(isLive);
+    }
     const hit = entries.get(key);
     if (hit) {
       // Stale-while-revalidate. The crawl parses every file in the nest, so
@@ -145,6 +156,19 @@ function withDiscoveryCache<S extends NestStorage>(
   };
 
   /**
+   * Drop the in-memory set AND flag the nest's DB mirror for a rebuild.
+   *
+   * Used wherever we no longer know that either view matches disk — a write we
+   * could not fold in, a vault file that might be a document, an out-of-band
+   * edit. The DB mirror outlives this process, so unlike `invalidate` it has to
+   * be told; the next read rebuilds it from disk before answering.
+   */
+  const desync = async (): Promise<void> => {
+    invalidate();
+    await markIndexStale(nestId);
+  };
+
+  /**
    * Fold one written or deleted document into the cached sets instead of
    * dropping them. Clearing made every write cost the next reader a full crawl
    * — one MCP create pays three of those, and on a Cloud Storage mount a crawl
@@ -167,11 +191,14 @@ function withDiscoveryCache<S extends NestStorage>(
       // otherwise drop a document we just wrote until the TTL expires, so
       // re-crawl rather than cache a set we know might be wrong.
       if (!(err instanceof DocumentNotFoundError)) {
-        invalidate();
+        await desync();
         return;
       }
       node = null;
     }
+    // Mirror the same fact into the DB index: `node` is the document as it now
+    // stands on disk, or null when the write removed it.
+    await syncIndexedNode(nestId, id, node);
     for (const [key, entry] of entries) {
       const docs = entry.docs.filter((d) => d.id !== id);
       // "all" keeps everything; "live" drops rejected documents, matching the
@@ -202,7 +229,7 @@ function withDiscoveryCache<S extends NestStorage>(
         try {
           await after(args);
         } catch {
-          invalidate();
+          await desync();
         }
       }
     };
@@ -210,16 +237,20 @@ function withDiscoveryCache<S extends NestStorage>(
 
   wrap("writeDocument", (args) => patch(String(args[0])));
   wrap("deleteDocument", (args) => patch(String(args[0])));
-  wrap("init", () => invalidate());
+  wrap("init", () => desync());
   wrap("writeVaultFile", (args) => {
     // Derived files (INDEX.md, context.yaml, agent configs) are outside
     // discovery; anything else written through this path could be a document.
     const rel = String(args[0] ?? "");
     const base = rel.split(/[/\\]/).pop() || "";
-    if (rel.endsWith(".md") && !DERIVED_VAULT_FILES.has(base)) invalidate();
+    if (rel.endsWith(".md") && !DERIVED_VAULT_FILES.has(base)) return desync();
   });
 
-  return { storage, invalidate };
+  // Two invalidators, deliberately. `invalidate` (memory only) is what a
+  // rebuild of the DB mirror uses — it needs a fresh crawl but must not mark
+  // the nest stale again, or it would undo the stamp it is about to write.
+  // `desync` is for callers who mean "disk may have moved under us".
+  return { storage, invalidate, desync: () => void desync() };
 }
 
 interface NestEngine {
@@ -232,12 +263,20 @@ interface NestEngine {
   // approved version's body via reconstructVersion().
   versions: VersionManager;
   /**
-   * Drop this nest's cached document set. For the callers that reconcile
-   * against what is actually on disk — import registration and the drift
-   * scanner — where a write this process never saw is exactly the thing being
-   * looked for, so a cached view would hide it.
+   * Drop this nest's cached document set AND flag its DB index for a rebuild.
+   * For the callers that reconcile against what is actually on disk — import
+   * registration and the drift scanner — where a write this process never saw
+   * is exactly the thing being looked for, so neither a cached view nor a
+   * mirror built before that write may answer.
    */
   invalidateDiscovery: () => void;
+  /**
+   * Drop the cached document set only, leaving the DB index's freshness stamp
+   * alone. For the index rebuild itself: it must crawl disk rather than a
+   * memoized set, but flagging the nest stale here would undo the stamp the
+   * rebuild is about to write.
+   */
+  dropDiscoveryCache: () => void;
 }
 
 class NestEngineCache {
@@ -249,14 +288,21 @@ class NestEngineCache {
       const nestPath = resolveNestPath(nestId);
       // Imported nests discover markdown anywhere in the copied folder;
       // default nests keep the engine's structured (nodes/) layout.
-      const { storage, invalidate } = withDiscoveryCache(
+      const { storage, invalidate, desync } = withDiscoveryCache(
+        nestId,
         (await isImportedNest(nestId))
           ? new FlatNestStorage(nestPath)
           : new NestStorage(nestPath),
       );
       const query = new GraphQueryEngine(storage as any);
       const versions = new VersionManager(storage);
-      engine = { storage, query, versions, invalidateDiscovery: invalidate };
+      engine = {
+        storage,
+        query,
+        versions,
+        invalidateDiscovery: desync,
+        dropDiscoveryCache: invalidate,
+      };
       this.cache.set(nestId, engine);
     }
     return engine;

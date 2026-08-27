@@ -4,7 +4,7 @@
  */
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
 import { visibleDocuments, documentsTabIsEmpty } from "../lib/visible-documents";
@@ -4308,6 +4308,17 @@ function ReviewDocumentModal({
   const [linkError, setLinkError] = useState<string | null>(null);
   const qc = useQueryClient();
 
+  // The row that opened this modal comes from the document list, which carries
+  // metadata only — a body per row costs a file read per row, and nothing in
+  // the list renders one. A reviewer decides on the TEXT, so fetch it for this
+  // one document, on open. Falls back to a body the caller already had, so a
+  // row that does carry one renders without a round trip.
+  const { data: full, isLoading: bodyLoading } = useQuery({
+    ...reads.node(nestId, node.id),
+    enabled: !node.content,
+  });
+  const body = node.content || full?.node?.content || "";
+
   // Resolve `[[Title]]` clicks to a node id and jump straight to that
   // doc. Without this the wiki-link decoration renders but click does
   // nothing — `MarkdownEditor` only wires nav when `onWikiLinkClick`
@@ -4357,19 +4368,24 @@ function ReviewDocumentModal({
           </div>
         )}
         <div className="flex-1 overflow-y-auto rounded-md">
-          {node.content ? (
+          {body ? (
             <MarkdownEditor
               // Remount when the reviewer switches between docs in the
               // queue. Same modal instance otherwise → TipTap keeps its
               // previous doc's editor state and the body briefly shows
               // the wrong content on swap.
               key={node.id}
-              content={node.content}
+              content={body}
               onChange={() => { }}
               editable={false}
               nestId={nestId}
               onWikiLinkClick={handleWikiLinkClick}
             />
+          ) : bodyLoading ? (
+            // Distinct from "(no content)": approving on the strength of an
+            // empty box that was merely still loading is the one mistake this
+            // modal must not invite.
+            <p className="text-sm text-muted-foreground p-4">Loading content…</p>
           ) : (
             <p className="text-sm text-muted-foreground p-4">(no content)</p>
           )}
