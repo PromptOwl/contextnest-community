@@ -197,15 +197,32 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     const token = header.startsWith("Bearer ")
       ? header.slice("Bearer ".length)
       : "";
-    const secret = config.OFFICIAL_COMMUNITY_SSO_SECRET;
+    // An MCP bearer may be signed by PromptOwl (the shared official secret) OR,
+    // on a self-hosted deployment, by this server's own MCP_SIGNING_SECRET (the
+    // key the SSO token-exchange mints with). Accept a ticket that verifies
+    // under EITHER — each attempt is an independent constant-time HMAC check,
+    // and a ticket matching neither is rejected. Order is irrelevant: a forged
+    // token fails both; a genuine one matches exactly the secret that signed it.
+    const secrets = [
+      config.OFFICIAL_COMMUNITY_SSO_SECRET,
+      config.MCP_SIGNING_SECRET,
+    ].filter(Boolean);
     const looksLikeJwt =
       !!token && !token.startsWith("cnst_") && token.split(".").length === 3;
-    if (!looksLikeJwt || !secret) return flexAuthMiddleware(c, next);
+    if (!looksLikeJwt || secrets.length === 0) {
+      return flexAuthMiddleware(c, next);
+    }
 
-    let claims: SsoTicketClaims;
-    try {
-      claims = verifySsoTicket(token, secret);
-    } catch {
+    let claims: SsoTicketClaims | null = null;
+    for (const secret of secrets) {
+      try {
+        claims = verifySsoTicket(token, secret);
+        break;
+      } catch {
+        // Wrong secret (or malformed/expired) — try the next candidate.
+      }
+    }
+    if (!claims) {
       return c.json({ error: "Invalid service ticket" }, 401);
     }
     // Require the MCP scope AND reject a present jti. A one-time-use jti is the

@@ -47,7 +47,69 @@ function b64urlToBuffer(input: string): Buffer {
   return Buffer.from(input.replace(/-/g, "+").replace(/_/g, "/") + pad, "base64");
 }
 
+function bufferToB64url(buf: Buffer): string {
+  return buf
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
 export class SsoTokenError extends Error {}
+
+/** TTL bounds for a minted MCP ticket — short-lived by design. */
+const MCP_TICKET_MIN_TTL = 30;
+const MCP_TICKET_MAX_TTL = 3600;
+
+/**
+ * Mint a short-lived HS256 "mcp" service ticket — the inverse of
+ * verifySsoTicket, kept in this file so the scope:"mcp" / no-jti invariant that
+ * the MCP acceptor depends on lives in exactly one place.
+ *
+ * Used by the token-exchange endpoint to issue an MCP bearer AFTER an external
+ * IdP (Entra/Google) identity has been verified. It NEVER sets a `jti` (an mcp
+ * ticket is not a one-time login ticket) and always forces `scope:"mcp"`, so a
+ * caller cannot accidentally mint a login-capable or replayable ticket.
+ *
+ * @param input.sub        verified user email (must pass isValidTicketSub)
+ * @param input.aud        this server's canonical base URL (PUBLIC_BASE_URL)
+ * @param input.ttlSeconds requested lifetime, clamped to [30, 3600]
+ * @param secret           the deployment's MCP signing secret (non-empty)
+ */
+export function signMcpTicket(
+  input: { sub: string; aud?: string; name?: string; ttlSeconds: number },
+  secret: string,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): string {
+  if (!secret) throw new SsoTokenError("MCP signing secret not configured");
+  const sub = (input.sub ?? "").trim();
+  if (!isValidTicketSub(sub)) throw new SsoTokenError("Invalid ticket subject");
+
+  const ttl = Math.max(
+    MCP_TICKET_MIN_TTL,
+    Math.min(MCP_TICKET_MAX_TTL, Math.floor(input.ttlSeconds)),
+  );
+
+  const headerB64 = bufferToB64url(
+    Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })),
+  );
+  // No jti — ever. scope is forced to "mcp".
+  const claims: SsoTicketClaims = {
+    sub,
+    scope: "mcp",
+    iat: nowSec,
+    exp: nowSec + ttl,
+  };
+  if (input.aud) claims.aud = input.aud;
+  if (input.name) claims.name = input.name;
+
+  const payloadB64 = bufferToB64url(Buffer.from(JSON.stringify(claims)));
+  const signingInput = `${headerB64}.${payloadB64}`;
+  const sig = bufferToB64url(
+    createHmac("sha256", secret).update(signingInput).digest(),
+  );
+  return `${signingInput}.${sig}`;
+}
 
 /**
  * Verify a PromptOwl SSO ticket and return its claims. Throws SsoTokenError on
