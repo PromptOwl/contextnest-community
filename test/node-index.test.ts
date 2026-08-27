@@ -149,6 +149,40 @@ describe("node_index — write-through", () => {
     ).toBe(false);
   });
 
+  it("drops every row when a whole folder is deleted", async () => {
+    await createNode("Temp One", { folder: "scratch" });
+    await createNode("Temp Two", { folder: "scratch" });
+    expect(
+      (await indexRows()).filter((r) => r.folder === "scratch"),
+    ).toHaveLength(2);
+
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/delete-folder`,
+      { folder: "scratch" },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(200);
+    expect(res.data.deleted).toBe(2);
+
+    // No orphans: a node id is derived from its title, so a leftover row would
+    // be inherited by the next document to take that id.
+    expect(
+      (await indexRows()).filter((r) => r.folder === "scratch"),
+    ).toHaveLength(0);
+    const folders = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/folders`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(folders.data.folders.some((f: any) => f.path === "scratch")).toBe(
+      false,
+    );
+  });
+
   it("repoints the row when a document moves", async () => {
     await createNode("Mover", { folder: "alpha" });
     const res = await jsonRequest(
