@@ -1794,12 +1794,19 @@ export function NestView({
           </>
         }
       >
-          {/* Connect is the front door for every read/write surface (CLI,
-              API, MCP, Add-with-AI) — a first-class button, not a menu item. */}
+          {/* Connect (external clients) and Add-with-AI (seed content) are
+              distinct first-class actions — Connect wires tools, Add-with-AI
+              generates context into the nest. */}
           <Button variant="outline" onClick={() => setShowConnect(true)}>
             <Link2 className="h-4 w-4 mr-2" />
             Connect
           </Button>
+          {!isReadOnly && (
+            <Button variant="outline" onClick={() => setShowGenerate(true)}>
+              <Sparkles className="h-4 w-4 mr-2" />
+              Add with AI
+            </Button>
+          )}
           {canManage && (
             <Button variant="outline" onClick={() => setShowShare(true)}>
               <Users className="h-4 w-4 mr-2" />
@@ -3791,10 +3798,6 @@ export function NestView({
         <ConnectModal
           isOpen={showConnect}
           onClose={() => setShowConnect(false)}
-          onGenerate={() => {
-            setShowConnect(false);
-            setShowGenerate(true);
-          }}
           nestId={nestId}
           nestName={nestName}
         />
