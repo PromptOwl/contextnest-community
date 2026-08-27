@@ -51,6 +51,15 @@ export function ApiKeysPage({ onBack }: { onBack: () => void }) {
     kind: "generated" | "rotated";
   } | null>(null);
 
+  // A name is what tells two keys apart once the plaintext is gone, so the
+  // server requires one and refuses duplicates. Mirror both here rather than
+  // letting the user submit into a rejection.
+  const trimmedLabel = label.trim();
+  const duplicateName = keys.some(
+    (k) => k.label?.trim().toLowerCase() === trimmedLabel.toLowerCase(),
+  );
+  const canGenerate = trimmedLabel.length > 0 && !duplicateName;
+
   const refresh = () =>
     qc.invalidateQueries({ queryKey: reads.apiKeys().queryKey });
 
@@ -117,21 +126,34 @@ export function ApiKeysPage({ onBack }: { onBack: () => void }) {
             className="flex flex-col gap-2 sm:flex-row"
             onSubmit={(e) => {
               e.preventDefault();
+              if (!canGenerate) return;
               run(
                 "new",
-                () => api.createApiKey({ label: label.trim() || undefined }),
+                () => api.createApiKey({ label: trimmedLabel }),
                 "generated",
               );
             }}
           >
-            <Input
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              maxLength={60}
-              placeholder="What's this key for? e.g. Claude Desktop, laptop CLI"
-              aria-label="Key name"
-            />
-            <Button type="submit" disabled={busy === "new"} className="shrink-0">
+            <div className="flex-1">
+              <Input
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                maxLength={60}
+                placeholder="What's this key for? e.g. Claude Desktop, laptop CLI"
+                aria-label="Key name"
+                aria-invalid={duplicateName || undefined}
+              />
+              {duplicateName && (
+                <p className="mt-1 text-xs text-destructive">
+                  You already have a key with this name.
+                </p>
+              )}
+            </div>
+            <Button
+              type="submit"
+              disabled={busy === "new" || !canGenerate}
+              className="shrink-0"
+            >
               {busy === "new" ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (

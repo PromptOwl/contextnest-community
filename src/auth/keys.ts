@@ -118,7 +118,8 @@ export type KeyRequestCheck =
 /**
  * Verify a key request and normalise its inputs.
  *
- * - `generate` — validates the label and enforces MAX_API_KEYS_PER_USER.
+ * - `generate` — requires a label, rejects one that duplicates an existing
+ *                key's (case-insensitively), and enforces MAX_API_KEYS_PER_USER.
  * - `update`   — resolves `keyId` to a row the caller actually owns. With no
  *                `keyId` and exactly one key on the account it targets that
  *                key, which keeps single-key clients working unchanged.
@@ -160,16 +161,51 @@ export async function verifyKeyRequest(
         error: `You already have ${MAX_API_KEYS_PER_USER} API keys. Revoke one before creating another.`,
       };
     }
+    // A name is the only thing that tells two keys apart in the list — the
+    // plaintext is never shown again and a prefix is not something anyone
+    // recognises. Several rows reading "Unnamed key" make revoking a guess.
+    if (!label) {
+      return {
+        ok: false,
+        status: 400,
+        error: "Name this key so you can tell it apart later.",
+      };
+    }
+    if (rows.some((r) => r.label?.trim().toLowerCase() === label.toLowerCase())) {
+      return {
+        ok: false,
+        status: 409,
+        error: `You already have a key named "${label}". Pick a different name.`,
+      };
+    }
     return { ok: true, label, key: null };
   }
 
-  // update (rotate / revoke)
+  // update (rotate / revoke). A rename that collides with another key is the
+  // same ambiguity as a duplicate at creation; renaming a key to what it is
+  // already called is not, hence the id check.
+  const renameCollides = (targetId: string) =>
+    !!label &&
+    rows.some(
+      (r) =>
+        r.id !== targetId && r.label?.trim().toLowerCase() === label.toLowerCase(),
+    );
+  const collision: KeyRequestCheck = {
+    ok: false,
+    status: 409,
+    error: `You already have a key named "${label}". Pick a different name.`,
+  };
+
   if (opts.keyId) {
     const match = rows.find((r) => r.id === opts.keyId);
     if (!match) return { ok: false, status: 404, error: "Key not found" };
+    if (renameCollides(match.id)) return collision;
     return { ok: true, label, key: match };
   }
-  if (rows.length === 1) return { ok: true, label, key: rows[0] };
+  if (rows.length === 1) {
+    if (renameCollides(rows[0].id)) return collision;
+    return { ok: true, label, key: rows[0] };
+  }
   if (rows.length === 0) {
     return { ok: false, status: 404, error: "No API key to rotate." };
   }

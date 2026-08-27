@@ -49,7 +49,9 @@ Body:
 Clears session cookie. 200.
 
 ### POST `/auth/keys` (auth required)
-Mints an API key for the caller. A user may hold **several** keys — one per place they connect from — so rotating the key for one client doesn't disconnect the rest. 409 only at the per-user ceiling (20); 400 if `label` isn't a string of at most 60 characters.
+Mints an API key for the caller. A user may hold **several** keys — one per place they connect from — so rotating the key for one client doesn't disconnect the rest.
+
+`label` is **required** and must be unique among the caller's keys (compared case-insensitively, after trimming): once the plaintext is gone the name is the only thing that tells two keys apart, so a list of identical entries makes revoking a guess. **400** if it's missing, blank, not a string, or longer than 60 characters; **409** on a duplicate name or at the per-user ceiling (20). Keys created before this rule keep their existing (possibly absent) label.
 ```json
 { "label": "cli", "nest_id": "optional — scope the key to one nest" }
 ```
@@ -64,7 +66,7 @@ Replaces **one** key and returns its new plaintext; the caller's other keys are 
 
 `key_id` names the target. Omitting it is only accepted when the account holds exactly one key (pre-multi-key clients) — with several keys and no `key_id` the server answers **400** rather than guessing which to replace. **404** if the id isn't the caller's.
 
-Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label).
+Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label). Supplying a `label` that matches a *different* key of the caller's is **409**; renaming a key to what it is already called is fine.
 ```json
 { "key_id": "uuid", "label": "optional", "nest_id": "optional" }
 ```

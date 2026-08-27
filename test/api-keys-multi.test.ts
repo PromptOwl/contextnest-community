@@ -173,6 +173,86 @@ describe("multiple API keys per user", () => {
     expect(status).toBe(400);
   });
 
+  // Once the plaintext is gone the name is the only thing distinguishing two
+  // rows, so a wall of "Unnamed key" makes revoking a guess.
+  it("requires a name", async () => {
+    for (const body of [{}, { label: "" }, { label: "   " }]) {
+      const { status, data } = await jsonRequest(
+        app,
+        "POST",
+        "/auth/keys",
+        body,
+        user.apiKey,
+      );
+      expect(status).toBe(400);
+      expect(data.error).toMatch(/name this key/i);
+    }
+  });
+
+  it("rejects a duplicate name, ignoring case and surrounding space", async () => {
+    const first = await jsonRequest(
+      app,
+      "POST",
+      "/auth/keys",
+      { label: "Claude Desktop" },
+      user.apiKey,
+    );
+    expect(first.status).toBe(201);
+
+    for (const dupe of ["Claude Desktop", "claude desktop", "  CLAUDE DESKTOP "]) {
+      const { status, data } = await jsonRequest(
+        app,
+        "POST",
+        "/auth/keys",
+        { label: dupe },
+        user.apiKey,
+      );
+      expect(status).toBe(409);
+      expect(data.error).toMatch(/already have a key named/i);
+    }
+
+    // A different name is still fine.
+    const other = await jsonRequest(
+      app,
+      "POST",
+      "/auth/keys",
+      { label: "Claude Desktop (work)" },
+      user.apiKey,
+    );
+    expect(other.status).toBe(201);
+  });
+
+  it("blocks renaming a key onto another key's name, but allows a no-op rename", async () => {
+    const target = await jsonRequest(
+      app,
+      "POST",
+      "/auth/keys",
+      { label: "rename-me" },
+      user.apiKey,
+    );
+
+    const onto = await jsonRequest(
+      app,
+      "POST",
+      "/auth/keys/rotate",
+      { key_id: target.data.id, label: "Claude Desktop" },
+      user.apiKey,
+    );
+    expect(onto.status).toBe(409);
+
+    // Rotating without renaming is unaffected, and so is renaming a key to
+    // the name it already carries.
+    const same = await jsonRequest(
+      app,
+      "POST",
+      "/auth/keys/rotate",
+      { key_id: target.data.id, label: "rename-me" },
+      user.apiKey,
+    );
+    expect(same.status).toBe(200);
+    expect(same.data.label).toBe("rename-me");
+  });
+
   it("caps the number of live keys", async () => {
     let last = { status: 201 } as { status: number };
     // Mint until the ceiling answers; the loop is bounded by the cap itself.
