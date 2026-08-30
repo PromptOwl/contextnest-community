@@ -289,3 +289,39 @@ describe("POST /context — explicit [[Title]] selector", () => {
     expect(res.status).toBe(200);
   });
 });
+
+// ── source URLs / citations (CU-wdqcq00k73) ───────────────────────────────
+// The context payload must carry a resolvable source URL per node so that
+// Chat-with-the-nest and Set-up-agent can cite the source and render a
+// clickable link. Regression guard for the "answers don't include URLs" bug.
+
+describe("POST /context — source URLs (citations)", () => {
+  it("attaches a resolvable url to each node in the manifest", async () => {
+    const { status, data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/context`,
+      { selector: "#brand" },
+    );
+    expect(status).toBe(200);
+    const brand = data.nodes.find(
+      (n: any) => n.id === "nodes/brand-guidelines",
+    );
+    expect(brand).toBeDefined();
+    expect(typeof brand.url).toBe("string");
+    expect(brand.url).toMatch(/^https?:\/\//);
+    expect(brand.url).toContain(`nest=${nestId}`);
+    expect(brand.url).toContain("doc=nodes");
+  });
+
+  it("embeds a _source: <url> line in each context block", async () => {
+    const { data } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/context`,
+      { selector: "#brand" },
+    );
+    // The block the model sees must contain the citable link.
+    expect(data.context).toMatch(/_source: https?:\/\/\S*nest=/);
+  });
+});
