@@ -290,14 +290,15 @@ describe("planMove", () => {
     });
   });
 
-  it("tag → unsupported (columns are read-only; PATCH unions tags)", () => {
+  it("tag → retag: drops the source column's tag, adds the target's", () => {
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "stage" };
     const plan = planMove(
       node({ id: "a", tags: ["keep", "stage:draft"] }),
       "review",
       cfg,
+      "draft",
     );
-    expect(plan.kind).toBe("unsupported");
+    expect(plan).toEqual({ kind: "retag", tags: ["keep", "stage:review"] });
   });
 
   it("status → unsupported (governance goes through the review workflow)", () => {
@@ -355,6 +356,93 @@ describe("hidden columns (curated tag columns)", () => {
   });
 });
 
+describe("explicit tag columns (user-curated board)", () => {
+  const nodes = [
+    node({ id: "a", tags: ["todo"] }),
+    node({ id: "b", tags: ["doing"] }),
+    node({ id: "c", tags: ["todo", "someday"] }),
+  ];
+  const cfg = (over: Partial<BoardConfig> = {}): BoardConfig => ({
+    dimension: "tag",
+    tagNamespace: "",
+    explicitColumns: true,
+    ...over,
+  });
+
+  it("starts empty: no columns until the user adds some", () => {
+    expect(buildColumns(nodes, cfg({ columnOrder: [] }))).toEqual([]);
+  });
+
+  it("shows ONLY the added columns, in order — unlisted tags never appear", () => {
+    const cols = buildColumns(nodes, cfg({ columnOrder: ["doing", "todo"] }));
+    expect(cols.map((c) => c.key)).toEqual(["doing", "todo"]);
+    // "someday" is a real tag on c but was never promoted to a column.
+    expect(cols.map((c) => c.key)).not.toContain("someday");
+  });
+
+  it("has no Uncategorized catch-all; unmatched cards simply don't appear", () => {
+    const { columns, byColumn } = groupByColumn(
+      nodes,
+      cfg({ columnOrder: ["doing"] }),
+    );
+    expect(columns.map((c) => c.key)).toEqual(["doing"]);
+    expect(byColumn[UNCATEGORIZED]).toBeUndefined();
+    expect(byColumn["doing"].map((n) => n.id)).toEqual(["b"]);
+  });
+
+  it("still honors hidden columns", () => {
+    const cols = buildColumns(
+      nodes,
+      cfg({ columnOrder: ["todo", "doing"], hiddenColumns: ["doing"] }),
+    );
+    expect(cols.map((c) => c.key)).toEqual(["todo"]);
+  });
+});
+
+describe("planMove — tag retag", () => {
+  it("flat tags: swaps the source tag for the target tag", () => {
+    const cfg: BoardConfig = {
+      dimension: "tag",
+      tagNamespace: "",
+      explicitColumns: true,
+    };
+    const plan = planMove(
+      node({ id: "a", tags: ["todo", "keep"] }),
+      "doing",
+      cfg,
+      "todo",
+    );
+    expect(plan).toEqual({ kind: "retag", tags: ["keep", "doing"] });
+  });
+
+  it("no source column (dropped from outside): just adds the target tag", () => {
+    const cfg: BoardConfig = { dimension: "tag", tagNamespace: "" };
+    const plan = planMove(node({ id: "a", tags: ["keep"] }), "doing", cfg);
+    expect(plan).toEqual({ kind: "retag", tags: ["keep", "doing"] });
+  });
+
+  it("same source and target column → no-op", () => {
+    const cfg: BoardConfig = { dimension: "tag", tagNamespace: "" };
+    expect(
+      planMove(node({ id: "a", tags: ["doing"] }), "doing", cfg, "doing").kind,
+    ).toBe("unsupported");
+  });
+
+  it("target tag already present and nothing to remove → no-op", () => {
+    const cfg: BoardConfig = { dimension: "tag", tagNamespace: "" };
+    expect(
+      planMove(node({ id: "a", tags: ["doing"] }), "doing", cfg).kind,
+    ).toBe("unsupported");
+  });
+
+  it("dropping onto Uncategorized is unsupported", () => {
+    const cfg: BoardConfig = { dimension: "tag", tagNamespace: "" };
+    expect(
+      planMove(node({ id: "a", tags: ["x"] }), UNCATEGORIZED, cfg, "x").kind,
+    ).toBe("unsupported");
+  });
+});
+
 describe("resolveConfig", () => {
   const settings = (over: Partial<BoardSettings> = {}): BoardSettings => ({
     dimension: "folder",
@@ -390,5 +478,18 @@ describe("resolveConfig", () => {
     expect(
       resolveConfig({ dimension: "status", layouts: {} }).columnOrder,
     ).toEqual(STATUS_ORDER);
+  });
+
+  it("enables explicit columns for the tag board only", () => {
+    expect(
+      resolveConfig({ dimension: "tag", tagNamespace: "", layouts: {} })
+        .explicitColumns,
+    ).toBe(true);
+    expect(
+      resolveConfig({ dimension: "folder", layouts: {} }).explicitColumns,
+    ).toBeFalsy();
+    expect(
+      resolveConfig({ dimension: "status", layouts: {} }).explicitColumns,
+    ).toBeFalsy();
   });
 });

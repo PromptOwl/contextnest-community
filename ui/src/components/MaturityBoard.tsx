@@ -129,6 +129,9 @@ export function MaturityBoard({
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<BoardSettings>(() => loadConfig(nestId));
   const [dragId, setDragId] = useState<string | null>(null);
+  // The column a card was dragged out of — needed on the tag board to know
+  // which tag to drop when retagging a multi-tagged card.
+  const [dragFromCol, setDragFromCol] = useState<string | null>(null);
   const [dropCol, setDropCol] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Same derivation NestView uses. Starts false so a read-only viewer never
@@ -225,13 +228,15 @@ export function MaturityBoard({
   const handleDrop = useCallback(
     async (targetKey: string) => {
       const id = dragId;
+      const from = dragFromCol;
       setDragId(null);
+      setDragFromCol(null);
       setDropCol(null);
       if (!id) return;
       const node = nodes.find((n) => n.id === id);
       if (!node) return;
 
-      const plan = planMove(node, targetKey, effectiveConfig);
+      const plan = planMove(node, targetKey, effectiveConfig, from ?? undefined);
       if (plan.kind === "unsupported") {
         // Silent for a pure no-op (same column); explain the real blockers.
         if (plan.reason !== "Already in this column.") toast(plan.reason);
@@ -243,6 +248,11 @@ export function MaturityBoard({
         if (plan.kind === "move-folder") {
           await api.moveNode(nestId, id, plan.folder);
           toast.success("Moved");
+        } else if (plan.kind === "retag") {
+          // updateNode replaces the tag set, so the plan's full next set both
+          // adds the target column's tag and drops the source column's.
+          await api.updateNode(nestId, id, { tags: plan.tags });
+          toast.success("Moved");
         }
         await load();
       } catch (e: any) {
@@ -251,14 +261,16 @@ export function MaturityBoard({
         setBusy(false);
       }
     },
-    [dragId, nodes, effectiveConfig, nestId, load],
+    [dragId, dragFromCol, nodes, effectiveConfig, nestId, load],
   );
 
-  // Folder is the only dimension a drag can set. Status moves through the
-  // review workflow, and a tag column can hold the same doc more than once
-  // (a doc has many tags), so "moved out of this column" has no single
-  // meaning. Write access is the second, independent condition.
-  const dimensionDraggable = effectiveConfig.dimension === "folder";
+  // Folder and tag drags mutate the node (moveNode / retag). Status moves
+  // through the review workflow, so it stays non-draggable. On the tag board a
+  // card can sit in several columns; the source column (dragFromCol) tells us
+  // which tag to drop. Write access is the second, independent condition.
+  const dimensionDraggable =
+    effectiveConfig.dimension === "folder" ||
+    effectiveConfig.dimension === "tag";
   const draggable = dimensionDraggable && canEditDocs;
 
   // ── Column management: reorder (all dimensions) + hide/add (tag columns) ──
@@ -638,11 +650,13 @@ export function MaturityBoard({
                       draggable={draggable}
                       onDragStart={(e) => {
                         setDragId(n.id);
+                        setDragFromCol(col.key);
                         e.dataTransfer.effectAllowed = "move";
                         e.dataTransfer.setData("text/plain", n.id);
                       }}
                       onDragEnd={() => {
                         setDragId(null);
+                        setDragFromCol(null);
                         setDropCol(null);
                       }}
                       onClick={() => onOpenDocument(n.id)}
