@@ -16,6 +16,11 @@ import { AllNestsBar } from "./AllNestsBar";
 import { relTime, formatServerDate } from "../lib/dates";
 import { nestNameProblem } from "../lib/nest-name";
 import {
+  scopeShowsNests,
+  visibleUnsynced,
+  type NestScope,
+} from "../lib/dashboard-scope";
+import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -97,11 +102,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
   // just bounds how many cards are mounted at once.
   const [nestQuery, setNestQuery] = useState("");
   const [nestSort, setNestSort] = useState<"activity" | "name">("activity");
-  const [nestScope, setNestScope] = useState<"all" | "owned" | "shared" | "public">("all");
+  const [nestScope, setNestScope] = useState<NestScope>("all");
   const [nestPageSize, setNestPageSize] = useState(NEST_PAGE_SIZE);
   const nestOwned = (n: any): boolean =>
     n.is_owner ?? (n.permission ?? "owner") === "owner";
   const filteredNests = useMemo(() => {
+    if (!scopeShowsNests(nestScope)) return [];
     const q = nestQuery.trim().toLowerCase();
     const matched = allNests.filter((n: any) => {
       if (nestScope === "owned" && !nestOwned(n)) return false;
@@ -134,6 +140,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
   };
   const qc = useQueryClient();
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
+  const filteredUnsynced = useMemo(
+    () => visibleUnsynced(unsynced, nestScope, nestQuery),
+    [unsynced, nestScope, nestQuery],
+  );
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
   const [showCreate, setShowCreate] = useState(false);
@@ -932,6 +942,18 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                 <option value="owned">Owned by me</option>
                 <option value="shared">Shared with me</option>
                 <option value="public">Public</option>
+                {/* Sync scopes are only meaningful while a folder is actually
+                    waiting to sync — otherwise "Synced only" just restates
+                    "All nests". Kept mounted when selected so the Select never
+                    holds a value with no matching option. */}
+                {(unsynced.length > 0 ||
+                  nestScope === "synced" ||
+                  nestScope === "unsynced") && (
+                  <>
+                    <option value="synced">Synced nests only</option>
+                    <option value="unsynced">Unsynced folders only</option>
+                  </>
+                )}
               </select>
               <select
                 value={nestSort}
@@ -944,7 +966,10 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                 <option value="name">Name (A–Z)</option>
               </select>
               <span className="text-xs text-muted-foreground">
-                {filteredNests.length} of {allNests.length}
+                {/* Counts what the grid actually shows — unsynced cards are
+                    part of that, so they belong on both sides of the "of". */}
+                {filteredNests.length + filteredUnsynced.length} of{" "}
+                {allNests.length + unsynced.length}
               </span>
               {nestFiltersActive && (
                 <Button
@@ -963,12 +988,14 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
           {/* Nest list */}
           {loading ? (
             <div className="text-center py-12 text-muted-foreground">Loading...</div>
-          ) : allNests.length > 0 && filteredNests.length === 0 ? (
+          ) : allNests.length + unsynced.length > 0 &&
+            filteredNests.length + filteredUnsynced.length === 0 ? (
             <Card>
               <CardContent className="text-center py-12">
-                <p className="font-medium">No nests match this filter</p>
+                <p className="font-medium">Nothing matches this filter</p>
                 <p className="text-sm text-muted-foreground mb-4">
-                  {allNests.length} nest{allNests.length === 1 ? "" : "s"} are hidden by
+                  {allNests.length + unsynced.length} item
+                  {allNests.length + unsynced.length === 1 ? " is" : "s are"} hidden by
                   the current filter.
                 </p>
                 <Button
@@ -996,7 +1023,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
           ) : (
             <>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {unsynced.map((folder) => {
+                {filteredUnsynced.map((folder) => {
                   const isSyncing = !!syncing[folder.name];
                   const errMsg = syncErrors[folder.name];
                   return (
