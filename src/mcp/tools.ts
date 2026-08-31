@@ -14,6 +14,7 @@ import {
   permissionLevel,
 } from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { VaultBusyError, isVaultLockTimeout } from "../shared/errors.js";
 import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { queryTableNode } from "../tables/query.js";
@@ -91,6 +92,7 @@ function toolError(
     | "DOCUMENT_ALREADY_EXISTS"
     | "UNAUTHORIZED_ACTION"
     | "VERSION_NOT_FOUND"
+    | "VAULT_BUSY"
     | "INTERNAL",
 ): ToolResult {
   return { text, isError: true, data: { code, message: text } };
@@ -719,6 +721,16 @@ export async function handleToolCall(
   try {
     return await runTool(toolName, args, ctx);
   } catch (err) {
+    // Vault write-lock timeout: map to a typed, retryable tool error HERE —
+    // one seam covering both MCP surfaces — before the SDK flattens the throw
+    // into prose and loses the code. Everything else keeps rethrowing.
+    if (isVaultLockTimeout(err) || err instanceof VaultBusyError) {
+      status = 503;
+      return toolError(
+        "The vault is busy with another write. Retry in a few seconds.",
+        "VAULT_BUSY",
+      );
+    }
     status = 500;
     throw err;
   } finally {
@@ -828,7 +840,12 @@ async function runTool(
         await opContext(nestId, userEmail),
       );
 
-      const visible = await listNodesForCallerByEmail(nestId, userEmail, {});
+      // `withContent` for the body previews below. An explicit whole-vault
+      // call, so paying for the crawl here is honest; the document tree and
+      // context_list do not, and read from the index instead.
+      const visible = await listNodesForCallerByEmail(nestId, userEmail, {
+        withContent: true,
+      });
       const types: Record<string, number> = {};
       const tags: Record<string, number> = {};
       for (const n of visible) {

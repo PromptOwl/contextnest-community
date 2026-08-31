@@ -10,12 +10,12 @@
 
 ContextNest Community Edition is a self-hosted server that lets you:
 
-- Store, version, and govern markdown-based context documents ("nests")
+- Store, version, and govern markdown-based context documents ("nests"), filed in folders you can reorganize as the vault grows
 - Import an existing folder or vault of markdown files in one step
 - Export a nest as a portable bundle and re-import it on another self-hosted host
 - Apply stewardship workflows — draft, pending review, approved
 - Share nests with collaborators or publish them read-only to the public
-- Serve approved context to AI agents via MCP or HTTP
+- Serve approved context to AI agents via MCP or HTTP — connect one by pasting a generated setup prompt or downloading a ready `.env`
 - Sync with the PromptOwl hosted platform for multi-user collaboration
 
 The server runs locally or on your own infrastructure. Your PromptOwl account handles authentication, entitlement, and governance metadata.
@@ -99,8 +99,12 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 | Admin password reset + user removal (in-platform) | ✅ | ✅ |
 | Wiki backlinks, outline, hover-preview, link health | ✅ | ✅ |
 | Rich editor — tables, callouts, toggles, code highlight, find/replace, image & video upload | ✅ | ✅ |
+| Folder organization — nested folders, move documents, lazy folder tree | ✅ | ✅ |
+| Scales to large vaults — nest listings served from a document index, not a disk crawl | ✅ | ✅ |
 | Steward version revert | ✅ | ✅ |
 | MCP server for AI agents | ✅ | ✅ |
+| One-shot agent setup — generated connect prompt + `.env` download | ✅ | ✅ |
+| Several API keys per account — one credential per client, rotate one at a time | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
 | Single sign-on (OIDC — Entra ID, Google, Okta, Keycloak) | ✅ | ✅ |
 | SAML / SCIM provisioning | — | ✅ |

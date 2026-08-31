@@ -1,12 +1,24 @@
 /** DocumentEditor — create/edit view; `nodeId === "new"` → POST, else PATCH. Server enforces 403. */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
-import { normalizeTagInput } from "../lib/tag-policy";
+import {
+  newTags,
+  normalizeTagInput,
+  TAG_INPUT_MAX_LENGTH,
+} from "../lib/tag-policy";
+import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
 import { Button } from "@/components/ui/button";
@@ -1050,27 +1062,40 @@ export function DocumentEditor({
     return () => clearTimeout(t);
   }, [content, isArtifactDraft]);
 
-  const addTag = useCallback(() => {
-    // Split on whitespace/comma, then hold each token to the tag policy
-    // (length cap, letters/digits/._- only) and say what it changed.
+  // What the current input would commit, under the same policy addTag applies
+  // (length cap, letters/digits/._- only, lowercased). Rendered under the
+  // field so a truncation or rewrite is visible BEFORE Enter — a transient
+  // toast after the fact is easy to miss, more so when several tags commit.
+  // The tool preview highlights with lowlight's auto-detection, which tries
+  // every grammar. Keyed on the live body that ran once per keystroke, on the
+  // typing path. Deferred, React keeps the textarea responsive and re-highlights
+  // when it has a spare frame — no debounce timer to tune or clean up.
+  const deferredContent = useDeferredValue(content);
+
+  const tagPreview = useMemo(() => {
     const candidates = tagInput.split(/[\s,]+/).map(normalizeTagInput);
-    const notes = candidates.map((c) => c.note).filter(Boolean) as string[];
     const accepted = candidates
       .map((c) => c.tag)
       .filter((t): t is string => !!t);
+    return {
+      // Already-present tags are dropped here, not at commit, so the preview
+      // never promises to add something the commit would quietly discard.
+      tags: newTags(tags, accepted),
+      notes: candidates.map((c) => c.note).filter(Boolean) as string[],
+    };
+  }, [tagInput, tags]);
+
+  const addTag = useCallback(() => {
+    const { tags: accepted, notes } = tagPreview;
     for (const note of notes) toast.warning(note);
     if (accepted.length === 0) {
       setTagInput("");
       return;
     }
-    const next = [...tags];
-    for (const t of accepted) {
-      if (!next.includes(t)) next.push(t);
-    }
-    setTags(next);
+    setTags([...tags, ...accepted]);
     setTagInput("");
     setTouched(true);
-  }, [tagInput, tags]);
+  }, [tagPreview, tags]);
 
   const removeTag = (t: string) => {
     setTags(tags.filter((x) => x !== t));
@@ -1557,7 +1582,13 @@ export function DocumentEditor({
               Submit for review
             </Button>
           )}
-          {!isViewOnly && canReviewHere && (
+          {/* NOT gated on isViewOnly: that flag answers "may this caller
+              author?", and a reviewer-only steward is view-only by definition
+              yet is exactly the person meant to act here. Gating approval on it
+              hid Approve/Reject from every reviewer who was not also an editor,
+              leaving the document page with no way to resolve a review.
+              canReviewHere already carries the full approval check. */}
+          {canReviewHere && (
             <ReviewActions
               documentTitle={title}
               version={baseVersion ?? 1}
@@ -1653,8 +1684,16 @@ export function DocumentEditor({
                           <span className="w-4 mr-2" />
                         )}
                         v{v.version}
-                        <span className="ml-auto text-xs text-muted-foreground">
-                          {v.editedBy?.split("@")[0] || ""}
+                        {/* Author AND when — "v3 · taimur" alone gives no way
+                            to tell which past version you are reaching for.
+                            Same editedAt Version History already renders. */}
+                        <span
+                          className="ml-auto text-xs text-muted-foreground"
+                          title={v.editedAt ? formatServerDate(v.editedAt) : undefined}
+                        >
+                          {[v.editedBy?.split("@")[0], relTime(v.editedAt)]
+                            .filter(Boolean)
+                            .join(" · ")}
                         </span>
                       </DropdownMenuItem>
                     ))
@@ -2075,6 +2114,9 @@ export function DocumentEditor({
                       }}
                       placeholder='Press Enter or space. Try "#api #v2" or "api, v2"'
                       disabled={fieldsDisabled}
+                      // A hard stop the way Title has one — several tags fit,
+                      // a pasted paragraph does not.
+                      maxLength={TAG_INPUT_MAX_LENGTH}
                       data-testid="document-editor-tag-input"
                     />
                     <Button
@@ -2086,6 +2128,18 @@ export function DocumentEditor({
                       Add
                     </Button>
                   </div>
+                  {tagInput.trim() && (
+                    <p
+                      className="mt-1 text-xs text-muted-foreground"
+                      data-testid="document-editor-tag-preview"
+                    >
+                      {tagPreview.tags.length > 0
+                        ? `Will add: ${tagPreview.tags.join(", ")}`
+                        : "Nothing new to add"}
+                      {tagPreview.notes.length > 0 &&
+                        ` — ${tagPreview.notes.join(" ")}`}
+                    </p>
+                  )}
                 </>
               )}
               {tags.length > 0 && (
@@ -2588,22 +2642,45 @@ export function DocumentEditor({
                       readOnly={fieldsDisabled}
                     />
                   ) : (
-                    <textarea
-                      value={content}
-                      onChange={(e) => {
-                        if (fieldsDisabled) return;
-                        setContent(e.target.value);
-                        setTouched(true);
-                      }}
-                      onBlur={saveOnBlur}
-                      readOnly={fieldsDisabled}
-                      spellCheck={false}
-                      placeholder={
-                        "The body is code — paste or write the tool's source."
+                    /* Source beside a highlighted rendering of itself, reusing
+                       the read view's lowlight output — flat plain text is hard
+                       to scan while writing a tool.
+                       ponytail: a preview pane, not highlighting under the
+                       caret; swap in CodeMirror if tool authoring grows. */
+                    <div
+                      className={
+                        content.trim() ? "grid gap-3 lg:grid-cols-2" : ""
                       }
-                      className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-                      data-testid="tool-source-editor"
-                    />
+                    >
+                      <textarea
+                        value={content}
+                        onChange={(e) => {
+                          if (fieldsDisabled) return;
+                          setContent(e.target.value);
+                          setTouched(true);
+                        }}
+                        onBlur={saveOnBlur}
+                        readOnly={fieldsDisabled}
+                        spellCheck={false}
+                        placeholder={
+                          "The body is code — paste or write the tool's source."
+                        }
+                        className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                        data-testid="tool-source-editor"
+                      />
+                      {content.trim() && (
+                        <div className="min-w-0 flex flex-col min-h-[400px] rounded-lg border bg-background shadow-sm overflow-hidden">
+                          <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                            Preview
+                          </div>
+                          <CodeHighlight
+                            code={deferredContent}
+                            className="flex-1 text-sm"
+                            data-testid="tool-source-preview"
+                          />
+                        </div>
+                      )}
+                    </div>
                   )
                 ) : rawMode ? (
                   <textarea

@@ -9,6 +9,7 @@ import {
   hashPassword,
   verifyPassword,
   parseBearerToken,
+  verifyKeyRequest,
 } from "./keys.js";
 import { authMiddleware, type AuthEnv } from "./middleware.js";
 import {
@@ -490,13 +491,17 @@ authRoutes.post("/logout", async (c) => {
   return c.json({ ok: true });
 });
 
-// ─── External-client API key (one per user) ──────────────────────────────
-
-// POST /auth/keys — mint the user's single external-client API key.
+// ─── External-client API keys ────────────────────────────────────────────
 //
-// Returns 409 if a key already exists. Use /auth/keys/rotate to replace
-// an existing key. The plaintext is shown ONCE on creation and never
-// retrievable again — server stores only sha256(key).
+// A user may hold several keys — one per place they connect from — so losing
+// the plaintext for one client no longer forces a rotate that silently kills
+// every other client. Every route below runs verifyKeyRequest first; that
+// helper owns the label rules, the per-user ceiling, and ownership lookup.
+
+// POST /auth/keys — mint another external-client API key.
+//
+// The plaintext is shown ONCE on creation and never retrievable again —
+// the server stores only sha256(key).
 authRoutes.post("/keys", authMiddleware, async (c) => {
   const body = await c.req.json<{ label?: string; nest_id?: string }>().catch(
     () => ({}) as { label?: string; nest_id?: string },
@@ -504,20 +509,11 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
   const db = getDb();
   const userId = c.get("userId");
 
-  const existing = await db.get(
-    "SELECT key_prefix FROM api_keys WHERE user_id = ?",
-    [userId],
-  ) as { key_prefix: string } | undefined;
-
-  if (existing) {
-    return c.json(
-      {
-        error: "An API key already exists for this user. Rotate it instead.",
-        key_prefix: existing.key_prefix,
-      },
-      409,
-    );
-  }
+  const check = await verifyKeyRequest(db, userId, {
+    action: "generate",
+    label: body.label,
+  });
+  if (!check.ok) return c.json({ error: check.error }, check.status);
 
   const apiKey = generateApiKey();
   const keyId = uuid();
@@ -529,44 +525,57 @@ authRoutes.post("/keys", authMiddleware, async (c) => {
       hashApiKey(apiKey),
       getKeyPrefix(apiKey),
       body.nest_id || null,
-      body.label || null,
+      check.label,
     ],
   );
 
   return c.json(
-    { api_key: apiKey, key_prefix: getKeyPrefix(apiKey) },
+    { id: keyId, api_key: apiKey, key_prefix: getKeyPrefix(apiKey), label: check.label },
     201,
   );
 });
 
-// POST /auth/keys/rotate — atomically replace the caller's existing key.
+// POST /auth/keys/rotate — replace ONE key, leaving the caller's others alone.
 //
-// One row per user (DB UNIQUE), so we DELETE + INSERT inside a
-// transaction to preserve that invariant. New plaintext returned once.
+// `key_id` picks the target. Omitting it is only unambiguous when the account
+// holds exactly one key (the pre-multi-key clients), which verifyKeyRequest
+// resolves; with several keys and no key_id it 400s rather than guessing.
 authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
   const body = await c.req
-    .json<{ label?: string; nest_id?: string | null }>()
-    .catch(() => ({}) as { label?: string; nest_id?: string | null });
+    .json<{ label?: string; nest_id?: string | null; key_id?: string }>()
+    .catch(() => ({}) as { label?: string; nest_id?: string | null; key_id?: string });
   const db = getDb();
   const userId = c.get("userId");
 
+  const check = await verifyKeyRequest(db, userId, {
+    action: "update",
+    label: body.label,
+    keyId: body.key_id,
+  });
+  if (!check.ok) return c.json({ error: check.error }, check.status);
+  const prior = check.key!;
+
   const apiKey = generateApiKey();
   const keyId = uuid();
-
-  const prior = await db.get(
-    "SELECT label, nest_id FROM api_keys WHERE user_id = ?",
-    [userId],
-  ) as { label: string | null; nest_id: string | null } | undefined;
 
   // Scope resolution: field absent → keep the prior scope; explicitly null
   // (or "") → clear to a user-level key; a nest id → scope to that nest.
   // The old `body.nest_id ?? prior` collapsed "clear it" into "keep it",
   // leaving no way to un-scope a key.
   const nestScope =
-    "nest_id" in body ? body.nest_id || null : prior?.nest_id ?? null;
+    "nest_id" in body ? body.nest_id || null : prior.nest_id;
 
-  await db.transaction(async (tx) => {
-    await tx.run("DELETE FROM api_keys WHERE user_id = ?", [userId]);
+  // verifyKeyRequest resolved `prior` outside this transaction, so the row can
+  // be gone by the time we get here — a concurrent rotate or revoke of the same
+  // key. Insisting the DELETE actually removed something keeps rotate a
+  // replacement: without it the INSERT would still run and leave an extra live
+  // key, which is the opposite of what a rotate promises.
+  const replaced = await db.transaction(async (tx) => {
+    const removed = await tx.run(
+      "DELETE FROM api_keys WHERE id = ? AND user_id = ?",
+      [prior.id, userId],
+    );
+    if (removed.changes === 0) return false;
     await tx.run(
       "INSERT INTO api_keys (id, user_id, key_hash, key_prefix, nest_id, label) VALUES (?, ?, ?, ?, ?, ?)",
       [
@@ -575,35 +584,55 @@ authRoutes.post("/keys/rotate", authMiddleware, async (c) => {
         hashApiKey(apiKey),
         getKeyPrefix(apiKey),
         nestScope,
-        body.label ?? prior?.label ?? null,
+        check.label ?? prior.label,
       ],
     );
+    return true;
   });
 
-  return c.json({ api_key: apiKey, key_prefix: getKeyPrefix(apiKey) });
+  if (!replaced) {
+    return c.json(
+      { error: "That key no longer exists — reload and try again." },
+      404,
+    );
+  }
+
+  return c.json({
+    id: keyId,
+    api_key: apiKey,
+    key_prefix: getKeyPrefix(apiKey),
+    label: check.label ?? prior.label,
+  });
 });
 
 // GET /auth/keys — return the caller's key metadata (no plaintext).
 authRoutes.get("/keys", authMiddleware, async (c) => {
   const db = getDb();
+  const userId = c.get("userId");
+  const check = await verifyKeyRequest(db, userId, { action: "fetch" });
+  if (!check.ok) return c.json({ error: check.error }, check.status);
+
   const keys = await db.all(
-    "SELECT id, key_prefix, nest_id, label, created_at, last_used_at FROM api_keys WHERE user_id = ?",
-    [c.get("userId")],
+    "SELECT id, key_prefix, nest_id, label, created_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at ASC, id ASC",
+    [userId],
   );
   return c.json({ keys });
 });
 
-// DELETE /auth/keys/:keyId — revoke the caller's external key.
+// DELETE /auth/keys/:keyId — revoke one of the caller's external keys.
 authRoutes.delete("/keys/:keyId", authMiddleware, async (c) => {
   const db = getDb();
-  const result = await db.run(
-    "DELETE FROM api_keys WHERE id = ? AND user_id = ?",
-    [c.req.param("keyId"), c.get("userId")],
-  );
+  const userId = c.get("userId");
+  const check = await verifyKeyRequest(db, userId, {
+    action: "update",
+    keyId: c.req.param("keyId"),
+  });
+  if (!check.ok) return c.json({ error: check.error }, check.status);
 
-  if (result.changes === 0) {
-    return c.json({ error: "Key not found" }, 404);
-  }
+  await db.run("DELETE FROM api_keys WHERE id = ? AND user_id = ?", [
+    check.key!.id,
+    userId,
+  ]);
   return c.json({ deleted: true });
 });
 

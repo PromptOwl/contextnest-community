@@ -7,12 +7,13 @@ import {
   parseDocument,
   normalizeStatus,
   isRejected,
+  filterDocuments,
   DocumentNotFoundError,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
+import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
@@ -22,6 +23,8 @@ import {
   ValidationError,
   ConflictError,
   ForbiddenError,
+  VaultBusyError,
+  isVaultLockTimeout,
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
@@ -46,14 +49,18 @@ import {
   listUserGrants,
   grantRoleForNode,
 } from "../governance/grants-service.js";
-import {
-  getPendingChange,
-  documentsWithSuggestions,
-} from "../governance/external-edit-service.js";
+import { getPendingChange } from "../governance/external-edit-service.js";
 import { getDb } from "../db/client.js";
 import type { Querier } from "../db/adapter.js";
 import { ANON_USER_ID, MAX_FOLDER_DEPTH } from "../shared/constants.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
+import { folderOfId, folderPathOf } from "../shared/node-id.js";
+import {
+  ensureNodeIndex,
+  readIndexedNodes,
+  indexedFolderCounts,
+  nodesWithSuggestions,
+} from "./node-index.js";
 import { config } from "../config.js";
 
 /** Reverse-lookup the auth userId from a registered email. Anonymous email → ANON. */
@@ -160,16 +167,10 @@ export function isIdUnderFolder(id: string, folder: string): boolean {
   return id.startsWith(`nodes/${folder}/`) || id.startsWith(`${folder}/`);
 }
 
-/**
- * The folder a node id sits in ("" for the nest root). The storage root
- * `nodes/` is not a user folder, so it is stripped — the UI's folderOfNode
- * does the same, and the two must agree on what a folder path is.
- */
-export function folderOfId(id: string): string {
-  const rel = folderPathOf(id);
-  const slash = rel.lastIndexOf("/");
-  return slash > 0 ? rel.slice(0, slash) : "";
-}
+// folderOfId / folderPathOf moved to shared/node-id.ts so the node index can
+// derive a row's folder without importing this service. Re-exported here so
+// every existing caller keeps its import.
+export { folderOfId, folderPathOf };
 
 /**
  * Refuse a folder path that could climb out of the nest.
@@ -199,15 +200,6 @@ export function assertSafeFolder(folder: string): void {
 export async function storagePrefix(nestId: string): Promise<string> {
   const { storage } = await engineCache.get(nestId);
   return (await storage.detectLayout()) === "structured" ? "nodes" : "";
-}
-
-/**
- * Strip the `nodes/` storage root from a folder path — the folder twin of
- * folderOfId. `nodes` itself is the nest root, which is "" to a caller.
- */
-export function folderPathOf(path: string): string {
-  if (path === "nodes") return "";
-  return path.startsWith("nodes/") ? path.slice(6) : path;
 }
 
 /**
@@ -295,6 +287,12 @@ function toSafeError(err: unknown, context: string, message: string): AppError {
     return new ConflictError(
       "This document is rejected. Change its status before saving.",
     );
+  }
+  // Vault write-lock timeout is retryable state, not an internal fault —
+  // keep it as a 503 the caller can act on instead of a generic 500.
+  if (isVaultLockTimeout(err)) {
+    console.error(`${context}:`, err);
+    return new VaultBusyError();
   }
   console.error(`${context}:`, err);
   return new AppError(500, message);
@@ -500,6 +498,16 @@ export interface ListNodesFilters {
    * for, and the point is to not pay for documents nobody has opened yet.
    */
   folder?: string;
+  /**
+   * Serve each row's body as well as its metadata.
+   *
+   * OFF by default, which is what makes a listing cheap: the document set comes
+   * from the DB mirror, and a body is the one field only the file has. Nothing
+   * that renders a list shows one — the document tree doesn't, and MCP's
+   * `context_list` deliberately drops it. Ask for it and the listing falls back
+   * to crawling the vault, which is the honest price.
+   */
+  withContent?: boolean;
 }
 
 /**
@@ -608,31 +616,74 @@ export async function listNodesForCaller(
   // strips it) and would hand back everything, so the catalog is checked
   // rather than the parameter simply being sent; the JS filter below is what
   // keeps the result correct either way.
-  const scopeInEngine = filters.folder !== undefined && engineScopesFolders();
-  const scopePrefix = scopeInEngine ? await storagePrefix(nestId) : "";
-  const { documents } = await engineApi.run<{
-    documents: Array<{ id: string; frontmatter: ContextNode["frontmatter"]; body: string }>;
-  }>(
-    "context_list",
-    {
-      ...(filters.type ? { type: filters.type } : {}),
-      ...(filters.tag ? { tag: filters.tag } : {}),
-      ...(filters.status ? { status: filters.status } : {}),
-      ...(scopeInEngine
-        ? {
-            folder: [scopePrefix, filters.folder].filter(Boolean).join("/"),
-            recursive: false,
-          }
-        : {}),
-      // Unlike the CLI and mcp-server, a retired node stays in this listing:
-      // here it is an unpublished document its stewards may still need to act
-      // on, not one removed from retrieval. An imported vault carrying
-      // `status: rejected` registers exactly that way.
-      include_retired: true,
-      full: true,
-    },
-    await opContext(nestId, userEmail),
-  );
+  // The cheap on-frontmatter filters go through the engine's own
+  // `filterDocuments` on BOTH paths below, so this surface can't drift from the
+  // CLI and mcp-server on what `type: document`, a `#`-less tag or a status
+  // alias means. `includeRetired` because — unlike the CLI and mcp-server — a
+  // retired node stays in this listing: here it is an unpublished document its
+  // stewards may still need to act on, not one removed from retrieval. An
+  // imported vault carrying `status: rejected` registers exactly that way.
+  //
+  // Split in two because the operation and `filterDocuments` spell the same
+  // flag differently: the op takes `include_retired`, the function takes
+  // `includeRetired`. Sending both used to be harmless (zod stripped the
+  // stranger); since engine 2.4.0 an unrecognized parameter is a hard error,
+  // so only `listFilters` may reach the op.
+  const listFilters = {
+    ...(filters.type ? { type: filters.type } : {}),
+    ...(filters.tag ? { tag: filters.tag } : {}),
+    ...(filters.status ? { status: filters.status } : {}),
+  };
+  const frontmatterFilters = { ...listFilters, includeRetired: true };
+
+  let documents: Array<{
+    id: string;
+    frontmatter: ContextNode["frontmatter"];
+    body?: string;
+  }>;
+  if (filters.withContent) {
+    // Bodies only the files have, so this path still crawls. A `folder` scope
+    // goes to the operation when the engine understands it, which narrows the
+    // crawl to one directory. An older engine SILENTLY IGNORES an unknown key
+    // (zod strips it) and would hand back everything, so the catalog is checked
+    // rather than the parameter simply being sent; the JS narrowing below is
+    // what keeps the result correct either way.
+    const scopeInEngine = filters.folder !== undefined && engineScopesFolders();
+    const scopePrefix = scopeInEngine ? await storagePrefix(nestId) : "";
+    ({ documents } = await engineApi.run<{
+      documents: Array<{
+        id: string;
+        frontmatter: ContextNode["frontmatter"];
+        body: string;
+      }>;
+    }>(
+      "context_list",
+      {
+        ...listFilters,
+        include_retired: true,
+        ...(scopeInEngine
+          ? {
+              folder: [scopePrefix, filters.folder].filter(Boolean).join("/"),
+              recursive: false,
+            }
+          : {}),
+        full: true,
+      },
+      await opContext(nestId, userEmail),
+    ));
+  } else {
+    // From the DB mirror: no vault crawl, no file reads. `folder` narrows in
+    // SQL, which is the narrowing that actually matters.
+    await ensureNodeIndex(nestId);
+    const indexed = await readIndexedNodes(
+      nestId,
+      filters.folder !== undefined ? { folder: filters.folder } : {},
+    );
+    documents = filterDocuments(indexed, {
+      ...frontmatterFilters,
+      includeRetired: true,
+    });
+  }
   // Narrow BEFORE the access gate and enrichment below — that is the whole
   // saving, since both cost per surviving document. Still applied even when
   // the engine already scoped the crawl: it is the correctness guarantee, and
@@ -646,7 +697,9 @@ export async function listNodesForCaller(
     filePath: "",
     rawContent: "",
     frontmatter: d.frontmatter,
-    body: d.body,
+    // Empty on the indexed path: no listing renders a body, and the
+    // approved-only branch below serves its own from the version store.
+    body: d.body ?? "",
   }));
   const publicReader = await isPublicReader(nestId, userId);
   // Approved-only view: what a public nest shows a stranger. ONE scan of the
@@ -698,7 +751,10 @@ export async function listNodesForCaller(
     ? [null, null]
     : await Promise.all([
         versions.getDisplayStatuses(nestId),
-        documentsWithSuggestions(nestId),
+        // From the DB, not a vault walk. The disk truth behind it is
+        // reconciled by the index rebuild and kept current by the stage /
+        // approve / reject paths.
+        nodesWithSuggestions(nestId),
       ]);
 
   // Author + collaborators for exactly the post-filter set — two batched
@@ -803,12 +859,12 @@ function withSubtreeTotals(
 }
 
 /**
- * The nest's folders, WITHOUT reading any document.
+ * The nest's folders, WITHOUT touching the vault.
  *
- * A navigable tree only needs directory names, and `context_folders` answers
- * that from directory entries alone. The fallback derives the same shape from
- * the document ids, which costs a full crawl — it exists only for an engine
- * that predates the operation, and drops away once the pin is bumped.
+ * A navigable tree only needs the folder each document sits in, which the DB
+ * mirror stores as a column — so this is one GROUP BY rather than a directory
+ * walk (`context_folders`) or a full crawl (the id-derived fallback it used
+ * before), and it stays correct on a nest the process has never opened.
  *
  * `folder` is a community folder path ("" = nest root), NOT an id prefix; the
  * `nodes/` storage root is added here so callers keep speaking one dialect.
@@ -822,41 +878,19 @@ export async function listNestFolders(
   opts: { folder?: string; recursive?: boolean } = {},
 ): Promise<FolderNode[]> {
   if (opts.folder !== undefined) assertSafeFolder(opts.folder);
-  const { storage } = await engineCache.get(nestId);
-  const prefix = await storagePrefix(nestId);
-  const base = [prefix, opts.folder].filter(Boolean).join("/");
-
-  let direct: Array<{ path: string; count: number }>;
-  // Catalog lookup, not a method probe: this runs the same operation the CLI
-  // and mcp-server do, and an older engine simply doesn't publish it.
-  if (engineApi.getOperation("context_folders")) {
-    const { folders } = await engineApi.run<{
-      folders: Array<{ path: string; count: number }>;
-    }>(
-      "context_folders",
-      {
-        folder: base,
-        ...(opts.recursive === false ? { recursive: false } : {}),
-      },
-      await opContext(nestId, ""),
-    );
-    direct = folders.map((f) => ({ path: folderPathOf(f.path), count: f.count }));
-  } else {
-    const docs = await storage.discoverDocuments({ includeRetired: true });
-    const counts = new Map<string, number>();
-    for (const d of docs) {
-      const f = folderOfId(d.id);
-      if (!f) continue;
-      counts.set(f, (counts.get(f) ?? 0) + 1);
-      // Ancestors with no document of their own still need a row.
-      let parent = f;
-      while (parent.includes("/")) {
-        parent = parent.slice(0, parent.lastIndexOf("/"));
-        if (!counts.has(parent)) counts.set(parent, 0);
-      }
+  await ensureNodeIndex(nestId);
+  const counts = new Map<string, number>();
+  for (const { path, count } of await indexedFolderCounts(nestId)) {
+    counts.set(path, count);
+    // Ancestors with no document of their own still need a row — a level that
+    // only holds subfolders still has to be expandable.
+    let parent = path;
+    while (parent.includes("/")) {
+      parent = parent.slice(0, parent.lastIndexOf("/"));
+      if (!counts.has(parent)) counts.set(parent, 0);
     }
-    direct = [...counts].map(([path, count]) => ({ path, count }));
   }
+  const direct = [...counts].map(([path, count]) => ({ path, count }));
 
   const scope = opts.folder ?? "";
   const inScope = direct.filter((f) => {
@@ -900,13 +934,12 @@ export async function nestCensus(
   userId: string,
 ): Promise<NestCensus> {
   const userEmail = await resolveCallerEmail(userId);
-  const { documents } = await engineApi.run<{
-    documents: Array<{ id: string; frontmatter: ContextNode["frontmatter"] }>;
-  }>(
-    "context_list",
-    { include_retired: true, full: true },
-    await opContext(nestId, userEmail),
-  );
+  // From the DB mirror, not the vault. This describes the WHOLE nest whatever
+  // folder is open, so on disk it meant reading and parsing every file in the
+  // nest on every mount — the single most expensive thing the page did, and
+  // the one the lazy per-folder loading could not avoid.
+  await ensureNodeIndex(nestId);
+  const documents = await readIndexedNodes(nestId);
 
   // Same gate as the listing, so the counts describe what this caller can
   // actually reach rather than what is on disk.
@@ -1830,6 +1863,8 @@ export const NODE_KEYED_TABLES = [
   ["annotation_threads", "node_id"],
   ["comments", "node_id"],
   ["node_tag_index", "node_id"],
+  ["node_index", "node_id"],
+  ["node_suggestions", "node_id"],
   ["watchers", "node_id"],
   ["schedules", "agent_node"],
   // A live capability token bound to one agent node — deleting the agent must
@@ -1959,7 +1994,7 @@ export async function moveNode(
     // serializeNodeSafe, not serializeDocument: `moved` came from
     // readDocument, so an empty `tags: []` on disk is back as
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
-    // are already clean (approve rewrites them through safePublishDocument),
+    // are already clean (approve rewrites them through serializeNodeSafe),
     // which is why drafts and pending-review docs were the ones failing.
     await storage.writeDocument(newId, serializeNodeSafe(moved));
 
@@ -1985,6 +2020,16 @@ export async function moveNode(
     // Repoint every node-keyed table for the source doc and its derived
     // annotations node, plus the run traces delete keeps. One transaction: a
     // half-moved node would be worse than a failed move.
+    //
+    // rewriteNodeKeyedRows only moves the keyed column, so it does NOT
+    // recompute node_index.folder. That is fine for both rows here:
+    //   - the source doc has no node_index row left to rewrite — its write to
+    //     newId and its delete of nodeId both ran above, each folding through
+    //     the index write-through, so this is a no-op on an already-correct row;
+    //   - the derived annotations row is repointed with its pre-move folder,
+    //     then replaced outright a few lines below when its document is written
+    //     at newDerived, which recomputes the folder. Stale only within this
+    //     transaction, and never on a path that serves a read.
     const oldDerived = derivedIdOf(nodeId);
     const newDerived = derivedIdOf(newId);
     const db = getDb();
@@ -2013,6 +2058,23 @@ export async function moveNode(
       await storage.deleteDocument(oldDerived);
     } catch {
       /* no derived annotations node */
+    }
+
+    // Regenerate the derived vault files. A move writes and deletes through raw
+    // storage rather than the operation catalog, so unlike create/update/
+    // publish/delete nothing here refreshed them — the SOURCE folder's INDEX.md
+    // kept listing a document that had left, the DESTINATION's never learned it
+    // arrived, and context.yaml (which graph-mode reads seed from) stayed on the
+    // old id until some unrelated write in the nest happened to trigger a regen.
+    //
+    // Best-effort: the move itself is already committed to disk and to the
+    // index, and derived files are regenerated from that truth. Failing the
+    // whole move because a generated file could not be rewritten would be the
+    // worse outcome; the next mutation, or a reindex, restores them.
+    try {
+      await storage.regenerateIndex();
+    } catch (err) {
+      console.error("[move] regenerateIndex failed", nestId, nodeId, newId, err);
     }
 
     await trackEvent("node.move", { nestId, nodeId, newId });

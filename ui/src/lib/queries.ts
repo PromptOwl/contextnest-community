@@ -705,7 +705,8 @@ export const useTeam = (teamId: string | undefined) =>
   useQuery({ ...reads.team(teamId ?? ""), enabled: !!teamId });
 export const useAdminSettings = () => useQuery(reads.adminSettings());
 export const useTeammates = () => useQuery(reads.teammates());
-export const useApiKeys = () => useQuery(reads.apiKeys());
+export const useApiKeys = (opts?: { enabled?: boolean }) =>
+  useQuery({ ...reads.apiKeys(), ...opts });
 export const useNestTeams = (nestId: string | undefined) =>
   useQuery({ ...reads.nestTeams(nestId ?? ""), enabled: !!nestId });
 export const useDefinitions = (nestId: string | undefined) =>

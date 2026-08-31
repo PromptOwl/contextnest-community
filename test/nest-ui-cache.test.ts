@@ -19,10 +19,16 @@ const okJson = (body: unknown) =>
 const errJson = (status: number, body: unknown = { error: "nope" }) =>
   ({ ok: false, status, text: async () => JSON.stringify(body) }) as any;
 
+// `includes`, not `endsWith`: a listing may carry a query string (the
+// nest-wide one asks for document bodies), and that does not change WHICH
+// endpoint was called — which is all this suite is counting. Sibling ids stay
+// distinguishable because the next character after the id is "/" (so
+// "/nests/nest-1/nodes" is not a substring of "/nests/nest-12/nodes"), and
+// same-path writes are excluded by the method check.
 const getListCalls = (spy: any, path: string) =>
   spy.mock.calls.filter(
     (c: any[]) =>
-      String(c[0]).endsWith(path) && (!c[1] || c[1].method === undefined),
+      String(c[0]).includes(path) && (!c[1] || c[1].method === undefined),
   );
 
 describe("nest UI read caching @unit", () => {

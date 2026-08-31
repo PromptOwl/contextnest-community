@@ -4,7 +4,7 @@
  */
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
 import { visibleDocuments, documentsTabIsEmpty } from "../lib/visible-documents";
@@ -76,7 +76,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+  Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
@@ -144,6 +144,8 @@ interface NestViewProps {
   ) => void;
   /** Open this nest's activity trace (owner/nest-admin only). */
   onOpenTrace?: () => void;
+  /** Open the account-level API keys page. */
+  onManageKeys?: () => void;
   /** Seed the search filter on mount. Used when arriving from a tag
    *  click on a document detail page. */
   initialSearch?: string;
@@ -166,6 +168,7 @@ export function NestView({
   onBack,
   onOpenDocument,
   onOpenTrace,
+  onManageKeys,
   initialSearch,
   initialTags,
   initialFolder,
@@ -1794,15 +1797,22 @@ export function NestView({
           </>
         }
       >
-          {/* Connect is the front door for every read/write surface (CLI,
-              API, MCP, Add-with-AI) — a first-class button, not a menu item. */}
-          <Button variant="outline" onClick={() => setShowConnect(true)}>
-            <Link2 className="h-4 w-4 mr-2" />
+          {/* Connect (external clients) and Add-with-AI (seed content) are
+              distinct first-class actions — Connect wires tools, Add-with-AI
+              generates context into the nest. */}
+          <Button variant="outline" size="sm" onClick={() => setShowConnect(true)}>
+            <Link2 className="h-3.5 w-3.5 mr-1.5" />
             Connect
           </Button>
+          {!isReadOnly && (
+            <Button variant="outline" size="sm" onClick={() => setShowGenerate(true)}>
+              <Sparkles className="h-3.5 w-3.5 mr-1.5" />
+              Add with AI
+            </Button>
+          )}
           {canManage && (
-            <Button variant="outline" onClick={() => setShowShare(true)}>
-              <Users className="h-4 w-4 mr-2" />
+            <Button variant="outline" size="sm" onClick={() => setShowShare(true)}>
+              <Users className="h-3.5 w-3.5 mr-1.5" />
               Share
             </Button>
           )}
@@ -1835,8 +1845,8 @@ export function NestView({
               />
               <DropdownMenu modal={false}>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline" data-testid="nest-import-files">
-                    <Upload className="h-4 w-4 mr-2" />
+                  <Button variant="outline" size="sm" data-testid="nest-import-files">
+                    <Upload className="h-3.5 w-3.5 mr-1.5" />
                     Import
                   </Button>
                 </DropdownMenuTrigger>
@@ -1849,8 +1859,8 @@ export function NestView({
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
-              <Button onClick={() => onOpenDocument("new")}>
-                <Plus className="h-4 w-4 mr-2" />
+              <Button size="sm" onClick={() => onOpenDocument("new")}>
+                <Plus className="h-3.5 w-3.5 mr-1.5" />
                 New Document
               </Button>
             </>
@@ -1921,7 +1931,13 @@ export function NestView({
                 onSelect: () =>
                   canDeleteNest ? setShowDelete(true) : setNestFlagOpen(true),
               });
-            return <OverflowMenu actions={actions} variant="outline" />;
+            return (
+              <OverflowMenu
+                actions={actions}
+                variant="outline"
+                className="h-8 w-8"
+              />
+            );
           })()}
       </NestPageHeader>
 
@@ -3791,12 +3807,15 @@ export function NestView({
         <ConnectModal
           isOpen={showConnect}
           onClose={() => setShowConnect(false)}
-          onGenerate={() => {
-            setShowConnect(false);
-            setShowGenerate(true);
-          }}
           nestId={nestId}
           nestName={nestName}
+          onManageKeys={
+            onManageKeys &&
+            (() => {
+              setShowConnect(false);
+              onManageKeys();
+            })
+          }
         />
       )}
 
@@ -3985,7 +4004,16 @@ export function NestView({
                   {prettyFolderPath(f)}
                 </SelectItem>
               ))}
-              <SelectItem value="__new__">New folder…</SelectItem>
+              {/* Below the rule: the entries above are destinations, this one
+                  starts a different flow. Undifferentiated, it read as one
+                  more existing folder. */}
+              <SelectSeparator />
+              <SelectItem value="__new__">
+                <span className="inline-flex items-center gap-1.5">
+                  <FolderPlus className="h-3.5 w-3.5" />
+                  New folder…
+                </span>
+              </SelectItem>
             </SelectContent>
           </Select>
           {moveNewFolder !== null && (
@@ -4289,6 +4317,17 @@ function ReviewDocumentModal({
   const [linkError, setLinkError] = useState<string | null>(null);
   const qc = useQueryClient();
 
+  // The row that opened this modal comes from the document list, which carries
+  // metadata only — a body per row costs a file read per row, and nothing in
+  // the list renders one. A reviewer decides on the TEXT, so fetch it for this
+  // one document, on open. Falls back to a body the caller already had, so a
+  // row that does carry one renders without a round trip.
+  const { data: full, isLoading: bodyLoading } = useQuery({
+    ...reads.node(nestId, node.id),
+    enabled: !node.content,
+  });
+  const body = node.content || full?.node?.content || "";
+
   // Resolve `[[Title]]` clicks to a node id and jump straight to that
   // doc. Without this the wiki-link decoration renders but click does
   // nothing — `MarkdownEditor` only wires nav when `onWikiLinkClick`
@@ -4338,19 +4377,24 @@ function ReviewDocumentModal({
           </div>
         )}
         <div className="flex-1 overflow-y-auto rounded-md">
-          {node.content ? (
+          {body ? (
             <MarkdownEditor
               // Remount when the reviewer switches between docs in the
               // queue. Same modal instance otherwise → TipTap keeps its
               // previous doc's editor state and the body briefly shows
               // the wrong content on swap.
               key={node.id}
-              content={node.content}
+              content={body}
               onChange={() => { }}
               editable={false}
               nestId={nestId}
               onWikiLinkClick={handleWikiLinkClick}
             />
+          ) : bodyLoading ? (
+            // Distinct from "(no content)": approving on the strength of an
+            // empty box that was merely still loading is the one mistake this
+            // modal must not invite.
+            <p className="text-sm text-muted-foreground p-4">Loading content…</p>
           ) : (
             <p className="text-sm text-muted-foreground p-4">(no content)</p>
           )}

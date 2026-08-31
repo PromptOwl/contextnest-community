@@ -53,8 +53,12 @@ export function NestPageHeader({
         )}
         {badges}
       </div>
+      {/* ml-auto, not just the parent's justify-between: once the actions wrap
+          onto their own line they're the only item on it, and justify-between
+          parks a lone item at the start — so a wrapped toolbar drifted to the
+          left edge and read as a mistake. */}
       {children && (
-        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:shrink-0 sm:justify-end">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:ml-auto sm:w-auto sm:shrink-0 sm:justify-end">
           {children}
         </div>
       )}

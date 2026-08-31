@@ -18,6 +18,8 @@ export interface OverflowAction {
   label: string;
   onSelect: () => void;
   icon?: React.ComponentType<{ className?: string }>;
+  /** Extra classes on the icon — e.g. "animate-spin" for an in-flight action. */
+  iconClassName?: string;
   /** Render a separator above this item. */
   separatorBefore?: boolean;
   /** Red destructive styling (e.g. Delete). */
@@ -71,7 +73,9 @@ export function OverflowMenu({
                 data-testid={a.testId}
                 className={a.destructive ? "text-destructive focus:text-destructive" : undefined}
               >
-                {Icon && <Icon className="h-4 w-4 mr-2" />}
+                {Icon && (
+                  <Icon className={`h-4 w-4 mr-2 ${a.iconClassName ?? ""}`} />
+                )}
                 {a.label}
               </DropdownMenuItem>
             </React.Fragment>

@@ -56,6 +56,51 @@ function historicalMigrationIds(source: string): Set<string> {
   return ids;
 }
 
+/** `table.column` pairs from every `ALTER TABLE … ADD COLUMN` in a source. */
+function addedColumns(source: string): Set<string> {
+  const cols = new Set<string>();
+  const re = /ALTER TABLE (\w+)\s+ADD COLUMN (?:IF NOT EXISTS )?(\w+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(source))) cols.add(`${m[1]}.${m[2]}`);
+  return cols;
+}
+
+/**
+ * Columns that live ONLY inline in the Postgres CREATE TABLE, and may.
+ *
+ * Declaring a column inline is enough for a database the DDL creates from
+ * scratch, and nothing else. On an EXISTING database `CREATE TABLE IF NOT
+ * EXISTS` is a no-op, so the column never arrives — which is a hard failure the
+ * moment any query names it, not a degraded feature.
+ *
+ * Every entry below predates the live Postgres deployments: their databases
+ * were created by a consolidated DDL that already declared the column, so no
+ * ALTER was ever needed. That is a fact about deployment history, not about the
+ * source, so no static check can derive it — hence a frozen list.
+ *
+ * `stewards.can_approve/can_reject` are here for the opposite reason: migration
+ * 007 drops them, and the Postgres DDL correctly never creates them at all.
+ *
+ * DO NOT ADD TO THIS LIST to make a failure go away. A newly added column has
+ * by definition not shipped yet, so some live database lacks it — write the
+ * `ALTER TABLE … ADD COLUMN IF NOT EXISTS` instead. (CU-wdqcq00ar3: an inline-only
+ * `nests.index_synced_at` 500'd every document listing on Postgres.)
+ */
+const INLINE_ONLY_IN_POSTGRES = new Set([
+  "nests.stewardship_enabled",
+  "nests.is_imported",
+  "nests.allow_self_approve",
+  "users.is_admin",
+  "users.is_invited",
+  "stewards.can_approve",
+  "stewards.can_reject",
+  "license_cache.owner_email",
+  "schedules.max_runs",
+  "schedules.runs_created",
+  "runs.claimed_by",
+  "runs.claimed_at",
+]);
+
 describe("SQLite/Postgres migration parity", () => {
   it("every SQLite table exists in the consolidated Postgres DDL", () => {
     const sqlite = tableNames(sqliteSrc);
@@ -75,6 +120,28 @@ describe("SQLite/Postgres migration parity", () => {
     // The 014 migration id must be seeded in Postgres HISTORICAL_MIGRATIONS so
     // a PG deployment doesn't re-run it (and bookkeeping matches SQLite).
     expect(historicalMigrationIds(pgSrc).has("014_api_events")).toBe(true);
+  });
+
+  it("every SQLite-added column has an explicit Postgres ALTER", () => {
+    const sqlite = addedColumns(sqliteSrc);
+    const pg = addedColumns(pgSrc);
+    const missing = [...sqlite].filter(
+      (c) => !pg.has(c) && !INLINE_ONLY_IN_POSTGRES.has(c),
+    );
+    expect(
+      missing,
+      `columns added in migrations.ts with no "ALTER TABLE … ADD COLUMN IF NOT EXISTS" in ` +
+        `migrations.postgres.ts: ${missing.join(", ")}. Declaring the column inline in the ` +
+        `CREATE TABLE only reaches a database created after it shipped — an existing Postgres ` +
+        `deployment never gets it, and the first query naming it fails.`,
+    ).toEqual([]);
+  });
+
+  it("index_synced_at is altered in, not just declared inline (CU-wdqcq00ar3)", () => {
+    // The node index reads this column on EVERY listing to decide whether to
+    // rebuild, so inline-only made it a 500 on the document list rather than a
+    // missing feature.
+    expect(addedColumns(pgSrc).has("nests.index_synced_at")).toBe(true);
   });
 
   it("every recorded SQLite migration id (002+) is seeded in Postgres HISTORICAL_MIGRATIONS", () => {

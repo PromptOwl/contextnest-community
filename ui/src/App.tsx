@@ -5,6 +5,7 @@ import { NestView } from "./components/NestView";
 import { DocumentEditor } from "./components/DocumentEditor";
 import { AdminLoginModal } from "./components/AdminLoginModal";
 import { TeammatesPage } from "./components/TeammatesPage";
+import { ApiKeysPage } from "./components/ApiKeysPage";
 import { TeamsPage } from "./components/TeamsPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { WorkflowsView } from "./components/WorkflowsView";
@@ -94,6 +95,7 @@ type View =
        *  also arrives via the ?thread= URL param). */
       initialThreadId?: string;
     }
+  | { page: "api-keys" }
   | { page: "teammates" }
   | { page: "teams" }
   | { page: "settings" }
@@ -832,6 +834,7 @@ export default function App() {
               <UserMenu
                 me={adminStatus.me}
                 isAdmin={isAdmin}
+                onApiKeys={() => setView({ page: "api-keys" })}
                 onTeammates={() => setView({ page: "teammates" })}
                 onTeams={() => setView({ page: "teams" })}
                 onSettings={() => setView({ page: "settings" })}
@@ -908,6 +911,7 @@ export default function App() {
         {view.page === "dashboard" && (
           <Dashboard
             onOpenSearch={() => setShowQuickOpen(true)}
+            onManageKeys={() => setView({ page: "api-keys" })}
             onSelectNest={(id, name, isOwner, isAnonOwned) =>
               setView({
                 page: "nest",
@@ -939,6 +943,7 @@ export default function App() {
             initialTags={view.initialTags}
             initialFolder={view.initialFolder}
             initialTab={view.tab}
+            onManageKeys={() => setView({ page: "api-keys" })}
             onTabChange={(tab) => setView({ ...view, tab })}
             onBack={leaveNest}
             onOpenDocument={(nodeId, opts) =>
@@ -994,6 +999,7 @@ export default function App() {
             initialSearch?: string;
             initialTags?: string[];
             initialFolder?: string;
+            tab?: string;
           }) =>
             setView({
               page: "nest",
@@ -1029,7 +1035,9 @@ export default function App() {
                   openDocument({ ...prev, breadcrumb: stack.slice(0, -1) });
                   return;
                 }
-                openNest();
+                // Documents tab, not the nest's default Overview — every
+                // caller of this is a "back to documents" affordance.
+                openNest({ tab: "documents" });
               }}
               onJumpBreadcrumb={(index) => {
                 // Jump to ancestor at index; drop entries after.
@@ -1133,6 +1141,9 @@ export default function App() {
             }
           />
         )}
+        {view.page === "api-keys" && (
+          <ApiKeysPage onBack={() => setView({ page: "dashboard" })} />
+        )}
         {view.page === "teammates" && (
           <TeammatesPage onBack={() => setView({ page: "dashboard" })} />
         )}
@@ -1202,6 +1213,7 @@ export default function App() {
 interface UserMenuProps {
   me: { email: string; name: string | null; is_admin: boolean };
   isAdmin: boolean;
+  onApiKeys: () => void;
   onTeammates: () => void;
   onTeams: () => void;
   onSettings: () => void;
@@ -1214,6 +1226,7 @@ interface UserMenuProps {
 function UserMenu({
   me,
   isAdmin,
+  onApiKeys,
   onTeammates,
   onTeams,
   onSettings,
@@ -1284,6 +1297,14 @@ function UserMenu({
           </>
         )}
         <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onSelect={onApiKeys}
+          className="cursor-pointer"
+          data-testid="user-menu-api-keys"
+        >
+          <KeyRound className="h-3.5 w-3.5 mr-2" />
+          API keys
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={onTeams} className="cursor-pointer">
           <Users className="h-3.5 w-3.5 mr-2" />
           Teams

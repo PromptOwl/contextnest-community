@@ -1,5 +1,112 @@
 # @promptowl/contextnest-community
 
+## 1.18.0
+
+### Minor Changes
+
+- Connect gives you a working setup, not a wall of client tabs.
+
+  Connecting an agent meant picking among five client tabs, copying a JSON block,
+  and guessing which fields your key went in. The new flow leads with a one-shot
+  setup prompt you paste into the assistant itself, plus a downloadable `.env`,
+  and pushes the per-client configs and the export/portability/nest-id details
+  behind an advanced toggle (`ui/src/components/ConnectModal.tsx`,
+  `ui/src/lib/connect.ts`).
+
+  The prompts are aware of the server they were generated from: open-mode
+  instances don't advertise a key, the described write scope matches what the
+  credential actually permits, and the CLI snippet uses the flag the current `ctx`
+  release takes. An all-nests landing surface (`ui/src/components/AllNestsBar.tsx`)
+  carries the same quick-start inline, so the first connection doesn't require
+  opening a nest first.
+
+- Finding and moving documents without leaving the page you're on.
+
+  - **The nest grid filters, sorts, and pages** (`ui/src/components/Dashboard.tsx`).
+    Past a couple of dozen nests the dashboard was a scroll, and a truncated name
+    told you nothing — the full name and description now surface on hover.
+  - **Move a document to another folder from inside it**
+    (`ui/src/components/DocumentEditor.tsx`), and the Move dialog can create the
+    destination folder it needs instead of sending you off to make it first. Folder
+    paths are validated and previewed before creation.
+  - **Folder trees show levels that hold only folders** — a branch whose documents
+    all live one level down used to render as empty.
+  - **The board can add folder columns** (`ui/src/components/MaturityBoard.tsx`),
+    and run details open beside the selected run rather than at the bottom of the
+    list.
+
+- Large nests open from a DB node index instead of a vault walk.
+
+  Opening a nest used to read every document off disk to answer questions the
+  listing only needed metadata for — title, folder, tags, status. On a nest with a
+  few thousand documents that meant a full crawl per request, and the page either
+  crawled or timed out.
+
+  Now each nest keeps a `node_index` table (`src/nodes/node-index.ts`) holding one
+  row per document, kept current on write, move, and delete, with
+  `nests.index_synced_at` recording the last full sync. Listings, folder trees, and
+  cross-nest search read the index; the vault is only touched when a caller
+  actually wants a body. Folder deletes clean their index rows, moves regenerate
+  them, and the drift scanner no longer marks every nest stale on a cold start.
+
+  The Postgres schema gets `nests.index_synced_at` through an explicit `ALTER`
+  rather than a table rebuild, so an existing deployment migrates in place.
+
+- Several API keys per account, so a client can be rotated without cutting off the
+  rest.
+
+  One key per account meant one credential shared by every editor, agent, and CI
+  job — and rotating it because a laptop went missing revoked all of them at once.
+
+  An account can now hold multiple named keys (`src/auth/keys.ts`,
+  `ui/src/components/ApiKeysPage.tsx`). Each name must be unique within the account
+  so a key is identifiable after the secret is hidden, and rotate is a true
+  replacement: it issues the new secret and retires the old one in a single
+  transaction, so two concurrent rotations can't leave the account with two live
+  keys or none.
+
+### Patch Changes
+
+- v1.18.0 — nests that open at size, one credential per client, and a long sweep
+  through the editor and review surfaces.
+
+  ### Governance and review
+
+  - The review modal shows the document body again, and Approve/Reject are back for
+    reviewers who have the authority to use them.
+  - A reviewer's rejection reason appears in version history, and rejected external
+    edits are recorded there instead of vanishing.
+  - Compare diffs against the selected version's real body, not a stale copy.
+  - Sharing refuses a grant to someone who already reaches the target by another
+    path, and says so when a document is already shared with that person.
+  - Steward pickers for documents and tags are searchable, scroll inside their
+    dialog, and stay pinned to the field width.
+  - Invite and connector emails use the user-facing role names rather than raw
+    permission strings.
+
+  ### Editor
+
+  - Unsaved state is visible, and a save that would do nothing is no longer
+    offered.
+  - Document tags have a length and character policy.
+  - A missing document renders a not-found state instead of a blank editable page.
+  - International document titles are supported.
+  - Table and artifact drafts get live previews, with the tool source highlighted.
+  - Toasts and dialogs stay inside the window, and the viewport clamp no longer
+    stretches every dialog to full width.
+
+  ### Workflows and definitions
+
+  - The workflows view restores from a cold deep link.
+  - Unclaimed runs show as queued and can be cancelled.
+  - Defining a term warns before it overwrites an existing one.
+  - The definitions endpoint sits behind a developer disclosure.
+
+  ### Performance
+
+  - Cross-nest search no longer pays for a cold crawl.
+  - A nest summary is read once per nest rather than once per folder.
+
 ## 1.17.0
 
 ### Minor Changes
