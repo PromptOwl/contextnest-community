@@ -6,7 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
-import { normalizeTagInput } from "../lib/tag-policy";
+import { normalizeTagInput, TAG_INPUT_MAX_LENGTH } from "../lib/tag-policy";
 import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
@@ -1051,14 +1051,20 @@ export function DocumentEditor({
     return () => clearTimeout(t);
   }, [content, isArtifactDraft]);
 
-  const addTag = useCallback(() => {
-    // Split on whitespace/comma, then hold each token to the tag policy
-    // (length cap, letters/digits/._- only) and say what it changed.
+  // What the current input would commit, under the same policy addTag applies
+  // (length cap, letters/digits/._- only, lowercased). Rendered under the
+  // field so a truncation or rewrite is visible BEFORE Enter — a transient
+  // toast after the fact is easy to miss, more so when several tags commit.
+  const tagPreview = useMemo(() => {
     const candidates = tagInput.split(/[\s,]+/).map(normalizeTagInput);
-    const notes = candidates.map((c) => c.note).filter(Boolean) as string[];
-    const accepted = candidates
-      .map((c) => c.tag)
-      .filter((t): t is string => !!t);
+    return {
+      tags: candidates.map((c) => c.tag).filter((t): t is string => !!t),
+      notes: candidates.map((c) => c.note).filter(Boolean) as string[],
+    };
+  }, [tagInput]);
+
+  const addTag = useCallback(() => {
+    const { tags: accepted, notes } = tagPreview;
     for (const note of notes) toast.warning(note);
     if (accepted.length === 0) {
       setTagInput("");
@@ -1073,7 +1079,7 @@ export function DocumentEditor({
     setTags(next);
     setTagInput("");
     setTouched(true);
-  }, [tagInput, tags]);
+  }, [tagPreview, tags]);
 
   const removeTag = (t: string) => {
     setTags(tags.filter((x) => x !== t));
@@ -2092,6 +2098,9 @@ export function DocumentEditor({
                       }}
                       placeholder='Press Enter or space. Try "#api #v2" or "api, v2"'
                       disabled={fieldsDisabled}
+                      // A hard stop the way Title has one — several tags fit,
+                      // a pasted paragraph does not.
+                      maxLength={TAG_INPUT_MAX_LENGTH}
                       data-testid="document-editor-tag-input"
                     />
                     <Button
@@ -2103,6 +2112,18 @@ export function DocumentEditor({
                       Add
                     </Button>
                   </div>
+                  {tagInput.trim() && (
+                    <p
+                      className="mt-1 text-xs text-muted-foreground"
+                      data-testid="document-editor-tag-preview"
+                    >
+                      {tagPreview.tags.length > 0
+                        ? `Will add: ${tagPreview.tags.join(", ")}`
+                        : "Nothing to add yet"}
+                      {tagPreview.notes.length > 0 &&
+                        ` — ${tagPreview.notes.join(" ")}`}
+                    </p>
+                  )}
                 </>
               )}
               {tags.length > 0 && (

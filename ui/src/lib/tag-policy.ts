@@ -6,6 +6,10 @@
 
 export const MAX_TAG_LENGTH = 40;
 
+/** Hard cap on the tag FIELD, which holds several tags at once — wide enough
+ *  for a handful, narrow enough that a pasted paragraph is refused outright. */
+export const TAG_INPUT_MAX_LENGTH = 120;
+
 /** Everything outside this set is dropped (`a/b/c` → `abc`, `🚀rocket` → `rocket`). */
 const DISALLOWED = /[^\p{L}\p{N}._-]+/gu;
 
