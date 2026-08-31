@@ -1,5 +1,12 @@
 /** DocumentEditor — create/edit view; `nodeId === "new"` → POST, else PATCH. Server enforces 403. */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
@@ -1055,6 +1062,12 @@ export function DocumentEditor({
   // (length cap, letters/digits/._- only, lowercased). Rendered under the
   // field so a truncation or rewrite is visible BEFORE Enter — a transient
   // toast after the fact is easy to miss, more so when several tags commit.
+  // The tool preview highlights with lowlight's auto-detection, which tries
+  // every grammar. Keyed on the live body that ran once per keystroke, on the
+  // typing path. Deferred, React keeps the textarea responsive and re-highlights
+  // when it has a spare frame — no debounce timer to tune or clean up.
+  const deferredContent = useDeferredValue(content);
+
   const tagPreview = useMemo(() => {
     const candidates = tagInput.split(/[\s,]+/).map(normalizeTagInput);
     return {
@@ -2658,7 +2671,7 @@ export function DocumentEditor({
                             Preview
                           </div>
                           <CodeHighlight
-                            code={content}
+                            code={deferredContent}
                             className="flex-1 text-sm"
                             data-testid="tool-source-preview"
                           />
