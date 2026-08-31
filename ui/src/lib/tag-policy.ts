@@ -20,6 +20,24 @@ export interface TagCandidate {
   note: string | null;
 }
 
+/**
+ * Of `candidates`, the ones that would actually be added. Tags are
+ * case-insensitive, so a candidate matching an existing tag in any casing is a
+ * no-op — as is a repeat within the same batch. Both the "will add" preview and
+ * the commit read this, so what is promised is what lands.
+ */
+export function newTags(existing: string[], candidates: string[]): string[] {
+  const have = new Set(existing.map((t) => t.toLowerCase()));
+  const out: string[] = [];
+  for (const t of candidates) {
+    const key = t.toLowerCase();
+    if (have.has(key)) continue;
+    have.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
 export function normalizeTagInput(raw: string): TagCandidate {
   const bare = raw.trim().replace(/^#+/, "");
   if (!bare) return { tag: null, note: null };

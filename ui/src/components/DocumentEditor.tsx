@@ -13,7 +13,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
-import { normalizeTagInput, TAG_INPUT_MAX_LENGTH } from "../lib/tag-policy";
+import {
+  newTags,
+  normalizeTagInput,
+  TAG_INPUT_MAX_LENGTH,
+} from "../lib/tag-policy";
 import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
@@ -1070,11 +1074,16 @@ export function DocumentEditor({
 
   const tagPreview = useMemo(() => {
     const candidates = tagInput.split(/[\s,]+/).map(normalizeTagInput);
+    const accepted = candidates
+      .map((c) => c.tag)
+      .filter((t): t is string => !!t);
     return {
-      tags: candidates.map((c) => c.tag).filter((t): t is string => !!t),
+      // Already-present tags are dropped here, not at commit, so the preview
+      // never promises to add something the commit would quietly discard.
+      tags: newTags(tags, accepted),
       notes: candidates.map((c) => c.note).filter(Boolean) as string[],
     };
-  }, [tagInput]);
+  }, [tagInput, tags]);
 
   const addTag = useCallback(() => {
     const { tags: accepted, notes } = tagPreview;
@@ -1083,13 +1092,7 @@ export function DocumentEditor({
       setTagInput("");
       return;
     }
-    const next = [...tags];
-    for (const t of accepted) {
-      // Case-insensitive: new tags arrive lowercased, but a document saved
-      // before that could still carry "Bug" alongside an incoming "bug".
-      if (!next.some((x) => x.toLowerCase() === t)) next.push(t);
-    }
-    setTags(next);
+    setTags([...tags, ...accepted]);
     setTagInput("");
     setTouched(true);
   }, [tagPreview, tags]);
@@ -2132,7 +2135,7 @@ export function DocumentEditor({
                     >
                       {tagPreview.tags.length > 0
                         ? `Will add: ${tagPreview.tags.join(", ")}`
-                        : "Nothing to add yet"}
+                        : "Nothing new to add"}
                       {tagPreview.notes.length > 0 &&
                         ` — ${tagPreview.notes.join(" ")}`}
                     </p>
