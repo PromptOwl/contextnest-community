@@ -40,6 +40,7 @@ import {
   cardColumnKeys,
   groupByColumn,
   layoutKey,
+  migrateLayout,
   planMove,
   resolveConfig,
   type BoardNode,
@@ -74,10 +75,10 @@ function loadConfig(nestId: string): BoardSettings {
       const layouts: Record<string, ColumnLayout> = {};
       for (const [k, v] of Object.entries(p.layouts ?? {})) {
         if (v && typeof v === "object") {
-          layouts[k] = {
+          layouts[k] = migrateLayout(k, {
             columnOrder: strings((v as any).columnOrder),
             hiddenColumns: strings((v as any).hiddenColumns),
-          };
+          });
         }
       }
       // Saves from before layouts existed kept one shared order; file it under
@@ -87,7 +88,8 @@ function loadConfig(nestId: string): BoardSettings {
         hiddenColumns: strings(p.hiddenColumns),
       };
       if (legacy.columnOrder || legacy.hiddenColumns) {
-        layouts[layoutKey({ dimension, tagNamespace })] ??= legacy;
+        const lk = layoutKey({ dimension, tagNamespace });
+        layouts[lk] ??= migrateLayout(lk, legacy);
       }
       return { dimension, tagNamespace, layouts };
     }

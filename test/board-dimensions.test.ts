@@ -5,6 +5,7 @@ import {
   cardColumnKey,
   buildColumns,
   groupByColumn,
+  migrateLayout,
   planMove,
   resolveConfig,
   STATUS_ORDER,
@@ -512,5 +513,40 @@ describe("resolveConfig", () => {
     expect(
       resolveConfig({ dimension: "status", layouts: {} }).explicitColumns,
     ).toBeFalsy();
+  });
+});
+
+describe("migrateLayout — layouts saved before tag keys dropped the \"#\"", () => {
+  it("strips the prefix from a tag layout so its columns match cards again", () => {
+    const migrated = migrateLayout("tag:", {
+      columnOrder: ["#GDPR", "#HIPAA"],
+      hiddenColumns: ["#SOC2"],
+    });
+    expect(migrated).toEqual({
+      columnOrder: ["GDPR", "HIPAA"],
+      hiddenColumns: ["SOC2"],
+    });
+    // The whole point: cards land in those columns instead of a board of zeros.
+    const { byColumn } = groupByColumn(
+      [node({ id: "a", tags: ["#GDPR"] })],
+      resolveConfig({
+        dimension: "tag",
+        tagNamespace: "",
+        layouts: { "tag:": migrated },
+      }),
+    );
+    expect(byColumn["GDPR"].map((n) => n.id)).toEqual(["a"]);
+  });
+
+  it("collapses keys that differ only by the prefix", () => {
+    expect(
+      migrateLayout("tag:", { columnOrder: ["#todo", "todo"] }).columnOrder,
+    ).toEqual(["todo"]);
+  });
+
+  it("leaves folder and status layouts alone", () => {
+    const l = { columnOrder: ["gtm/deals"], hiddenColumns: ["draft"] };
+    expect(migrateLayout("folder", l)).toBe(l);
+    expect(migrateLayout("status", l)).toBe(l);
   });
 });

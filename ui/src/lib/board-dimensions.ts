@@ -158,6 +158,25 @@ export function layoutKey(s: {
   return s.dimension === "tag" ? `tag:${namespaceOf(s)}` : s.dimension;
 }
 
+/**
+ * One saved layout, brought up to date with the current key spelling.
+ *
+ * Tag column keys used to be the tag exactly as stored, "#" and all. A layout
+ * saved back then holds keys like "#GDPR"; card keys are the bare value now, so
+ * every one of those columns renders — and matches nothing, leaving a board of
+ * empty columns. Stripping on read repairs a curated board in place instead of
+ * asking the user to rebuild it. Folder/status keys never carried a "#", so
+ * they are returned untouched.
+ */
+export function migrateLayout(key: string, layout: ColumnLayout): ColumnLayout {
+  if (!key.startsWith("tag:")) return layout;
+  const keys = (a?: string[]) => a && [...new Set(a.map(stripHash))];
+  return {
+    columnOrder: keys(layout.columnOrder),
+    hiddenColumns: keys(layout.hiddenColumns),
+  };
+}
+
 /** The BoardConfig for the active dimension: its own layout, nothing else's. */
 export function resolveConfig(s: BoardSettings): BoardConfig {
   const layout = s.layouts[layoutKey(s)] ?? {};
