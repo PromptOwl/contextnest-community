@@ -65,6 +65,7 @@ import {
 } from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
 import { Button } from "./ui/button";
+import { OverflowMenu, type OverflowAction } from "./ui/overflow-menu";
 import { Badge } from "./ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { Input } from "./ui/input";
@@ -93,6 +94,18 @@ const statusVariant = (
   if (s === "queued") return "outline";
   return "secondary"; // running
 };
+
+/**
+ * Left pad for a run row at `level`. The step stops compounding past a few
+ * levels: a deep sub-agent chain otherwise pushed the run id clean out of the
+ * row on a narrow panel, and the nesting is still legible from the arrow and
+ * the `sub · dN` badge, which carries the true depth either way.
+ */
+const INDENT_STEP_REM = 0.85;
+const MAX_INDENT_LEVELS = 6;
+function indentFor(level: number): string {
+  return `${0.75 + Math.min(level, MAX_INDENT_LEVELS) * INDENT_STEP_REM}rem`;
+}
 
 // The wire status is "running" from creation; a run is only really executing
 // once a runner has claimed it, so show the unclaimed stretch as "queued".
@@ -931,7 +944,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
 
   const renderRun = (r: RunSummary, level: number): React.ReactNode => {
     const kids = childrenOf.get(r.id) ?? [];
-    const indent = level ? `${0.75 + level * 1.1}rem` : undefined;
+    const indent = level ? indentFor(level) : undefined;
     // Depth badges below prefer the server's `r.depth` and fall back to render
     // `level` only if it's missing. These can differ when a run's parent is
     // outside the loaded window (rendered as a root at level 0 though its true
@@ -957,7 +970,12 @@ function RunsPanel({ nestId }: { nestId: string }) {
             <NodeTypeIcon type={runType(r.agent_node)} className="h-3.5 w-3.5" />
             {/* Ellipsis + full id on hover: the list showed a bare head slice
                 that read as a complete, different id from the detail view's. */}
-            <span className="font-mono text-xs truncate" title={r.id}>
+            {/* min-w keeps the id readable instead of letting it collapse to
+                nothing between the indent and the shrink-0 badges. */}
+            <span
+              className="font-mono text-xs truncate min-w-[6rem]"
+              title={r.id}
+            >
               {r.id.length > 12 ? `${r.id.slice(0, 12)}…` : r.id}
             </span>
             <Badge
@@ -981,52 +999,54 @@ function RunsPanel({ nestId }: { nestId: string }) {
                 {kids.length} child{kids.length === 1 ? "" : "ren"}
               </span>
             )}
-            {/* Row actions — one right-aligned group, revealed on hover.
+            {/* Row actions collapse into one ⋮ button. As labelled buttons they
+                were the widest thing in the row, and a deeply nested run pushed
+                them past the card's edge.
                 Sub-agent: only running runs can parent one; hidden when the
                 feature is off or this run is at the depth / fan-out cap (a
                 deeper/wider child would be rejected server-side).
                 Cancel: the only way out of a run no runner ever claims. */}
-            {r.status === "running" && (
-              <div className="ml-auto flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100">
-                {subagentRunsEnabled &&
+            {r.status === "running" &&
+              (() => {
+                const actions: OverflowAction[] = [];
+                if (
+                  subagentRunsEnabled &&
                   (r.depth ?? 0) < maxDepth &&
-                  childCount(r.id) < maxChildren && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 px-2 text-[11px] text-muted-foreground"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSpawnParent(spawnParent === r.id ? "" : r.id);
-                        setSpawnAgent("");
-                        setSpawnInputs("");
-                        setSpawnError(null);
-                      }}
-                      title="Spawn a sub-agent nested under this run"
-                    >
-                      <Plus className="h-3 w-3 mr-1" /> sub-agent
-                    </Button>
-                  )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-2 text-[11px] text-muted-foreground hover:text-destructive"
-                  disabled={cancelling === r.id}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void cancel(r.id);
-                  }}
-                  title="Cancel this run"
-                >
-                  {cancelling === r.id ? (
-                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                  ) : (
-                    <X className="h-3 w-3 mr-1" />
-                  )}
-                  cancel
-                </Button>
-              </div>
-            )}
+                  childCount(r.id) < maxChildren
+                ) {
+                  actions.push({
+                    label:
+                      spawnParent === r.id ? "Close sub-agent form" : "Spawn sub-agent",
+                    icon: Plus,
+                    testId: "run-action-spawn",
+                    onSelect: () => {
+                      setSpawnParent(spawnParent === r.id ? "" : r.id);
+                      setSpawnAgent("");
+                      setSpawnInputs("");
+                      setSpawnError(null);
+                    },
+                  });
+                }
+                actions.push({
+                  label: cancelling === r.id ? "Cancelling…" : "Cancel run",
+                  icon: cancelling === r.id ? Loader2 : X,
+                  destructive: true,
+                  disabled: cancelling === r.id,
+                  separatorBefore: true,
+                  testId: "run-action-cancel",
+                  onSelect: () => void cancel(r.id),
+                });
+                return (
+                  <div className="ml-auto shrink-0">
+                    <OverflowMenu
+                      actions={actions}
+                      className="h-6 w-6 text-muted-foreground"
+                      triggerTitle="Run actions"
+                      testId="run-actions"
+                    />
+                  </div>
+                );
+              })()}
           </div>
           <div className="text-[11px] text-muted-foreground truncate">
             {runLabel(r.agent_node)} · {timeOf(r.started_at)}
@@ -1045,7 +1065,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
         {subagentRunsEnabled && spawnParent === r.id && (
           <div
             className="border-t bg-muted/20 px-3 py-2.5 space-y-2"
-            style={{ paddingLeft: `${0.75 + (level + 1) * 1.1}rem` }}
+            style={{ paddingLeft: indentFor(level + 1) }}
           >
             <div className="text-[11px] font-medium text-muted-foreground">
               New sub-agent under{" "}
