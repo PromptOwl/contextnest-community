@@ -157,6 +157,17 @@ RP-initiated logout for an SSO session. Deletes the current session server-side 
 
 Related `/admin/settings` fields (GET/PATCH, superadmin only): `oidc_enabled`, `oidc_issuer` (https URL), `oidc_client_id`, `oidc_client_secret` (**write-only** — PATCH sets/replaces, `null` clears; GET returns only `oidc_client_secret_set: boolean`), `oidc_allowed_domains` (comma-separated), `oidc_auto_provision`, `oidc_department_tagging` (append `dept:<slugified-department>` to a new document's tags on create — create-only, no-op for users without a stored department). Enabling is refused unless issuer + client id + secret are all present.
 
+### POST `/auth/token-exchange`
+Exchange an IdP ID token for a short-lived, scoped **MCP bearer** (RFC 8693-shaped) — for an external agent acting on behalf of a user your IdP already authenticated. No session, no API key. **Off by default; security-critical** — see `CONFIGURATION.md → Agent SSO (token exchange)`.
+
+Body: `{ "provider": "microsoft" | "google", "subject_token": "<IdP ID token>" }`. Response `200`: `{ "access_token", "token_type": "Bearer", "expires_in" }` — send it as `Authorization: Bearer <access_token>` to `/index`, `/mcp`, and the ticket-eligible `/nests/:nestId/*` routes.
+
+The `subject_token` is verified for signature (provider JWKS, `RS256` pinned), issuer (exact per provider — the tenant-scoped Entra issuer or Google's), audience (your configured client id, so a token minted for another app can't be replayed), and expiry (30s tolerance); then the same `email_verified` + `oidc_allowed_domains` policy as browser login, then resolve/JIT the user (`oidc_auto_provision`) and mint. JIT **fails closed**: auto-provision with an empty domain allowlist refuses with `no_account`.
+
+`404 disabled` unless `sso_token_exchange_enabled` **and** `mcp_signing_secret` **and** that provider's toggle are all set (a disabled server doesn't advertise the endpoint). Rate-limited per IP (`429 rate_limited`). Other codes: `400` `bad_request` / `provider_disabled` / `provider_misconfigured`, `401` `invalid_subject_token`, `403` `email_not_verified` / `domain_not_allowed` / `no_account`, `500` `server_error`.
+
+Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchange_enabled`, `mcp_signing_secret` (**write-only** — GET returns only `mcp_signing_secret_set: boolean`), `mcp_token_ttl_seconds` (30–3600), `ms_token_exchange_enabled`, `ms_client_id`, `ms_tenant_id` (directory GUID), `google_token_exchange_enabled`, `google_client_id`. Enabling a provider is refused while `oidc_auto_provision` is on and `oidc_allowed_domains` is empty.
+
 ---
 
 ## 2. Nests

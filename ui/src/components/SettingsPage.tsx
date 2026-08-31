@@ -951,6 +951,24 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                   />
                 </div>
 
+                {/* The server REFUSES this combination on save (and refuses to
+                    mint on it), so say why here instead of leaving the admin a
+                    field error. */}
+                {(draft.ms_token_exchange_enabled ||
+                  draft.google_token_exchange_enabled) &&
+                  draft.oidc_auto_provision &&
+                  !draft.oidc_allowed_domains?.trim() && (
+                    <div
+                      role="alert"
+                      className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+                    >
+                      Blocked: with auto-provision on and no allowed email
+                      domains, anyone with an account at that provider could
+                      sign themselves up and mint a token. Set allowed email
+                      domains above, or turn auto-provision off.
+                    </div>
+                  )}
+
                 {(() => {
                   const secretPresent =
                     draft.mcp_signing_secret === null
@@ -1029,7 +1047,11 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                     value={String(draft.mcp_token_ttl_seconds ?? 300)}
                     placeholder="300"
                     onChange={(v) =>
-                      set({ mcp_token_ttl_seconds: Number(v) || 0 })
+                      // Clearing the box means "default", not 0 — 0 would fail
+                      // the 30–3600 check and block the whole save.
+                      set({
+                        mcp_token_ttl_seconds: v.trim() === "" ? 300 : Number(v),
+                      })
                     }
                   />
                   <p className="text-xs text-muted-foreground mt-1">

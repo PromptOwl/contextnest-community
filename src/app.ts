@@ -888,6 +888,36 @@ export function createApp(): Hono<AuthEnv> {
     if ("google_client_id" in body) {
       pending.push({ name: "GOOGLE_CLIENT_ID", value: String(body.google_client_id ?? "").trim() || null });
     }
+    // Fail-closed guard on the combination, not on either field alone: a
+    // provider enabled while unknown emails may JIT-provision AND no domain
+    // allowlist bounds them means any account at that IdP (Google = the whole
+    // internet) can exchange a token for a bearer on an account it just made.
+    // Effective post-PATCH values, so setting the allowlist in the SAME request
+    // that flips the toggle is accepted. The endpoint refuses that combination
+    // at mint time too — this only stops an admin from saving it blind.
+    const effAllowedDomains =
+      "oidc_allowed_domains" in body
+        ? String(body.oidc_allowed_domains ?? "")
+            .split(",")
+            .map((d) => d.trim())
+            .filter(Boolean)
+        : config.OIDC_ALLOWED_DOMAINS;
+    const effAutoProvision =
+      "oidc_auto_provision" in body
+        ? !!body.oidc_auto_provision
+        : config.OIDC_AUTO_PROVISION;
+    if (effAutoProvision && effAllowedDomains.length === 0) {
+      for (const field of [
+        "ms_token_exchange_enabled",
+        "google_token_exchange_enabled",
+      ] as const) {
+        if (body[field])
+          addError(
+            field,
+            "Set allowed email domains (or turn auto-provision off) before enabling token exchange — otherwise anyone with an account at that provider can sign themselves up and mint a token.",
+          );
+      }
+    }
     // Effective post-PATCH OIDC state: what this request sets, falling back
     // to current config for fields it doesn't touch. Shared by the enable
     // guard here AND the total-lockout guard below (SSO-only servers are a
