@@ -428,20 +428,22 @@ queryRoutes.post("/context", async (c) => {
   const accessible = await filterAccessible(nestId, userId, userEmail, documents);
   const permissionFiltered = beforePermission - accessible.length;
 
-  // Public readers must see approved bodies only, never on-disk drafts.
+  // Public readers must see approved bodies only, never on-disk drafts. The
+  // source URL rides along so it resolves once per node, then feeds the budget
+  // pass, the markdown, and the manifest.
   const readable = await Promise.all(
     accessible.map(async (doc) => ({
       ...doc,
       body: await resolveReadableBody(nestId, doc.id, userId, doc.body || ""),
+      url: resolveNodeUrl(doc, { nestId, baseUrl }),
     })),
   );
 
   // ── 4. Budget-fit within max_tokens ──
-  const included: ContextNode[] = [];
+  const included: (ContextNode & { url?: string })[] = [];
   let tokenCount = 0;
   for (const doc of readable) {
-    const url = resolveNodeUrl(doc, { nestId, baseUrl });
-    const block = formatContextBlock(doc, url);
+    const block = formatContextBlock(doc, doc.url);
     const blockTokens = approxTokens(block);
     if (tokenCount + blockTokens > maxTokens && included.length > 0) break;
     included.push(doc);
@@ -451,7 +453,7 @@ queryRoutes.post("/context", async (c) => {
 
   // ── 5. Format response ──
   const contextMarkdown = included
-    .map((n) => formatContextBlock(n, resolveNodeUrl(n, { nestId, baseUrl })))
+    .map((n) => formatContextBlock(n, n.url))
     .join("\n\n---\n\n");
 
   trackEvent("context.resolve", {
@@ -467,7 +469,7 @@ queryRoutes.post("/context", async (c) => {
     nodes: included.map((n) => ({
       id: n.id,
       title: n.frontmatter.title,
-      url: resolveNodeUrl(n, { nestId, baseUrl }),
+      url: n.url,
       tags: n.frontmatter.tags || [],
       type: n.frontmatter.type || "document",
     })),
