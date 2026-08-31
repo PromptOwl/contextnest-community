@@ -2,7 +2,15 @@ import { Hono } from "hono";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
-import { ValidationError, NotFoundError, ForbiddenError, ConflictError } from "../shared/errors.js";
+import {
+  AppError,
+  ValidationError,
+  NotFoundError,
+  ForbiddenError,
+  ConflictError,
+  VaultBusyError,
+  isVaultLockTimeout,
+} from "../shared/errors.js";
 import { rebuildNodeIndex } from "./node-index.js";
 import { queryTableNode } from "../tables/query.js";
 import { trackEvent } from "../telemetry/tracker.js";
@@ -756,12 +764,11 @@ queryRoutes.post("/publish", async (c) => {
     throw new ValidationError("documents array or context_md is required");
   }
 
-  // Content-type toggles gate this bulk path too: it writes documents
-  // directly (no createNode), so without this check a disabled artifact/
-  // table type could still be created here. A disabled type is a POLICY
-  // violation, so it fails the WHOLE batch up front — before any write,
-  // context_md included — with the same message the single-create path
-  // uses. (Malformed rows — missing title/content — keep this endpoint's
+  // Content-type toggles gate this bulk path up front. createNode refuses a
+  // disabled artifact/table below anyway, but that would land the rows before
+  // it and report the rest as failures — and a disabled type is a POLICY
+  // violation, so it fails the WHOLE batch before any write, context_md
+  // included. (Malformed rows — missing title/content — keep this endpoint's
   // existing skip-silently semantics below; those are shape problems,
   // not policy ones.)
   for (const doc of body.documents || []) {
@@ -778,6 +785,7 @@ queryRoutes.post("/publish", async (c) => {
   const userEmail = await resolveCallerEmail(c.get("userId"));
   const created: string[] = [];
   const skipped: string[] = [];
+  const failed: Array<{ title: string; error: string }> = [];
 
   if (body.context_md) {
     // No engine op exists for context.md, so this stays a direct write; the
@@ -793,7 +801,10 @@ queryRoutes.post("/publish", async (c) => {
 
     // Route through the canonical create (engine `context_create` underneath)
     // instead of hand-assembling documents here: same slugs, same governance
-    // rows, same id-occupancy check as every other create surface.
+    // rows, same id-occupancy check as every other create surface. The engine
+    // regenerates the index per create, where the old direct-write path
+    // regenerated once for the batch — fine at agent batch sizes, and the cost
+    // of a bulk path that no longer bypasses the vault lock.
     try {
       const result = await createNode(
         nestId,
@@ -815,7 +826,21 @@ queryRoutes.post("/publish", async (c) => {
         skipped.push(doc.title);
         continue;
       }
-      throw err;
+      // A busy vault fails every remaining document the same way, so stop and
+      // let the caller retry the whole batch: what already landed comes back
+      // as `skipped`, so the retry finishes the job instead of duplicating.
+      if (isVaultLockTimeout(err) || err instanceof VaultBusyError) throw err;
+      // Anything else is one document's problem — an unusable title, a type
+      // the engine rejects. Report it and keep going: aborting the batch left
+      // the earlier writes on disk with nothing in the response naming them.
+      // Only an AppError's message is caller-facing; anything else could carry
+      // a filesystem path, so it goes to the log and the caller gets the
+      // generic line, same as the 500 handler would have given them.
+      if (!(err instanceof AppError)) console.error("bulk publish row failed", err);
+      failed.push({
+        title: doc.title,
+        error: err instanceof AppError ? err.message : "Could not create this document",
+      });
     }
   }
 
@@ -827,6 +852,7 @@ queryRoutes.post("/publish", async (c) => {
       context_md_updated: !!body.context_md,
       node_ids: created,
       skipped,
+      failed,
     },
     201,
   );

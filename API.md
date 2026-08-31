@@ -1399,17 +1399,32 @@ A document whose title slugs to an id that already exists is **skipped and
 reported** — never overwritten, so republishing a folder cannot destroy an
 existing document's version history.
 
+A document the create path rejects for its own reasons — a title that is too
+long or carries no sluggable characters, a `type` the engine does not know — is
+**reported in `failed` and the batch continues**. One bad row cannot abandon the
+rest half-written.
+
 ```json
 {
   "published": 2,
   "context_md_updated": true,
   "node_ids": ["nodes/alpha", "nodes/beta"],
-  "skipped": ["Existing Doc Title"]
+  "skipped": ["Existing Doc Title"],
+  "failed": [{ "title": "Bad Row", "error": "..." }]
 }
 ```
 
-Returns `201`. Writes can fail with `503` + `Retry-After` when the vault's
-write lock is held past its acquire timeout (retry the request).
+Returns `201` whenever the batch ran, even if every row landed in `skipped` or
+`failed` — read the arrays, not the status, to know what happened.
+
+**Partial writes and retries.** The batch is not a transaction: documents are
+created one at a time and the ones written before a failure stay written. The
+one error that stops the batch early is the vault write lock being held past
+its acquire timeout, which answers `503` + `Retry-After`. Retrying is safe and
+finishes the job — every document from the first attempt now exists, so it
+comes back under `skipped` while the remaining ones are created. Expect a
+lower `published` count on the retry; that is the batch converging, not a
+failure.
 
 ---
 

@@ -1985,7 +1985,7 @@ export async function moveNode(
     // serializeNodeSafe, not serializeDocument: `moved` came from
     // readDocument, so an empty `tags: []` on disk is back as
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
-    // are already clean (approve rewrites them through safePublishDocument),
+    // are already clean (approve rewrites them through serializeNodeSafe),
     // which is why drafts and pending-review docs were the ones failing.
     await storage.writeDocument(newId, serializeNodeSafe(moved));
 

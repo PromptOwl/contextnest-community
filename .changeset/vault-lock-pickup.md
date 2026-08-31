@@ -24,6 +24,15 @@ One behavior change: a document whose title slugs to an **existing id is skipped
 and reported** in a new additive `skipped` response field, instead of silently
 overwriting the existing document and restarting its version history.
 
+Going through `createNode` also means a single document can now be refused on its
+own merits — an unusable title, a type the engine does not know. The batch is not
+a transaction, so a row that fails is reported in a new additive `failed` field
+and the remaining documents still publish, rather than aborting the batch and
+leaving the earlier writes on disk with nothing in the response naming them. The
+one error that still stops the batch is the lock timeout itself: it answers `503`,
+and retrying is safe because everything the first attempt created comes back under
+`skipped`.
+
 Also removed the dead `safePublishDocument` wrapper, and added the
 concurrent-writes regression for the MCP surface (the REST surface already had
 one): a burst of concurrent `context_update` calls must land as a contiguous,
