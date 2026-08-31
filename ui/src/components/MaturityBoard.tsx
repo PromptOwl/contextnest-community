@@ -299,18 +299,27 @@ export function MaturityBoard({
     [orderedKeys, updateLayout],
   );
 
-  // Drop from the order as well as hiding: on the tag board columnOrder IS the
-  // column set, so leaving the key there kept a "removed" column alive until
-  // the next reorder silently dropped it.
   const hideColumn = useCallback(
     (key: string) =>
       updateLayout({
-        columnOrder: orderedKeys.filter((k) => k !== key),
+        // On an explicit-column board columnOrder IS the column set, so a
+        // removed key must leave it too — otherwise the column stays alive
+        // until the next reorder silently drops it. Folder/status re-derive
+        // their columns from the data, so their saved order is left intact
+        // and a column that repopulates keeps the position it was given.
+        ...(effectiveConfig.explicitColumns
+          ? { columnOrder: orderedKeys.filter((k) => k !== key) }
+          : {}),
         hiddenColumns: [
           ...new Set([...(effectiveConfig.hiddenColumns ?? []), key]),
         ],
       }),
-    [orderedKeys, effectiveConfig.hiddenColumns, updateLayout],
+    [
+      orderedKeys,
+      effectiveConfig.explicitColumns,
+      effectiveConfig.hiddenColumns,
+      updateLayout,
+    ],
   );
 
   /**
@@ -656,7 +665,9 @@ export function MaturityBoard({
                           title={
                             effectiveConfig.dimension === "folder"
                               ? "Remove this empty column"
-                              : "Remove this column — its cards move to Uncategorized"
+                              : // No Uncategorized catch-all on the tag board:
+                                // the cards leave the board, tags untouched.
+                                "Remove this column — its cards drop off the board; their tags aren't changed"
                           }
                         >
                           <X className="h-3.5 w-3.5" />
