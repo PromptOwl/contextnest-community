@@ -623,12 +623,18 @@ export async function listNodesForCaller(
   // retired node stays in this listing: here it is an unpublished document its
   // stewards may still need to act on, not one removed from retrieval. An
   // imported vault carrying `status: rejected` registers exactly that way.
-  const frontmatterFilters = {
+  //
+  // Split in two because the operation and `filterDocuments` spell the same
+  // flag differently: the op takes `include_retired`, the function takes
+  // `includeRetired`. Sending both used to be harmless (zod stripped the
+  // stranger); since engine 2.4.0 an unrecognized parameter is a hard error,
+  // so only `listFilters` may reach the op.
+  const listFilters = {
     ...(filters.type ? { type: filters.type } : {}),
     ...(filters.tag ? { tag: filters.tag } : {}),
     ...(filters.status ? { status: filters.status } : {}),
-    includeRetired: true,
   };
+  const frontmatterFilters = { ...listFilters, includeRetired: true };
 
   let documents: Array<{
     id: string;
@@ -653,7 +659,7 @@ export async function listNodesForCaller(
     }>(
       "context_list",
       {
-        ...frontmatterFilters,
+        ...listFilters,
         include_retired: true,
         ...(scopeInEngine
           ? {

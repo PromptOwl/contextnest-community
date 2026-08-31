@@ -2,19 +2,20 @@
 "@promptowl/contextnest-community": minor
 ---
 
-Prepare for the engine's per-vault write lock, and retire the last legacy write path.
+Pick up the engine's per-vault write lock, and retire the last legacy write path.
 
-The engine is adding a cross-process write lock (PromptOwl/ContextNest#78): every
+Engine 2.4.0 ships a cross-process write lock (PromptOwl/ContextNest#78): every
 mutation through the operation catalog serializes on it, and a writer that cannot
-acquire it within 20s fails with `VaultLockTimeoutError`. Two things had to be
-true here before an upgrade to that engine is safe:
+acquire it within 20s fails with `VaultLockTimeoutError`. The engine pin moves to
+`^2.4.0` to take it. Two things had to be true here before that upgrade was safe:
 
 **Every wire surface now maps the lock timeout to a retryable error.** REST
 returns `503` with a `Retry-After` header (via a new `VaultBusyError`); MCP
 returns an `isError` tool result whose `structuredContent` carries
 `code: "VAULT_BUSY"` — never a generic 500. Detection matches the error by
-`name`/`code` rather than `instanceof`, so it survives the package boundary and
-is simply inert until the engine release that ships the lock.
+`name`/`code` rather than `instanceof`, so it survives the package boundary —
+and, because it keys on the error rather than the class, it was already correct
+against the engine versions that predate the lock.
 
 **`POST /nests/:nestId/publish` no longer writes documents by hand.** It was the
 last pre-catalog write path — hand-built frontmatter, its own slugify, direct

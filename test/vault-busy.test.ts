@@ -4,12 +4,18 @@
  * retryable error — HTTP 503 + Retry-After on REST, a typed VAULT_BUSY
  * structuredContent code on MCP — never a generic 500.
  *
- * The engine release carrying the lock is not required here: the error is
- * simulated by name, which is exactly how production detection works
- * (isVaultLockTimeout in src/shared/errors.ts matches name/code, not
- * instanceof, to survive the dual CJS/ESM package boundary).
+ * The error thrown here is the engine's own VaultLockTimeoutError, so this
+ * pins detection to the real class rather than a lookalike. What it cannot
+ * exercise is the acquire path itself: the timeout is a fixed 20s with no
+ * knob, so genuinely losing the race would cost the suite 20 seconds per
+ * assertion. Injecting the engine's error at the operation boundary tests the
+ * half that lives here — that isVaultLockTimeout (src/shared/errors.ts, which
+ * matches name/code rather than instanceof to survive the dual CJS/ESM package
+ * boundary) recognises it, and that every surface maps it to a retryable
+ * answer.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
+import { VaultLockTimeoutError } from "@promptowl/contextnest-engine";
 import { setupTestEnv, createTestApp, jsonRequest } from "./helpers";
 
 let env: ReturnType<typeof setupTestEnv>;
@@ -18,11 +24,7 @@ let nestId: string;
 let nodeId: string;
 let engineApi: any;
 
-const vaultLockTimeout = () =>
-  Object.assign(
-    new Error("Could not acquire the write lock for vault at /x within 20000ms"),
-    { name: "VaultLockTimeoutError" },
-  );
+const vaultLockTimeout = () => new VaultLockTimeoutError("/x");
 
 /** Reject mutating ops only — reads keep working so requests reach the write. */
 function makeVaultBusy() {
