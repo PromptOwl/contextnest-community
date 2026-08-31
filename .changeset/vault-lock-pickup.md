@@ -33,6 +33,12 @@ one error that still stops the batch is the lock timeout itself: it answers `503
 and retrying is safe because everything the first attempt created comes back under
 `skipped`.
 
+One gap stays open on purpose: the `context_md` half of that same endpoint has
+no operation in the catalog to route through, so it remains a direct write and
+will not be covered by the lock. It cannot answer a retryable `503` either —
+there is no timeout to map. Closing that needs an engine-side op for
+`CONTEXT.md`, which is Phase B work.
+
 Also removed the dead `safePublishDocument` wrapper, and added the
 concurrent-writes regression for the MCP surface (the REST surface already had
 one): a burst of concurrent `context_update` calls must land as a contiguous,

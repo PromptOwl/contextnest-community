@@ -35,7 +35,7 @@ import {
   listNestFolders,
   nestCensus,
   RUNNABLE_NODE_TYPES,
-  createNode
+  createNode,
 } from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";

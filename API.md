@@ -1417,6 +1417,10 @@ rest half-written.
 Returns `201` whenever the batch ran, even if every row landed in `skipped` or
 `failed` — read the arrays, not the status, to know what happened.
 
+`context_md` is written directly rather than through an operation, because none
+exists for it. It is therefore outside the vault write lock and has no `503` to
+return — a `context_md`-only request cannot report contention.
+
 **Partial writes and retries.** The batch is not a transaction: documents are
 created one at a time and the ones written before a failure stay written. The
 one error that stops the batch early is the vault write lock being held past
