@@ -197,11 +197,10 @@ const CASES: Case[] = [
     tool: "context_versions",
     args: { title: "Conformance Doc" },
     catalog: "context_versions",
-    // No `allowed`: the catalog once required a keyframe+hash-chain model this
-    // server does not have, and had no home for approved_version or a
-    // per-version status. Upstream now makes the keyframe and hash fields
-    // optional and models both governance fields outright, so this tool
-    // conforms exactly. Restore an entry here only with the reason it is right.
+    // Was the one case with a long divergence list. Engine 2.4.0 closed all of
+    // it from the catalog side: `approved_version` and `versions[].status` are
+    // modelled now, and the keyframe/hash fields no longer read as required of
+    // a server without a keyframe+diff model. Conforms as-is.
   },
   {
     tool: "context_submit_review",

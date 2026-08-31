@@ -13,7 +13,7 @@ import {
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
+import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
@@ -23,6 +23,8 @@ import {
   ValidationError,
   ConflictError,
   ForbiddenError,
+  VaultBusyError,
+  isVaultLockTimeout,
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
@@ -285,6 +287,12 @@ function toSafeError(err: unknown, context: string, message: string): AppError {
     return new ConflictError(
       "This document is rejected. Change its status before saving.",
     );
+  }
+  // Vault write-lock timeout is retryable state, not an internal fault —
+  // keep it as a 503 the caller can act on instead of a generic 500.
+  if (isVaultLockTimeout(err)) {
+    console.error(`${context}:`, err);
+    return new VaultBusyError();
   }
   console.error(`${context}:`, err);
   return new AppError(500, message);
@@ -616,16 +624,17 @@ export async function listNodesForCaller(
   // stewards may still need to act on, not one removed from retrieval. An
   // imported vault carrying `status: rejected` registers exactly that way.
   //
-  // "Include retired" is spelled differently on the two consumers below —
-  // `filterDocuments` takes `includeRetired`, the `context_list` operation
-  // takes `include_retired` — so it is NOT part of this shared object. Sending
-  // the camelCase key to the operation is a hard error now that the engine
-  // rejects unrecognized parameters instead of stripping them.
-  const frontmatterFilters = {
+  // Split in two because the operation and `filterDocuments` spell the same
+  // flag differently: the op takes `include_retired`, the function takes
+  // `includeRetired`. Sending both used to be harmless (zod stripped the
+  // stranger); since engine 2.4.0 an unrecognized parameter is a hard error,
+  // so only `listFilters` may reach the op.
+  const listFilters = {
     ...(filters.type ? { type: filters.type } : {}),
     ...(filters.tag ? { tag: filters.tag } : {}),
     ...(filters.status ? { status: filters.status } : {}),
   };
+  const frontmatterFilters = { ...listFilters, includeRetired: true };
 
   let documents: Array<{
     id: string;
@@ -650,7 +659,7 @@ export async function listNodesForCaller(
     }>(
       "context_list",
       {
-        ...frontmatterFilters,
+        ...listFilters,
         include_retired: true,
         ...(scopeInEngine
           ? {
@@ -1985,7 +1994,7 @@ export async function moveNode(
     // serializeNodeSafe, not serializeDocument: `moved` came from
     // readDocument, so an empty `tags: []` on disk is back as
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
-    // are already clean (approve rewrites them through safePublishDocument),
+    // are already clean (approve rewrites them through serializeNodeSafe),
     // which is why drafts and pending-review docs were the ones failing.
     await storage.writeDocument(newId, serializeNodeSafe(moved));
 

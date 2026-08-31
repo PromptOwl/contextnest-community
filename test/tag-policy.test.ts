@@ -2,11 +2,16 @@
  * Document tag policy: what the editor accepts, rewrites, or refuses.
  */
 import { describe, it, expect } from "vitest";
-import { normalizeTagInput, MAX_TAG_LENGTH } from "../ui/src/lib/tag-policy";
+import { normalizeTagInput, newTags, MAX_TAG_LENGTH } from "../ui/src/lib/tag-policy";
 
 describe("normalizeTagInput", () => {
   it("keeps a plain tag and strips a leading #", () => {
     expect(normalizeTagInput("#api-v2")).toEqual({ tag: "api-v2", note: null });
+  });
+
+  it("lowercases so case-variants collapse to one tag, silently", () => {
+    expect(normalizeTagInput("Bug")).toEqual({ tag: "bug", note: null });
+    expect(normalizeTagInput("TAG").tag).toBe(normalizeTagInput("tag").tag);
   });
 
   it("caps an over-long tag and says so", () => {
@@ -29,5 +34,19 @@ describe("normalizeTagInput", () => {
 
   it("ignores an empty token without complaining", () => {
     expect(normalizeTagInput("  ")).toEqual({ tag: null, note: null });
+  });
+});
+
+describe("newTags", () => {
+  it("drops a candidate already present in any casing", () => {
+    expect(newTags(["Bug", "api"], ["bug", "v2"])).toEqual(["v2"]);
+  });
+
+  it("drops a repeat within the same batch", () => {
+    expect(newTags([], ["api", "api"])).toEqual(["api"]);
+  });
+
+  it("keeps everything when nothing collides", () => {
+    expect(newTags(["api"], ["v2", "infra"])).toEqual(["v2", "infra"]);
   });
 });
