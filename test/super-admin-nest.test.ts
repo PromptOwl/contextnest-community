@@ -56,7 +56,7 @@ describe("governance: org super-admin over nest visibility + collaborators", () 
       app,
       "PATCH",
       `/nests/${nestId}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       admin.apiKey,
     );
     expect(res.status).toBe(200);
@@ -87,7 +87,7 @@ describe("governance: org super-admin over nest visibility + collaborators", () 
       app,
       "PATCH",
       `/nests/${nestId}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       nobody.apiKey,
     );
     expect(res.status).toBe(404);
@@ -159,7 +159,7 @@ describe("governance: org super-admin over nest visibility + collaborators", () 
       app,
       "PATCH",
       `/nests/${nestId}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       owner.apiKey,
     );
     expect(await isPublicReader(nestId, admin.userId)).toBe(false);
@@ -211,7 +211,7 @@ describe("governance: license admin over nest visibility + collaborators", () =>
       app,
       "PATCH",
       `/nests/${nestId}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       admin.apiKey,
     );
     expect(res.status).toBe(200);

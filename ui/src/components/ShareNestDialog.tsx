@@ -29,6 +29,16 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Tabs, TabsContent, TabsList, TabsTrigger,
 } from "@/components/ui/tabs";
 import { Globe, Lock, Users, Loader2, AlertCircle } from "lucide-react";
@@ -56,6 +66,8 @@ export function ShareNestDialog({
   const [isPublic, setIsPublic] = useState(false);
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Publishing (→ public) is guarded by an acknowledgement dialog.
+  const [confirmPublic, setConfirmPublic] = useState(false);
 
   useEffect(() => {
     // Read current visibility straight from the server so the toggle
@@ -69,7 +81,7 @@ export function ShareNestDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nestId]);
 
-  const handleVisibilityToggle = async (next: boolean) => {
+  const writeVisibility = async (next: boolean, acknowledgePublic?: boolean) => {
     // Optimistic flip; revert on failure so the switch never lies about
     // server state (same pattern as NestSettingsModal's stewardship save).
     setIsPublic(next);
@@ -79,6 +91,7 @@ export function ShareNestDialog({
       const result = await api.setNestVisibility(
         nestId,
         next ? "public" : "private",
+        acknowledgePublic,
       );
       if ((result.visibility === "public") !== next) {
         setIsPublic(!next);
@@ -92,6 +105,17 @@ export function ShareNestDialog({
     } finally {
       setVisibilitySaving(false);
     }
+  };
+
+  const handleVisibilityToggle = async (next: boolean) => {
+    // Going public makes the nest readable by anyone on the internet, outside
+    // your organization — confirm first (and send acknowledge_public). Going
+    // back to private is unguarded.
+    if (next) {
+      setConfirmPublic(true);
+      return;
+    }
+    await writeVisibility(false);
   };
 
   return (
@@ -184,6 +208,31 @@ export function ShareNestDialog({
           </Button>
         </DialogFooter>
       </DialogContent>
+
+      {/* Outside-org publish acknowledgement — same guardrail the header
+          toggle uses; the write sends acknowledge_public:true. */}
+      <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This makes the nest readable by anyone on the internet, outside
+              your organization. Anyone with the URL will be able to read it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setConfirmPublic(false);
+                void writeVisibility(true, true);
+              }}
+            >
+              Make public
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }

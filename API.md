@@ -209,8 +209,32 @@ Turning stewardship **off** wipes stewards and pending reviews and is owner-only
 
 ### PATCH `/nests/:nestId/visibility` (admin)
 ```json
-{ "visibility": "public" }
+{ "visibility": "public", "acknowledge_public": true }
 ```
+- **Outside-org publish guardrail.** Setting `visibility: "public"` **requires** `acknowledge_public: true`. Without it the request is rejected `409`:
+  ```json
+  {
+    "error": "Publishing this nest requires acknowledgement.",
+    "requires_acknowledgement": true,
+    "warning": "This makes the nest readable by anyone on the internet, outside your organization."
+  }
+  ```
+  Going back to `private` needs no acknowledgement.
+
+### PATCH `/nests/:nestId/reader-mode` (server-admin / superadmin only)
+Configure **Public Docs Reader Mode** — a clean, read-only public docs view of the nest. Superadmin-gated via `isServerAdminUserId` (license admin OR `access.yaml` super_admins ∪ the DB-granted set; the same gate as `/nests/unsynced` and `/admin/*`). A plain nest-owner/admin who is not a superadmin gets `403`.
+```json
+{ "enabled": true, "home_node": "welcome" }
+```
+- `enabled` (optional boolean) — toggle reader mode. When on, read-only callers (public/anonymous readers) get a stripped three-pane docs reader instead of the tabbed authoring UI; owners/editors/reviewers/admins keep the full UI.
+- `home_node` (optional string | null) — the designated landing/hub node id. `null` (or a blank string) clears it, so the landing node resolves by convention (first node whose id/title is `welcome | index | readme | home | overview`, case-insensitive; else the synthesized Contents table). A non-string, non-null value is rejected `400`.
+- At least one of `enabled` / `home_node` must be present (`400` otherwise).
+
+Response (200) echoes the persisted row:
+```json
+{ "reader_mode": 1, "reader_home_node": "welcome" }
+```
+The two additive columns (`nests.reader_mode`, `nests.reader_home_node`) also surface on `GET /nests/:nestId` via the `SELECT *` nest payload.
 
 ### GET `/nests/unsynced` (server-admin only outside open mode)
 Lists folders under `DATA_ROOT` that aren't nests yet — typically dropped in by the starter CLI or copied in manually. Each entry is a sync candidate. Reflects server-side filesystem state, so in non-open mode only a server admin — the license admin or any superadmin (`access.yaml` ∪ granted; same resolution as `/admin/*`) — sees it (everyone else gets `403`).
@@ -1646,6 +1670,7 @@ For any `/nests/:nestId/...` request, the middleware computes:
 - `permission` = effective nest perm: `owner | admin | write | read | none`.
 - Required level by path:
   - `/collaborators`, `/visibility` → `admin`
+  - `/reader-mode` → `admin` at the middleware, then the handler hard-gates on `isServerAdminUserId` (superadmin only)
   - Stewardship action paths (`/approve`, `/reject`, `/submit-review`, `/cancel-review`) → `read` (handler enforces fine-grained steward gating)
   - Other non-GET → `write`
   - GET → `read`

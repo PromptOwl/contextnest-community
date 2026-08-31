@@ -715,16 +715,47 @@ export async function deleteUnsyncedFolder(name: string) {
 export async function setNestVisibility(
   nestId: string,
   visibility: "private" | "public",
+  // Publishing (→ public) requires an explicit acknowledgement that the nest
+  // becomes readable by anyone on the internet, outside your organization.
+  // Without it the server returns 409 requires_acknowledgement. Going back to
+  // private needs no acknowledgement, so this is optional.
+  acknowledgePublic?: boolean,
 ) {
   return request<{ visibility: "private" | "public" }>(
     `/nests/${nestId}/visibility`,
-    { method: "PATCH", body: JSON.stringify({ visibility }) },
+    {
+      method: "PATCH",
+      body: JSON.stringify(
+        acknowledgePublic
+          ? { visibility, acknowledge_public: true }
+          : { visibility },
+      ),
+    },
+  );
+}
+
+// Configure Public Docs Reader Mode (superadmin-only). Either field may be sent
+// on its own; home_node: null clears the designated landing node.
+export async function setNestReaderMode(
+  nestId: string,
+  body: { enabled?: boolean; home_node?: string | null },
+) {
+  return request<{ reader_mode: number; reader_home_node: string | null }>(
+    `/nests/${nestId}/reader-mode`,
+    { method: "PATCH", body: JSON.stringify(body) },
   );
 }
 
 export async function getNest(nestId: string) {
   return request<{
-    nest: { id: string; name: string; visibility: "private" | "public" };
+    nest: {
+      id: string;
+      name: string;
+      visibility: "private" | "public";
+      // Public Docs Reader Mode fields — surfaced straight off the SELECT *.
+      reader_mode?: number;
+      reader_home_node?: string | null;
+    };
     permission: string;
     // Caller's merged effective roles (collaborator + steward), nest-wide.
     roles?: Array<"owner" | "admin" | "editor" | "reviewer" | "viewer">;

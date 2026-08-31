@@ -106,6 +106,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       prime_tags TEXT NOT NULL DEFAULT 'prime-document',
       shared_teams TEXT NOT NULL DEFAULT '[]',
       index_synced_at TEXT,
+      reader_mode INTEGER NOT NULL DEFAULT 0,
+      reader_home_node TEXT,
       UNIQUE(user_id, slug)
     );
     CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
@@ -401,6 +403,12 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- from disk before answering", which is exactly right for a nest whose
     -- index has never been built.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS index_synced_at TEXT;
+
+    -- Public Docs Reader Mode: same inline-plus-explicit-ALTER pattern so a
+    -- database created before reader mode shipped still gets the columns on
+    -- upgrade. reader_mode is off by default; reader_home_node is nullable.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_mode INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_home_node TEXT;
 
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,

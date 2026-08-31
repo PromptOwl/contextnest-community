@@ -25,7 +25,7 @@ import {
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
-  Activity, Share2,
+  Activity, Share2, BookOpen,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
@@ -64,6 +64,17 @@ export function NodeTypeIcon({
 }
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
+import { ReaderView } from "./ReaderView";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
@@ -325,6 +336,15 @@ export function NestView({
   const [primeTags, setPrimeTags] = useState<string[]>([]);
   const [visibility, setVisibility] = useState<"private" | "public">("private");
   const [visibilitySaving, setVisibilitySaving] = useState(false);
+  // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
+  // becomes readable by anyone on the internet, outside your organization.
+  const [confirmPublic, setConfirmPublic] = useState(false);
+  // Public Docs Reader Mode (superadmin-only config). reader_mode flips the
+  // read-only presentation to the clean docs reader; reader_home_node names the
+  // designated landing/hub node (empty → resolve by convention).
+  const [readerModeEnabled, setReaderModeEnabled] = useState(false);
+  const [readerHomeNode, setReaderHomeNode] = useState<string | null>(null);
+  const [readerModeSaving, setReaderModeSaving] = useState(false);
   const [isImported, setIsImported] = useState(false);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
@@ -843,6 +863,8 @@ export function NestView({
     if (nestMeta?.nest) {
       setIsImported(!!(nestMeta.nest as any).is_imported);
       setNestDescription((nestMeta.nest as any).description ?? null);
+      setReaderModeEnabled(!!(nestMeta.nest as any).reader_mode);
+      setReaderHomeNode((nestMeta.nest as any).reader_home_node ?? null);
     }
     if (nestMeta?.permission) {
       setPermission(nestMeta.permission);
@@ -1200,10 +1222,12 @@ export function NestView({
     myStewards,
     isOwner,
     isAdmin,
+    readerMode: readerModeEnabled,
   });
   // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
   // canReviewNode for scope resolution, so it isn't destructured here.
-  const { canManage, collabCanWrite, canEditDocs, isReadOnly } = caps;
+  const { canManage, collabCanWrite, canEditDocs, isReadOnly, isReaderView } =
+    caps;
 
   // Map nodeId → submitter so the per-row Review button can hide on
   // docs the current user submitted (separation-of-duties: authors must
@@ -1555,18 +1579,68 @@ export function NestView({
   // flip with revert on failure, mirroring ShareNestDialog so the control
   // never lies about server state. Surfaces the public/private switch outside
   // the Share dialog, where it was easy to miss. (CU-wdqcpztgwk)
-  const handleVisibilityToggle = async () => {
-    const next = visibility === "public" ? "private" : "public";
+  const applyVisibility = async (
+    next: "private" | "public",
+    acknowledgePublic?: boolean,
+  ) => {
+    const prev = visibility;
     setVisibility(next);
     setVisibilitySaving(true);
     try {
-      const result = await api.setNestVisibility(nestId, next);
+      const result = await api.setNestVisibility(
+        nestId,
+        next,
+        acknowledgePublic,
+      );
       if (result?.visibility) setVisibility(result.visibility);
     } catch (err: any) {
-      setVisibility(next === "public" ? "private" : "public"); // revert
+      setVisibility(prev); // revert
       toast.error(err?.message || "Failed to change visibility");
     } finally {
       setVisibilitySaving(false);
+    }
+  };
+
+  const handleVisibilityToggle = async () => {
+    // Going public makes the nest readable by anyone on the internet, outside
+    // your organization — confirm first (and send acknowledge_public). Going
+    // back to private is unguarded.
+    if (visibility !== "public") {
+      setConfirmPublic(true);
+      return;
+    }
+    await applyVisibility("private");
+  };
+
+  // Public Docs Reader Mode config (superadmin-only; the server hard-gates on
+  // isServerAdminUserId). Optimistic flip with revert on failure.
+  const handleReaderModeToggle = async () => {
+    const next = !readerModeEnabled;
+    setReaderModeEnabled(next);
+    setReaderModeSaving(true);
+    try {
+      const result = await api.setNestReaderMode(nestId, { enabled: next });
+      setReaderModeEnabled(!!result.reader_mode);
+      setReaderHomeNode(result.reader_home_node ?? null);
+    } catch (err: any) {
+      setReaderModeEnabled(!next); // revert
+      toast.error(err?.message || "Failed to change reader mode");
+    } finally {
+      setReaderModeSaving(false);
+    }
+  };
+
+  const handleReaderHomeNodeSave = async (raw: string) => {
+    const home = raw.trim() === "" ? null : raw.trim();
+    setReaderModeSaving(true);
+    try {
+      const result = await api.setNestReaderMode(nestId, { home_node: home });
+      setReaderHomeNode(result.reader_home_node ?? null);
+      toast.success("Saved reader home node");
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to set reader home node");
+    } finally {
+      setReaderModeSaving(false);
     }
   };
 
@@ -1633,6 +1707,31 @@ export function NestView({
     },
     [nestId, fetchData, onOpenDocument],
   );
+
+  // Public Docs Reader Mode: a read-only caller of a reader-mode nest gets the
+  // stripped docs reader instead of the full tabbed authoring layout. Gated on
+  // caps.isReaderView (reader_mode && isReadOnly), so owners/editors/reviewers/
+  // admins never lose the authoring UI.
+  if (isReaderView) {
+    return (
+      <div className="relative">
+        <div className="mb-3">
+          <Button variant="ghost" size="sm" onClick={onBack} className="gap-1.5">
+            <ArrowLeft className="h-4 w-4" />
+            Back
+          </Button>
+        </div>
+        <ReaderView
+          nestId={nestId}
+          nestName={editableName}
+          nodes={nodes}
+          tocGroups={tocGroups}
+          knownFolders={knownFolders}
+          readerHomeNode={readerHomeNode}
+        />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1761,6 +1860,52 @@ export function NestView({
                 Public
               </Badge>
             )
+          )}
+          {/* Public Docs Reader Mode — superadmin-only config (isAdmin ==
+              server/super admin). Toggles the clean read-only docs view that
+              public readers see; the input designates the landing/hub node
+              (blank → resolve by convention). */}
+          {isAdmin && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleReaderModeToggle}
+              disabled={readerModeSaving}
+              className={`shrink-0 h-7 gap-1.5 ${
+                readerModeEnabled
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                  : ""
+              }`}
+              title={
+                readerModeEnabled
+                  ? "Public Docs Reader Mode is ON — public readers get a clean docs view. Click to turn off."
+                  : "Turn on Public Docs Reader Mode — a clean, read-only docs view for public readers."
+              }
+            >
+              {readerModeSaving ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <BookOpen className="h-3.5 w-3.5" />
+              )}
+              {readerModeEnabled ? "Reader: On" : "Reader: Off"}
+            </Button>
+          )}
+          {isAdmin && readerModeEnabled && (
+            <input
+              type="text"
+              defaultValue={readerHomeNode ?? ""}
+              key={readerHomeNode ?? ""}
+              placeholder="home node (optional)"
+              disabled={readerModeSaving}
+              onBlur={(e) => {
+                const val = e.target.value.trim();
+                if (val !== (readerHomeNode ?? "")) {
+                  void handleReaderHomeNodeSave(val);
+                }
+              }}
+              className="shrink-0 h-7 w-40 rounded-md border bg-background px-2 text-xs"
+              title="Designated landing/hub node id. Blank resolves by convention (welcome / index / readme / home / overview)."
+            />
           )}
           {isImported && (
             <Badge
@@ -3957,6 +4102,32 @@ export function NestView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Outside-org publish acknowledgement — flipping a nest to public makes
+          it readable by anyone on the internet, outside your organization.
+          Confirm sends acknowledge_public:true; the server 409s without it. */}
+      <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This makes the nest readable by anyone on the internet, outside
+              your organization. Anyone with the URL will be able to read it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setConfirmPublic(false);
+                void applyVisibility("public", true);
+              }}
+            >
+              Make public
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Move to folder — the keyboard-accessible path to the same move the
           drag-and-drop performs; both funnel through handleMoveNode. */}

@@ -16,7 +16,7 @@ import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
-import { deriveNestCaps } from "./lib/nest-caps";
+import { deriveNestCaps, isReaderHiddenView } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
@@ -76,6 +76,10 @@ type View =
       /** Which of NestView's own tabs is open, mirrored to ?tab= so a link
        *  to the Review Queue lands on the Review Queue. Absent = overview. */
       tab?: string;
+      /** Public Docs Reader Mode is on for this nest AND the caller is
+       *  read-only — the shell hides the board/graph/definitions tabs and
+       *  NestView renders the stripped ReaderView. */
+      readerMode?: boolean;
     }
   | {
       page: "document";
@@ -108,6 +112,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       page: "workflows";
@@ -115,6 +120,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       page: "definitions";
@@ -122,6 +128,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       page: "board";
@@ -129,6 +136,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       /** Nest-scoped activity trace (owner/nest-admin) — ActivityTracePage
@@ -138,6 +146,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     };
 
 /** The views of a single nest, in switcher order. "Nest" (not "Documents")
@@ -334,13 +343,24 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const { nest, permission } = await getNest(nestId);
+        const { nest, permission, roles, myStewards } = await getNest(nestId);
         if (cancelled) return;
         // Deep-link / refresh nav has no is_owner from a nest-list row, so
         // derive it from the authoritative permission — resolveNestPermission
         // returns "owner" only for the real owner. Hardcoding false here hid
         // owner-only UI (Nest settings) after a refresh, even for the owner.
         const isOwner = permission === "owner";
+        // Public Docs Reader Mode strips the shell tabs (board/graph/
+        // definitions) and swaps NestView for the docs reader — but ONLY for a
+        // read-only caller. Owners/editors/reviewers/admins keep authoring.
+        const readerMode = deriveNestCaps({
+          roles: roles ?? [],
+          permission,
+          myStewards: (myStewards ?? []) as any,
+          isOwner,
+          isAdmin,
+          readerMode: !!nest.reader_mode,
+        }).isReaderView;
         setDeepLinkProbe({
           status: "ok",
           nestId: nest.id,
@@ -380,6 +400,7 @@ export default function App() {
             nestName: nest.name,
             isOwner,
             isAnonOwned: false,
+            readerMode,
           });
           return;
         }
@@ -389,6 +410,7 @@ export default function App() {
           nestName: nest.name,
           isOwner,
           isAnonOwned: false,
+          readerMode,
           // ?tab=<slug> → open on that NestView tab. Unknown slugs are
           // dropped rather than passed through, so a stale link can't leave
           // Radix with a value that matches no trigger (blank content area).
@@ -875,6 +897,7 @@ export default function App() {
                   nestName: view.nestName,
                   isOwner: view.isOwner,
                   isAnonOwned: view.isAnonOwned,
+                  readerMode: view.readerMode,
                 } as View)
               }
             >
@@ -883,7 +906,12 @@ export default function App() {
                   (v) =>
                     v.page !== "workflows" ||
                     (workflowPlaneEnabled && nestCanEdit === true),
-                ).map((v) => {
+                )
+                  // Public Docs Reader Mode presents a clean, read-only docs
+                  // view — the board, ontology graph and definitions authoring
+                  // surfaces are hidden so a public reader sees only the docs.
+                  .filter((v) => !view.readerMode || !isReaderHiddenView(v.page))
+                  .map((v) => {
                   const Icon = v.icon;
                   return (
                     <TabsTrigger key={v.page} value={v.page} className="gap-1.5">

@@ -92,6 +92,55 @@ export async function setStewardshipEnabled(
   ]);
 }
 
+/** Whether Public Docs Reader Mode (read-only public docs view) is on for a nest. */
+export async function nestReaderMode(nestId: string): Promise<boolean> {
+  const db = getDb();
+  const row = (await db.get("SELECT reader_mode FROM nests WHERE id = ?", [
+    nestId,
+  ])) as { reader_mode: number } | undefined;
+  return !!row?.reader_mode;
+}
+
+/**
+ * The designated reader-mode home/hub node for a nest, or null when unset
+ * (callers then resolve a landing node by convention).
+ */
+export async function nestReaderHomeNode(
+  nestId: string,
+): Promise<string | null> {
+  const db = getDb();
+  const row = (await db.get(
+    "SELECT reader_home_node FROM nests WHERE id = ?",
+    [nestId],
+  )) as { reader_home_node: string | null } | undefined;
+  return row?.reader_home_node ?? null;
+}
+
+/**
+ * Configure Public Docs Reader Mode for a nest (superadmin-only). Either field
+ * may be updated independently; `enabled` toggles the read-only public view and
+ * `homeNode` designates (or clears, with null) the landing/hub node.
+ */
+export async function setReaderMode(
+  nestId: string,
+  opts: { enabled?: boolean; homeNode?: string | null },
+): Promise<void> {
+  const db = getDb();
+  const sets: string[] = [];
+  const params: Array<string | number | null> = [];
+  if (opts.enabled !== undefined) {
+    sets.push("reader_mode = ?");
+    params.push(opts.enabled ? 1 : 0);
+  }
+  if (opts.homeNode !== undefined) {
+    sets.push("reader_home_node = ?");
+    params.push(opts.homeNode ?? null);
+  }
+  if (sets.length === 0) return;
+  params.push(nestId);
+  await db.run(`UPDATE nests SET ${sets.join(", ")} WHERE id = ?`, params);
+}
+
 /** Whether the nest lets a submitter approve their own version (bypass SoD). */
 export async function nestAllowsSelfApprove(
   nestId: string,

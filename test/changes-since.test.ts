@@ -226,7 +226,7 @@ describe("GET /changes — public-reader approval signal", () => {
       `version: 1\nnest:\n  - email: ${bob.email}, role: editor\n`,
     );
     await jsonRequest(app, "POST", `/nests/${gNest}/stewards/sync`, {}, alice.apiKey);
-    await jsonRequest(app, "PATCH", `/nests/${gNest}/visibility`, { visibility: "public" }, alice.apiKey);
+    await jsonRequest(app, "PATCH", `/nests/${gNest}/visibility`, { visibility: "public", acknowledge_public: true }, alice.apiKey);
 
     // Owner create auto-publishes under self-approve → public reader has an
     // approved body to see.

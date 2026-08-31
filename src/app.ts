@@ -1785,6 +1785,12 @@ export function createApp(): Hono<AuthEnv> {
     const resource = parts[1];
     if (resource === "visibility") {
       required = "admin";
+    } else if (resource === "reader-mode") {
+      // Public Docs Reader Mode is a superadmin-only surface. The admin tier
+      // here folds in the server/super admin (resolveNestPermission maps them
+      // to "admin"); the handler additionally hard-gates on isServerAdminUserId
+      // so a plain nest-admin collaborator can't reach it.
+      required = "admin";
     } else if (resource === "collaborators") {
       // Viewing the roster (GET) and inviting (POST) are open to write+
       // collaborators: the Collaborators tab loads the roster and lets editors

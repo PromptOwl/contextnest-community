@@ -22,6 +22,12 @@ export interface NestCapsInput {
   myStewards: CapSteward[];
   isOwner: boolean;
   isAdmin: boolean;
+  /**
+   * Whether Public Docs Reader Mode is enabled on the nest (nest.reader_mode).
+   * Only flips the presentation for read-only callers — owners/editors/admins
+   * keep the full authoring UI.
+   */
+  readerMode?: boolean;
 }
 
 export interface NestCaps {
@@ -35,6 +41,12 @@ export interface NestCaps {
   canEditDocs: boolean;
   /** No write/review/manage — public visitors and plain 'read' collaborators. */
   isReadOnly: boolean;
+  /**
+   * Show the stripped read-only Public Docs Reader presentation. True ONLY when
+   * the nest has reader mode on AND the caller is read-only — owners, editors,
+   * reviewers and admins keep the full tabbed authoring UI.
+   */
+  isReaderView: boolean;
 }
 
 export function deriveNestCaps({
@@ -43,6 +55,7 @@ export function deriveNestCaps({
   myStewards,
   isOwner,
   isAdmin,
+  readerMode,
 }: NestCapsInput): NestCaps {
   const hasRole = (...r: string[]) => roles.some((x) => r.includes(x));
   const canManage = isOwner || isAdmin || hasRole("owner", "admin");
@@ -55,5 +68,29 @@ export function deriveNestCaps({
     collabCanWrite ||
     myStewards.some((s) => s.role === "editor" && s.scope === "nest");
   const isReadOnly = !canEditDocs && !canReviewDocs && !canManage;
-  return { canManage, collabCanWrite, canReviewDocs, canEditDocs, isReadOnly };
+  const isReaderView = !!readerMode && isReadOnly;
+  return {
+    canManage,
+    collabCanWrite,
+    canReviewDocs,
+    canEditDocs,
+    isReadOnly,
+    isReaderView,
+  };
+}
+
+/**
+ * Shell nest-view tabs hidden by Public Docs Reader Mode — the board, ontology
+ * graph and definitions authoring surfaces. In reader mode a public reader sees
+ * only the docs, so these disappear from the nest view switcher.
+ */
+export const READER_HIDDEN_VIEWS = [
+  "board",
+  "ontology-graph",
+  "definitions",
+] as const;
+
+/** Whether a nest-view page is hidden when reader mode is active for a reader. */
+export function isReaderHiddenView(page: string): boolean {
+  return (READER_HIDDEN_VIEWS as readonly string[]).includes(page);
 }
