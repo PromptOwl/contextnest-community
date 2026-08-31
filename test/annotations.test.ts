@@ -323,10 +323,21 @@ describe("annotations: hosted artifact + threaded comments", () => {
       (n: any) => n.title === "Q3 Deck — Annotations",
     );
     expect(derived).toBeDefined();
-    // The feedback + anchor are readable as ordinary node content (so MCP /
-    // context assembly pulls them into the next iteration for free).
-    expect(derived.content).toContain("Should be ARR not MRR.");
-    expect(derived.content).toContain('quote "MRR of $400K"');
+
+    // The listing itself is served from the node index and carries metadata
+    // only — no body. The feedback + anchor are still readable as ordinary
+    // node content (so MCP / context assembly pulls them into the next
+    // iteration for free); that just costs the file read you opt into.
+    const withBodies = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes?content=1`,
+      undefined,
+      alice.apiKey,
+    );
+    const full = withBodies.data.nodes.find((n: any) => n.id === derived.id);
+    expect(full.content).toContain("Should be ARR not MRR.");
+    expect(full.content).toContain('quote "MRR of $400K"');
   });
 
   it("does NOT create a derived node when annotating a plain document", async () => {

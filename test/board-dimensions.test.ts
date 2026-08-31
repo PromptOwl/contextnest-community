@@ -133,6 +133,18 @@ describe("buildColumns", () => {
       "b006e456-15de/nodes/gtm/deals",
     ]);
   });
+  it("shows a folder column added to columnOrder before any card is in it", () => {
+    // What the board's "new folder" action leans on: a nest whose documents
+    // all sit in Root needs somewhere to drag them, and the folder itself is
+    // written by the first move.
+    const cols = buildColumns(
+      [node({ id: "nodes/a" }), node({ id: "nodes/b" })],
+      { dimension: "folder", columnOrder: ["gtm"] },
+    );
+    expect(cols.map((c) => c.key)).toEqual(["gtm", ""]);
+    expect(cols[0]!.label).toBe("gtm");
+  });
+
   it("grows colliding folder labels until they are distinct", () => {
     const cfg: BoardConfig = { dimension: "folder" };
     const cols = buildColumns(

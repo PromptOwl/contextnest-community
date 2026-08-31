@@ -266,6 +266,16 @@ describe("discovery — the grantee finds the nest by logging in", () => {
     expect(res.data.myStewards).toEqual([]);
   });
 
+  it("the grantee can read the nest's glossary from the Definitions tab", async () => {
+    // Regression: a doc/folder grantee has no nest-wide permission, so
+    // GET /nests/:id/definitions fell through the middleware's grant
+    // checks (only bare GET, GET /nodes and the query/search/export
+    // routes were covered) and 404'd as "Nest not found" even though the
+    // grantee could otherwise open the nest fine.
+    const res = await jsonRequest(app, "GET", `/nests/${nestId}/definitions`, undefined, guest.apiKey);
+    expect(res.status).toBe(200);
+  });
+
   it("read access still buys no nest-wide power", async () => {
     // Reporting a grantee as a reader inside the nest routes must not become
     // authority. Denial can come from the middleware (404 — these paths are
@@ -401,5 +411,101 @@ describe("grants under stewardship (governed nest)", () => {
     const write = await jsonRequest(app, "PATCH", `/nests/${govNest}/nodes/nodes/gov-shared`,
       { append: "\nedited by guest" }, guest.apiKey);
     expect(write.status).toBe(200);
+  });
+});
+
+/**
+ * A share that grants nothing is refused. Someone who already reaches the
+ * target — as owner, collaborator, team member, a steward assigned to it, or
+ * through an existing grant — cannot be "shared" it again: the endpoint
+ * upserts, so the repeat silently looked like it worked.
+ *
+ * Scope is the interesting half: a steward of a DIFFERENT document has no
+ * access to this one, so that share must still go through.
+ */
+describe("sharing with someone who already has access", () => {
+  const steward = "steward@acme.com";
+
+  it("refuses a share to the nest owner", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      { target_type: "document", target: "nodes/sibling-secret", email: owner.email, role: "read" },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(res.data.error).toContain("already has");
+  });
+
+  it("refuses re-sharing the same document with the same person", async () => {
+    // Share once, then repeat the exact same call.
+    const first = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      { target_type: "document", target: "nodes/shared-one", email: guest.email, role: "read" },
+      owner.apiKey,
+    );
+    expect(first.status).toBe(201);
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      { target_type: "document", target: "nodes/shared-one", email: guest.email, role: "read" },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("refuses a share to a nest collaborator", async () => {
+    const added = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/collaborators`,
+      { email: outsider.email, permission: "read" },
+      owner.apiKey,
+    );
+    expect(added.status).toBe(201);
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      { target_type: "document", target: "nodes/sibling-secret", email: outsider.email, role: "read" },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("still shares a document with a steward scoped to a different one", async () => {
+    const assigned = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/stewards`,
+      { scope: "document", email: steward, role: "viewer", nodePattern: "nodes/shared-one" },
+      owner.apiKey,
+    );
+    expect(assigned.status).toBe(201);
+
+    // Steward of shared-one — sibling-secret is not theirs, so the share adds
+    // access and must succeed.
+    const other = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      { target_type: "document", target: "nodes/sibling-secret", email: steward, role: "read" },
+      owner.apiKey,
+    );
+    expect(other.status).toBe(201);
+
+    // The document they steward is already visible to them — refused.
+    const same = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      { target_type: "document", target: "nodes/shared-one", email: steward, role: "read" },
+      owner.apiKey,
+    );
+    expect(same.status).toBe(400);
   });
 });

@@ -45,8 +45,8 @@ function walkFiles(root: string): string[] {
 
 /**
  * Build the export .zip for a nest. Caller must have already gated the request
- * (owner/admin). `includeDrafts` adds unapproved draft documents; when false,
- * only approved/published documents are exported.
+ * (any nest reader — viewer and up). `includeDrafts` adds unapproved draft
+ * documents; when false, only approved/published documents are exported.
  */
 export async function exportNestBundle(
   nestId: string,

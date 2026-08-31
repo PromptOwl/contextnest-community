@@ -7,6 +7,7 @@
  * All user-controlled fragments (nest names, notes, emails) are HTML-escaped
  * BEFORE `*bold*` markup is applied, so a fragment can never inject markup.
  */
+import { permissionLabel } from "../governance/roles.js";
 
 /** HTML-escape user-controlled fragments before they enter the HTML body. */
 export function escapeHtml(s: string): string {
@@ -106,6 +107,10 @@ const STATUS_META: Record<
 /** First-letter capitalize for tidy detail values (role/scope). */
 const cap = (s: string) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
+/** Share copy names the role ("Viewer"), never the raw permission ("read"). */
+const shareRole = (permission?: string) =>
+  permission ? permissionLabel(permission) : "collaborator";
+
 /** One details-table row rendered to an HTML `<tr>` (label + value cell). */
 const detailRow = (label: string, valueHtml: string) =>
   `<tr>
@@ -194,12 +199,12 @@ const TEMPLATES: Record<EmailEventDetails["status"], EmailTemplate> = {
     detailsHeader: "Details",
     linkLabel: "Open nest",
     lineT: (x) =>
-      `You've been given ${x.d.permission || "collaborator"} access to ${x.title}${x.d.by ? ` by ${x.d.by}` : ""}. Open it below to start collaborating.`,
+      `You've been given ${shareRole(x.d.permission)} access to ${x.title}${x.d.by ? ` by ${x.d.by}` : ""}. Open it below to start collaborating.`,
     lineH: (x) =>
-      `You've been given <strong>${escapeHtml(x.d.permission || "collaborator")}</strong> access to ${x.doc}${x.d.by ? ` by ${escapeHtml(x.d.by)}` : ""}. Open it below to start collaborating.`,
+      `You've been given <strong>${escapeHtml(shareRole(x.d.permission))}</strong> access to ${x.doc}${x.d.by ? ` by ${escapeHtml(x.d.by)}` : ""}. Open it below to start collaborating.`,
     rows: (x) => [
       plainRow("Nest", x.d.path),
-      ...(x.d.permission ? [plainRow("Role", cap(x.d.permission))] : []),
+      ...(x.d.permission ? [plainRow("Role", shareRole(x.d.permission))] : []),
     ],
   },
   invited: {

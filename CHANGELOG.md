@@ -1,5 +1,201 @@
 # @promptowl/contextnest-community
 
+## 1.17.0
+
+### Minor Changes
+
+- f2a1a78: Deletion requests are editor-only — viewers no longer see the action at all.
+
+  Flagging something for deletion used to be read-tier, on the reasoning that
+  whoever notices dead content usually can't delete it. In practice that handed
+  the action to everyone who could merely _see_ a document — read-only
+  collaborators, viewer stewards, and now anyone holding a read share grant — and
+  produced requests from people with no stake in the content. Someone who cannot
+  change a document has no standing to propose destroying it.
+
+  Now: `POST /nests/:id/nodes/:nodeId/request-deletion` and
+  `POST /nests/:id/request-deletion` require **editor** authority, meaning any of
+  the three paths that already let someone change the target — nest-wide `write`,
+  an editor steward row covering it, or a `write` share grant on it. A folder or
+  nest flag additionally wants a **nest**-scope steward row: a row scoped to one
+  document is no mandate over everything around it. Below that the answer is
+  `403`, after the existing read check, so the gate never doubles as an existence
+  oracle. Deleting outright is unchanged (owner/admin, or the document's author).
+
+  The rule lives in one predicate (`canRequestDeletion`) shared by the REST routes
+  and the `context_request_deletion` MCP tool, so the agent surface can't become
+  the way around it.
+
+  In the UI the action is withheld rather than offered and refused: no Delete
+  entry on a document's ⋯ menu or list row for a viewer, no request affordance on
+  a folder row, and no nest-level Delete for viewers or reviewer-only stewards.
+
+- v1.17.0 — narrower sharing, a review queue that reads the same everywhere, and an editor that stops inventing versions.
+
+  ### Governance
+
+  - **Withdraw your own pending deletion request** — a requester can retract a flag they raised without waiting for a reviewer to reject it. The withdraw path sits at read tier deliberately: the person who filed it can always unfile it, even after the editor-only gate on _raising_ one (`src/governance/review-service.ts`, `src/governance/routes.ts`, `ui/src/components/DocumentEditor.tsx`).
+  - **My Work reject requires feedback**, and both approve and reject now route through the shared `ReviewActions` component, so the dashboard and the document surfaces stop disagreeing about what rejecting means (`ui/src/components/Dashboard.tsx`, `ui/src/components/governance/ReviewActions.tsx`).
+  - **One word for the negative action** — "Reject", replacing the three different names the same button carried across review surfaces (`ui/src/components/governance/ReviewActions.tsx`).
+  - Reviewers opening a pending-review document land with comment mode already on, and authoring controls are withheld from viewers and reviewers rather than shown and refused.
+
+  ### Search
+
+  - **Viewer-accessible nests are covered by global search.** A nest reachable only through a viewer role was silently absent from cross-nest results — the search path resolved access differently from every other read (`src/nodes/search.ts`, `src/nests/service.ts`, `src/governance/access-guard.ts`, `src/app.ts`).
+  - **Quick-open shows the matching snippet**, not just the title, so a hit in the body is legible without opening the document (`src/nodes/search.ts`, `ui/src/components/QuickOpen.tsx`).
+
+  ### Editor
+
+  - **A no-op Save no longer creates a version.** Pressing Save without edits used to mint a new document version; it now short-circuits and toasts instead (`ui/src/components/DocumentEditor.tsx`).
+  - **Agent Schedule is validated per cron field position** and echoed back as a human-readable interpretation, instead of accepting anything and failing later (`ui/src/lib/schedule-validation.ts`, `ui/src/components/DocumentEditor.tsx`).
+  - **Text color persists to markdown** and renders in both the viewer and the editor — it was previously an editor-only preview that was dropped on save (`ui/src/components/DocumentViewer.tsx`, `ui/src/components/MarkdownEditor/MarkdownEditor.tsx`).
+  - The ``` code-fence shortcut fires on a blank line (`ui/src/components/MarkdownEditor/extensions/CodeBlock.ts`); the wiki-link popup has an empty state; New Document focuses Title and warns on Type reinterpretation.
+
+  ### Performance
+
+  - **The discovery cache stays warm across nest writes** instead of being dropped on every publish (`src/nodes/engine.ts`, `src/mcp/tools.ts`, `test/discovery-cache.test.ts`).
+
+  ### Fixes
+
+  - Folder share targeted the wrong path and broke the dialog layout; a write grant is now honoured in the UI rather than rendered read-only.
+  - Doc/folder grantees can read the nest's Definitions glossary; viewer-role collaborators can export the portability `.zip`.
+  - Root is excluded from the Overview folder count; nest summary card titles clarified; publication is confirmed after a new document auto-publishes.
+  - My Work no longer flashes its empty state during the initial load.
+
+- 45e11a6: Share a single document or folder from the UI — the human half of the grants model.
+
+  Grants (share one document, or everything under one folder, with one person)
+  already existed on the server and in MCP as `context_grant`, but the only way to
+  use them was an API call. Sharing something narrower than a whole nest meant
+  either handing over nest-wide collaborator access or writing a request by hand —
+  the wrong thing was the easy thing.
+
+  Added:
+
+  - **Share this document** on a saved document's ⋯ menu, and a share icon on
+    every folder row in the nest view. Both open one dialog: add someone by
+    email, see who the target is already shared with, and revoke. Owner/admin
+    only, matching the `/nests/:id/grants` routes. Sharing from the UI is
+    **view-only** and has no role picker — the API and `context_grant` still
+    accept `write`, and a grant made that way is labelled as editable in the
+    roster, but nobody hands out edit rights by leaving a dropdown where it was.
+  - **The recipient can now find it.** A grantee holds no nest-wide permission,
+    so the nest was absent from their dashboard — being shared a document only
+    worked if someone also sent the direct link. The nest is now listed for them
+    as a viewer (`permission: "read"`, `roles: ["viewer"]`, `grant_only: true`),
+    with the card scoped to their slice: `document_count` counts only the
+    documents their grants cover, and the collaborator/steward roster comes back
+    empty, so a one-document share never reveals the nest's size or its people.
+    Grant-only nests stay out of the work inbox and `/stats` — those are
+    governance surfaces over documents the grantee cannot read.
+  - **Fixed: "Nest not found" when opening a shared nest.** Following the link
+    failed even with a valid grant — the middleware admitted the caller, then
+    `GET /nests/:id` rejected them for holding no nest-wide permission, and the
+    nest page's review-queue read surfaced the same 404 as an error toast. The
+    grant check now lives in the one permission helper every nest route shares,
+    so the nest resolves once for all of them instead of being patched per
+    handler, and the page skips the governance reads a grantee was never allowed
+    to make (seven wasted 404 round-trips per load). Authority is unchanged:
+    rename, delete, import and settings-write still demand `owner`/`admin`, the
+    governance paths still refuse a grantee, and `resolveNestPermission` — what
+    the per-node grant checks key off — still answers `none`.
+  - `/llms.txt` now names `context_grant` and its arguments, so an agent reading
+    the public manual can find the one-call path instead of inferring it.
+  - `API.md` documents `GET/POST/DELETE /nests/:nestId/grants` — resolution rules,
+    the bare-`nodes`-root rejection, and how grants behave on move/delete/export.
+
+  Access is not stewardship: a grant lets someone reach exactly the granted
+  document (or folder subtree) and nothing else in the nest, and confers no
+  approval rights. Nothing was loosened — `resolveNestPermission` still returns
+  `none` for a grantee, and every read past the card runs through the same grant
+  checks as before.
+
+### Patch Changes
+
+- a0eaebc: Hide the definitions editor from viewers instead of refusing them after the click.
+
+  The Definitions page rendered the full "Define term" form, plus per-row edit and
+  delete buttons, to everyone who could open the nest — including read-only
+  collaborators, public readers, and share grantees. Writes were already refused
+  server-side (`POST`/`DELETE /nests/:id/definitions` are write-tier), so a viewer
+  could fill in a term and a definition, press the button, and get a toast telling
+  them it wasn't theirs to do. The page even documented that as the design.
+
+  Viewers now get the glossary read-only: no form, no row actions, and an empty
+  state that doesn't invite them to write one. The gate is derived from
+  `deriveNestCaps` on the nest read every other nest screen already makes, and is
+  deliberately `canManage || collabCanWrite` rather than the looser `canEditDocs` —
+  the steward-editor bypass in the middleware covers `/nodes` routes only, so a
+  nest-scope editor steward without a write collaborator row is refused here by
+  the server too, and the UI now says so up front.
+
+  No server change: the existing read-tier denial is unchanged and still covered
+  by `test/definitions.test.ts`.
+
+- 4be85f9: Resolve nest permissions in one query instead of six.
+
+  Every node read, every MCP tool call and every dashboard card resolves the
+  caller's permission, and `resolveNestPermission` did it a query at a time: the
+  nest row, the caller's email, the collaborator row, the steward row, the shared
+  teams, then one query **per team**. `isPublicReader` then asked the same
+  questions over again for its own answer. Three of those round trips were the
+  identical `SELECT email FROM users` — the license-admin check ran its own copy.
+
+  Both now derive from `resolveNestAccess`, a single statement that left-joins the
+  caller, their collaborator row, and existence probes for a steward row and a
+  share grant onto the nest row. With the caller's email in hand, both admin
+  checks (`isLicenseAdminEmail`, `isSuperAdmin`) are pure functions over it and
+  cost nothing. Team membership can't be joined — it lives as JSON in
+  `teams.members` — but `shared_teams` rides along on the same row, and the
+  per-team loop became one `IN (…)` query, consulted only when the answer isn't
+  already settled at admin/owner.
+
+  Measured, collaborator on a private nest and steward on a public one:
+
+  | call                                           | before | after |
+  | ---------------------------------------------- | ------ | ----- |
+  | `resolveNestPermission` (collaborator)         | 6      | 1     |
+  | `resolveNestPermission` (steward, public nest) | 6      | 1     |
+  | `isPublicReader` (steward, public nest)        | 5      | 1     |
+
+  The middleware and the nest routes now read `hasGrant` off that same row rather
+  than issuing their own lookup, so `hasAnyGrant` is gone; `effectiveAccess`
+  returns the facts alongside the permission so the nest list and single-nest
+  handlers stop re-resolving to answer "is this caller grant-only?".
+
+  No policy change: resolution order, the highest-wins merge across
+  collaborator/team/steward/public sources, the anon-commons rule and the `admin`
+  short-circuit all behave exactly as before, and `resolveNestPermission` /
+  `isPublicReader` keep their signatures for their ~40 call sites. A new
+  `test/nest-access-resolution.test.ts` pins the merge per caller shape — owner,
+  collaborator, steward, grantee, stranger, public reader, missing nest — and
+  asserts both wrappers still agree with the fetch they now share.
+
+- 5d5de0d: Remove the duplicated CLI/plugin surface — it now lives in the ContextNest repo.
+
+  The `ctx` CLI and the agent plugins are consolidating upstream in
+  [PromptOwl/ContextNest](https://github.com/PromptOwl/ContextNest) (`packages/cli`,
+  `plugins/`, `.claude-plugin/`). The community server carried its own copy of that
+  contract — install commands, a `ctx push` snippet, and a CLI section in the public
+  agent manual — which is exactly the drift the Engine & CLI Sync Discipline in
+  `CLAUDE.md` exists to prevent. Every published `ctx` invocation was a second place
+  the CLI's flags and command surface had to stay correct.
+
+  Removed:
+
+  - The **CLI** tab in the nest Connect dialog (the `ctx push --server … --nest …`
+    snippet and the `npm i -g @promptowl/contextnest-cli` install line).
+  - The **CLI** client hint on the dashboard.
+  - The `CLI (ctx)` row in the Guide's surfaces table, which pointed at the
+    now-removed Connect tab.
+  - The `## ctx CLI` section and the CLI package entry in the `/llms.txt` agent
+    manual, plus the CLI scaffolding block in `README.md`.
+
+  No server behavior changes. MCP and the REST API — the community server's own
+  surface — are untouched, and remain the documented way for an agent to read and
+  write a nest remotely. Anyone wanting the CLI installs it from upstream, where
+  its documentation is now the single source of truth.
+
 ## 1.16.1
 
 ### Patch Changes

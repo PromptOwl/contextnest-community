@@ -41,7 +41,9 @@ describe("nest invite inbox", () => {
     expect(invited).toBeTruthy();
     expect(invited.nest_id).toBe(nestId);
     expect(invited.message).toContain("Invite Nest");
-    expect(invited.message).toContain("admin");
+    // User-facing role, never the raw permission token.
+    expect(invited.message).toContain("Admin");
+    expect(invited.message).not.toContain("as admin");
   });
 
   it("does not notify the granter about their own action", async () => {

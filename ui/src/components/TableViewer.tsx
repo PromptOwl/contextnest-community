@@ -138,35 +138,53 @@ export function TableViewer({
             </Badge>
           ))}
       </div>
-      <div className="overflow-x-auto rounded-lg border">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="bg-muted/50 text-left text-muted-foreground">
-              {shown.columns.map((h) => (
-                <th key={h} className="px-3 py-2 font-semibold whitespace-nowrap">
-                  {h}
-                </th>
+      <TableGrid columns={shown.columns} rows={shown.rows} />
+    </div>
+  );
+}
+
+/**
+ * The grid itself — shared with the CSV source editor's live preview so the
+ * author sees the same rendering the reader gets.
+ */
+export function TableGrid({
+  columns,
+  rows,
+  limit = 500,
+}: {
+  columns: string[];
+  rows: string[][];
+  limit?: number;
+}) {
+  return (
+    <div className="overflow-x-auto rounded-lg border">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="bg-muted/50 text-left text-muted-foreground">
+            {columns.map((h) => (
+              <th key={h} className="px-3 py-2 font-semibold whitespace-nowrap">
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, limit).map((r, i) => (
+            <tr key={i} className="border-t align-top hover:bg-muted/30">
+              {r.map((cell, j) => (
+                <td key={j} className="px-3 py-1.5 whitespace-nowrap font-mono">
+                  {cell}
+                </td>
               ))}
             </tr>
-          </thead>
-          <tbody>
-            {shown.rows.slice(0, 500).map((r, i) => (
-              <tr key={i} className="border-t align-top hover:bg-muted/30">
-                {r.map((cell, j) => (
-                  <td key={j} className="px-3 py-1.5 whitespace-nowrap font-mono">
-                    {cell}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {shown.rows.length > 500 && (
-          <p className="px-3 py-2 text-[11px] text-muted-foreground border-t">
-            Showing first 500 rows — use a query to narrow.
-          </p>
-        )}
-      </div>
+          ))}
+        </tbody>
+      </table>
+      {rows.length > limit && (
+        <p className="px-3 py-2 text-[11px] text-muted-foreground border-t">
+          Showing first {limit.toLocaleString()} rows.
+        </p>
+      )}
     </div>
   );
 }

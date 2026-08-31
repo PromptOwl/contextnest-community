@@ -19,6 +19,7 @@ import {
   type Editor,
 } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
+import { useRovingFocus } from "../../lib/use-roving-focus";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import TiptapImage from "@tiptap/extension-image";
@@ -35,22 +36,13 @@ import type { Transaction } from "@tiptap/pm/state";
 import { Markdown, type MarkdownStorage } from "tiptap-markdown";
 
 // tiptap-markdown's storage isn't in TipTap's Storage type; cast.
-// TextStyle/Color have no markdown representation. Without an explicit
-// (empty) mark serializer, tiptap-markdown's html:true fallback writes raw
-// <span style> into the stored .md — breaking the markdown-only invariant
-// and showing as literal tags in the react-markdown viewer. Strip on
-// serialize so color stays an in-editor-only affordance.
-const stripMarkSpec = { serialize: { open: "", close: "" }, parse: {} };
-const PlainTextStyle = TextStyle.extend({
-  addStorage() {
-    return { ...(this.parent?.() || {}), markdown: stripMarkSpec };
-  },
-});
-const PlainColor = Color.extend({
-  addStorage() {
-    return { ...(this.parent?.() || {}), markdown: stripMarkSpec };
-  },
-});
+// TextStyle/Color have no dedicated markdown syntax, so with no explicit
+// mark serializer tiptap-markdown's html:true fallback (see Markdown.configure
+// below) writes the mark as raw `<span style="color: …">` HTML straight into
+// the stored .md — that's valid CommonMark (raw inline HTML) and is exactly
+// how legacy HTML docs already round-trip through this editor. Same fallback
+// parses it back into the TextStyle/Color marks on load via their normal
+// `parseHTML`, so color survives save + reopen without any custom code here.
 
 // Unescape `\[\[ \]\]` — prosemirror-markdown escapes `[`/`]` as link syntax.
 function getEditorMarkdown(editor: Editor): string {
@@ -247,6 +239,10 @@ interface MarkdownEditorProps {
   placeholder?: string;
   editable?: boolean;
   className?: string;
+  /** Caret-ready on mount ("end"), or leave focus alone (false) — e.g. a
+   *  brand-new document wants focus on the Title field first. Default
+   *  preserves the existing Notion/Obsidian-style caret-ready feel. */
+  autofocus?: "end" | false;
 }
 
 export const MarkdownEditor = forwardRef<
@@ -267,6 +263,7 @@ export const MarkdownEditor = forwardRef<
     placeholder = "Start writing...",
     editable = true,
     className,
+    autofocus = "end",
   }: MarkdownEditorProps,
   ref: ForwardedRef<MarkdownEditorHandle>,
 ) {
@@ -420,10 +417,11 @@ export const MarkdownEditor = forwardRef<
       TiptapImage.configure({ inline: false, allowBase64: false }),
       // `==text==` highlight. multicolor lets the color marks set a bg.
       Highlight.configure({ multicolor: true }),
-      // Text color mark (in-editor + HTML export). Note: plain markdown has
-      // no color syntax, so color is not persisted to the .md on save.
-      PlainTextStyle,
-      PlainColor,
+      // Text color mark. Persisted via the html:true raw-HTML fallback below
+      // (see the TextStyle/Color import comment) — no dedicated markdown
+      // syntax needed.
+      TextStyle,
+      Color,
       // Smart typography: -- → em-dash, (c) → ©, -> → →, smart quotes, etc.
       Typography,
       // Word / character counter (read from editor.storage.characterCount).
@@ -491,8 +489,10 @@ export const MarkdownEditor = forwardRef<
     content,
     editable,
     // Caret-ready on open so you can type immediately (Notion/Obsidian
-    // feel). "end" lands at doc end; placeholder shows when empty.
-    autofocus: "end",
+    // feel). "end" lands at doc end; placeholder shows when empty. A
+    // brand-new document passes `false` so the Title field gets focus
+    // instead (see DocumentEditor's initial-focus effect).
+    autofocus,
     immediatelyRender: false,
     onUpdate: ({ editor }) => {
       const md = getEditorMarkdown(editor);
@@ -1301,14 +1301,22 @@ export const MarkdownEditor = forwardRef<
 
           <Divider />
 
-          {/* Text color swatches. Note: not persisted to markdown. */}
+          {/* Text color swatches — saved with the document (see the
+              TextStyle/Color import comment above) and rendered on view too
+              (DocumentViewer's remarkColorSpans). Selection collapses to the
+              end on pick so the applied color is visible immediately instead
+              of staying hidden under the selection highlight, and the menu
+              closes with it (BubbleMenu only shows for a live selection). */}
           {["#ef4444", "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6"].map((c) => (
             <button
               key={c}
               type="button"
               title={`Text color ${c}`}
               onMouseDown={(e) => e.preventDefault()}
-              onClick={() => editor.chain().focus().setColor(c).run()}
+              onClick={() => {
+                const { to } = editor.state.selection;
+                editor.chain().focus().setColor(c).setTextSelection(to).run();
+              }}
               className="m-0.5 h-4 w-4 rounded-full border border-border"
               style={{ backgroundColor: c }}
             />
@@ -1847,6 +1855,7 @@ function Toolbar({
   previewing: boolean;
   onTogglePreview: () => void;
 }) {
+  const roving = useRovingFocus<HTMLDivElement>();
   // Hidden file input driven by the "Insert table from CSV" toolbar button.
   const csvInputRef = useRef<HTMLInputElement>(null);
   const pickCsv = () => csvInputRef.current?.click();
@@ -1890,7 +1899,11 @@ function Toolbar({
   // to editing.
   if (previewing) {
     return (
-      <div className="flex items-center gap-0.5 p-1 flex-wrap">
+      <div
+        className="flex items-center gap-0.5 p-1 flex-wrap"
+        role="toolbar"
+        aria-label="Editor"
+      >
         <ToolbarButton
           active
           onClick={onTogglePreview}
@@ -1906,7 +1919,15 @@ function Toolbar({
   }
 
   return (
-    <div className="flex items-center gap-0.5 p-1 flex-wrap">
+    // One tab stop for the whole strip; arrows move between the buttons, so
+    // Tab out of the Title field reaches the writing area in one press
+    // instead of twenty-odd.
+    <div
+      className="flex items-center gap-0.5 p-1 flex-wrap"
+      role="toolbar"
+      aria-label="Formatting"
+      {...roving}
+    >
       <ToolbarButton
         active={editor.isActive("bold")}
         onClick={() => editor.chain().focus().toggleBold().run()}

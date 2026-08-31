@@ -1025,6 +1025,29 @@ export async function dropDeletionRequest(id: string): Promise<void> {
   await getDb().run("DELETE FROM deletion_requests WHERE id = ?", [id]);
 }
 
+/** Withdraw a pending deletion request. Only the original requester may do so.
+ *  Returns null if the request doesn't exist, isn't pending, or belongs to
+ *  another user. The row is deleted — unlike decline, there's no verdict to
+ *  record when someone changes their own mind. */
+export async function withdrawDeletionRequest(params: {
+  nestId: string;
+  id: string;
+  withdrawnBy: string;
+}): Promise<DeletionRequest | null> {
+  const db = getDb();
+  const pending = await getDeletionRequest(params.id);
+  if (
+    !pending ||
+    pending.nestId !== params.nestId ||
+    pending.status !== "pending" ||
+    pending.requestedBy.toLowerCase() !== params.withdrawnBy.toLowerCase()
+  ) {
+    return null;
+  }
+  await db.run("DELETE FROM deletion_requests WHERE id = ?", [params.id]);
+  return pending;
+}
+
 /** Decline a pending request, keeping the row (and the note) as the record.
  *  Returns null when it is already resolved or belongs to another nest. */
 export async function declineDeletion(params: {

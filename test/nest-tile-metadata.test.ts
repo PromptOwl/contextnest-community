@@ -65,6 +65,15 @@ describe("GET /nests tile metadata", () => {
     expect(nest.steward_count).toBe(0);
   });
 
+  it("stamps last_activity so the dashboard can sort by recent activity", async () => {
+    const res = await jsonRequest(app, "GET", "/nests", undefined, alice.apiKey);
+    const nest = res.data.nests.find((n: any) => n.id === emptyNestId);
+    // Newest version timestamp in the nest — a real value, not null, once the
+    // nest has documents.
+    expect(typeof nest.last_activity).toBe("string");
+    expect(nest.last_activity.length).toBeGreaterThan(0);
+  });
+
   it("counts collaborators and active stewards per nest", async () => {
     const res = await jsonRequest(app, "GET", "/nests", undefined, alice.apiKey);
     expect(res.status).toBe(200);

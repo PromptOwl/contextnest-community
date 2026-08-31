@@ -412,6 +412,18 @@ governanceRoutes.post("/deletion-requests/:id/decline", async (c) => {
   return c.json({ request });
 });
 
+// POST /nests/:nestId/deletion-requests/:id/withdraw — requester cancels own request
+governanceRoutes.post("/deletion-requests/:id/withdraw", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const request = await reviews.withdrawDeletionRequest({
+    nestId,
+    id: c.req.param("id")!,
+    withdrawnBy: await getUserEmail(c),
+  });
+  if (!request) return c.json({ error: "Deletion request not found or not yours" }, 404);
+  return c.json({ withdrawn: true, request });
+});
+
 // GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=
 // Activity feed: pending change submissions (the same rows the review queue
 // shows, every field intact) interleaved with annotation activity (new
@@ -535,22 +547,35 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   // previews or restores is fetched by GET .../versions/:version.
   const { versions: versionManager } = await engineCache.get(nestId);
 
-  // Who approved/rejected each version. node_versions carries the status but
-  // not the resolver's email, so the latest resolution per version comes from
-  // review_requests — that is what the row's "approved by X" hint renders.
+  // Who approved/rejected each version, and why. node_versions carries the
+  // status but not the resolver's email or note, so the latest resolution per
+  // version comes from review_requests — that is what the row's "approved by X"
+  // hint and the reviewer's reason render from.
   const resolutions = (await getDb().all(
-    `SELECT version, status, resolved_by
+    `SELECT version, status, resolved_by, resolution_note
        FROM review_requests
       WHERE nest_id = ? AND node_id = ?
         AND status IN ('approved', 'rejected')
         AND resolved_by IS NOT NULL
       ORDER BY resolved_at DESC`,
     [nestId, nodeId],
-  )) as Array<{ version: number; status: string; resolved_by: string }>;
-  const byVersion = new Map<number, { status: string; resolvedBy: string }>();
+  )) as Array<{
+    version: number;
+    status: string;
+    resolved_by: string;
+    resolution_note: string | null;
+  }>;
+  const byVersion = new Map<
+    number,
+    { status: string; resolvedBy: string; resolutionNote?: string }
+  >();
   for (const r of resolutions) {
     if (!byVersion.has(r.version)) {
-      byVersion.set(r.version, { status: r.status, resolvedBy: r.resolved_by });
+      byVersion.set(r.version, {
+        status: r.status,
+        resolvedBy: r.resolved_by,
+        resolutionNote: r.resolution_note?.trim() || undefined,
+      });
     }
   }
 
@@ -558,7 +583,11 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
     allVersions.map(async (v) => {
       const r = byVersion.get(v.version);
       const resolution = r
-        ? { resolvedBy: r.resolvedBy, resolutionStatus: r.status }
+        ? {
+            resolvedBy: r.resolvedBy,
+            resolutionStatus: r.status,
+            resolutionNote: r.resolutionNote,
+          }
         : {};
       try {
         const diff = await versionManager.getDiff(nodeId, v.version);

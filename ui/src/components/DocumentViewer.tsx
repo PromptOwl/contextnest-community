@@ -14,6 +14,12 @@
  *
  * GFM: tables, task lists, strikethrough, and autolinks come from
  * `remark-gfm`.
+ *
+ * Text color: the editor's color swatches persist as a raw
+ * `<span style="color: …">` (valid CommonMark inline HTML — see
+ * MarkdownEditor's TextStyle/Color import comment). `remarkColorSpans`
+ * below recognizes that exact shape and renders it as a real colored span;
+ * any other raw HTML is stripped to plain text by `remarkStripHtml`.
  */
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
@@ -65,11 +71,60 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
   });
 };
 
+// `<span style="color: #rrggbb">…</span>` — the one raw-HTML shape the
+// editor itself writes (its text-color swatches). remark tokenizes raw HTML
+// as plain sibling `html` nodes rather than a single element, so this scans
+// each container's children for that exact open/close pair and swaps the
+// run for a real hast `span` carrying the color style. Only a plain-text
+// run in between is handled (the common case for this feature); anything
+// else in between is left alone and falls through to remarkStripHtml below.
+const COLOR_SPAN_OPEN =
+  /^<span style=["']color:\s*(#[0-9a-fA-F]{3,8})["']>$/;
+const COLOR_SPAN_CLOSE = /^<\/span>$/;
+
+const remarkColorSpans: Plugin<[], Root> = () => (tree) => {
+  visit(tree, "html", (node: any, index, parent) => {
+    if (!parent || index === null || index === undefined) return;
+    const m = COLOR_SPAN_OPEN.exec((node.value ?? "").trim());
+    if (!m) return;
+
+    const siblings = parent.children as any[];
+    let closeIndex = -1;
+    for (let j = index + 1; j < siblings.length; j++) {
+      const candidate = siblings[j];
+      if (candidate.type !== "html") continue;
+      const text = (candidate.value ?? "").trim();
+      // Editor never nests color spans — bail on another open tag rather
+      // than risk pairing with the wrong close tag.
+      if (COLOR_SPAN_OPEN.test(text)) break;
+      if (COLOR_SPAN_CLOSE.test(text)) {
+        closeIndex = j;
+      }
+      break;
+    }
+    if (closeIndex === -1) return;
+
+    const inner = siblings.slice(index + 1, closeIndex);
+    if (!inner.every((n) => n.type === "text")) return;
+    const value = inner.map((n) => n.value).join("");
+
+    siblings.splice(index, closeIndex - index + 1, {
+      type: "colorSpan",
+      data: {
+        hName: "span",
+        hProperties: { style: `color: ${m[1]}` },
+        hChildren: [{ type: "text", value }],
+      },
+    });
+    return index;
+  });
+};
+
 // Stored docs are markdown-only, but legacy content can carry stray inline
-// HTML (e.g. color <span>s from older saves). react-markdown renders raw
-// HTML as literal text — turn html nodes into plain text with tags stripped
-// so only the inner text shows. Fenced code is a `code` node, never `html`,
-// so code samples are untouched.
+// HTML (e.g. an unmatched color <span> from an old save, or hand-authored
+// HTML). react-markdown renders raw HTML as literal text — turn html nodes
+// into plain text with tags stripped so only the inner text shows. Fenced
+// code is a `code` node, never `html`, so code samples are untouched.
 const remarkStripHtml: Plugin<[], Root> = () => (tree) => {
   visit(tree, "html", (node: any) => {
     node.type = "text";
@@ -167,7 +222,7 @@ export function DocumentViewer({
       )}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkStripHtml, remarkWikiLinks]}
+        remarkPlugins={[remarkGfm, remarkColorSpans, remarkStripHtml, remarkWikiLinks]}
         // Cast: Components type keyed on HTML names; `wikilink` not in union.
         components={
           {

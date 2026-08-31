@@ -840,7 +840,12 @@ async function runTool(
         await opContext(nestId, userEmail),
       );
 
-      const visible = await listNodesForCallerByEmail(nestId, userEmail, {});
+      // `withContent` for the body previews below. An explicit whole-vault
+      // call, so paying for the crawl here is honest; the document tree and
+      // context_list do not, and read from the index instead.
+      const visible = await listNodesForCallerByEmail(nestId, userEmail, {
+        withContent: true,
+      });
       const types: Record<string, number> = {};
       const tags: Record<string, number> = {};
       for (const n of visible) {
@@ -1212,6 +1217,20 @@ async function runTool(
           (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
         );
         if (twin) {
+          // A twin with no version rows is invisible to the tools that would
+          // normally resolve it: under stewardship it has no approved version,
+          // so context_get reads "not found" and no draft list carries it. Say
+          // so rather than sending the caller after something they cannot see.
+          // The cause is NOT certain — an interrupted create leaves this state,
+          // and so does a staged import whose registration never finished — so
+          // the message offers writing into it before removing it.
+          const twinVersions = await versions.getVersions(nestId, twin.id);
+          if (twinVersions.length === 0) {
+            return toolError(
+              `A node titled "${twin.frontmatter.title}" already exists (${twin.id}) but has no version history, which is why it doesn't show up in a read or a draft list. It may be an interrupted create or a document whose import never finished. Write into it with context_update "${twin.id}" to keep whatever is there, or remove it with context_delete "${twin.id}" and create again — check its content first.`,
+              "DOCUMENT_ALREADY_EXISTS",
+            );
+          }
           return toolError(
             `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`,
             "DOCUMENT_ALREADY_EXISTS",

@@ -89,3 +89,140 @@ function timingSafeEqualHex(a: string, b: string): boolean {
     return false;
   }
 }
+
+// ─── Request verification ─────────────────────────────────────────────────
+// One gate every /auth/keys route runs before touching the table, so the
+// rules for what a key request may do live in exactly one place instead of
+// being re-derived per route.
+
+/** Ceiling on live keys per user. Generous — the point is to stop a runaway
+ *  client minting unbounded rows, not to ration credentials. */
+export const MAX_API_KEYS_PER_USER = 20;
+const MAX_LABEL_LENGTH = 60;
+
+export interface ApiKeyRow {
+  id: string;
+  key_prefix: string;
+  nest_id: string | null;
+  label: string | null;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export type KeyRequestAction = "generate" | "fetch" | "update";
+
+export type KeyRequestCheck =
+  | { ok: true; label: string | null; key: ApiKeyRow | null }
+  | { ok: false; status: 400 | 404 | 409; error: string };
+
+/**
+ * Verify a key request and normalise its inputs.
+ *
+ * - `generate` — requires a label, rejects one that duplicates an existing
+ *                key's (case-insensitively), and enforces MAX_API_KEYS_PER_USER.
+ * - `update`   — resolves `keyId` to a row the caller actually owns. With no
+ *                `keyId` and exactly one key on the account it targets that
+ *                key, which keeps single-key clients working unchanged.
+ * - `fetch`    — label/ownership are moot; returns ok so callers can run the
+ *                same gate on every route without branching.
+ *
+ * Returns the resolved row and cleaned label rather than throwing, so routes
+ * stay flat: `if (!check.ok) return c.json({ error }, check.status)`.
+ */
+export async function verifyKeyRequest(
+  db: {
+    get(sql: string, params?: unknown[]): Promise<unknown>;
+    all(sql: string, params?: unknown[]): Promise<unknown[]>;
+  },
+  userId: string,
+  opts: { action: KeyRequestAction; label?: unknown; keyId?: string | null },
+): Promise<KeyRequestCheck> {
+  const label = normalizeKeyLabel(opts.label);
+  if (label === INVALID_LABEL) {
+    return {
+      ok: false,
+      status: 400,
+      error: `Label must be a string of at most ${MAX_LABEL_LENGTH} characters.`,
+    };
+  }
+
+  if (opts.action === "fetch") return { ok: true, label, key: null };
+
+  const rows = (await db.all(
+    "SELECT id, key_prefix, nest_id, label, created_at, last_used_at FROM api_keys WHERE user_id = ? ORDER BY created_at ASC, id ASC",
+    [userId],
+  )) as ApiKeyRow[];
+
+  if (opts.action === "generate") {
+    if (rows.length >= MAX_API_KEYS_PER_USER) {
+      return {
+        ok: false,
+        status: 409,
+        error: `You already have ${MAX_API_KEYS_PER_USER} API keys. Revoke one before creating another.`,
+      };
+    }
+    // A name is the only thing that tells two keys apart in the list — the
+    // plaintext is never shown again and a prefix is not something anyone
+    // recognises. Several rows reading "Unnamed key" make revoking a guess.
+    if (!label) {
+      return {
+        ok: false,
+        status: 400,
+        error: "Name this key so you can tell it apart later.",
+      };
+    }
+    if (rows.some((r) => r.label?.trim().toLowerCase() === label.toLowerCase())) {
+      return {
+        ok: false,
+        status: 409,
+        error: `You already have a key named "${label}". Pick a different name.`,
+      };
+    }
+    return { ok: true, label, key: null };
+  }
+
+  // update (rotate / revoke). A rename that collides with another key is the
+  // same ambiguity as a duplicate at creation; renaming a key to what it is
+  // already called is not, hence the id check.
+  const renameCollides = (targetId: string) =>
+    !!label &&
+    rows.some(
+      (r) =>
+        r.id !== targetId && r.label?.trim().toLowerCase() === label.toLowerCase(),
+    );
+  const collision: KeyRequestCheck = {
+    ok: false,
+    status: 409,
+    error: `You already have a key named "${label}". Pick a different name.`,
+  };
+
+  if (opts.keyId) {
+    const match = rows.find((r) => r.id === opts.keyId);
+    if (!match) return { ok: false, status: 404, error: "Key not found" };
+    if (renameCollides(match.id)) return collision;
+    return { ok: true, label, key: match };
+  }
+  if (rows.length === 1) {
+    if (renameCollides(rows[0].id)) return collision;
+    return { ok: true, label, key: rows[0] };
+  }
+  if (rows.length === 0) {
+    return { ok: false, status: 404, error: "No API key to rotate." };
+  }
+  return {
+    ok: false,
+    status: 400,
+    error: "You have several API keys — say which one to rotate (key_id).",
+  };
+}
+
+const INVALID_LABEL = Symbol("invalid-label") as unknown as string;
+
+function normalizeKeyLabel(raw: unknown): string | null {
+  if (raw === undefined || raw === null || raw === "") return null;
+  if (typeof raw !== "string") return INVALID_LABEL;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > MAX_LABEL_LENGTH) return INVALID_LABEL;
+  return trimmed;
+}

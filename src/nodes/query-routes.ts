@@ -2,12 +2,8 @@ import { Hono } from "hono";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
-import {
-  ValidationError,
-  NotFoundError,
-  ForbiddenError,
-  ConflictError,
-} from "../shared/errors.js";
+import { ValidationError, NotFoundError, ForbiddenError, ConflictError } from "../shared/errors.js";
+import { rebuildNodeIndex } from "./node-index.js";
 import { queryTableNode } from "../tables/query.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import {
@@ -23,10 +19,16 @@ import {
 import { resolveReadableBody, resolveExportBody } from "./readable-body.js";
 import { isStewardshipEnabled } from "../nests/service.js";
 import { countThreadsByNode } from "../annotations/service.js";
-import { permissionLevel, isPublicReader, resolveNestPermission } from "../shared/access.js";
+import { permissionLevel, isPublicReader } from "../shared/access.js";
 import { exportNestBundle } from "../nests/bundle-service.js";
 import { buildNestGraph, extractWikiTargets } from "./graph-service.js";
-import { listNodesForCaller, createNode, RUNNABLE_NODE_TYPES } from "./service.js";
+import {
+  listNodesForCaller,
+  listNestFolders,
+  nestCensus,
+  RUNNABLE_NODE_TYPES,
+  createNode
+} from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
 import { config } from "../config.js";
@@ -53,7 +55,11 @@ queryRoutes.get("/changes", async (c) => {
     c.req.query("include_content") || "",
   );
 
-  const all = await listNodesForCaller(nestId, userId);
+  // Bodies only when the caller asked to mirror them — otherwise this is a
+  // metadata diff and the DB index answers it without touching the vault.
+  const all = await listNodesForCaller(nestId, userId, {
+    ...(includeContent ? { withContent: true } : {}),
+  });
   const db = getDb();
   // Public readers only ever see the approved version's body — their change
   // signal must be approval time, not the raw frontmatter timestamps (see loop).
@@ -168,6 +174,9 @@ queryRoutes.get("/runnables", async (c) => {
   // governance/version enrichment — not every plain document in the nest.
   const all = await listNodesForCaller(nestId, userId, {
     type: RUNNABLE_NODE_TYPES,
+    // The prompt/skill body IS the payload here — an orchestrator pulls it to
+    // run the thing, so this surface pays for the file reads.
+    withContent: true,
   });
   const runnables = all.map((n) => ({
     id: n.id,
@@ -575,6 +584,52 @@ queryRoutes.get("/overview", async (c) => {
   });
 });
 
+// GET /nests/:nestId/census
+//
+// Everything that describes the WHOLE nest — folder tree, counts, tags,
+// types, authors — for a client that lists one folder level at a time and
+// would otherwise have no way to show nest-wide filters or totals. Separate
+// from the listing so expanding a folder does not recompute it.
+queryRoutes.get("/census", async (c) => {
+  const census = await nestCensus(c.req.param("nestId")!, c.get("userId"));
+  return c.json({ census });
+});
+
+// GET /nests/:nestId/folders?folder=&recursive=0
+//
+// The nest's folder tree on its own, for callers that need the SHAPE of the
+// vault (a navigable tree, a folder picker) and none of its content. Reads
+// directory entries only — no document is opened, so this stays cheap on a
+// vault where listing the documents would not be.
+queryRoutes.get("/folders", async (c) => {
+  const q = c.req.query();
+  const folders = await listNestFolders(c.req.param("nestId")!, {
+    ...(q.folder !== undefined ? { folder: q.folder } : {}),
+    ...(q.recursive === "0" || q.recursive === "false" ? { recursive: false } : {}),
+  });
+  return c.json({ folders });
+});
+
+// POST /nests/:nestId/reindex
+//
+// Force-rebuild the nest's document index from disk.
+//
+// The index heals itself: anything that leaves it possibly out of step with
+// the vault — an out-of-band edit, an import, a write we could not mirror —
+// marks the nest stale, and the next read rebuilds before answering. This is
+// the manual lever for when an operator wants that to happen NOW, or suspects
+// the mirror is wrong for a reason nothing flagged.
+//
+// Write tier: a rebuild crawls the whole vault, so it is not something a
+// read-only caller should be able to trigger at will.
+queryRoutes.post("/reindex", async (c) => {
+  if (permissionLevel(c.get("nestPermission")) < permissionLevel("write")) {
+    throw new ForbiddenError("Reindexing a nest requires write access");
+  }
+  const indexed = await rebuildNodeIndex(c.req.param("nestId")!);
+  return c.json({ indexed });
+});
+
 // GET /nests/:nestId/comment-counts
 // Per-node annotation (comment) counts for the whole nest, so the UI can sort
 // document lists by "most comments" in one call instead of N per-node fetches.
@@ -599,13 +654,11 @@ queryRoutes.get("/export", async (c) => {
   const nestId = c.req.param("nestId")!;
 
   // Portability bundle (?format=bundle): the nest's documents as a .zip that
-  // the existing folder importer (POST /nests/import) ingests. Owner/admin only.
+  // the existing folder importer (POST /nests/import) ingests. Gated the same
+  // as the markdown export above — the nest access middleware already 404s
+  // callers with no access at all, so any reader (viewer and up) may export.
   // `?includeDrafts=1` also exports unapproved drafts; default is approved only.
   if (c.req.query("format") === "bundle") {
-    const perm = await resolveNestPermission(nestId, c.get("userId"));
-    if (perm !== "owner" && perm !== "admin") {
-      throw new ForbiddenError("Only the nest owner or an admin can export a bundle");
-    }
     const draftsParam = c.req.query("includeDrafts");
     const includeDrafts = draftsParam === "1" || draftsParam === "true";
     const zip = await exportNestBundle(nestId, includeDrafts);
