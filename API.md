@@ -1437,7 +1437,49 @@ sees **approved** agent/skill definitions; unapproved drafts are omitted.
   enrichment, so cost scales with the number of runnables, not total nest size.
 
 ### POST `/nests/:nestId/publish`
-Publishes the nest (snapshots + index).
+Bulk-create documents (and/or update `CONTEXT.md`) in one call. Each document
+routes through the same create path as `POST /nests/:nestId/nodes` — same slug
+derivation, same governance rows, same content-type policy gate (a disabled
+`artifact`/`table` type fails the whole batch up front, before any write).
+
+Body: `{ documents?, context_md? }` — at least one required.
+`documents[]` rows are `{ title, content, type?, tags?, scope? }`; rows missing
+`title` or `content` are skipped silently (a shape problem, not a policy one).
+
+A document whose title slugs to an id that already exists is **skipped and
+reported** — never overwritten, so republishing a folder cannot destroy an
+existing document's version history.
+
+A document the create path rejects for its own reasons — a title that is too
+long or carries no sluggable characters, a `type` the engine does not know — is
+**reported in `failed` and the batch continues**. One bad row cannot abandon the
+rest half-written.
+
+```json
+{
+  "published": 2,
+  "context_md_updated": true,
+  "node_ids": ["nodes/alpha", "nodes/beta"],
+  "skipped": ["Existing Doc Title"],
+  "failed": [{ "title": "Bad Row", "error": "..." }]
+}
+```
+
+Returns `201` whenever the batch ran, even if every row landed in `skipped` or
+`failed` — read the arrays, not the status, to know what happened.
+
+`context_md` is written directly rather than through an operation, because none
+exists for it. It is therefore outside the vault write lock and has no `503` to
+return — a `context_md`-only request cannot report contention.
+
+**Partial writes and retries.** The batch is not a transaction: documents are
+created one at a time and the ones written before a failure stay written. The
+one error that stops the batch early is the vault write lock being held past
+its acquire timeout, which answers `503` + `Retry-After`. Retrying is safe and
+finishes the job — every document from the first attempt now exists, so it
+comes back under `skipped` while the remaining ones are created. Expect a
+lower `published` count on the retry; that is the batch converging, not a
+failure.
 
 ---
 

@@ -183,29 +183,34 @@ export function TableSourceEditor({
           onChange={onFilePicked}
         />
       </div>
-      <textarea
-        value={value}
-        onChange={(e) => {
-          if (locked) return;
-          onChange(e.target.value);
-        }}
-        onBlur={onBlur}
-        onPaste={onPaste}
-        readOnly={locked}
-        spellCheck={false}
-        placeholder={"sku:key, price:number, region\nOWL-100, 149, EU"}
-        className="w-full min-h-[360px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-        data-testid="table-source-textarea"
-      />
-      {preview.columns.length > 0 && (
-        <div className="mt-3" data-testid="table-source-preview">
-          <p className="mb-1 text-xs font-medium text-muted-foreground">
-            Preview — {preview.rows.length.toLocaleString()} data row
-            {preview.rows.length === 1 ? "" : "s"}
-          </p>
-          <TableGrid columns={preview.columns} rows={preview.rows} limit={50} />
-        </div>
-      )}
+      {/* Source and grid sit side by side once there is something to render:
+          proofreading CSV means comparing the two, and stacking them put a
+          large table's source off-screen from its result. */}
+      <div className={preview.columns.length > 0 ? "grid gap-3 lg:grid-cols-2" : ""}>
+        <textarea
+          value={value}
+          onChange={(e) => {
+            if (locked) return;
+            onChange(e.target.value);
+          }}
+          onBlur={onBlur}
+          onPaste={onPaste}
+          readOnly={locked}
+          spellCheck={false}
+          placeholder={"sku:key, price:number, region\nOWL-100, 149, EU"}
+          className="w-full min-h-[360px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+          data-testid="table-source-textarea"
+        />
+        {preview.columns.length > 0 && (
+          <div className="min-w-0" data-testid="table-source-preview">
+            <p className="mb-1 text-xs font-medium text-muted-foreground">
+              Preview — {preview.rows.length.toLocaleString()} data row
+              {preview.rows.length === 1 ? "" : "s"}
+            </p>
+            <TableGrid columns={preview.columns} rows={preview.rows} limit={50} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
