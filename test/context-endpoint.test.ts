@@ -12,6 +12,7 @@ import {
   jsonRequest,
 } from "./helpers";
 import { compilePrompt, tokenizePrompt } from "../src/nodes/prompt-compiler";
+import { resolveNodeUrl } from "../src/governance/title-resolver";
 
 let env: ReturnType<typeof setupTestEnv>;
 let app: any;
@@ -323,5 +324,14 @@ describe("POST /context — source URLs (citations)", () => {
     );
     // The block the model sees must contain the citable link.
     expect(data.context).toMatch(/_source: https?:\/\/\S*nest=/);
+  });
+
+  it("omits the url when no base URL resolves (no broken links)", () => {
+    // AC4: no resolvable URL degrades gracefully — the field is absent, not an
+    // empty string a consumer would render as href="".
+    delete process.env.PUBLIC_BASE_URL;
+    expect(
+      resolveNodeUrl({ id: "nodes/brand-guidelines" }, { nestId, baseUrl: "" }),
+    ).toBeUndefined();
   });
 });

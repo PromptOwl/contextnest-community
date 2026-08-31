@@ -19,7 +19,7 @@ import {
   filterAccessible,
 } from "../governance/access-guard.js";
 import { compilePrompt } from "./prompt-compiler.js";
-import { docLink } from "../governance/title-resolver.js";
+import { resolveNodeUrl } from "../governance/title-resolver.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import {
   nodeToMarkdown,
@@ -440,7 +440,8 @@ queryRoutes.post("/context", async (c) => {
   const included: ContextNode[] = [];
   let tokenCount = 0;
   for (const doc of readable) {
-    const block = formatContextBlock(doc, docLink(nestId, doc.id, baseUrl));
+    const url = resolveNodeUrl(doc, { nestId, baseUrl });
+    const block = formatContextBlock(doc, url);
     const blockTokens = approxTokens(block);
     if (tokenCount + blockTokens > maxTokens && included.length > 0) break;
     included.push(doc);
@@ -450,7 +451,7 @@ queryRoutes.post("/context", async (c) => {
 
   // ── 5. Format response ──
   const contextMarkdown = included
-    .map((n) => formatContextBlock(n, docLink(nestId, n.id, baseUrl)))
+    .map((n) => formatContextBlock(n, resolveNodeUrl(n, { nestId, baseUrl })))
     .join("\n\n---\n\n");
 
   trackEvent("context.resolve", {
@@ -466,7 +467,7 @@ queryRoutes.post("/context", async (c) => {
     nodes: included.map((n) => ({
       id: n.id,
       title: n.frontmatter.title,
-      url: docLink(nestId, n.id, baseUrl),
+      url: resolveNodeUrl(n, { nestId, baseUrl }),
       tags: n.frontmatter.tags || [],
       type: n.frontmatter.type || "document",
     })),
