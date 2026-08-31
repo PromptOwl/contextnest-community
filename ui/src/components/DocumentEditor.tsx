@@ -7,6 +7,7 @@ import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import { normalizeTagInput } from "../lib/tag-policy";
+import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
 import { Button } from "@/components/ui/button";
@@ -1661,8 +1662,16 @@ export function DocumentEditor({
                           <span className="w-4 mr-2" />
                         )}
                         v{v.version}
-                        <span className="ml-auto text-xs text-muted-foreground">
-                          {v.editedBy?.split("@")[0] || ""}
+                        {/* Author AND when — "v3 · taimur" alone gives no way
+                            to tell which past version you are reaching for.
+                            Same editedAt Version History already renders. */}
+                        <span
+                          className="ml-auto text-xs text-muted-foreground"
+                          title={v.editedAt ? formatServerDate(v.editedAt) : undefined}
+                        >
+                          {[v.editedBy?.split("@")[0], relTime(v.editedAt)]
+                            .filter(Boolean)
+                            .join(" · ")}
                         </span>
                       </DropdownMenuItem>
                     ))
