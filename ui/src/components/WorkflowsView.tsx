@@ -959,13 +959,23 @@ function RunsPanel({ nestId }: { nestId: string }) {
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") void open(r.id);
           }}
-          className={`group w-full cursor-pointer px-3 py-2 hover:bg-muted/40 ${selected?.id === r.id ? "bg-muted/60" : ""
+          className={`group w-full overflow-hidden cursor-pointer px-3 py-2 hover:bg-muted/40 ${selected?.id === r.id ? "bg-muted/60" : ""
             }`}
           style={{ paddingLeft: indent }}
         >
-          <div className="flex items-center gap-2">
+          {/* min-w-0 lets the row shrink below its content's natural width, so
+              a deep row narrows instead of pushing the actions past the card. */}
+          <div className="flex items-center gap-2 min-w-0">
             {level > 0 && (
-              <CornerDownRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
+              <CornerDownRight
+                className="h-3 w-3 text-muted-foreground/50 shrink-0"
+                // Depth used to ride the title line as a badge. The indent and
+                // this arrow already say "nested"; the exact number is a detail,
+                // so it moves to a tooltip rather than costing a badge's width.
+                aria-label={`Sub-agent at depth ${r.depth ?? level}`}
+              >
+                <title>{`Sub-agent at depth ${r.depth ?? level}`}</title>
+              </CornerDownRight>
             )}
             <NodeTypeIcon type={runType(r.agent_node)} className="h-3.5 w-3.5" />
             {/* Ellipsis + full id on hover: the list showed a bare head slice
@@ -985,20 +995,6 @@ function RunsPanel({ nestId }: { nestId: string }) {
             >
               {runStatus(r)}
             </Badge>
-            {level > 0 && (
-              <Badge
-                variant="outline"
-                className="text-[10px] shrink-0"
-                title={`Sub-agent at depth ${r.depth ?? level}`}
-              >
-                sub · d{r.depth ?? level}
-              </Badge>
-            )}
-            {kids.length > 0 && (
-              <span className="text-[10px] text-muted-foreground shrink-0" title="Sub-agents spawned">
-                {kids.length} child{kids.length === 1 ? "" : "ren"}
-              </span>
-            )}
             {/* Row actions collapse into one ⋮ button. As labelled buttons they
                 were the widest thing in the row, and a deeply nested run pushed
                 them past the card's edge.
@@ -1048,8 +1044,13 @@ function RunsPanel({ nestId }: { nestId: string }) {
                 );
               })()}
           </div>
+          {/* Child count lives here rather than on the title line: it is
+              context, not identity, and the title line has to hold the id and
+              the actions inside the card at every nesting depth. */}
           <div className="text-[11px] text-muted-foreground truncate">
             {runLabel(r.agent_node)} · {timeOf(r.started_at)}
+            {kids.length > 0 &&
+              ` · ${kids.length} child${kids.length === 1 ? "" : "ren"}`}
           </div>
           {r.status === "failed" && r.trace?.error && (
             <div
