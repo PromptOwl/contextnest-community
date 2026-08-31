@@ -9,6 +9,11 @@ describe("normalizeTagInput", () => {
     expect(normalizeTagInput("#api-v2")).toEqual({ tag: "api-v2", note: null });
   });
 
+  it("lowercases so case-variants collapse to one tag, silently", () => {
+    expect(normalizeTagInput("Bug")).toEqual({ tag: "bug", note: null });
+    expect(normalizeTagInput("TAG").tag).toBe(normalizeTagInput("tag").tag);
+  });
+
   it("caps an over-long tag and says so", () => {
     const long = "a".repeat(MAX_TAG_LENGTH + 20);
     const { tag, note } = normalizeTagInput(long);

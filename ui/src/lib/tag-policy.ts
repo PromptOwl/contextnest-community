@@ -20,7 +20,12 @@ export function normalizeTagInput(raw: string): TagCandidate {
   const bare = raw.trim().replace(/^#+/, "");
   if (!bare) return { tag: null, note: null };
 
-  const cleaned = bare.replace(DISALLOWED, "").replace(/^[._-]+|[._-]+$/g, "");
+  // Lowercased: tags are index keys, and folder paths and prime-tag matching
+  // already canonicalise that way. Without it "Bug" and "bug" are two tags.
+  const cleaned = bare
+    .replace(DISALLOWED, "")
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .toLowerCase();
   if (!cleaned) {
     return {
       tag: null,
@@ -33,7 +38,9 @@ export function normalizeTagInput(raw: string): TagCandidate {
       note: `Tags are capped at ${MAX_TAG_LENGTH} characters — "${bare}" was shortened.`,
     };
   }
-  if (cleaned !== bare) {
+  // Compared lowercased so a pure case change stays silent — only real
+  // rewrites (dropped characters) are worth a note.
+  if (cleaned !== bare.toLowerCase()) {
     return { tag: cleaned, note: `"${bare}" was simplified to "${cleaned}".` };
   }
   return { tag: cleaned, note: null };

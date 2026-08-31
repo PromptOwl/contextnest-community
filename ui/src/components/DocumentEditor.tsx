@@ -1065,7 +1065,9 @@ export function DocumentEditor({
     }
     const next = [...tags];
     for (const t of accepted) {
-      if (!next.includes(t)) next.push(t);
+      // Case-insensitive: new tags arrive lowercased, but a document saved
+      // before that could still carry "Bug" alongside an incoming "bug".
+      if (!next.some((x) => x.toLowerCase() === t)) next.push(t);
     }
     setTags(next);
     setTagInput("");
