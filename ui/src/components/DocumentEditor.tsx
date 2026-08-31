@@ -2596,22 +2596,45 @@ export function DocumentEditor({
                       readOnly={fieldsDisabled}
                     />
                   ) : (
-                    <textarea
-                      value={content}
-                      onChange={(e) => {
-                        if (fieldsDisabled) return;
-                        setContent(e.target.value);
-                        setTouched(true);
-                      }}
-                      onBlur={saveOnBlur}
-                      readOnly={fieldsDisabled}
-                      spellCheck={false}
-                      placeholder={
-                        "The body is code — paste or write the tool's source."
+                    /* Source beside a highlighted rendering of itself, reusing
+                       the read view's lowlight output — flat plain text is hard
+                       to scan while writing a tool.
+                       ponytail: a preview pane, not highlighting under the
+                       caret; swap in CodeMirror if tool authoring grows. */
+                    <div
+                      className={
+                        content.trim() ? "grid gap-3 lg:grid-cols-2" : ""
                       }
-                      className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-                      data-testid="tool-source-editor"
-                    />
+                    >
+                      <textarea
+                        value={content}
+                        onChange={(e) => {
+                          if (fieldsDisabled) return;
+                          setContent(e.target.value);
+                          setTouched(true);
+                        }}
+                        onBlur={saveOnBlur}
+                        readOnly={fieldsDisabled}
+                        spellCheck={false}
+                        placeholder={
+                          "The body is code — paste or write the tool's source."
+                        }
+                        className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                        data-testid="tool-source-editor"
+                      />
+                      {content.trim() && (
+                        <div className="min-w-0 flex flex-col min-h-[400px] rounded-lg border bg-background shadow-sm overflow-hidden">
+                          <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                            Preview
+                          </div>
+                          <CodeHighlight
+                            code={content}
+                            className="flex-1 text-sm"
+                            data-testid="tool-source-preview"
+                          />
+                        </div>
+                      )}
+                    </div>
                   )
                 ) : rawMode ? (
                   <textarea
