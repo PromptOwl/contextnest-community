@@ -122,6 +122,16 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
     );
   }, [allNests, nestQuery, nestScope, nestSort]);
   const nests = filteredNests.slice(0, nestPageSize);
+  // The Documents browser offers a clear affordance whenever a control is
+  // narrowing its list; the Dashboard only offered one once nothing matched,
+  // leaving a filtered-but-non-empty grid with no way back.
+  const nestFiltersActive =
+    nestQuery.trim() !== "" || nestScope !== "all" || nestSort !== "activity";
+  const clearNestFilters = () => {
+    setNestQuery("");
+    setNestScope("all");
+    setNestSort("activity");
+  };
   const qc = useQueryClient();
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
@@ -936,6 +946,17 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
               <span className="text-xs text-muted-foreground">
                 {filteredNests.length} of {allNests.length}
               </span>
+              {nestFiltersActive && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2 text-xs text-muted-foreground"
+                  onClick={clearNestFilters}
+                  data-testid="nest-clear-filters"
+                >
+                  Clear filters
+                </Button>
+              )}
             </div>
           )}
 
@@ -952,13 +973,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                 </p>
                 <Button
                   variant="outline"
-                  onClick={() => {
-                    setNestQuery("");
-                    setNestScope("all");
-                    // Sort is one of the grid controls the label promises to
-                    // clear — leaving it set contradicts "Clear filters".
-                    setNestSort("activity");
-                  }}
+                  onClick={clearNestFilters}
                 >
                   Clear filters
                 </Button>
