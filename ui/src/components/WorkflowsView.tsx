@@ -955,8 +955,10 @@ function RunsPanel({ nestId }: { nestId: string }) {
               <CornerDownRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
             )}
             <NodeTypeIcon type={runType(r.agent_node)} className="h-3.5 w-3.5" />
-            <span className="font-mono text-xs truncate">
-              {r.id.slice(0, 12)}
+            {/* Ellipsis + full id on hover: the list showed a bare head slice
+                that read as a complete, different id from the detail view's. */}
+            <span className="font-mono text-xs truncate" title={r.id}>
+              {r.id.length > 12 ? `${r.id.slice(0, 12)}…` : r.id}
             </span>
             <Badge
               variant={statusVariant(runStatus(r))}
