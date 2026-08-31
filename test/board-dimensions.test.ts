@@ -75,9 +75,9 @@ describe("cardColumnKey", () => {
   it("tag dimension → the namespaced tag value, else UNCATEGORIZED", () => {
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "stage" };
     expect(
-      cardColumnKey(node({ id: "a", tags: ["stage:shipped"] }), cfg),
+      cardColumnKey(node({ id: "a", tags: ["#stage:shipped"] }), cfg),
     ).toBe("shipped");
-    expect(cardColumnKey(node({ id: "b", tags: ["other"] }), cfg)).toBe(
+    expect(cardColumnKey(node({ id: "b", tags: ["#other"] }), cfg)).toBe(
       UNCATEGORIZED,
     );
   });
@@ -226,8 +226,8 @@ describe("tag dimension grouping", () => {
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "" };
     const { columns, byColumn } = groupByColumn(
       [
-        node({ id: "a", tags: ["blog", "marketing"] }),
-        node({ id: "b", tags: ["blog"] }),
+        node({ id: "a", tags: ["#blog", "#marketing"] }),
+        node({ id: "b", tags: ["#blog"] }),
         node({ id: "c", tags: [] }),
       ],
       cfg,
@@ -247,7 +247,7 @@ describe("tag dimension grouping", () => {
     // used to match nothing at all (it searched for "status:draft:").
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "status:draft" };
     const { byColumn } = groupByColumn(
-      [node({ id: "a", tags: ["status:draft"] })],
+      [node({ id: "a", tags: ["#status:draft"] })],
       cfg,
     );
     expect(byColumn["draft"].map((n) => n.id)).toEqual(["a"]);
@@ -255,7 +255,7 @@ describe("tag dimension grouping", () => {
   it("keeps flat tags out of a namespaced grouping", () => {
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "stage" };
     const { byColumn } = groupByColumn(
-      [node({ id: "a", tags: ["blog", "sales"] })],
+      [node({ id: "a", tags: ["#blog", "#sales"] })],
       cfg,
     );
     expect(byColumn[UNCATEGORIZED].map((n) => n.id)).toEqual(["a"]);
@@ -266,9 +266,9 @@ describe("groupByColumn", () => {
   it("buckets every node under exactly one column, incl. UNCATEGORIZED", () => {
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "stage" };
     const nodes = [
-      node({ id: "a", tags: ["stage:draft"] }),
-      node({ id: "b", tags: ["stage:draft"] }),
-      node({ id: "c", tags: ["nope"] }),
+      node({ id: "a", tags: ["#stage:draft"] }),
+      node({ id: "b", tags: ["#stage:draft"] }),
+      node({ id: "c", tags: ["#nope"] }),
     ];
     const { columns, byColumn } = groupByColumn(nodes, cfg);
     const total = columns.reduce(
@@ -293,12 +293,12 @@ describe("planMove", () => {
   it("tag → retag: drops the source column's tag, adds the target's", () => {
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "stage" };
     const plan = planMove(
-      node({ id: "a", tags: ["keep", "stage:draft"] }),
+      node({ id: "a", tags: ["#keep", "#stage:draft"] }),
       "review",
       cfg,
       "draft",
     );
-    expect(plan).toEqual({ kind: "retag", tags: ["keep", "stage:review"] });
+    expect(plan).toEqual({ kind: "retag", tags: ["#keep", "#stage:review"] });
   });
 
   it("status → unsupported (governance goes through the review workflow)", () => {
@@ -321,9 +321,9 @@ describe("hidden columns (curated tag columns)", () => {
     ...over,
   });
   const nodes = [
-    node({ id: "a", tags: ["draft"] }),
-    node({ id: "b", tags: ["review"] }),
-    node({ id: "c", tags: ["draft", "review"] }),
+    node({ id: "a", tags: ["#draft"] }),
+    node({ id: "b", tags: ["#review"] }),
+    node({ id: "c", tags: ["#draft", "#review"] }),
   ];
 
   it("omits a hidden column from the board", () => {
@@ -358,9 +358,9 @@ describe("hidden columns (curated tag columns)", () => {
 
 describe("explicit tag columns (user-curated board)", () => {
   const nodes = [
-    node({ id: "a", tags: ["todo"] }),
-    node({ id: "b", tags: ["doing"] }),
-    node({ id: "c", tags: ["todo", "someday"] }),
+    node({ id: "a", tags: ["#todo"] }),
+    node({ id: "b", tags: ["#doing"] }),
+    node({ id: "c", tags: ["#todo", "#someday"] }),
   ];
   const cfg = (over: Partial<BoardConfig> = {}): BoardConfig => ({
     dimension: "tag",
@@ -407,38 +407,59 @@ describe("planMove — tag retag", () => {
       explicitColumns: true,
     };
     const plan = planMove(
-      node({ id: "a", tags: ["todo", "keep"] }),
+      node({ id: "a", tags: ["#todo", "#keep"] }),
       "doing",
       cfg,
       "todo",
     );
-    expect(plan).toEqual({ kind: "retag", tags: ["keep", "doing"] });
+    expect(plan).toEqual({ kind: "retag", tags: ["#keep", "#doing"] });
   });
 
   it("no source column (dropped from outside): just adds the target tag", () => {
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "" };
-    const plan = planMove(node({ id: "a", tags: ["keep"] }), "doing", cfg);
-    expect(plan).toEqual({ kind: "retag", tags: ["keep", "doing"] });
+    const plan = planMove(node({ id: "a", tags: ["#keep"] }), "doing", cfg);
+    expect(plan).toEqual({ kind: "retag", tags: ["#keep", "#doing"] });
   });
 
   it("same source and target column → no-op", () => {
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "" };
     expect(
-      planMove(node({ id: "a", tags: ["doing"] }), "doing", cfg, "doing").kind,
+      planMove(node({ id: "a", tags: ["#doing"] }), "doing", cfg, "doing").kind,
     ).toBe("unsupported");
   });
 
   it("target tag already present and nothing to remove → no-op", () => {
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "" };
     expect(
-      planMove(node({ id: "a", tags: ["doing"] }), "doing", cfg).kind,
+      planMove(node({ id: "a", tags: ["#doing"] }), "doing", cfg).kind,
     ).toBe("unsupported");
+  });
+
+  it("a hand-typed column round-trips: the written tag lands back in it", () => {
+    // Column keys are the bare value ("doing") but the server stores "#doing".
+    // Plan the drop, feed the resulting tags back through the grouping: the card
+    // must reappear under the column it was dropped on. Nothing else in this
+    // file catches a mismatch between the key we write and the key we read.
+    const cfg = resolveConfig({
+      dimension: "tag",
+      tagNamespace: "",
+      layouts: { "tag:": { columnOrder: ["todo", "doing"] } },
+    });
+    const card = node({ id: "a", tags: ["#todo"] });
+    const plan = planMove(card, "doing", cfg, "todo");
+    expect(plan).toEqual({ kind: "retag", tags: ["#doing"] });
+    const { byColumn } = groupByColumn(
+      [{ ...card, tags: (plan as { tags: string[] }).tags }],
+      cfg,
+    );
+    expect(byColumn["doing"].map((n) => n.id)).toEqual(["a"]);
+    expect(byColumn["todo"]).toEqual([]);
   });
 
   it("dropping onto Uncategorized is unsupported", () => {
     const cfg: BoardConfig = { dimension: "tag", tagNamespace: "" };
     expect(
-      planMove(node({ id: "a", tags: ["x"] }), UNCATEGORIZED, cfg, "x").kind,
+      planMove(node({ id: "a", tags: ["#x"] }), UNCATEGORIZED, cfg, "x").kind,
     ).toBe("unsupported");
   });
 });

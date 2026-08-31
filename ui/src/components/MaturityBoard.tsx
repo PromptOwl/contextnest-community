@@ -252,7 +252,8 @@ export function MaturityBoard({
           // updateNode replaces the tag set, so the plan's full next set both
           // adds the target column's tag and drops the source column's.
           await api.updateNode(nestId, id, { tags: plan.tags });
-          toast.success("Moved");
+          // Not "Moved": this rewrites the doc's tags and saves a new version.
+          toast.success("Retagged");
         }
         await load();
       } catch (e: any) {
@@ -298,14 +299,18 @@ export function MaturityBoard({
     [orderedKeys, updateLayout],
   );
 
+  // Drop from the order as well as hiding: on the tag board columnOrder IS the
+  // column set, so leaving the key there kept a "removed" column alive until
+  // the next reorder silently dropped it.
   const hideColumn = useCallback(
     (key: string) =>
       updateLayout({
+        columnOrder: orderedKeys.filter((k) => k !== key),
         hiddenColumns: [
           ...new Set([...(effectiveConfig.hiddenColumns ?? []), key]),
         ],
       }),
-    [effectiveConfig.hiddenColumns, updateLayout],
+    [orderedKeys, effectiveConfig.hiddenColumns, updateLayout],
   );
 
   /**
@@ -327,7 +332,9 @@ export function MaturityBoard({
       const v =
         effectiveConfig.dimension === "folder"
           ? slugifyFolderPath(value)
-          : value.trim();
+          : // Tag column keys are the bare value; "#doing" and "doing" are the
+            // same column (board-dimensions strips the stored "#").
+            value.trim().replace(/^#/, "");
       if (effectiveConfig.dimension === "folder" && !v) {
         // Slugifying to nothing is the same bound the server enforces: a name
         // with no letter or digit has no path to derive.
@@ -486,9 +493,20 @@ export function MaturityBoard({
                 : "Type a namespace (e.g. stage) to group by stage: values only."}
             </li>
             <li>
-              Cards are{" "}
-              <span className="font-medium text-foreground">read-only</span>;
-              drag a header to reorder.
+              {canEditDocs ? (
+                <>
+                  <span className="font-medium text-foreground">
+                    Drag a card
+                  </span>{" "}
+                  between columns to swap its tag; drag a header to reorder.
+                </>
+              ) : (
+                <>
+                  You have{" "}
+                  <span className="font-medium text-foreground">read-only</span>{" "}
+                  access, so cards can't be retagged. Drag a header to reorder.
+                </>
+              )}
             </li>
             <li>
               <span className="font-medium text-foreground">+</span> to add a
@@ -549,8 +567,12 @@ export function MaturityBoard({
       ) : error ? (
         <div className="text-sm text-destructive py-8">{error}</div>
       ) : columns.length === 0 ? (
+        // The tag board starts with no columns by design, so "no documents"
+        // would be a lie — the documents are there, the columns aren't yet.
         <div className="text-sm text-muted-foreground py-8">
-          No documents to show.
+          {effectiveConfig.dimension === "tag"
+            ? "No tag columns yet — add one above to start sorting documents into it."
+            : "No documents to show."}
         </div>
       ) : (
         <div className="flex gap-3 overflow-x-auto pb-4">

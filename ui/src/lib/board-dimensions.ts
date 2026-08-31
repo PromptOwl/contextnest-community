@@ -121,6 +121,17 @@ function namespaceOf(config: { tagNamespace?: string }): string {
   return (config.tagNamespace ?? "").trim().split(":")[0]!.trim();
 }
 
+/**
+ * Tags are stored with a leading "#" (normalizeTag, src/nodes/service.ts), but
+ * a tag column key is the bare value — that is what the user types into the
+ * add-column box and what reads best as a heading. Every crossing of that line
+ * goes through these two: strip when deriving a key from stored tags, add back
+ * when writing tags. Without it a hand-typed "doing" column writes "#doing",
+ * matches no key, and the card vanishes from an explicit-column board.
+ */
+const stripHash = (t: string) => (t.startsWith("#") ? t.slice(1) : t);
+const withHash = (t: string) => (t.startsWith("#") ? t : `#${t}`);
+
 /** A saved column layout for one dimension. */
 export interface ColumnLayout {
   columnOrder?: string[];
@@ -177,14 +188,15 @@ export function cardColumnKeys(node: BoardNode, config: BoardConfig): string[] {
       return [node.status || UNCATEGORIZED];
     case "tag": {
       const ns = namespaceOf(config);
+      const tags = node.tags.map(stripHash);
       // With a namespace, group by the value after the colon; without one,
       // every tag is its own column (which is what a vault of flat tags needs).
       const values = ns
-        ? node.tags
+        ? tags
             .filter((t) => t.startsWith(`${ns}:`))
             .map((t) => t.slice(ns.length + 1))
             .filter(Boolean)
-        : node.tags.filter(Boolean);
+        : tags.filter(Boolean);
       return values.length > 0 ? [...new Set(values)] : [UNCATEGORIZED];
     }
   }
@@ -398,11 +410,13 @@ export function planMove(
         return { kind: "unsupported", reason: "Already in this column." };
       }
       const ns = namespaceOf(config);
-      const asTag = (key: string) => (ns ? `${ns}:${key}` : key);
+      // Column key → the tag as stored, "#" and all; the existing set is
+      // normalized the same way so the drop actually removes the source tag.
+      const asTag = (key: string) => withHash(ns ? `${ns}:${key}` : key);
       const removing =
         fromKey && fromKey !== UNCATEGORIZED ? asTag(fromKey) : null;
       const toTag = asTag(targetKey);
-      const next = new Set(node.tags);
+      const next = new Set(node.tags.map(withHash));
       if (removing) next.delete(removing);
       // Nothing to remove and the target tag is already there → pure no-op.
       if (!removing && next.has(toTag)) {
