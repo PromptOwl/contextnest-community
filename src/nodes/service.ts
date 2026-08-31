@@ -615,11 +615,16 @@ export async function listNodesForCaller(
   // retired node stays in this listing: here it is an unpublished document its
   // stewards may still need to act on, not one removed from retrieval. An
   // imported vault carrying `status: rejected` registers exactly that way.
+  //
+  // "Include retired" is spelled differently on the two consumers below —
+  // `filterDocuments` takes `includeRetired`, the `context_list` operation
+  // takes `include_retired` — so it is NOT part of this shared object. Sending
+  // the camelCase key to the operation is a hard error now that the engine
+  // rejects unrecognized parameters instead of stripping them.
   const frontmatterFilters = {
     ...(filters.type ? { type: filters.type } : {}),
     ...(filters.tag ? { tag: filters.tag } : {}),
     ...(filters.status ? { status: filters.status } : {}),
-    includeRetired: true,
   };
 
   let documents: Array<{
@@ -665,7 +670,10 @@ export async function listNodesForCaller(
       nestId,
       filters.folder !== undefined ? { folder: filters.folder } : {},
     );
-    documents = filterDocuments(indexed, frontmatterFilters);
+    documents = filterDocuments(indexed, {
+      ...frontmatterFilters,
+      includeRetired: true,
+    });
   }
   // Narrow BEFORE the access gate and enrichment below — that is the whole
   // saving, since both cost per surviving document. Still applied even when

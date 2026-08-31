@@ -197,28 +197,11 @@ const CASES: Case[] = [
     tool: "context_versions",
     args: { title: "Conformance Doc" },
     catalog: "context_versions",
-    allowed: {
-      "invalid_type(undefined) at keyframe_interval":
-        "there is no keyframe+diff model here — version bodies live on disk and " +
-        "in the DB, not as keyframes plus diffs. The catalog makes this REQUIRED. " +
-        "GENUINE DISAGREEMENT — either the catalog relaxes it or this server " +
-        "grows a keyframe model; a faked constant would be a lie.",
-      "invalid_type(undefined) at versions[].keyframe":
-        "same missing model — no version here is a keyframe.",
-      "invalid_type(undefined) at versions[].content_hash":
-        "the column exists but is conflict-detection state this tool has never " +
-        "served, and it is ungated. Required in the catalog.",
-      "invalid_type(undefined) at versions[].chain_hash":
-        "integrity here is server-side, not a per-version hash chain. Required " +
-        "in the catalog.",
-      "unknown_key at approved_version":
-        "which version AI traffic is actually served — the community equivalent " +
-        "of the catalog's publish state, and the same fact the prose reports.",
-      "unknown_key at versions[].status":
-        "per-version lifecycle state (draft/pending/published). The catalog " +
-        "models publication as `published_at`, which this server has no " +
-        "equivalent for; status is what it does have.",
-    },
+    // No `allowed`: the catalog once required a keyframe+hash-chain model this
+    // server does not have, and had no home for approved_version or a
+    // per-version status. Upstream now makes the keyframe and hash fields
+    // optional and models both governance fields outright, so this tool
+    // conforms exactly. Restore an entry here only with the reason it is right.
   },
   {
     tool: "context_submit_review",
