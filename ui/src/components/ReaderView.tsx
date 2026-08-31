@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FileText, FolderOpen, BookOpen } from "lucide-react";
 import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
@@ -76,9 +76,15 @@ export function ReaderView({
   // Per-node markdown cache so re-selecting a doc doesn't refetch.
   const [content, setContent] = useState<Record<string, string>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
+  // In-flight guard, keyed by node id. The `content` check below reads a stale
+  // closure across the two effects that both call loadNode in the same commit
+  // (selectedId + homeNode.id are the same node on first mount), so without a
+  // synchronous ref both would pass the cache check and fire duplicate fetches.
+  const inFlight = useRef<Set<string>>(new Set());
 
   const loadNode = async (nodeId: string) => {
-    if (content[nodeId] !== undefined) return;
+    if (content[nodeId] !== undefined || inFlight.current.has(nodeId)) return;
+    inFlight.current.add(nodeId);
     setLoadingId(nodeId);
     try {
       const { node } = await api.getNode(nestId, nodeId);
@@ -89,6 +95,7 @@ export function ReaderView({
         [nodeId]: "_This document could not be loaded._",
       }));
     } finally {
+      inFlight.current.delete(nodeId);
       setLoadingId((cur) => (cur === nodeId ? null : cur));
     }
   };

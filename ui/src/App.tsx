@@ -16,7 +16,11 @@ import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
-import { deriveNestCaps, isReaderHiddenView } from "./lib/nest-caps";
+import {
+  deriveNestCaps,
+  isReaderHiddenView,
+  isViewBlockedInReaderMode,
+} from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
@@ -393,6 +397,21 @@ export default function App() {
           : sub === "board" ? "board"
           : sub === "trace" ? "nest-trace"
           : null;
+        // In reader mode the board / ontology-graph / definitions pages are
+        // hidden — a deep link into one must not enter it (the tab is gone, but
+        // the page state is top-level and would otherwise render the full
+        // authoring view). Fall back to the nest page, same as an unknown ?tab.
+        if (subPage && isViewBlockedInReaderMode(subPage, readerMode)) {
+          setView({
+            page: "nest",
+            nestId: nest.id,
+            nestName: nest.name,
+            isOwner,
+            isAnonOwned: false,
+            readerMode,
+          });
+          return;
+        }
         if (subPage) {
           setView({
             page: subPage,
@@ -496,6 +515,29 @@ export default function App() {
       window.history.replaceState({}, "", next);
     }
   }, [view, deepLinkProbe.status]);
+
+  // Reader-mode render guard: the board / ontology-graph / definitions pages
+  // are hidden in reader mode, but they are top-level view.page states, so a
+  // reader who reaches one another way (a stale in-app link, a restored state)
+  // would otherwise land on the full authoring page. Redirect to the nest page
+  // — the deep-link probe already blocks the URL entry point; this closes the
+  // remaining paths. The render conditionals also require !view.readerMode, so
+  // the hidden page never paints for the frame before this effect corrects it.
+  useEffect(() => {
+    if (
+      isNestScoped(view) &&
+      isViewBlockedInReaderMode(view.page, view.readerMode)
+    ) {
+      setView({
+        page: "nest",
+        nestId: view.nestId,
+        nestName: view.nestName,
+        isOwner: view.isOwner,
+        isAnonOwned: view.isAnonOwned,
+        readerMode: view.readerMode,
+      });
+    }
+  }, [view]);
 
   // Caller's write access on the nest currently in view, for gating the
   // Workflows tab (an execution plane — every action inside it mutates).
@@ -1141,14 +1183,16 @@ export default function App() {
             />
           );
         })()}
-        {view.page === "definitions" && (
+        {view.page === "definitions" &&
+          !isViewBlockedInReaderMode(view.page, view.readerMode) && (
           <DefinitionsPage
             nestId={view.nestId}
             nestName={view.nestName}
             onBack={leaveNest}
           />
         )}
-        {view.page === "board" && (
+        {view.page === "board" &&
+          !isViewBlockedInReaderMode(view.page, view.readerMode) && (
           <MaturityBoard
             nestId={view.nestId}
             nestName={view.nestName}
@@ -1189,7 +1233,8 @@ export default function App() {
         {view.page === "docs" && (
           <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}
-        {view.page === "ontology-graph" && (
+        {view.page === "ontology-graph" &&
+          !isViewBlockedInReaderMode(view.page, view.readerMode) && (
           <OntologyGraphView
             nestId={view.nestId}
             nestName={view.nestName}

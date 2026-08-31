@@ -94,3 +94,21 @@ export const READER_HIDDEN_VIEWS = [
 export function isReaderHiddenView(page: string): boolean {
   return (READER_HIDDEN_VIEWS as readonly string[]).includes(page);
 }
+
+/**
+ * Whether a nest-scoped page must be BLOCKED for the current caller — true only
+ * when the caller is in reader mode AND the page is one reader mode hides.
+ *
+ * Single source of truth for every reader-mode page gate: the deep-link probe
+ * (so `?view=board` can't enter the page), the top-level redirect effect, and
+ * the render conditionals. The board / ontology-graph / definitions pages are
+ * top-level `view.page` states rendered independently of the (already hidden)
+ * tab buttons, so hiding the tab alone did not stop a read-only caller from
+ * reaching the full authoring page by URL.
+ */
+export function isViewBlockedInReaderMode(
+  page: string,
+  readerMode: boolean | undefined,
+): boolean {
+  return !!readerMode && isReaderHiddenView(page);
+}
