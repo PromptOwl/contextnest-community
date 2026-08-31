@@ -679,7 +679,10 @@ export async function listNodesForCaller(
       nestId,
       filters.folder !== undefined ? { folder: filters.folder } : {},
     );
-    documents = filterDocuments(indexed, frontmatterFilters);
+    documents = filterDocuments(indexed, {
+      ...frontmatterFilters,
+      includeRetired: true,
+    });
   }
   // Narrow BEFORE the access gate and enrichment below — that is the whole
   // saving, since both cost per surviving document. Still applied even when

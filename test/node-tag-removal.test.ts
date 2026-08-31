@@ -60,3 +60,37 @@ describe("tag removal persists", () => {
     expect(await readTags()).toEqual(["#gamma"]);
   });
 });
+
+/**
+ * The board's drag-to-retag sends ONLY `tags` — no content, no title. That is a
+ * write to a document whose body the user never opened, so the body has to
+ * survive it; a patch that treated the missing field as "clear it" would empty
+ * a document on a drag.
+ */
+describe("a tags-only patch assigns the tag without touching the document", () => {
+  it("keeps the body and the title, and stores the new tag", async () => {
+    await patchTags(["#todo"]);
+    const before = await jsonRequest(
+      app, "GET", `/nests/${nestId}/nodes/${DOC}`, undefined, alice.apiKey);
+    const body = (before.data.node ?? before.data).content;
+    expect(body).toContain("# doc");
+
+    // Exactly what planMove produces for a drag from #todo to #doing.
+    const res = await patchTags(["#doing"]);
+    expect(res.status).toBe(200);
+
+    const after = await jsonRequest(
+      app, "GET", `/nests/${nestId}/nodes/${DOC}`, undefined, alice.apiKey);
+    const node = after.data.node ?? after.data;
+    expect(node.tags).toEqual(["#doing"]);
+    expect(node.content).toBe(body);
+    expect(node.title).toBe("Tagged Doc");
+  });
+
+  it("a bare tag is stored with the # the board reads back", async () => {
+    // The board writes "#doing"; a layout typed without the # must land the same
+    // way, or the card would not rejoin the column it was dropped on.
+    expect((await patchTags(["doing"])).status).toBe(200);
+    expect(await readTags()).toEqual(["#doing"]);
+  });
+});
