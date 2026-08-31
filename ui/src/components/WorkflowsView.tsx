@@ -1026,6 +1026,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
                 actions.push({
                   label: cancelling === r.id ? "Cancelling…" : "Cancel run",
                   icon: cancelling === r.id ? Loader2 : X,
+                  iconClassName: cancelling === r.id ? "animate-spin" : undefined,
                   destructive: true,
                   disabled: cancelling === r.id,
                   separatorBefore: true,
