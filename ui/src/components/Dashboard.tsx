@@ -955,6 +955,9 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                   onClick={() => {
                     setNestQuery("");
                     setNestScope("all");
+                    // Sort is one of the grid controls the label promises to
+                    // clear — leaving it set contradicts "Clear filters".
+                    setNestSort("activity");
                   }}
                 >
                   Clear filters
