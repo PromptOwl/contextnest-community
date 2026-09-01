@@ -1171,6 +1171,14 @@ export async function withdrawDeletionRequest(nestId: string, id: string) {
   );
 }
 
+/** Withdraw your own pending review — the document returns to draft. */
+export async function cancelReview(nestId: string, nodeId: string) {
+  return request<{ review: unknown }>(
+    `/nests/${nestId}/nodes/${nodeId}/cancel-review`,
+    { method: "POST" },
+  );
+}
+
 export async function getReviewQueue(nestId: string, status = "pending") {
   return request<{ requests: any[]; total: number }>(
     `/nests/${nestId}/review-queue?status=${encodeURIComponent(status)}`,

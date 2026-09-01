@@ -320,6 +320,17 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
       ),
     }));
   };
+  // Withdraw your own pending review — the document goes back to Draft
+  // instead of the only non-destructive exit being Delete (CU-wdqcq007pe).
+  const handleWithdrawReview = async (w: api.WorkItem) => {
+    await api.cancelReview(w.nest_id, w.node_id);
+    setWork((prev) => ({
+      ...prev,
+      waiting: prev.waiting.filter(
+        (x) => !(x.nest_id === w.nest_id && x.node_id === w.node_id),
+      ),
+    }));
+  };
   // A folder or nest deletion item carries a folder path / nest id in node_id,
   // not a document id — opening the editor on it lands on a page for a node
   // that was never there. Send those to the nest instead.
@@ -701,6 +712,29 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                             }
                           }}
                           title="Withdraw this deletion request"
+                        >
+                          Withdraw
+                        </Button>
+                      )}
+                      {w.type === "review" && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="shrink-0 text-muted-foreground h-7 px-2"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            try {
+                              await handleWithdrawReview(w);
+                              toast.success(
+                                "Submission withdrawn — back to Draft",
+                              );
+                            } catch (err: any) {
+                              toast.error(
+                                err?.message || "Failed to withdraw submission",
+                              );
+                            }
+                          }}
+                          title="Withdraw this submission and return the document to Draft"
                         >
                           Withdraw
                         </Button>

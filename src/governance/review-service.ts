@@ -483,6 +483,24 @@ export async function cancelReview(params: {
 
     if (!pending) return null;
 
+    // Withdrawing is the author's own undo, so the submitter always may.
+    // Anyone else needs the rights they'd need to resolve it any other way.
+    if (
+      String(pending.requested_by).toLowerCase() !==
+      params.cancelledBy.toLowerCase()
+    ) {
+      const verdict = await canUserApprove(
+        params.nestId,
+        params.nodeId,
+        params.cancelledBy,
+      );
+      if (!verdict.allowed) {
+        throw new Error(
+          "Only the submitter or a reviewer can withdraw this review",
+        );
+      }
+    }
+
     await db.run(
       `UPDATE review_requests
      SET status = 'cancelled', resolved_by = ?, resolved_at = ${nowExpr(db)}
