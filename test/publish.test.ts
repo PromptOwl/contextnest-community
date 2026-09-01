@@ -87,6 +87,36 @@ describe("publish management", () => {
     expect([403, 404]).toContain(res.status);
   });
 
+  it("refuses to mint a link for a document that does not exist", async () => {
+    const res = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publications`,
+      { node_id: "nodes/typo-not-here", access_mode: "public" },
+      owner.apiKey,
+    );
+    expect(res.status).toBe(400);
+    expect(String(res.data.error)).toMatch(/no such document/i);
+  });
+
+  it("stops serving once the link has expired", async () => {
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publications`,
+      {
+        node_id: "nodes/deck-one",
+        access_mode: "public",
+        expires_at: new Date(Date.now() - 60_000).toISOString(),
+      },
+      owner.apiKey,
+    );
+    expect(created.status).toBe(201);
+    const res = await app.request(`/p/${created.data.publish.slug}`);
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain("hello world deck");
+  });
+
   it("rejects an unsafe node id", async () => {
     const res = await jsonRequest(
       app,
@@ -587,6 +617,20 @@ describe("invite allowlist", () => {
     expect(await stranger.text()).toContain("Check your email");
     // ...but no link is ever minted or mailed for them.
     expect(mailed.some((s) => s.to === "nobody@elsewhere.test")).toBe(false);
+
+    // A token IS minted for an uninvited address, so the rejected and accepted
+    // paths do the same DB work and cannot be told apart by timing. It must be
+    // inert by construction, not merely undelivered: redeeming it fails because
+    // the allow-list is re-checked at the click, not only at the send.
+    const svc: any = await import("../src/nests/publish-service.js");
+    const strangerToken = await svc.mintMagicLink(
+      created.data.publish.id,
+      "nobody@elsewhere.test",
+    );
+    expect(typeof strangerToken).toBe("string");
+    const denied = await app.request(`/p/${slug}/verify?token=${strangerToken}`);
+    expect(denied.status).toBe(401);
+    expect(await denied.text()).not.toContain("hello world deck");
 
     // An invited address does get one.
     const invited = await app.request(`/p/${slug}/gate`, {

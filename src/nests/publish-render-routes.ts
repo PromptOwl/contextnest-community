@@ -539,12 +539,16 @@ publishRenderRoutes.post("/:slug/gate", async (c) => {
   if (!isEmailish(email)) {
     return c.html(gatePage(row, "Enter a valid email address."), 400);
   }
-  // Invite mode: only allow-listed addresses get a link. Respond identically
-  // either way so the form can't be used to probe the allow-list.
-  if (row.access_mode === "invite" && !(await publish.isAllowlisted(row.id, email))) {
-    return c.html(sentPage());
-  }
+  // Invite mode: only allow-listed addresses get a link. Both branches must
+  // cost the same, not just look the same — returning early on a rejection
+  // would skip the mint's INSERT and leave a latency difference that answers
+  // "is this address invited?" just as well as a different page would. So the
+  // token is always minted; the allow-list decides only whether it is sent.
+  // The undelivered token is inert: single-use, expiring, and known to nobody.
+  const allowed =
+    row.access_mode !== "invite" || (await publish.isAllowlisted(row.id, email));
   const linkToken = await publish.mintMagicLink(row.id, email);
+  if (!allowed) return c.html(sentPage());
   const link = `${requestBaseUrl(c.req.url)}/p/${slug}/verify?token=${linkToken}`;
   void sendEmailToRecipient(email, {
     status: "shared",

@@ -26,6 +26,7 @@
 import { v4 as uuid } from "uuid";
 import { createHash, randomBytes } from "crypto";
 import { getDb } from "../db/client.js";
+import { engineCache } from "../nodes/engine.js";
 import { hashPassword, verifyPassword } from "../auth/keys.js";
 import { ValidationError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
@@ -55,6 +56,18 @@ const SESSION_TTL_SECONDS = 24 * 60 * 60; // viewing session 24h
 
 function sha256Hex(s: string): string {
   return createHash("sha256").update(s).digest("hex");
+}
+
+/** Does this document exist in this nest? Documents live in engine storage,
+ *  not a table, so this asks the same reader the published page will use. */
+async function nodeExists(nestId: string, nodeId: string): Promise<boolean> {
+  try {
+    const { storage } = await engineCache.get(nestId);
+    await storage.readDocument(nodeId);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** URL-safe unguessable slug (~11 chars of base64url over 8 random bytes). */
@@ -121,6 +134,12 @@ export async function createPublish(params: {
   }
   if (params.expiresAt && Number.isNaN(new Date(params.expiresAt).getTime())) {
     throw new ValidationError("expires_at must be an ISO date");
+  }
+  // Fail here rather than mint a slug for a node that does not exist — a typo
+  // would otherwise hand back a link that 404s forever, with nothing on the
+  // publish row to explain why.
+  if (!(await nodeExists(nestId, nodeId))) {
+    throw new ValidationError(`No such document in this nest: ${nodeId}`);
   }
 
   const db = getDb();
@@ -248,6 +267,17 @@ export async function consumeMagicLink(
     | { id: string; email: string | null; expires_at: string | null; used_at: string | null }
     | undefined;
   if (!row || row.used_at || isPast(row.expires_at)) return null;
+  // Re-check the allow-list at redemption, not just at send. The gate mints a
+  // token for any address so that an invited and an uninvited attempt cost the
+  // same (see the gate handler), and an allow-list can change between mint and
+  // click. Enforcing here is what makes an undelivered token inert by
+  // construction rather than merely undelivered.
+  const publishRow = (await getDb().get("SELECT access_mode FROM publish WHERE id = ?", [
+    publishId,
+  ])) as { access_mode: PublishMode } | undefined;
+  if (publishRow?.access_mode === "invite") {
+    if (!row.email || !(await isAllowlisted(publishId, row.email))) return null;
+  }
   const res = await getDb().run(
     "UPDATE access_grant SET used_at = ? WHERE id = ? AND used_at IS NULL",
     [nowIso(), row.id],
