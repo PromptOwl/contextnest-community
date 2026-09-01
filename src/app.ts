@@ -178,10 +178,11 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   return c.json({ error: "Missing or invalid credentials" }, 401);
 });
 
-// PromptOwl native integration — /index and /mcp additionally accept a
-// short-lived HS256 service ticket minted by the official PromptOwl
-// deployment (the same shared OFFICIAL_COMMUNITY_SSO_SECRET the /auth/sso
-// login flow trusts). Distinctions from a login ticket: `scope: "mcp"` is
+// MCP bearer tickets — /index and /mcp additionally accept a short-lived HS256
+// service ticket, minted either by the official PromptOwl deployment (the
+// shared OFFICIAL_COMMUNITY_SSO_SECRET the /auth/sso login flow trusts) or by
+// this server's own SSO token-exchange (MCP_SIGNING_SECRET). Either secret
+// verifies — see the constant-time loop below. Distinctions from a login ticket: `scope: "mcp"` is
 // REQUIRED here (a leaked one-time SSO login ticket can't double as a bearer
 // credential) and there's no jti (this ticket can't be redeemed for a login
 // session). The user is resolved by email and must ALREADY exist — native
@@ -202,15 +203,32 @@ const flexAuthWithPromptowlTicket = createMiddleware<AuthEnv>(
     const token = header.startsWith("Bearer ")
       ? header.slice("Bearer ".length)
       : "";
-    const secret = config.OFFICIAL_COMMUNITY_SSO_SECRET;
+    // An MCP bearer may be signed by PromptOwl (the shared official secret) OR,
+    // on a self-hosted deployment, by this server's own MCP_SIGNING_SECRET (the
+    // key the SSO token-exchange mints with). Accept a ticket that verifies
+    // under EITHER — each attempt is an independent constant-time HMAC check,
+    // and a ticket matching neither is rejected. Order is irrelevant: a forged
+    // token fails both; a genuine one matches exactly the secret that signed it.
+    const secrets = [
+      config.OFFICIAL_COMMUNITY_SSO_SECRET,
+      config.MCP_SIGNING_SECRET,
+    ].filter(Boolean);
     const looksLikeJwt =
       !!token && !token.startsWith("cnst_") && token.split(".").length === 3;
-    if (!looksLikeJwt || !secret) return flexAuthMiddleware(c, next);
+    if (!looksLikeJwt || secrets.length === 0) {
+      return flexAuthMiddleware(c, next);
+    }
 
-    let claims: SsoTicketClaims;
-    try {
-      claims = verifySsoTicket(token, secret);
-    } catch {
+    let claims: SsoTicketClaims | null = null;
+    for (const secret of secrets) {
+      try {
+        claims = verifySsoTicket(token, secret);
+        break;
+      } catch {
+        // Wrong secret (or malformed/expired) — try the next candidate.
+      }
+    }
+    if (!claims) {
       return c.json({ error: "Invalid service ticket" }, 401);
     }
     // Require the MCP scope AND reject a present jti. A one-time-use jti is the
@@ -561,6 +579,16 @@ export function createApp(): Hono<AuthEnv> {
     oidc_allowed_domains: config.OIDC_ALLOWED_DOMAINS.join(", "),
     oidc_auto_provision: config.OIDC_AUTO_PROVISION,
     oidc_department_tagging: config.OIDC_DEPARTMENT_TAGGING,
+    // Agent SSO / token-exchange. MCP_SIGNING_SECRET is WRITE-ONLY — only its
+    // presence is reported, never the value (same discipline as the OIDC secret).
+    sso_token_exchange_enabled: config.SSO_TOKEN_EXCHANGE_ENABLED,
+    mcp_signing_secret_set: !!config.MCP_SIGNING_SECRET,
+    mcp_token_ttl_seconds: config.MCP_TOKEN_TTL_SECONDS,
+    ms_token_exchange_enabled: config.MS_TOKEN_EXCHANGE_ENABLED,
+    ms_client_id: config.MS_CLIENT_ID,
+    ms_tenant_id: config.MS_TENANT_ID,
+    google_token_exchange_enabled: config.GOOGLE_TOKEN_EXCHANGE_ENABLED,
+    google_client_id: config.GOOGLE_CLIENT_ID,
     // Live readiness (enabled AND issuer+id+secret present) — the SAVED state,
     // i.e. whether the login button is currently live. The Settings UI derives
     // its own "enabled but not configured" warning from the unsaved draft
@@ -810,6 +838,86 @@ export function createApp(): Hono<AuthEnv> {
         name: "OIDC_DEPARTMENT_TAGGING",
         value: body.oidc_department_tagging ? "true" : null,
       });
+    }
+    // ── Agent SSO / token-exchange (POST /auth/token-exchange) ────────────
+    // Default-off toggles persist "false" as null (unset already = off). The
+    // MCP signing secret is write-only, same discipline as oidc_client_secret.
+    if ("sso_token_exchange_enabled" in body) {
+      pending.push({
+        name: "SSO_TOKEN_EXCHANGE_ENABLED",
+        value: body.sso_token_exchange_enabled ? "true" : null,
+      });
+    }
+    if ("mcp_signing_secret" in body) {
+      const v = body.mcp_signing_secret;
+      if (v === null || v === "") {
+        pending.push({ name: "MCP_SIGNING_SECRET", value: null });
+      } else if (typeof v !== "string") {
+        addError("mcp_signing_secret", "MCP signing secret must be a string (or empty to clear it).");
+      } else if (v.trim().length < 16) {
+        addError("mcp_signing_secret", "MCP signing secret should be a long random string (16+ characters).");
+      } else {
+        pending.push({ name: "MCP_SIGNING_SECRET", value: v.trim() });
+      }
+    }
+    if ("mcp_token_ttl_seconds" in body) {
+      const n = Number(body.mcp_token_ttl_seconds);
+      if (!Number.isFinite(n) || n < 30 || n > 3600) {
+        addError("mcp_token_ttl_seconds", "Token lifetime must be between 30 and 3600 seconds.");
+      } else {
+        pending.push({ name: "MCP_TOKEN_TTL_SECONDS", value: String(Math.floor(n)) });
+      }
+    }
+    if ("ms_token_exchange_enabled" in body) {
+      pending.push({
+        name: "MS_TOKEN_EXCHANGE_ENABLED",
+        value: body.ms_token_exchange_enabled ? "true" : null,
+      });
+    }
+    if ("ms_client_id" in body) {
+      pending.push({ name: "MS_CLIENT_ID", value: String(body.ms_client_id ?? "").trim() || null });
+    }
+    if ("ms_tenant_id" in body) {
+      pending.push({ name: "MS_TENANT_ID", value: String(body.ms_tenant_id ?? "").trim() || null });
+    }
+    if ("google_token_exchange_enabled" in body) {
+      pending.push({
+        name: "GOOGLE_TOKEN_EXCHANGE_ENABLED",
+        value: body.google_token_exchange_enabled ? "true" : null,
+      });
+    }
+    if ("google_client_id" in body) {
+      pending.push({ name: "GOOGLE_CLIENT_ID", value: String(body.google_client_id ?? "").trim() || null });
+    }
+    // Fail-closed guard on the combination, not on either field alone: a
+    // provider enabled while unknown emails may JIT-provision AND no domain
+    // allowlist bounds them means any account at that IdP (Google = the whole
+    // internet) can exchange a token for a bearer on an account it just made.
+    // Effective post-PATCH values, so setting the allowlist in the SAME request
+    // that flips the toggle is accepted. The endpoint refuses that combination
+    // at mint time too — this only stops an admin from saving it blind.
+    const effAllowedDomains =
+      "oidc_allowed_domains" in body
+        ? String(body.oidc_allowed_domains ?? "")
+            .split(",")
+            .map((d) => d.trim())
+            .filter(Boolean)
+        : config.OIDC_ALLOWED_DOMAINS;
+    const effAutoProvision =
+      "oidc_auto_provision" in body
+        ? !!body.oidc_auto_provision
+        : config.OIDC_AUTO_PROVISION;
+    if (effAutoProvision && effAllowedDomains.length === 0) {
+      for (const field of [
+        "ms_token_exchange_enabled",
+        "google_token_exchange_enabled",
+      ] as const) {
+        if (body[field])
+          addError(
+            field,
+            "Set allowed email domains (or turn auto-provision off) before enabling token exchange — otherwise anyone with an account at that provider can sign themselves up and mint a token.",
+          );
+      }
     }
     // Effective post-PATCH OIDC state: what this request sets, falling back
     // to current config for fields it doesn't touch. Shared by the enable
