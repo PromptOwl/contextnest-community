@@ -178,10 +178,11 @@ const flexAuthMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   return c.json({ error: "Missing or invalid credentials" }, 401);
 });
 
-// PromptOwl native integration — /index and /mcp additionally accept a
-// short-lived HS256 service ticket minted by the official PromptOwl
-// deployment (the same shared OFFICIAL_COMMUNITY_SSO_SECRET the /auth/sso
-// login flow trusts). Distinctions from a login ticket: `scope: "mcp"` is
+// MCP bearer tickets — /index and /mcp additionally accept a short-lived HS256
+// service ticket, minted either by the official PromptOwl deployment (the
+// shared OFFICIAL_COMMUNITY_SSO_SECRET the /auth/sso login flow trusts) or by
+// this server's own SSO token-exchange (MCP_SIGNING_SECRET). Either secret
+// verifies — see the constant-time loop below. Distinctions from a login ticket: `scope: "mcp"` is
 // REQUIRED here (a leaked one-time SSO login ticket can't double as a bearer
 // credential) and there's no jti (this ticket can't be redeemed for a login
 // session). The user is resolved by email and must ALREADY exist — native

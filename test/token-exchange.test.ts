@@ -403,6 +403,72 @@ describe("POST /auth/token-exchange — Microsoft Entra", () => {
   });
 });
 
+describe("POST /auth/token-exchange — two providers at once", () => {
+  it("serves both issuers without refetching discovery on every alternation", async () => {
+    enableGoogle({
+      MS_TOKEN_EXCHANGE_ENABLED: "true",
+      MS_CLIENT_ID: MS_CLIENT,
+      MS_TENANT_ID: MS_TENANT,
+      OIDC_ALLOWED_DOMAINS: "example.com",
+    });
+    const { privateKey, jwks } = await makeKeys();
+
+    // One mock IdP serving BOTH issuers, counting discovery hits: the cache
+    // holds an entry per issuer, so alternating providers must not evict.
+    const discoveryHits: Record<string, number> = {};
+    vi.stubGlobal("fetch", async (input: any) => {
+      const url = String(
+        typeof input === "object" && input?.url ? input.url : input,
+      );
+      const json = (b: unknown) =>
+        new Response(JSON.stringify(b), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      for (const issuer of [GOOGLE_ISSUER, MS_ISSUER]) {
+        if (url === `${issuer}/.well-known/openid-configuration`) {
+          discoveryHits[issuer] = (discoveryHits[issuer] ?? 0) + 1;
+          return json({
+            issuer,
+            authorization_endpoint: `${issuer}/authorize`,
+            token_endpoint: `${issuer}/token`,
+            jwks_uri: `${issuer}/jwks`,
+          });
+        }
+        if (url === `${issuer}/jwks`) return json(jwks);
+      }
+      throw new Error(`unexpected fetch in test: ${url}`);
+    });
+    const app = await createTestApp("key");
+
+    for (let i = 0; i < 2; i++) {
+      const google = await exchange(app, {
+        provider: "google",
+        subject_token: await signSubject(privateKey, {
+          email: "user@example.com",
+          email_verified: true,
+        }),
+      });
+      expect(google.status).toBe(200);
+
+      const microsoft = await exchange(app, {
+        provider: "microsoft",
+        subject_token: await signSubject(
+          privateKey,
+          { preferred_username: "entra.user@example.com" },
+          { issuer: MS_ISSUER, audience: MS_CLIENT },
+        ),
+      });
+      expect(microsoft.status).toBe(200);
+    }
+
+    // One discovery fetch per issuer for the whole run — a single-slot cache
+    // would evict on every alternation and fetch four times.
+    expect(discoveryHits[GOOGLE_ISSUER]).toBe(1);
+    expect(discoveryHits[MS_ISSUER]).toBe(1);
+  });
+});
+
 describe("MCP bearer acceptor — either signing secret", () => {
   // /index + /mcp accept a ticket signed by the PromptOwl shared secret OR by
   // this server's own MCP_SIGNING_SECRET, and nothing else.

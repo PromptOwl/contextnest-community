@@ -977,12 +977,20 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                           draft.mcp_signing_secret.trim() !== ""
                         ? true
                         : !!settings?.mcp_signing_secret_set;
-                  const providerOn =
-                    draft.ms_token_exchange_enabled ||
-                    draft.google_token_exchange_enabled;
+                  // A provider counts as ready only with the ids its verifier
+                  // needs — the toggle alone leaves the backend answering
+                  // provider_misconfigured on every request, and this banner is
+                  // the only signal the admin gets.
+                  const msReady =
+                    draft.ms_token_exchange_enabled &&
+                    !!draft.ms_client_id?.trim() &&
+                    !!draft.ms_tenant_id?.trim();
+                  const googleReady =
+                    draft.google_token_exchange_enabled &&
+                    !!draft.google_client_id?.trim();
                   if (
                     !draft.sso_token_exchange_enabled ||
-                    (secretPresent && providerOn)
+                    (secretPresent && (msReady || googleReady))
                   )
                     return null;
                   return (
@@ -990,8 +998,9 @@ export function SettingsPage({ onBack, settings, onUpdate }: SettingsPageProps) 
                       role="alert"
                       className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
                     >
-                      Enabled but not ready — the endpoint stays disabled until a
-                      signing secret and at least one provider are set.
+                      Enabled but not ready — the endpoint needs a signing
+                      secret and at least one provider turned on with its client
+                      ID filled in (plus the tenant ID for Microsoft).
                     </div>
                   );
                 })()}

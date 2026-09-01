@@ -123,8 +123,16 @@ async function verifySubjectToken(
       clockTolerance: 30,
     });
     claims = payload as Record<string, unknown>;
-  } catch {
-    // Bad signature, wrong issuer/audience, expired, malformed — all one class.
+  } catch (err) {
+    // One class to the CALLER (bad signature, wrong issuer/audience, expired,
+    // malformed — telling them which would leak verification internals), but
+    // logged server-side: jose fetches the JWKS lazily here, so an IdP outage
+    // lands in this same catch as attack noise and the log is the only way to
+    // tell them apart.
+    console.warn(
+      `[token-exchange] subject_token rejected (${provider}):`,
+      err instanceof Error ? err.message : err,
+    );
     throw new ExchangeError("invalid_subject_token", 401);
   }
 
