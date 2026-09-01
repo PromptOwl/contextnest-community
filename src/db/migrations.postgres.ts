@@ -393,7 +393,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_access_grant_token ON access_grant(token_hash);
 
     -- Viewer overlays, declared inline above; explicit ALTERs so a database
-    -- created by an earlier build of 035 still gets them on upgrade.
+    -- created by an earlier build of 037 still gets them on upgrade.
     ALTER TABLE publish ADD COLUMN IF NOT EXISTS watermark INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE publish ADD COLUMN IF NOT EXISTS no_download INTEGER NOT NULL DEFAULT 0;
 

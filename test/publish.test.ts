@@ -360,6 +360,47 @@ describe("governed content", () => {
     const html = await (await app.request(`/p/${slug}`)).text();
     expect(html).toContain("approved content here");
     expect(html).not.toContain("unapproved draft leak");
+
+    // A document that has never been approved has no snapshot to publish, so
+    // the link must 404 rather than fall back to serving the draft.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${gNest}/nodes`,
+      { title: "Never Approved", content: "draft nobody signed off" },
+      owner.apiKey,
+    );
+    const draft = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${gNest}/publications`,
+      { node_id: "nodes/never-approved", access_mode: "public" },
+      owner.apiKey,
+    );
+    const draftSlug = draft.data.publish.slug;
+    const draftRes = await app.request(`/p/${draftSlug}`);
+    expect(draftRes.status).toBe(404);
+    expect(await draftRes.text()).not.toContain("draft nobody signed off");
+
+    // ...and the 404 is the approval gate, not a bad slug: approve it and the
+    // very same link starts serving.
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${gNest}/nodes/nodes/never-approved/submit-review`,
+      { note: "please review" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${gNest}/nodes/nodes/never-approved/approve`,
+      { note: "ship it" },
+      reviewer.apiKey,
+    );
+    const live = await app.request(`/p/${draftSlug}`);
+    expect(live.status).toBe(200);
+    expect(await live.text()).toContain("draft nobody signed off");
   });
 });
 
@@ -501,17 +542,21 @@ describe("comments", () => {
     expect(sent.status).toBe(200);
     expect(await sent.text()).toContain("Thanks");
 
-    const comments = await jsonRequest(
+    // Lands in the document's Comments panel (annotation threads), which is
+    // where a steward actually looks — not a table nothing renders.
+    const threads = await jsonRequest(
       app,
       "GET",
-      `/nests/${nestId}/nodes/nodes/deck-one/comments`,
+      `/nests/${nestId}/nodes/nodes/deck-one/annotations`,
       undefined,
       owner.apiKey,
     );
-    expect(comments.status).toBe(200);
-    const mine = comments.data.comments.find((x: any) => x.body === "Slide 4 has a typo");
+    expect(threads.status).toBe(200);
+    const mine = threads.data.threads.find((t: any) =>
+      t.comments.some((x: any) => x.body === "Slide 4 has a typo"),
+    );
     expect(mine).toBeDefined();
-    expect(mine.author).toBe("reader@outside.test");
+    expect(mine.comments[0].author).toBe("reader@outside.test");
   });
 
   it("refuses an unidentified comment", async () => {
@@ -551,14 +596,18 @@ describe("comments", () => {
     });
     // Bounced back to the gate, not accepted.
     expect(await res.text()).toContain('name="code"');
-    const comments = await jsonRequest(
+    const threads = await jsonRequest(
       app,
       "GET",
-      `/nests/${nestId}/nodes/nodes/deck-one/comments`,
+      `/nests/${nestId}/nodes/nodes/deck-one/annotations`,
       undefined,
       owner.apiKey,
     );
-    expect(comments.data.comments.some((x: any) => x.body === "let me in")).toBe(false);
+    expect(
+      threads.data.threads.some((t: any) =>
+        t.comments.some((x: any) => x.body === "let me in"),
+      ),
+    ).toBe(false);
   });
 });
 

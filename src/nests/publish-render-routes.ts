@@ -21,7 +21,7 @@ import { requestBaseUrl } from "../shared/base-url.js";
 import { isSecureRequest } from "../auth/sessions.js";
 import { sendEmailToRecipient } from "../notify/email.js";
 import { readArtifact } from "../annotations/service.js";
-import { createComment } from "../governance/comment-service.js";
+import { createThread } from "../annotations/service.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { clientIp } from "../shared/request-ip.js";
 import * as publish from "./publish-service.js";
@@ -137,6 +137,10 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
     // opaque — a public 404 must not confirm which node ids exist.
     throw new NotFoundError("Not found");
   }
+  // A null version means readArtifact found no approved snapshot and fell back
+  // to the live body. Serving that would put an unapproved draft on the open
+  // web, so a document that has never been approved simply has nothing to show.
+  if (artifact.version == null) throw new NotFoundError("Not found");
   const type = String(artifact.type ?? "document");
   const body = artifact.html ?? "";
   const isHtml = type === "artifact" || /^\s*<(?:!doctype|html)\b/i.test(body);
@@ -290,14 +294,10 @@ publishRenderRoutes.post("/:slug/comments", async (c) => {
     return c.html(commentPage(row, viewer.email, "Write a comment first."), 400);
   }
 
-  // Lands as an ordinary open comment on the node — the same queue stewards
-  // already work, so a public reader can never open-write onto the document.
-  await createComment({
-    nestId: row.nest_id,
-    nodeId: row.node_id,
-    author: email,
-    body,
-  });
+  // Lands as an unanchored annotation thread — the same list the document's
+  // Comments panel already renders, so a steward actually sees it. A public
+  // reader can never open-write onto the document itself.
+  await createThread(row.nest_id, row.node_id, { body, anchor: null }, email);
   return c.html(commentThanksPage());
 });
 
