@@ -297,6 +297,15 @@ describe("viewer overlays", () => {
     expect(guarded.data.publish.no_download).toBe(true);
     const guardedHtml = await (await app.request(`/p/${guarded.data.publish.slug}`)).text();
     expect(guardedHtml).toContain("@media print");
+    expect(guardedHtml).toContain("user-select:none");
+    // Every reflex path a normal reader reaches: menu, copy, drag, shortcuts.
+    for (const evt of ["contextmenu", "copy", "cut", "dragstart", "selectstart"]) {
+      expect(guardedHtml).toContain(evt);
+    }
+    expect(guardedHtml).toContain("beforeprint");
+    const guardScript = guardedHtml.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    expect(guardScript).toBeTruthy();
+    expect(() => new Function(guardScript!)).not.toThrow();
 
     const plain = await jsonRequest(
       app,

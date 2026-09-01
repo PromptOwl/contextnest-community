@@ -110,6 +110,52 @@ function esc(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+/**
+ * The no-download overlay: everything a browser lets us refuse.
+ *
+ * READ THIS BEFORE PROMISING ANYTHING. The document has already been delivered
+ * to the reader's machine by the time any of this runs, so none of it is
+ * protection — a screenshot, DevTools, "Save page as" from the browser menu, or
+ * plain `curl` on the URL all still return the content. What it does is close
+ * every path an ordinary reader would reach by reflex: selection, copy, cut,
+ * drag, right-click, print, and the Ctrl-key shortcuts for save/print/copy/
+ * source. Determined extraction is not in scope for CSS and JavaScript, and
+ * cannot be. Identify the viewer (email or invite gate) and watermark the page
+ * if the content genuinely matters — attribution deters where obstruction does
+ * not.
+ */
+const NO_DOWNLOAD_CSS = `<style>
+  @media print{html,body{display:none !important}}
+  html,body{-webkit-user-select:none;-ms-user-select:none;user-select:none}
+  img,a,svg,canvas{-webkit-user-drag:none;user-drag:none}
+</style>`;
+
+/** The shell only ever holds the comment modal, so it gets the print blank and
+ *  nothing else — blocking selection here would stop a reader typing a comment,
+ *  and the document's own copy guards live inside the frame. */
+const SHELL_PRINT_BLANK = `<style>@media print{html,body{display:none !important}}</style>`;
+
+const NO_DOWNLOAD_SCRIPT = `<script>
+  (function () {
+    function stop(e) { e.preventDefault(); return false; }
+    ["contextmenu", "copy", "cut", "dragstart", "selectstart"].forEach(function (evt) {
+      document.addEventListener(evt, stop, { capture: true });
+    });
+    document.addEventListener("keydown", function (e) {
+      var k = (e.key || "").toLowerCase();
+      // Save, print, copy, cut, select-all, view-source.
+      if ((e.ctrlKey || e.metaKey) && ["s", "p", "c", "x", "a", "u"].indexOf(k) !== -1) return stop(e);
+      // DevTools. Blocking these is courtesy at best — the browser menu still
+      // opens them — but it stops the reflex.
+      if (k === "f12") return stop(e);
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && ["i", "j", "c"].indexOf(k) !== -1) return stop(e);
+    }, { capture: true });
+    // Belt and braces with the print stylesheet, for engines that ignore it.
+    window.addEventListener("beforeprint", function () { document.body.style.display = "none"; });
+    window.addEventListener("afterprint", function () { document.body.style.display = ""; });
+  })();
+</script>`;
+
 /** The viewer overlays: a watermark stamping the viewer's email across the page,
  *  and a print-blank for no-download. Both are deterrents against casual copying,
  *  never enforcement — anything a browser renders can be screenshotted. The
@@ -117,9 +163,7 @@ function esc(s: string): string {
 function overlayMarkup(row: PublishRow, viewerEmail: string | null): string {
   const parts: string[] = [];
   if (row.no_download === 1) {
-    parts.push(
-      `<style>@media print{html,body{display:none !important}}body{-webkit-user-select:none;user-select:none}</style>`,
-    );
+    parts.push(NO_DOWNLOAD_CSS, NO_DOWNLOAD_SCRIPT);
   }
   if (row.watermark === 1 && viewerEmail) {
     parts.push(
@@ -367,7 +411,7 @@ function readerShell(row: PublishRow, title: string, viewerEmail: string | null)
         .then(function () { send.disabled = false; });
     });
   })();
-  </script></body></html>`;
+  </script>${row.no_download === 1 ? SHELL_PRINT_BLANK : ""}</body></html>`;
 }
 
 /** CSP for the reader shell. The shell is our own markup, so it is NOT

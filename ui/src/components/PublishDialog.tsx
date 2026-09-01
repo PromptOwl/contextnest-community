@@ -278,7 +278,7 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
               <ToggleRow
                 id="publish-nodownload"
                 label="Discourage download and print"
-                hint="Blanks the page for print. A deterrent, not protection."
+                hint="Blocks copy, right-click, drag and printing. Screenshots and developer tools still work — pair it with a watermark if the content matters."
                 checked={noDownload}
                 onChange={setNoDownload}
               />
