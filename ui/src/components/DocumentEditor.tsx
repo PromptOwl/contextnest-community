@@ -73,7 +73,8 @@ import {
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
-import { TableViewer } from "./TableViewer";
+import { TableViewer, TableGrid } from "./TableViewer";
+import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { CodeHighlight } from "./CodeHighlight";
@@ -2598,22 +2599,46 @@ export function DocumentEditor({
                         );
                       }
                       if (diffRendered) {
+                        // A table's body is CSV: rendered as markdown it
+                        // collapses into one run-on paragraph, so each side
+                        // gets the same grid the reader sees, with the rows
+                        // the other version doesn't have tinted.
+                        const tableSides =
+                          effectiveType === "table"
+                            ? tableDiffSides(past.content || "", content)
+                            : null;
+                        const renderPane = (
+                          side: "past" | "current",
+                          body: string,
+                        ) =>
+                          tableSides ? (
+                            <TableGrid
+                              columns={tableSides[side].columns}
+                              rows={tableSides[side].rows}
+                              rowClassName={(i) =>
+                                tableSides[side].changed[i]
+                                  ? side === "past"
+                                    ? "bg-red-50 dark:bg-red-950/30"
+                                    : "bg-emerald-50 dark:bg-emerald-950/30"
+                                  : ""
+                              }
+                            />
+                          ) : (
+                            <DocumentViewer content={body} className="px-4 py-3" />
+                          );
                         return (
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div className="border rounded-lg overflow-hidden">
                               <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
                                 v{compareVersion}
                               </div>
-                              <DocumentViewer
-                                content={past.content || ""}
-                                className="px-4 py-3"
-                              />
+                              {renderPane("past", past.content || "")}
                             </div>
                             <div className="border rounded-lg overflow-hidden">
                               <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
                                 current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
                               </div>
-                              <DocumentViewer content={content} className="px-4 py-3" />
+                              {renderPane("current", content)}
                             </div>
                           </div>
                         );

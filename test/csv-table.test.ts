@@ -15,6 +15,7 @@ import {
   LARGE_TABLE_ROW_THRESHOLD,
   typedColumnIssues,
   tableTypeIssueMessage,
+  tableDiffSides,
 } from "../ui/src/lib/csv-table";
 
 describe("parseDelimited", () => {
@@ -548,5 +549,28 @@ describe("typedColumnIssues", () => {
     expect(typedColumnIssues(rows("launched:date\nsomeday"))).toEqual([
       { column: "launched", kind: "not-a-date", value: "someday", row: 1, count: 1 },
     ]);
+  });
+});
+
+describe("tableDiffSides", () => {
+  const PAST = "sku:key,price:number\nOWL-100,149\nOWL-200,299";
+  const CURRENT = "sku:key,price:number\nOWL-100,149\nOWL-200,349\nOWL-300,99";
+
+  it("marks rows the other version does not have", () => {
+    const { past, current } = tableDiffSides(PAST, CURRENT);
+    expect(past.columns).toEqual(["sku", "price"]);
+    expect(past.changed).toEqual([false, true]);
+    expect(current.changed).toEqual([false, true, true]);
+  });
+
+  it("pairs duplicate rows one-for-one", () => {
+    const { current } = tableDiffSides("a\nx", "a\nx\nx");
+    expect(current.changed).toEqual([false, true]);
+  });
+
+  it("ignores comment lines and identical bodies", () => {
+    const { past, current } = tableDiffSides("# note\na,b\n1,2", "a,b\n1,2");
+    expect(past.changed).toEqual([false]);
+    expect(current.changed).toEqual([false]);
   });
 });

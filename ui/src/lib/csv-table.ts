@@ -464,3 +464,70 @@ export function delimitedToMarkdownTable(
     hasHeader,
   };
 }
+
+/** One side of a table-vs-table comparison, ready to render as a grid. */
+export interface TableDiffSide {
+  columns: string[];
+  rows: string[][];
+  /** Per row: true when the other version has no matching row. */
+  changed: boolean[];
+}
+
+/** Header + data rows of a table body, comment and blank lines dropped — the
+ *  same rows the server's table parser reads. */
+function tableRows(body: string): string[][] {
+  return parseDelimited(body, ",").filter(
+    (r) =>
+      !(r[0] ?? "").trimStart().startsWith("#") &&
+      r.some((c) => c.trim() !== ""),
+  );
+}
+
+/**
+ * Compare two CSV table bodies row-wise, so each version can render as a grid
+ * with its added/removed rows marked. A table diffed as prose collapses into
+ * one run-on paragraph — exactly what a reviewer cannot check.
+ *
+ * Matching is whole-row and multiset-aware (two identical rows on one side
+ * need two on the other), which is all a fact store needs: the row is the unit
+ * that gets added, dropped or corrected.
+ */
+export function tableDiffSides(
+  past: string,
+  current: string,
+): { past: TableDiffSide; current: TableDiffSide } {
+  const key = (row: string[]) => row.map((c) => c.trim()).join(" ");
+  const side = (body: string) => {
+    const rows = tableRows(body);
+    return {
+      columns: (rows[0] ?? []).map((h) => h.split(":")[0].trim()),
+      rows: rows.slice(1),
+    };
+  };
+  const a = side(past);
+  const b = side(current);
+
+  const counts = (rows: string[][]) => {
+    const m = new Map<string, number>();
+    for (const r of rows) {
+      const k = key(r);
+      m.set(k, (m.get(k) ?? 0) + 1);
+    }
+    return m;
+  };
+  // Each match consumes one from the other side's tally, so duplicates pair
+  // up one-for-one instead of every copy matching the same row.
+  const mark = (rows: string[][], other: Map<string, number>) =>
+    rows.map((r) => {
+      const k = key(r);
+      const left = other.get(k) ?? 0;
+      if (left <= 0) return true;
+      other.set(k, left - 1);
+      return false;
+    });
+
+  return {
+    past: { ...a, changed: mark(a.rows, counts(b.rows)) },
+    current: { ...b, changed: mark(b.rows, counts(a.rows)) },
+  };
+}
