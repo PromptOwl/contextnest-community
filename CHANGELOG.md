@@ -1,5 +1,92 @@
 # @promptowl/contextnest-community
 
+## 1.19.0
+
+### Minor Changes
+
+- bb7a11e: Cite source node URLs in `POST /nests/:id/context`.
+
+  The one endpoint that grounds both "Chat with the nest" and "Set up agent" now carries each node's source URL, so answers can cite inline and consumers can render clickable citations. Two additive changes to the response shape: every `nodes[]` entry gains a `url` deep link (`<base>/?nest=<nestId>&doc=nodes/<slug>`), and every context block gains a `_source: <url>_` line alongside the existing `_tags:` line. The `_source:` line is built before the token estimate, so it counts against `max_tokens` rather than silently overflowing the budget.
+
+  URLs are built in one place — `resolveNodeUrl(node, { nestId, baseUrl })` in `src/governance/title-resolver.ts`, wrapping the existing `docLink()`. That is the seam the public `/p/:slug` URL will swap into once the publish/hosting work lands, rather than every call site.
+
+  The base is `PUBLIC_BASE_URL` when set, falling back to the request origin. When neither resolves, `resolveNodeUrl` returns `undefined`, so `url` is omitted from the payload and the `_source:` line is left out — no empty `href=""` reaches a consumer. **Set `PUBLIC_BASE_URL` on any deployment whose citations reach users**: without it the cited origin comes from the incoming `Host` header, which a proxy that forwards an untrusted value would let an attacker influence.
+
+- Curated tag columns on the board, and a pass over the edges the UI kept getting wrong.
+
+  **The tag board is user-curated.** It starts empty and shows only the columns you add — no tag auto-appearing as a column the moment one document carries it, and no Uncategorized catch-all collecting everything else (`ui/src/lib/board-dimensions.ts`, `ui/src/components/MaturityBoard.tsx`). Folder and status boards are unchanged and still auto-populate. Dragging a card between tag columns now retags the document: the source column's tag comes off, the target's goes on, in one `updateNode` write. The old "tag columns are read-only" limitation was written against a PATCH that unioned tags; PATCH replaces the tag set, so a swap has been expressible for a while.
+
+  Tag column keys are the bare value, but tags are stored with a leading `#`. Every crossing of that line goes through one strip/add pair, and a layout saved under the old `#`-prefixed spelling is migrated on read (`migrateLayout`) — a curated board repairs itself instead of rendering a row of columns that match nothing.
+
+  **An unknown node type is a 400, not a 500.** `POST /nests/:id/nodes` with a type the server does not know slipped past the create choke point and threw an opaque "Something went wrong" from deeper in the write path, telling the caller nothing about which field was wrong. An allow-list guard at the same point that already gates the disabled types now rejects it with a `ValidationError` naming the accepted types (`src/nodes/service.ts`).
+
+  **`context_list` no longer 500s on the storage-side filter key.** `listNodesForCaller` built one filter object for two consumers that spell "include retired" differently — `includeRetired` for the engine's `filterDocuments`, `include_retired` for the `context_list` operation. The camelCase key rode along into the operation call, harmless while the engine stripped unrecognized parameters and a hard error now that it rejects them. Every listing that crawls for bodies was returning a 500, taking `/runnables`, `/changes`, the node index, annotations and `context_overview` with it (`src/nodes/query-routes.ts`).
+
+  ### Documents
+
+  - **Tags are case-insensitive.** `Bug`, `bug`, `TAG` and `tag` produced four chips for two tags; input is lowercased on entry, and de-duplication is case-insensitive so documents saved before this change behave too (`ui/src/lib/tag-policy.ts`).
+  - **The tag field previews what it will add** while you type, with the rewrite note, instead of truncating and normalizing on commit and explaining it in a toast afterwards. It carries a `maxLength` the way Title does. Preview and commit read the same `newTags` function, so the line cannot promise a tag the commit will discard as a duplicate.
+  - **The Compare picker shows version dates** — relative time beside the author, absolute on hover — so picking a past version isn't guesswork (`ui/src/components/DocumentEditor.tsx`).
+  - **Backing out of a document lands on the Documents tab**, not the nest's Overview.
+  - **New folder… is separated from the folder destinations** in the Move dropdown, rather than reading as one more destination.
+
+  ### Dashboard
+
+  - **The filter applies to unsynced folders.** They were rendered off the raw list and ignored it entirely: selecting "Public" showed one matching nest beside every unsynced folder on disk, with a result count that contradicted the grid. An unsynced folder is a directory, not a nest — no owner, no collaborators, no visibility — so every access scope hides it and the text query matches its label or path. Two sync-state scopes are added, offered only when a folder is actually waiting to sync (`ui/src/lib/dashboard-scope.ts`).
+  - **Clear filters is available while the grid still has results**, not just from the empty state, and it now resets the sort order along with the scope and query.
+
+  ### Runs
+
+  - **Run rows fit their card at any nesting depth.** Cancel and Spawn sub-agent collapse into the shared overflow menu, the depth badge and child count move off the title line, the indent stops compounding, and the row clips rather than overflowing.
+  - **The run list marks a truncated ID** with an ellipsis and the full value on hover — the same run appeared to carry two different IDs between the list and the detail view.
+  - **An overflow-menu action can animate its icon** again, so a cancel in flight spins instead of looking hung.
+  - **The tool source editor highlights its code** in a preview pane beside the textarea, reusing the lowlight component the read view already had. The preview reads a deferred copy of the body, so auto-detection runs on a spare frame rather than on the typing path.
+  - **Table CSV source and preview sit side by side** on large screens instead of stacked.
+
+- 3fc9c76: Pick up the engine's per-vault write lock, and retire the last legacy write path.
+
+  Engine 2.4.0 ships a cross-process write lock (PromptOwl/ContextNest#78): every
+  mutation through the operation catalog serializes on it, and a writer that cannot
+  acquire it within 20s fails with `VaultLockTimeoutError`. The engine pin moves to
+  `^2.4.0` to take it. Two things had to be true here before that upgrade was safe:
+
+  **Every wire surface now maps the lock timeout to a retryable error.** REST
+  returns `503` with a `Retry-After` header (via a new `VaultBusyError`); MCP
+  returns an `isError` tool result whose `structuredContent` carries
+  `code: "VAULT_BUSY"` — never a generic 500. Detection matches the error by
+  `name`/`code` rather than `instanceof`, so it survives the package boundary —
+  and, because it keys on the error rather than the class, it was already correct
+  against the engine versions that predate the lock.
+
+  **`POST /nests/:nestId/publish` no longer writes documents by hand.** It was the
+  last pre-catalog write path — hand-built frontmatter, its own slugify, direct
+  `writeDocument` — invisible to any engine-side locking. It now routes each
+  document through the same `createNode` path as every other create surface.
+  One behavior change: a document whose title slugs to an **existing id is skipped
+  and reported** in a new additive `skipped` response field, instead of silently
+  overwriting the existing document and restarting its version history.
+
+  Going through `createNode` also means a single document can now be refused on its
+  own merits — an unusable title, a type the engine does not know. The batch is not
+  a transaction, so a row that fails is reported in a new additive `failed` field
+  and the remaining documents still publish, rather than aborting the batch and
+  leaving the earlier writes on disk with nothing in the response naming them. The
+  one error that still stops the batch is the lock timeout itself: it answers `503`,
+  and retrying is safe because everything the first attempt created comes back under
+  `skipped`.
+
+  One gap stays open on purpose: the `context_md` half of that same endpoint has
+  no operation in the catalog to route through, so it remains a direct write and
+  will not be covered by the lock. It cannot answer a retryable `503` either —
+  there is no timeout to map. Closing that needs an engine-side op for
+  `CONTEXT.md`, which is Phase B work.
+
+  Also removed the dead `safePublishDocument` wrapper, and added the
+  concurrent-writes regression for the MCP surface (the REST surface already had
+  one): a burst of concurrent `context_update` calls must land as a contiguous,
+  duplicate-free, fully reconstructable version history with nothing staged by a
+  drift scan.
+
 ## 1.18.0
 
 ### Minor Changes
