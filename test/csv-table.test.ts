@@ -13,6 +13,8 @@ import {
   uploadedTableErrorMessage,
   MAX_CSV_FILE_BYTES,
   LARGE_TABLE_ROW_THRESHOLD,
+  typedColumnIssues,
+  tableTypeIssueMessage,
 } from "../ui/src/lib/csv-table";
 
 describe("parseDelimited", () => {
@@ -506,5 +508,45 @@ describe("uploadedTableErrorMessage", () => {
     expect(uploadedTableErrorMessage("empty", { size: 0 })).toBe(
       "No table rows found in that file.",
     );
+  });
+});
+
+describe("typedColumnIssues", () => {
+  const rows = (csv: string) => parseDelimited(csv, ",");
+
+  it("flags a duplicate :key value and a non-numeric :number cell", () => {
+    const issues = typedColumnIssues(
+      rows(
+        "sku:key,price:number,region\nOWL-100,149,EU\nOWL-200,299,US\nOWL-100,notanumber,EU",
+      ),
+    );
+    expect(issues).toEqual([
+      { column: "sku", kind: "duplicate-key", value: "OWL-100", row: 3, count: 1 },
+      { column: "price", kind: "not-a-number", value: "notanumber", row: 3, count: 1 },
+    ]);
+  });
+
+  it("counts repeat offenders once per column", () => {
+    const [issue] = typedColumnIssues(
+      rows("price:number\nnope\n149\nalso-nope"),
+    );
+    expect(issue.count).toBe(2);
+    expect(tableTypeIssueMessage(issue)).toBe(
+      '"price" expects a number but row 1 has "nope" (+1 more).',
+    );
+  });
+
+  it("ignores blanks, untyped columns and clean typed data", () => {
+    expect(
+      typedColumnIssues(
+        rows("sku:key,launched:date,note\nOWL-100,2026-01-05,hi\n,,\nOWL-200,2026-02-01,ok"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("flags an unparseable :date", () => {
+    expect(typedColumnIssues(rows("launched:date\nsomeday"))).toEqual([
+      { column: "launched", kind: "not-a-date", value: "someday", row: 1, count: 1 },
+    ]);
   });
 });

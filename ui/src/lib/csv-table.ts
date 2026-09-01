@@ -119,6 +119,97 @@ export function isNumericLike(cell: string): boolean {
   return NUMERIC_LIKE.test(cell.trim());
 }
 
+/** One column's worth of data that contradicts its declared header type. */
+export interface TableTypeIssue {
+  /** Column name, directives stripped. */
+  column: string;
+  kind: "duplicate-key" | "not-a-number" | "not-a-date";
+  /** First offending value, for the message. */
+  value: string;
+  /** 1-based data row the first offender sits on (the header is row 0). */
+  row: number;
+  /** How many cells in this column hit this issue. */
+  count: number;
+}
+
+/**
+ * Check data rows against the `:key` / `:number` / `:date` directives their
+ * header declares — the constraints table-query relies on. Advisory, not a
+ * gate: a table is a human-maintained fact store, and an import with one bad
+ * cell is still worth saving. Blank cells are "not filled in", never invalid.
+ *
+ * `rows` is header-first and already stripped of `#` comment lines, matching
+ * what the server's parseTable reads.
+ */
+export function typedColumnIssues(rows: string[][]): TableTypeIssue[] {
+  const header = rows[0] ?? [];
+  const issues: TableTypeIssue[] = [];
+
+  header.forEach((raw, col) => {
+    const parts = raw.split(":").map((p) => p.trim());
+    const name = parts[0];
+    const directives = new Set(parts.slice(1).map((d) => d.toLowerCase()));
+    const isKey = directives.has("key");
+    const wrongType = directives.has("number")
+      ? (cell: string) => !isNumericLike(cell)
+      : directives.has("date")
+        ? (cell: string) => Number.isNaN(Date.parse(cell))
+        : null;
+    if (!isKey && !wrongType) return;
+
+    const seen = new Set<string>();
+    let duplicate: TableTypeIssue | null = null;
+    let mistyped: TableTypeIssue | null = null;
+
+    for (let i = 1; i < rows.length; i++) {
+      const cell = (rows[i][col] ?? "").trim();
+      if (!cell) continue;
+      if (isKey) {
+        const k = cell.toLowerCase();
+        if (seen.has(k)) {
+          if (duplicate) duplicate.count += 1;
+          else
+            duplicate = {
+              column: name,
+              kind: "duplicate-key",
+              value: cell,
+              row: i,
+              count: 1,
+            };
+        } else {
+          seen.add(k);
+        }
+      }
+      if (wrongType?.(cell)) {
+        if (mistyped) mistyped.count += 1;
+        else
+          mistyped = {
+            column: name,
+            kind: directives.has("number") ? "not-a-number" : "not-a-date",
+            value: cell,
+            row: i,
+            count: 1,
+          };
+      }
+    }
+    if (duplicate) issues.push(duplicate);
+    if (mistyped) issues.push(mistyped);
+  });
+
+  return issues;
+}
+
+/** One-line, human-readable rendering of an issue. */
+export function tableTypeIssueMessage(issue: TableTypeIssue): string {
+  const more = issue.count > 1 ? ` (+${issue.count - 1} more)` : "";
+  const where = `row ${issue.row}`;
+  if (issue.kind === "duplicate-key") {
+    return `"${issue.column}" is a :key column but "${issue.value}" repeats at ${where}${more}.`;
+  }
+  const expected = issue.kind === "not-a-number" ? "a number" : "a date";
+  return `"${issue.column}" expects ${expected} but ${where} has "${issue.value}"${more}.`;
+}
+
 /**
  * Heuristic: does the first row look like a header?
  *

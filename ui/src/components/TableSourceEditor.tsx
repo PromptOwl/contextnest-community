@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ClipboardEvent } from "react";
-import { Upload } from "lucide-react";
+import { AlertTriangle, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,6 +9,8 @@ import {
   parseDelimited,
   readUploadedTable,
   rowsToCsv,
+  tableTypeIssueMessage,
+  typedColumnIssues,
   uploadedTableErrorMessage,
 } from "../lib/csv-table";
 import { TableGrid } from "./TableViewer";
@@ -64,6 +66,9 @@ export function TableSourceEditor({
     return {
       columns: (rows[0] ?? []).map((h) => h.split(":")[0].trim()),
       rows: rows.slice(1),
+      // A preview that renders bad data as if it were fine is what made the
+      // typed header look enforced when nothing checked it.
+      issues: typedColumnIssues(rows),
     };
   }, [value]);
 
@@ -207,6 +212,31 @@ export function TableSourceEditor({
               Preview — {preview.rows.length.toLocaleString()} data row
               {preview.rows.length === 1 ? "" : "s"}
             </p>
+            {preview.issues.length > 0 && (
+              <div
+                className="mb-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200"
+                data-testid="table-source-issues"
+              >
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <div className="min-w-0">
+                    <b>
+                      {preview.issues.length} column
+                      {preview.issues.length === 1 ? "" : "s"} disagree with the
+                      header
+                    </b>{" "}
+                    — table-query trusts these types.
+                    <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                      {preview.issues.slice(0, 5).map((issue, i) => (
+                        <li key={`${issue.column}-${issue.kind}-${i}`}>
+                          {tableTypeIssueMessage(issue)}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
             <TableGrid columns={preview.columns} rows={preview.rows} limit={50} />
           </div>
         )}
