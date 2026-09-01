@@ -496,6 +496,41 @@ describe("invite allowlist", () => {
   });
 });
 
+describe("markdown rendering", () => {
+  it("renders a markdown document as HTML, not raw source", async () => {
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      {
+        title: "Rendered Doc",
+        content:
+          "# Rendered Doc\n\n**Prepared for:** someone\n\n## Summary\n\n- first point\n- second point\n\n| a | b |\n| - | - |\n| 1 | 2 |\n",
+      },
+      owner.apiKey,
+    );
+    const created = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publications`,
+      { node_id: "nodes/rendered-doc", access_mode: "public" },
+      owner.apiKey,
+    );
+    const html = await (await app.request(`/p/${created.data.publish.slug}`)).text();
+
+    expect(html).toContain("<h1>Rendered Doc</h1>");
+    expect(html).toContain("<h2>Summary</h2>");
+    expect(html).toContain("<strong>Prepared for:</strong>");
+    expect(html).toContain("<li>first point</li>");
+    expect(html).toContain("<table>");
+    // The raw markers themselves must be gone — that was the bug.
+    expect(html).not.toContain("## Summary");
+    expect(html).not.toContain("**Prepared for:**");
+    // Title comes from the body's own H1; don't print it twice.
+    expect(html.match(/<h1>Rendered Doc<\/h1>/g)?.length).toBe(1);
+  });
+});
+
 describe("comments", () => {
   it("is closed when the publish did not enable comments", async () => {
     const created = await jsonRequest(

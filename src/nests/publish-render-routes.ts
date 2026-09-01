@@ -13,6 +13,7 @@
  * carries document content.
  */
 import { Hono } from "hono";
+import MarkdownIt from "markdown-it";
 import { NotFoundError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
 import { isEmailish } from "../config.js";
@@ -39,6 +40,32 @@ const GATE_LIMIT = { max: 10, windowMs: 10 * 60_000 };
 // Comments are an anonymous write path, so they get their own (tighter) clamp.
 const COMMENT_LIMIT = { max: 5, windowMs: 10 * 60_000 };
 const COMMENT_MAX_CHARS = 4000;
+
+// Markdown nodes are rendered server-side so a published document reads like the
+// editor rather than as raw source. `html: false` keeps inline HTML escaped —
+// belt and braces, since the page already runs under the artifact sandbox.
+const markdown = new MarkdownIt({ html: false, linkify: true, breaks: false });
+
+/** Reader styling for a rendered markdown document: one column, generous
+ *  measure, and the same indigo headings the app uses. */
+const PROSE_CSS = `
+  body{margin:0;background:#fff;color:#1c1917;font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  main{max-width:820px;margin:0 auto;padding:48px 24px}
+  h1,h2,h3,h4{color:#142a80;line-height:1.25;margin:1.8em 0 .6em}
+  h1{font-size:2em;margin-top:0}h2{font-size:1.5em}h3{font-size:1.2em}h4{font-size:1.05em}
+  p,ul,ol,blockquote,table{margin:0 0 1.1em}
+  ul,ol{padding-left:1.5em}li{margin:.3em 0}
+  a{color:#142a80}
+  hr{border:0;border-top:1px solid #e7e5e4;margin:2em 0}
+  blockquote{border-left:3px solid #d6d3d1;margin-left:0;padding:.2em 0 .2em 1em;color:#57534e}
+  code{background:#f5f5f4;border-radius:4px;padding:.15em .35em;font:.9em/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  pre{background:#f5f5f4;border-radius:9px;padding:14px 16px;overflow-x:auto}
+  pre code{background:none;padding:0}
+  table{border-collapse:collapse;width:100%;display:block;overflow-x:auto}
+  th,td{border:1px solid #e7e5e4;padding:8px 10px;text-align:left}
+  th{background:#fafaf9}
+  img{max-width:100%}
+`;
 
 function cookieName(slug: string): string {
   return `cnp_${slug}`;
@@ -154,7 +181,10 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
     });
   }
   const title = esc(artifact.title || row.node_id);
-  const shell = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>body{margin:0;background:#fff;color:#1c1917;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}main{max-width:820px;margin:0 auto;padding:48px 24px}h1{color:#142a80}pre{white-space:pre-wrap;word-wrap:break-word}</style></head><body><main><h1>${title}</h1><pre>${esc(body)}</pre></main>${overlays}</body></html>`;
+  // The body almost always opens with its own H1, so only fall back to the
+  // node title when it doesn't — otherwise the page shows the heading twice.
+  const heading = /^\s*#\s/.test(body) ? "" : `<h1>${title}</h1>`;
+  const shell = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>${PROSE_CSS}</style></head><body><main>${heading}${markdown.render(body)}</main>${overlays}</body></html>`;
   return c.body(shell, 200, { "Content-Type": "text/html; charset=utf-8" });
 }
 
