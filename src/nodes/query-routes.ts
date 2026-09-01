@@ -38,6 +38,7 @@ import {
   nestCensus,
   RUNNABLE_NODE_TYPES,
   createNode,
+  isDerivedAnnotationsNode,
 } from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
@@ -560,7 +561,9 @@ queryRoutes.get("/search", async (c) => {
 
   const nestId = c.req.param("nestId")!;
   const { storage } = await engineCache.get(nestId);
-  const matches = matchDocuments(await discoverForSearch(storage), q);
+  const matches = matchDocuments(await discoverForSearch(storage), q).filter(
+    (n) => !isDerivedAnnotationsNode(n.id),
+  );
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
@@ -576,7 +579,11 @@ queryRoutes.get("/search", async (c) => {
 // GET /nests/:nestId/overview
 queryRoutes.get("/overview", async (c) => {
   const { storage } = await engineCache.get(c.req.param("nestId")!);
-  const documents = await storage.discoverDocuments();
+  // Derived annotation projections stay out of the counts and — because this
+  // is where the tag facet comes from — out of tag filtering too.
+  const documents = (await storage.discoverDocuments()).filter(
+    (d) => !isDerivedAnnotationsNode(d.id),
+  );
 
   const types: Record<string, number> = {};
   const tags: Record<string, number> = {};

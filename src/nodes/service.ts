@@ -493,10 +493,27 @@ function engineScopesFolders(): boolean {
   return folderScopeSupported;
 }
 
+/**
+ * A node the annotations projection maintains on the artifact's behalf, not one
+ * a user authored. It stays a real vault node (that is how an agent picks the
+ * feedback up on the next iteration), but every user-facing surface — listings,
+ * counts, board, graph, search, tag facets — leaves it out, so commenting on an
+ * artifact doesn't silently grow the nest's document count.
+ *
+ * Mirrors `derivedAnnotationsId` in annotations/service.ts; importing it would
+ * close the annotations→nodes import cycle.
+ */
+export function isDerivedAnnotationsNode(id: string): boolean {
+  return id.endsWith("--annotations");
+}
+
 export interface ListNodesFilters {
   /** One type, or several (e.g. runnable types) to keep. */
   type?: string | readonly string[];
   tag?: string;
+  /** Keep the derived `— Annotations` nodes in the result. Off for the UI,
+   *  which never asked for them; on for MCP, whose agents read them. */
+  includeDerived?: boolean;
   /** Lifecycle status; aliases normalized. Retired nodes stay hidden without it. */
   status?: string;
   /**
@@ -698,6 +715,11 @@ export async function listNodesForCaller(
       ...frontmatterFilters,
       includeRetired: true,
     });
+  }
+  // Derived annotation projections are machine-maintained, not documents the
+  // caller wrote — keep them out of every listing that isn't MCP's.
+  if (!filters.includeDerived) {
+    documents = documents.filter((d) => !isDerivedAnnotationsNode(d.id));
   }
   // Narrow BEFORE the access gate and enrichment below — that is the whole
   // saving, since both cost per surviving document. Still applied even when
@@ -954,7 +976,11 @@ export async function nestCensus(
   // nest on every mount — the single most expensive thing the page did, and
   // the one the lazy per-folder loading could not avoid.
   await ensureNodeIndex(nestId);
-  const documents = await readIndexedNodes(nestId);
+  // Same exclusion as the listing — the counts must describe the documents the
+  // Documents tab shows, not those plus the annotation projections.
+  const documents = (await readIndexedNodes(nestId)).filter(
+    (d) => !isDerivedAnnotationsNode(d.id),
+  );
 
   // Same gate as the listing, so the counts describe what this caller can
   // actually reach rather than what is on disk.
@@ -1043,7 +1069,12 @@ export async function listNodesForCallerByEmail(
   userEmail: string,
   filters: ListNodesFilters = {}
 ): Promise<NodeResponse[]> {
-  return listNodesForCaller(nestId, await userIdFromEmail(userEmail), filters);
+  // MCP is the agent surface the annotation projection exists for, so it keeps
+  // seeing those nodes unless a caller says otherwise.
+  return listNodesForCaller(nestId, await userIdFromEmail(userEmail), {
+    includeDerived: true,
+    ...filters,
+  });
 }
 
 export interface CreateNodeInput {
