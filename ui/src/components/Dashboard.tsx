@@ -519,17 +519,40 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                   </div>
                   <div className="divide-y border-t">
                     {work.notifications!.slice(0, 8).map((n) => (
-                      <button
+                      <div
                         key={n.id}
-                        type="button"
-                        onClick={() => openNotification(n)}
-                        className="w-full px-4 py-2 text-xs flex items-center gap-2 text-left hover:bg-amber-500/10"
+                        className="flex items-center gap-2 px-4 py-2 text-xs hover:bg-amber-500/10"
                       >
-                        <span className="flex-1">{n.message}</span>
-                        <span className="text-muted-foreground shrink-0">
-                          {formatServerDate(n.created_at)}
-                        </span>
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => openNotification(n)}
+                          className="flex-1 flex items-center gap-2 text-left"
+                        >
+                          <span className="flex-1">{n.message}</span>
+                          <span className="text-muted-foreground shrink-0">
+                            {formatServerDate(n.created_at)}
+                          </span>
+                        </button>
+                        {/* Per-row dismiss: "Mark all read" alone forces an
+                            all-or-nothing triage (CU-wdqcq007pu). */}
+                        <button
+                          type="button"
+                          title="Mark as read"
+                          aria-label="Mark as read"
+                          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-amber-500/20 hover:text-foreground"
+                          onClick={async () => {
+                            await api.markNotificationsRead([n.id]);
+                            setWork((prev) => ({
+                              ...prev,
+                              notifications: (prev.notifications ?? []).filter(
+                                (x) => x.id !== n.id,
+                              ),
+                            }));
+                          }}
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     ))}
                   </div>
                 </div>
