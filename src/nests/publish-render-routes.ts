@@ -2,15 +2,19 @@
  * Public render surface for published documents — mounted at top-level `/p`,
  * OUTSIDE the /nests auth chain, so it is reachable with no account.
  *
- *   GET  /p/:slug          → the page (public) or a gate form (email/code/invite)
+ *   GET  /p/:slug           → the document, a gate form, or (when comments are
+ *                             on) the reader shell that frames the document
+ *   GET  /p/:slug/view      → the document itself, always sandboxed
  *   POST /p/:slug/gate      → submit a code, or request a magic link by email
  *   GET  /p/:slug/verify    → consume a magic link → set session cookie → open
+ *   POST /p/:slug/comments  → file a comment (JSON), from the shell's modal
  *
  * The published document itself is served under the strict artifact sandbox
  * (opaque origin, no host cookies, no network) — the same policy the /hosted
- * artifact viewer uses. The GATE page is ordinary HTML (it needs a same-origin
- * form post, which the sandbox's `form-action 'none'` would block), and never
- * carries document content.
+ * artifact viewer uses. Our own chrome can never live inside it: the sandbox
+ * blocks forms and network calls, and a popup opened from it INHERITS those
+ * flags. So anything interactive (the gate form, the comment modal) is ordinary
+ * HTML on a separate page or on the shell that frames the document.
  */
 import { Hono } from "hono";
 import MarkdownIt from "markdown-it";
@@ -21,8 +25,7 @@ import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { isSecureRequest } from "../auth/sessions.js";
 import { sendEmailToRecipient } from "../notify/email.js";
-import { readArtifact } from "../annotations/service.js";
-import { createThread } from "../annotations/service.js";
+import { readArtifact, createThread } from "../annotations/service.js";
 import { tryConsume } from "../shared/rate-limit.js";
 import { clientIp } from "../shared/request-ip.js";
 import * as publish from "./publish-service.js";
@@ -119,14 +122,6 @@ function overlayMarkup(row: PublishRow, viewerEmail: string | null): string {
       `<style>@media print{html,body{display:none !important}}body{-webkit-user-select:none;user-select:none}</style>`,
     );
   }
-  if (row.comments_enabled === 1) {
-    // Opens in a new tab: the sandbox allows popups but not top-level
-    // navigation, and the form itself cannot live inside the sandboxed body.
-    parts.push(
-      `<style>#cn-comment{position:fixed;right:18px;bottom:18px;z-index:2147483646;background:#142a80;color:#fff;font:600 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:11px 16px;border-radius:9999px;text-decoration:none;box-shadow:0 4px 14px rgba(20,42,128,.32)}</style>` +
-        `<a id="cn-comment" href="/p/${esc(row.slug)}/comment" target="_blank" rel="noopener">Leave a comment</a>`,
-    );
-  }
   if (row.watermark === 1 && viewerEmail) {
     parts.push(
       `<style>#cn-watermark{position:fixed;inset:0;z-index:2147483647;pointer-events:none;overflow:hidden;display:flex;align-items:center;justify-content:center}` +
@@ -135,6 +130,16 @@ function overlayMarkup(row: PublishRow, viewerEmail: string | null): string {
     );
   }
   return parts.join("");
+}
+
+/** The document's title, for the reader shell's tab label. Falls back to the
+ *  node id rather than failing the page over a label. */
+async function publishedTitle(row: PublishRow): Promise<string> {
+  try {
+    return (await readArtifact(row.nest_id, row.node_id)).title || row.node_id;
+  } catch {
+    return row.node_id;
+  }
 }
 
 /** Splice the overlays in just before `</body>` so they sit above the document,
@@ -223,39 +228,106 @@ function sentPage(): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Check your email</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;color:#1c1917;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}.card{background:#fff;border:1px solid #e7e5e4;border-radius:14px;box-shadow:0 4px 24px rgba(20,42,128,.08);padding:32px 34px;max-width:380px;text-align:center}h1{font-size:20px;color:#142a80;margin:0 0 6px}p{color:#78716c;margin:0;font-size:14px}</style></head><body><div class="card"><h1>Check your email</h1><p>If your address has access, a one-time link to open this document is on its way.</p></div></body></html>`;
 }
 
-/** The comment form. Its own page, NOT part of the document: the artifact
- *  sandbox sets `form-action 'none'`, so a form rendered inside the published
- *  body could never post. The document links out to here instead. */
-function commentPage(row: PublishRow, viewerEmail: string | null, message?: string): string {
-  // An identified viewer (email/invite gate) is already known, so don't ask
-  // again — a passcode or public viewer has to name themselves.
-  const who = viewerEmail
+/** The reader shell for a commentable publish: the document itself in a
+ *  full-bleed same-origin iframe, with our comment button and modal alongside
+ *  it.
+ *
+ *  The controls cannot live inside the document. That document is served under
+ *  the artifact sandbox (opaque origin, `form-action 'none'`, `connect-src
+ *  'none'`), and a popup opened from it inherits those sandbox flags — which is
+ *  why the old separate comment page rendered but could never submit. Framing
+ *  the document keeps its sandbox intact and puts the comment UI on a page we
+ *  control and trust. */
+function readerShell(row: PublishRow, title: string, viewerEmail: string | null): string {
+  // A gated viewer is already identified; anyone else names themselves.
+  const emailField = viewerEmail
     ? `<p class="who">Commenting as <strong>${esc(viewerEmail)}</strong></p>`
-    : `<label>Your email<input name="email" type="email" autocomplete="email" required></label>`;
-  const err = message ? `<p class="err">${esc(message)}</p>` : "";
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Leave a comment</title><style>
-    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;color:#1c1917;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-    .card{background:#fff;border:1px solid #e7e5e4;border-radius:14px;box-shadow:0 4px 24px rgba(20,42,128,.08);padding:32px 34px;max-width:460px;width:calc(100% - 32px)}
-    h1{font-size:20px;color:#142a80;margin:0 0 6px}
-    p{color:#78716c;margin:0 0 18px;font-size:14px}
+    : `<label>Your email<input id="cn-email" type="email" autocomplete="email" required></label>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)}</title><style>
+    html,body{margin:0;height:100%}
+    #cn-frame{border:0;width:100%;height:100%;display:block}
+    #cn-open{position:fixed;right:18px;bottom:18px;z-index:20;background:#142a80;color:#fff;font:600 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;padding:11px 16px;border:0;border-radius:9999px;cursor:pointer;box-shadow:0 4px 14px rgba(20,42,128,.32)}
+    #cn-back{position:fixed;inset:0;z-index:30;background:rgba(28,25,23,.45);display:none;place-items:center}
+    #cn-back[data-open]{display:grid}
+    .card{background:#fff;border-radius:14px;box-shadow:0 10px 40px rgba(20,42,128,.22);padding:28px 30px;width:min(460px,calc(100% - 32px));font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1c1917;box-sizing:border-box}
+    .card h2{font-size:20px;color:#142a80;margin:0 0 6px}
+    .card p{color:#78716c;margin:0 0 18px;font-size:14px}
     .who strong{color:#44403c}
     label{display:block;font-size:13px;font-weight:600;color:#44403c;margin-bottom:16px}
     input,textarea{display:block;width:100%;margin-top:6px;padding:10px 12px;border:1px solid #d6d3d1;border-radius:9px;font:inherit;box-sizing:border-box}
     textarea{min-height:130px;resize:vertical}
-    button{width:100%;background:#142a80;color:#fff;font-weight:700;border:0;border-radius:9px;padding:11px;font-size:15px;cursor:pointer}
-    .err{color:#be123c;font-weight:600}
-    .brand{font-size:12px;color:#a8a29e;margin:18px 0 0;text-align:center}
-  </style></head><body><form class="card" method="POST" action="/p/${esc(row.slug)}/comments">
-    <h1>Leave a comment</h1><p>Your comment goes to this document's stewards for review — it is not posted publicly.</p>${err}${who}
-    <label>Comment<textarea name="body" maxlength="${COMMENT_MAX_CHARS}" required autofocus></textarea></label>
-    <button type="submit">Send comment</button>
-    <p class="brand">Secured by PromptOwl · ContextNest</p>
-  </form></body></html>`;
+    .row{display:flex;gap:10px}
+    button{flex:1;background:#142a80;color:#fff;font-weight:700;border:0;border-radius:9px;padding:11px;font-size:15px;cursor:pointer}
+    button.ghost{background:#f5f5f4;color:#44403c}
+    button[disabled]{opacity:.6;cursor:default}
+    .msg{font-weight:600;margin:0 0 14px;font-size:14px}
+    .msg.err{color:#be123c}.msg.ok{color:#15803d}
+  </style></head><body>
+    <iframe id="cn-frame" src="/p/${esc(row.slug)}/view" title="${esc(title)}"></iframe>
+    <button id="cn-open" type="button">Leave a comment</button>
+    <div id="cn-back"><div class="card" role="dialog" aria-modal="true" aria-label="Leave a comment">
+      <h2>Leave a comment</h2>
+      <p>Your comment goes to this document's stewards for review — it is not posted publicly.</p>
+      <p class="msg" id="cn-msg" hidden></p>
+      ${emailField}
+      <label>Comment<textarea id="cn-body" maxlength="${COMMENT_MAX_CHARS}" required></textarea></label>
+      <div class="row">
+        <button type="button" class="ghost" id="cn-cancel">Cancel</button>
+        <button type="button" id="cn-send">Send comment</button>
+      </div>
+    </div></div>
+  <script>
+  (function () {
+    var back = document.getElementById("cn-back");
+    var msg = document.getElementById("cn-msg");
+    var send = document.getElementById("cn-send");
+    var bodyEl = document.getElementById("cn-body");
+    var emailEl = document.getElementById("cn-email");
+    function show(text, ok) {
+      msg.textContent = text;
+      msg.className = "msg " + (ok ? "ok" : "err");
+      msg.hidden = false;
+    }
+    function open() { msg.hidden = true; back.setAttribute("data-open", ""); (emailEl || bodyEl).focus(); }
+    function close() { back.removeAttribute("data-open"); }
+    document.getElementById("cn-open").addEventListener("click", open);
+    document.getElementById("cn-cancel").addEventListener("click", close);
+    back.addEventListener("click", function (e) { if (e.target === back) close(); });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape") close(); });
+    send.addEventListener("click", function () {
+      var payload = { body: bodyEl.value };
+      if (emailEl) payload.email = emailEl.value;
+      send.disabled = true;
+      fetch("/p/${esc(row.slug)}/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok) { show(res.d.error || "Could not send that comment.", false); return; }
+          bodyEl.value = "";
+          show("Thanks — your comment is with the stewards.", true);
+          setTimeout(close, 1600);
+        })
+        .catch(function () { show("Could not reach the server.", false); })
+        .then(function () { send.disabled = false; });
+    });
+  })();
+  </script></body></html>`;
 }
 
-function commentThanksPage(): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Comment sent</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;color:#1c1917;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}.card{background:#fff;border:1px solid #e7e5e4;border-radius:14px;box-shadow:0 4px 24px rgba(20,42,128,.08);padding:32px 34px;max-width:400px;text-align:center}h1{font-size:20px;color:#142a80;margin:0 0 6px}p{color:#78716c;margin:0;font-size:14px}</style></head><body><div class="card"><h1>Thanks — comment sent</h1><p>A steward will see it alongside the document. You can close this tab.</p></div></body></html>`;
-}
+/** CSP for the reader shell. The shell is our own markup, so it is NOT
+ *  sandboxed — but it still may not load anything external, and it may only
+ *  frame and talk to this origin. The framed document keeps its own strict
+ *  artifact sandbox. */
+const SHELL_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "frame-src 'self'",
+  "connect-src 'self'",
+].join("; ");
 
 /** Who is allowed to see this publish right now, and who they are. `null` means
  *  the gate has not been passed. A public viewer is allowed but anonymous. */
@@ -270,27 +342,35 @@ async function resolveViewer(
   return token ? await publish.verifySession(row.id, token) : null;
 }
 
-// GET /p/:slug — render, or present the gate for a protected publish.
+// GET /p/:slug — the document, or the gate, or (when comments are on) the
+// reader shell that frames the document alongside the comment controls.
 publishRenderRoutes.get("/:slug", async (c) => {
   const slug = c.req.param("slug");
   const row = await publish.getPublishBySlug(slug);
   if (!publish.isLivePublish(row)) throw new NotFoundError("Not found");
 
   const viewer = await resolveViewer(c, row);
-  if (viewer) return renderPublished(c, row, viewer.email);
-  return c.html(gatePage(row));
+  if (!viewer) return c.html(gatePage(row));
+  if (row.comments_enabled !== 1) return renderPublished(c, row, viewer.email);
+
+  // The shell frames /view, which is what logs the view and applies the
+  // sandbox — nothing is logged twice.
+  const title = await publishedTitle(row);
+  c.header("Content-Security-Policy", SHELL_CSP);
+  c.header("Referrer-Policy", "no-referrer");
+  return c.html(readerShell(row, title, viewer.email));
 });
 
-// GET /p/:slug/comment — the comment form, for a viewer already past the gate.
-publishRenderRoutes.get("/:slug/comment", async (c) => {
+// GET /p/:slug/view — the document itself, always sandboxed. Framed by the
+// shell above, and gated independently: being the frame source is not
+// authorization.
+publishRenderRoutes.get("/:slug/view", async (c) => {
   const slug = c.req.param("slug");
   const row = await publish.getPublishBySlug(slug);
-  if (!publish.isLivePublish(row) || row.comments_enabled !== 1) {
-    throw new NotFoundError("Not found");
-  }
+  if (!publish.isLivePublish(row)) throw new NotFoundError("Not found");
   const viewer = await resolveViewer(c, row);
-  if (!viewer) return c.html(gatePage(row));
-  return c.html(commentPage(row, viewer.email));
+  if (!viewer) throw new NotFoundError("Not found");
+  return renderPublished(c, row, viewer.email);
 });
 
 // POST /p/:slug/comments — file a comment against the document.
@@ -300,35 +380,35 @@ publishRenderRoutes.post("/:slug/comments", async (c) => {
   if (!publish.isLivePublish(row) || row.comments_enabled !== 1) {
     throw new NotFoundError("Not found");
   }
-  // Reaching the comment form requires clearing the document's own gate, so an
-  // unauthenticated writer can never appear on a gated document.
+  // Posting requires clearing the document's own gate, so an unauthenticated
+  // writer can never appear on a gated document.
   const viewer = await resolveViewer(c, row);
-  if (!viewer) return c.html(gatePage(row));
+  if (!viewer) return c.json({ error: "Not found" }, 404);
 
   if (!tryConsume(`publish-comment:${slug}:${clientIp(c)}`, COMMENT_LIMIT)) {
-    return c.html(
-      commentPage(row, viewer.email, "Too many comments. Try again in a few minutes."),
-      429,
-    );
+    return c.json({ error: "Too many comments. Try again in a few minutes." }, 429);
   }
 
-  const form = await c.req.parseBody();
+  const input = (await c.req.json().catch(() => ({}))) as {
+    email?: string;
+    body?: string;
+  };
   // The ticket requires an identifying email on every comment: take the gated
   // viewer's when we have one, otherwise the address they typed.
-  const email = viewer.email ?? normalizeEmail(String(form.email ?? ""));
+  const email = viewer.email ?? normalizeEmail(String(input.email ?? ""));
   if (!isEmailish(email)) {
-    return c.html(commentPage(row, viewer.email, "Enter a valid email address."), 400);
+    return c.json({ error: "Enter a valid email address." }, 400);
   }
-  const body = String(form.body ?? "").trim().slice(0, COMMENT_MAX_CHARS);
+  const body = String(input.body ?? "").trim().slice(0, COMMENT_MAX_CHARS);
   if (!body) {
-    return c.html(commentPage(row, viewer.email, "Write a comment first."), 400);
+    return c.json({ error: "Write a comment first." }, 400);
   }
 
   // Lands as an unanchored annotation thread — the same list the document's
   // Comments panel already renders, so a steward actually sees it. A public
   // reader can never open-write onto the document itself.
   await createThread(row.nest_id, row.node_id, { body, anchor: null }, email);
-  return c.html(commentThanksPage());
+  return c.json({ ok: true });
 });
 
 // POST /p/:slug/gate — submit code (unlock now) or email (send magic link).

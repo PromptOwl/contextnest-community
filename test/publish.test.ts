@@ -543,11 +543,12 @@ describe("comments", () => {
     const slug = created.data.publish.slug;
     const html = await (await app.request(`/p/${slug}`)).text();
     expect(html).not.toContain("Leave a comment");
-    expect((await app.request(`/p/${slug}/comment`)).status).toBe(404);
+    // No shell either — a publish without comments is served directly.
+    expect(html).not.toContain("cn-frame");
     const post = await app.request(`/p/${slug}/comments`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: "email=x%40y.test&body=hi",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "x@y.test", body: "hi" }),
     });
     expect(post.status).toBe(404);
   });
@@ -563,19 +564,34 @@ describe("comments", () => {
       owner.apiKey,
     );
     const slug = created.data.publish.slug;
-    expect(await (await app.request(`/p/${slug}`)).text()).toContain("Leave a comment");
+    // The shell carries the comment control and frames the document; the
+    // document itself is still served sandboxed, from /view.
+    const shell = await (await app.request(`/p/${slug}`)).text();
+    expect(shell).toContain("Leave a comment");
+    expect(shell).toContain(`src="/p/${slug}/view"`);
+    expect(shell).not.toContain("hello world deck");
 
-    const form = await app.request(`/p/${slug}/comment`);
-    expect(form.status).toBe(200);
-    expect(await form.text()).toContain('name="body"');
+    // The modal is driven by inline JS that no request can exercise, so at
+    // least prove it parses — a syntax slip there breaks commenting silently.
+    const script = shell.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    expect(script).toBeTruthy();
+    expect(() => new Function(script!)).not.toThrow();
+
+    const framed = await app.request(`/p/${slug}/view`);
+    expect(framed.status).toBe(200);
+    expect(framed.headers.get("content-security-policy")).toContain("sandbox");
+    expect(await framed.text()).toContain("hello world deck");
 
     const sent = await app.request(`/p/${slug}/comments`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: "email=reader%40outside.test&body=Slide%204%20has%20a%20typo",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "reader@outside.test",
+        body: "Slide 4 has a typo",
+      }),
     });
     expect(sent.status).toBe(200);
-    expect(await sent.text()).toContain("Thanks");
+    expect(await sent.json()).toEqual({ ok: true });
 
     // Lands in the document's Comments panel (annotation threads), which is
     // where a steward actually looks — not a table nothing renders.
@@ -604,8 +620,8 @@ describe("comments", () => {
     );
     const res = await app.request(`/p/${created.data.publish.slug}/comments`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: "email=not-an-email&body=hi",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "not-an-email", body: "hi" }),
     });
     expect(res.status).toBe(400);
   });
@@ -626,11 +642,13 @@ describe("comments", () => {
     const slug = created.data.publish.slug;
     const res = await app.request(`/p/${slug}/comments`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: "email=stranger%40outside.test&body=let me in",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "stranger@outside.test", body: "let me in" }),
     });
-    // Bounced back to the gate, not accepted.
-    expect(await res.text()).toContain('name="code"');
+    // Refused outright — no gate cleared, no comment.
+    expect(res.status).toBe(404);
+    // ...and the document behind it stays shut too.
+    expect((await app.request(`/p/${slug}/view`)).status).toBe(404);
     const threads = await jsonRequest(
       app,
       "GET",
