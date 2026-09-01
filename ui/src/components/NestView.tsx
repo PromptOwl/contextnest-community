@@ -64,7 +64,7 @@ export function NodeTypeIcon({
 }
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
-import { ShareNestDialog } from "./ShareNestDialog";
+import { NestVisibilityControl } from "./NestVisibilityControl";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
 import { deriveNestCaps } from "../lib/nest-caps";
@@ -487,7 +487,6 @@ export function NestView({
       setCreatingFolder(false);
     }
   };
-  const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   // Rename dialog (name + description) — complements the inline header
   // rename, which only covers the name.
@@ -1813,7 +1812,13 @@ export function NestView({
             </Button>
           )}
           {canManage && (
-            <Button variant="outline" size="sm" onClick={() => setShowShare(true)}>
+            // Inside the nest, Share IS the Collaborators tab — one surface
+            // for visibility, people and teams (CU-wdqcpzzzy6).
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setActiveTab("collaborators")}
+            >
               <Users className="h-3.5 w-3.5 mr-1.5" />
               Share
             </Button>
@@ -3755,12 +3760,21 @@ export function NestView({
               <CardHeader className="pb-3">
                 <CardTitle className="text-lg">Collaborators</CardTitle>
                 <CardDescription>
-                  People with direct access to this nest. Sharing grants plain
-                  access (viewer/editor/admin) — it does not make anyone a
-                  steward. Manage visibility from the Share dialog.
+                  Who can reach this nest — visibility, people and teams.
+                  Sharing grants plain access (viewer/editor/admin); it does
+                  not make anyone a steward.
                 </CardDescription>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-4">
+                {/* Visibility lives here rather than only in the Share dialog,
+                    so access management is one surface (CU-wdqcpzzzy6). */}
+                {canManage && (
+                  <NestVisibilityControl
+                    nestId={nestId}
+                    onChanged={fetchData}
+                    onError={(msg) => msg && toast.error(msg)}
+                  />
+                )}
                 <CollaboratorManager
                   nestId={nestId}
                   nestName={nestName}
@@ -3831,14 +3845,6 @@ export function NestView({
         />
       )}
 
-      {showShare && (
-        <ShareNestDialog
-          nestId={nestId}
-          nestName={nestName}
-          onClose={() => setShowShare(false)}
-          onChanged={fetchData}
-        />
-      )}
       {shareFolder && (
         <ShareTargetDialog
           nestId={nestId}
