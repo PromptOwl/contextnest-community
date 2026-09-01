@@ -692,6 +692,24 @@ export function DocumentEditor({
   const [nestNodes, setNestNodes] = useState<
     Array<{ id: string; title: string; content?: string; tags?: string[] }>
   >([]);
+  // The nest's folders, including any holding no document. Same cached census
+  // the nest views read, so this costs no extra request in practice.
+  const [nestFolders, setNestFolders] = useState<string[]>([]);
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { census } = await qc.fetchQuery(reads.census(nestId));
+        if (!cancelled) setNestFolders(census.folders.map((f) => f.path));
+      } catch {
+        /* best-effort: the picker still offers document-derived folders */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, nestId, qc]);
   useEffect(() => {
     // New docs need the list too — the folder picker derives its
     // suggestions from existing node ids.
@@ -719,17 +737,18 @@ export function DocumentEditor({
     };
   }, [isNew, loading, nestId]);
 
-  // Every folder prefix in use (ids minus the nodes/ root and the leaf),
-  // so the folder picker suggests existing paths at each depth.
+  // Every folder the picker can offer: the prefixes documents sit under, plus
+  // the nest's folder list — a folder created empty holds no document to
+  // derive it from, so ids alone would hide it (CU-wdqcpzzzut).
   const folderOptions = useMemo(() => {
-    const opts = new Set<string>();
+    const opts = new Set<string>(nestFolders);
     for (const n of nestNodes) {
       const rel = n.id.startsWith("nodes/") ? n.id.slice(6) : n.id;
       const segs = rel.split("/").slice(0, -1);
       for (let i = 1; i <= segs.length; i++) opts.add(segs.slice(0, i).join("/"));
     }
     return [...opts].sort();
-  }, [nestNodes]);
+  }, [nestNodes, nestFolders]);
 
   // Folder path this doc lives under (id minus the "nodes/" root and the leaf
   // slug), prettified for the header breadcrumb so users see where a nested
