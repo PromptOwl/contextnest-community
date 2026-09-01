@@ -1110,6 +1110,8 @@ export function NestView({
     artifact: "Artifact",
     agent: "Agent",
     skill: "Skill",
+    tool: "Tool",
+    table: "Table",
   };
   // Colored pill for a non-document node type, shown on each list/card row so
   // the kind is scannable. `document` returns null (the default — no pill).
