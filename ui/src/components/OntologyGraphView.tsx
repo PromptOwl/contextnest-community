@@ -25,6 +25,8 @@ interface Props {
   nestName: string;
   /** Open the nest list filtered by a tag (tag chip in the detail panel). */
   onOpenTag?: (tag: string) => void;
+  /** Open a document — graph node double-click, detail panel, orphan list. */
+  onOpenDocument?: (nodeId: string) => void;
   onBack: () => void;
 }
 
@@ -102,7 +104,13 @@ interface View {
  * native deps). The coverage-gaps panel is the headline: unstewarded
  * categories, bottleneck stewards, orphan nodes.
  */
-export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props) {
+export function OntologyGraphView({
+  nestId,
+  nestName,
+  onOpenTag,
+  onOpenDocument,
+  onBack,
+}: Props) {
   const [graph, setGraph] = useState<NestGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -553,9 +561,18 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
                           key={n.id}
                           transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
                           onPointerDown={(e) => onNodeDown(e, n)}
+                          // Single click keeps its job (select + highlight the
+                          // neighborhood); double-click opens the document, the
+                          // navigation Board cards already give (CU-wdqcq0042w).
+                          onDoubleClick={() => {
+                            if (n.kind === "doc") onOpenDocument?.(n.id);
+                          }}
                           style={{ cursor: "grab" }}
                           opacity={inHood ? 1 : 0.25}
                         >
+                          {n.kind === "doc" && onOpenDocument && (
+                            <title>{`Double-click to open "${n.name}"`}</title>
+                          )}
                           <circle
                             r={radius(n)}
                             fill={n.color}
@@ -623,6 +640,11 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
                   label="Orphan nodes (no links)"
                   items={signals.orphans.map((n) => n.title)}
                   empty="No orphans — everything connects."
+                  onSelect={
+                    onOpenDocument &&
+                    ((i) => onOpenDocument(signals.orphans[i].id))
+                  }
+                  selectTitle={(i) => `Open "${signals.orphans[i].title}"`}
                 />
               </div>
             )}
@@ -638,6 +660,7 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
               neighborhood={neighborhood}
               nodesById={nodesById}
               onOpenTag={onOpenTag}
+              onOpenDocument={onOpenDocument}
             />
           )}
 
@@ -686,6 +709,7 @@ function NodeDetail({
   neighborhood,
   nodesById,
   onOpenTag,
+  onOpenDocument,
 }: {
   node: GNode;
   graph: NestGraph | null;
@@ -695,6 +719,7 @@ function NodeDetail({
   neighborhood: Set<string> | null;
   nodesById: Map<string, GNode>;
   onOpenTag?: (tag: string) => void;
+  onOpenDocument?: (nodeId: string) => void;
 }) {
   const doc = node.kind === "doc" ? graph?.nodes.find((n) => n.id === node.id) : null;
   const linkCount =
@@ -727,6 +752,16 @@ function NodeDetail({
         <div className="font-medium mb-1 break-all">{node.name}</div>
         <div className="text-xs text-muted-foreground capitalize">{node.kind}</div>
       </div>
+      {doc && onOpenDocument && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="w-full h-7 text-xs"
+          onClick={() => onOpenDocument(doc.id)}
+        >
+          Open document
+        </Button>
+      )}
       {doc && (
         <div className="space-y-1 text-xs">
           {doc.tags.length > 0 && (

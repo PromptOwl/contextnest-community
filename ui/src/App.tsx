@@ -1178,6 +1178,16 @@ export default function App() {
                 initialTags: [tag],
               })
             }
+            onOpenDocument={(nodeId) =>
+              setView({
+                page: "document",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                nodeId,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
+              })
+            }
             onBack={leaveNest}
           />
         )}
