@@ -93,7 +93,9 @@ export function StewardModal({
   const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nodes, setNodes] = useState<Array<{ id: string; title: string }>>([]);
-  const [tags, setTags] = useState<string[]>([]);
+  // null until fetched; an empty array means the nest genuinely has no tags,
+  // which is what makes the tag scope unusable.
+  const [tags, setTags] = useState<string[] | null>(null);
   const [optionsLoading, setOptionsLoading] = useState(false);
   const qc = useQueryClient();
 
@@ -123,6 +125,9 @@ export function StewardModal({
         : qc.fetchQuery(reads.tags(nestId)).then((list) => {
             if (cancelled) return;
             setTags(list);
+            // No tags means tag scope can never be satisfied — drop back to
+            // the nest scope instead of leaving an unsubmittable form.
+            if (list.length === 0 && !steward) setScope("nest");
           });
     fetcher
       .catch((err) =>
@@ -262,7 +267,11 @@ export function StewardModal({
                   ([key, cfg]) => {
                     const Icon = cfg.icon;
                     return (
-                      <SelectItem key={key} value={key}>
+                      <SelectItem
+                        key={key}
+                        value={key}
+                        disabled={key === "tag" && tags?.length === 0}
+                      >
                         <div className="flex items-center gap-2">
                           <Icon className="h-4 w-4" />
                           {cfg.label}
@@ -293,11 +302,11 @@ export function StewardModal({
                   value={target}
                   onChange={setTarget}
                   disabled={loading || optionsLoading}
-                  options={tags.map((t) => ({ value: t, label: `#${t}` }))}
+                  options={(tags ?? []).map((t) => ({ value: t, label: `#${t}` }))}
                   placeholder={
                     optionsLoading
                       ? "Loading tags..."
-                      : tags.length === 0
+                      : tags?.length === 0
                         ? "No tags in this nest"
                         : "Select a tag"
                   }
