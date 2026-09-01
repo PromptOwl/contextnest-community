@@ -207,6 +207,8 @@ export async function getHealth() {
     subagent_max_depth?: number;
     subagent_max_children?: number;
     runner_key_configured?: boolean;
+    /** Mail transport is set up — email/invite publish gates need it. */
+    email_configured?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
@@ -247,6 +249,17 @@ export interface AdminSettings {
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */
   oidc_client_secret?: string | null;
+  /** Agent SSO / token-exchange (POST /auth/token-exchange). Signing secret is
+   *  write-only — only its presence (mcp_signing_secret_set) comes back. */
+  sso_token_exchange_enabled: boolean;
+  mcp_signing_secret_set?: boolean;
+  mcp_signing_secret?: string | null;
+  mcp_token_ttl_seconds: number;
+  ms_token_exchange_enabled: boolean;
+  ms_client_id: string;
+  ms_tenant_id: string;
+  google_token_exchange_enabled: boolean;
+  google_client_id: string;
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;
@@ -1191,6 +1204,22 @@ export async function withdrawDeletionRequest(nestId: string, id: string) {
   );
 }
 
+/** Create a folder with nothing in it — no placeholder document. */
+export async function createFolder(nestId: string, folder: string) {
+  return request<{ folder: string }>(`/nests/${nestId}/folders`, {
+    method: "POST",
+    body: JSON.stringify({ folder }),
+  });
+}
+
+/** Withdraw your own pending review — the document returns to draft. */
+export async function cancelReview(nestId: string, nodeId: string) {
+  return request<{ review: unknown }>(
+    `/nests/${nestId}/nodes/${nodeId}/cancel-review`,
+    { method: "POST" },
+  );
+}
+
 export async function getReviewQueue(nestId: string, status = "pending") {
   return request<{ requests: any[]; total: number }>(
     `/nests/${nestId}/review-queue?status=${encodeURIComponent(status)}`,
@@ -1652,6 +1681,66 @@ export async function rejectExternalEdit(
     `/nests/${nestId}/nodes/${nodeId}/external-edits/${suggestionId}/reject`,
     { method: "POST", body: JSON.stringify({ reason }) },
   );
+}
+
+// ─── Publish (gated public hosting of one document at /p/<slug>) ─────────
+
+export type PublishMode = "public" | "email" | "code" | "invite";
+
+export interface Publication {
+  id: string;
+  slug: string;
+  node_id: string;
+  access_mode: PublishMode;
+  comments_enabled: boolean;
+  watermark: boolean;
+  no_download: boolean;
+  created_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  link?: string;
+}
+
+export interface PublicationView {
+  email: string | null;
+  created_at: string;
+}
+
+export async function listPublications(nestId: string) {
+  return request<{ count: number; publishes: Publication[] }>(
+    `/nests/${nestId}/publications`,
+  );
+}
+
+export async function createPublication(
+  nestId: string,
+  data: {
+    node_id: string;
+    access_mode: PublishMode;
+    comments_enabled?: boolean;
+    watermark?: boolean;
+    no_download?: boolean;
+    code?: string | null;
+    allowlist?: string[];
+    expires_at?: string | null;
+  },
+) {
+  return request<{ publish: Publication; link: string }>(
+    `/nests/${nestId}/publications`,
+    { method: "POST", body: JSON.stringify(data) },
+  );
+}
+
+export async function listPublicationViews(nestId: string, publishId: string) {
+  return request<{ count: number; views: PublicationView[] }>(
+    `/nests/${nestId}/publications/${publishId}/views`,
+  );
+}
+
+export async function revokePublication(nestId: string, publishId: string) {
+  return request<{ revoked: boolean }>(`/nests/${nestId}/publications/${publishId}`, {
+    method: "DELETE",
+  });
 }
 
 // ─── Sharing ────────────────────────────────────────────────────────────

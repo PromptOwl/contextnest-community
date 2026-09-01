@@ -774,13 +774,32 @@ export default function App() {
         onClose={() => setShowChangePassword(false)}
       />
 
-      {showQuickOpen &&
-        (view.page === "nest" || view.page === "document") && (
-          <QuickOpen
-            nestId={view.nestId}
-            onClose={() => setShowQuickOpen(false)}
-            onSelect={(nodeId) => {
-              setShowQuickOpen(false);
+      {/* One palette for both scopes: inside a nest it starts scoped to that
+          nest and can widen to every nest, so the pick has to open whichever
+          nest the row came from — openSearchHit does that for both. */}
+      {showQuickOpen && canQuickOpen && (
+        <QuickOpen
+          nestId={
+            view.page === "nest" || view.page === "document"
+              ? view.nestId
+              : undefined
+          }
+          nestName={
+            view.page === "nest" || view.page === "document"
+              ? view.nestName
+              : undefined
+          }
+          onClose={() => setShowQuickOpen(false)}
+          onSelect={(nodeId, result) => {
+            setShowQuickOpen(false);
+            // A hit in the nest you are already in keeps the standing you were
+            // admitted with (a public deep link isn't in the nest list, so
+            // re-resolving it there would drop those capabilities).
+            if (
+              (view.page === "nest" || view.page === "document") &&
+              result.kind === "node" &&
+              (result.nest_id ?? view.nestId) === view.nestId
+            ) {
               setView({
                 page: "document",
                 nestId: view.nestId,
@@ -789,16 +808,8 @@ export default function App() {
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
               });
-            }}
-          />
-        )}
-
-      {/* Dashboard palette: no nestId, so it searches every nest. */}
-      {showQuickOpen && view.page === "dashboard" && (
-        <QuickOpen
-          onClose={() => setShowQuickOpen(false)}
-          onSelect={(_id, result) => {
-            setShowQuickOpen(false);
+              return;
+            }
             void openSearchHit(result);
           }}
         />
@@ -1069,6 +1080,7 @@ export default function App() {
             initialSearch?: string;
             initialTags?: string[];
             initialFolder?: string;
+            tab?: string;
           }) =>
             setView({
               page: "nest",
@@ -1104,7 +1116,9 @@ export default function App() {
                   openDocument({ ...prev, breadcrumb: stack.slice(0, -1) });
                   return;
                 }
-                openNest();
+                // Documents tab, not the nest's default Overview — every
+                // caller of this is a "back to documents" affordance.
+                openNest({ tab: "documents" });
               }}
               onJumpBreadcrumb={(index) => {
                 // Jump to ancestor at index; drop entries after.
@@ -1246,6 +1260,16 @@ export default function App() {
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
                 initialTags: [tag],
+              })
+            }
+            onOpenDocument={(nodeId) =>
+              setView({
+                page: "document",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                nodeId,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
               })
             }
             onBack={leaveNest}

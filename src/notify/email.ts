@@ -215,6 +215,17 @@ export async function notifyEmailForNest(
  * NOTIFY_EMAIL_FROM + at least one recipient — the team-channel address is
  * irrelevant here, so emailing an invitee/reviewer never depends on it.
  */
+/**
+ * Can this server actually deliver mail to a named recipient? The exact
+ * condition `sendEmailToRecipient` gates on, exported so callers that would be
+ * BROKEN rather than merely quieter without mail (publishing an email- or
+ * invite-gated link, whose only way in is a mailed link) can refuse up front
+ * instead of silently producing something nobody can open.
+ */
+export function isEmailConfigured(): boolean {
+  return !!config.SMTP_URL && !!config.NOTIFY_EMAIL_FROM;
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**

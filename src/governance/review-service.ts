@@ -15,7 +15,6 @@ import { sendEmailToRecipient } from "../notify/email.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { engineCache, engineApi, opContext } from "../nodes/engine.js";
-import { safePublishDocument } from "./safe-publish.js";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
 import * as versions from "./version-service.js";
 import {
@@ -483,6 +482,24 @@ export async function cancelReview(params: {
     )) as any;
 
     if (!pending) return null;
+
+    // Withdrawing is the author's own undo, so the submitter always may.
+    // Anyone else needs the rights they'd need to resolve it any other way.
+    if (
+      String(pending.requested_by).toLowerCase() !==
+      params.cancelledBy.toLowerCase()
+    ) {
+      const verdict = await canUserApprove(
+        params.nestId,
+        params.nodeId,
+        params.cancelledBy,
+      );
+      if (!verdict.allowed) {
+        throw new Error(
+          "Only the submitter or a reviewer can withdraw this review",
+        );
+      }
+    }
 
     await db.run(
       `UPDATE review_requests

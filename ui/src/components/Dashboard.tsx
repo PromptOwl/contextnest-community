@@ -16,6 +16,11 @@ import { AllNestsBar } from "./AllNestsBar";
 import { relTime, formatServerDate } from "../lib/dates";
 import { nestNameProblem } from "../lib/nest-name";
 import {
+  scopeShowsNests,
+  visibleUnsynced,
+  type NestScope,
+} from "../lib/dashboard-scope";
+import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -97,11 +102,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
   // just bounds how many cards are mounted at once.
   const [nestQuery, setNestQuery] = useState("");
   const [nestSort, setNestSort] = useState<"activity" | "name">("activity");
-  const [nestScope, setNestScope] = useState<"all" | "owned" | "shared" | "public">("all");
+  const [nestScope, setNestScope] = useState<NestScope>("all");
   const [nestPageSize, setNestPageSize] = useState(NEST_PAGE_SIZE);
   const nestOwned = (n: any): boolean =>
     n.is_owner ?? (n.permission ?? "owner") === "owner";
   const filteredNests = useMemo(() => {
+    if (!scopeShowsNests(nestScope)) return [];
     const q = nestQuery.trim().toLowerCase();
     const matched = allNests.filter((n: any) => {
       if (nestScope === "owned" && !nestOwned(n)) return false;
@@ -122,8 +128,22 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
     );
   }, [allNests, nestQuery, nestScope, nestSort]);
   const nests = filteredNests.slice(0, nestPageSize);
+  // The Documents browser offers a clear affordance whenever a control is
+  // narrowing its list; the Dashboard only offered one once nothing matched,
+  // leaving a filtered-but-non-empty grid with no way back.
+  const nestFiltersActive =
+    nestQuery.trim() !== "" || nestScope !== "all" || nestSort !== "activity";
+  const clearNestFilters = () => {
+    setNestQuery("");
+    setNestScope("all");
+    setNestSort("activity");
+  };
   const qc = useQueryClient();
   const [unsynced, setUnsynced] = useState<api.UnsyncedFolder[]>([]);
+  const filteredUnsynced = useMemo(
+    () => visibleUnsynced(unsynced, nestScope, nestQuery),
+    [unsynced, nestScope, nestQuery],
+  );
   const [syncing, setSyncing] = useState<Record<string, boolean>>({});
   const [syncErrors, setSyncErrors] = useState<Record<string, string>>({});
   const [showCreate, setShowCreate] = useState(false);
@@ -293,6 +313,17 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
   // Withdraw your own pending deletion request from the "Waiting on others" list.
   const handleWithdrawDeletion = async (w: api.WorkItem) => {
     await api.withdrawDeletionRequest(w.nest_id, w.request_id!);
+    setWork((prev) => ({
+      ...prev,
+      waiting: prev.waiting.filter(
+        (x) => !(x.nest_id === w.nest_id && x.node_id === w.node_id),
+      ),
+    }));
+  };
+  // Withdraw your own pending review — the document goes back to Draft
+  // instead of the only non-destructive exit being Delete (CU-wdqcq007pe).
+  const handleWithdrawReview = async (w: api.WorkItem) => {
+    await api.cancelReview(w.nest_id, w.node_id);
     setWork((prev) => ({
       ...prev,
       waiting: prev.waiting.filter(
@@ -499,17 +530,49 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                   </div>
                   <div className="divide-y border-t">
                     {work.notifications!.slice(0, 8).map((n) => (
-                      <button
+                      <div
                         key={n.id}
-                        type="button"
-                        onClick={() => openNotification(n)}
-                        className="w-full px-4 py-2 text-xs flex items-center gap-2 text-left hover:bg-amber-500/10"
+                        className="flex items-center gap-2 px-4 py-2 text-xs hover:bg-amber-500/10"
                       >
-                        <span className="flex-1">{n.message}</span>
-                        <span className="text-muted-foreground shrink-0">
-                          {formatServerDate(n.created_at)}
-                        </span>
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => openNotification(n)}
+                          className="flex-1 flex items-center gap-2 text-left"
+                        >
+                          <span className="flex-1">{n.message}</span>
+                          <span className="text-muted-foreground shrink-0">
+                            {formatServerDate(n.created_at)}
+                          </span>
+                        </button>
+                        {/* Per-row dismiss: "Mark all read" alone forces an
+                            all-or-nothing triage (CU-wdqcq007pu). */}
+                        <button
+                          type="button"
+                          title="Mark as read"
+                          aria-label="Mark as read"
+                          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-amber-500/20 hover:text-foreground"
+                          onClick={async () => {
+                            try {
+                              await api.markNotificationsRead([n.id]);
+                              setWork((prev) => ({
+                                ...prev,
+                                notifications: (
+                                  prev.notifications ?? []
+                                ).filter((x) => x.id !== n.id),
+                              }));
+                            } catch (err: any) {
+                              // Same feedback the row's siblings give — a
+                              // silent failure left the row sitting there
+                              // with no explanation.
+                              toast.error(
+                                err?.message || "Failed to mark as read",
+                              );
+                            }
+                          }}
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -658,6 +721,29 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                             }
                           }}
                           title="Withdraw this deletion request"
+                        >
+                          Withdraw
+                        </Button>
+                      )}
+                      {w.type === "review" && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="shrink-0 text-muted-foreground h-7 px-2"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            try {
+                              await handleWithdrawReview(w);
+                              toast.success(
+                                "Submission withdrawn — back to Draft",
+                              );
+                            } catch (err: any) {
+                              toast.error(
+                                err?.message || "Failed to withdraw submission",
+                              );
+                            }
+                          }}
+                          title="Withdraw this submission and return the document to Draft"
                         >
                           Withdraw
                         </Button>
@@ -922,6 +1008,18 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                 <option value="owned">Owned by me</option>
                 <option value="shared">Shared with me</option>
                 <option value="public">Public</option>
+                {/* Sync scopes are only meaningful while a folder is actually
+                    waiting to sync — otherwise "Synced only" just restates
+                    "All nests". Kept mounted when selected so the Select never
+                    holds a value with no matching option. */}
+                {(unsynced.length > 0 ||
+                  nestScope === "synced" ||
+                  nestScope === "unsynced") && (
+                  <>
+                    <option value="synced">Synced nests only</option>
+                    <option value="unsynced">Unsynced folders only</option>
+                  </>
+                )}
               </select>
               <select
                 value={nestSort}
@@ -934,28 +1032,41 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                 <option value="name">Name (A–Z)</option>
               </select>
               <span className="text-xs text-muted-foreground">
-                {filteredNests.length} of {allNests.length}
+                {/* Counts what the grid actually shows — unsynced cards are
+                    part of that, so they belong on both sides of the "of". */}
+                {filteredNests.length + filteredUnsynced.length} of{" "}
+                {allNests.length + unsynced.length}
               </span>
+              {nestFiltersActive && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2 text-xs text-muted-foreground"
+                  onClick={clearNestFilters}
+                  data-testid="nest-clear-filters"
+                >
+                  Clear filters
+                </Button>
+              )}
             </div>
           )}
 
           {/* Nest list */}
           {loading ? (
             <div className="text-center py-12 text-muted-foreground">Loading...</div>
-          ) : allNests.length > 0 && filteredNests.length === 0 ? (
+          ) : allNests.length + unsynced.length > 0 &&
+            filteredNests.length + filteredUnsynced.length === 0 ? (
             <Card>
               <CardContent className="text-center py-12">
-                <p className="font-medium">No nests match this filter</p>
+                <p className="font-medium">Nothing matches this filter</p>
                 <p className="text-sm text-muted-foreground mb-4">
-                  {allNests.length} nest{allNests.length === 1 ? "" : "s"} are hidden by
+                  {allNests.length + unsynced.length} item
+                  {allNests.length + unsynced.length === 1 ? " is" : "s are"} hidden by
                   the current filter.
                 </p>
                 <Button
                   variant="outline"
-                  onClick={() => {
-                    setNestQuery("");
-                    setNestScope("all");
-                  }}
+                  onClick={clearNestFilters}
                 >
                   Clear filters
                 </Button>
@@ -978,7 +1089,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
           ) : (
             <>
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {unsynced.map((folder) => {
+                {filteredUnsynced.map((folder) => {
                   const isSyncing = !!syncing[folder.name];
                   const errMsg = syncErrors[folder.name];
                   return (

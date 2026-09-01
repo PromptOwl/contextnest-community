@@ -9,11 +9,13 @@ import {
   isRejected,
   filterDocuments,
   DocumentNotFoundError,
+  NODE_TYPES,
+  generateIndexMd,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
-import { rename, mkdir } from "node:fs/promises";
+import { rename, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
+import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
@@ -23,6 +25,8 @@ import {
   ValidationError,
   ConflictError,
   ForbiddenError,
+  VaultBusyError,
+  isVaultLockTimeout,
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
@@ -286,6 +290,12 @@ function toSafeError(err: unknown, context: string, message: string): AppError {
       "This document is rejected. Change its status before saving.",
     );
   }
+  // Vault write-lock timeout is retryable state, not an internal fault —
+  // keep it as a 503 the caller can act on instead of a generic 500.
+  if (isVaultLockTimeout(err)) {
+    console.error(`${context}:`, err);
+    return new VaultBusyError();
+  }
   console.error(`${context}:`, err);
   return new AppError(500, message);
 }
@@ -331,6 +341,20 @@ export const RUNNABLE_NODE_TYPES = ["agent", "skill"] as const;
 export function isRunnableType(type: string | undefined): boolean {
   return (RUNNABLE_NODE_TYPES as readonly string[]).includes(type || "");
 }
+
+/**
+ * Node types this server accepts on create: the engine's core NODE_TYPES plus
+ * the community extensions (agent/skill runnables, artifact, table). Anything
+ * outside this set is rejected with a 400 at the create choke point below —
+ * previously an unknown type slipped past here and surfaced as an opaque 500
+ * from deeper in the write path.
+ */
+export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
+  ...NODE_TYPES,
+  ...RUNNABLE_NODE_TYPES,
+  "artifact",
+  "table",
+]);
 
 export function toNodeResponse(node: ContextNode): NodeResponse {
   const fm = node.frontmatter;
@@ -470,10 +494,27 @@ function engineScopesFolders(): boolean {
   return folderScopeSupported;
 }
 
+/**
+ * A node the annotations projection maintains on the artifact's behalf, not one
+ * a user authored. It stays a real vault node (that is how an agent picks the
+ * feedback up on the next iteration), but every user-facing surface — listings,
+ * counts, board, graph, search, tag facets — leaves it out, so commenting on an
+ * artifact doesn't silently grow the nest's document count.
+ *
+ * Mirrors `derivedAnnotationsId` in annotations/service.ts; importing it would
+ * close the annotations→nodes import cycle.
+ */
+export function isDerivedAnnotationsNode(id: string): boolean {
+  return id.endsWith("--annotations");
+}
+
 export interface ListNodesFilters {
   /** One type, or several (e.g. runnable types) to keep. */
   type?: string | readonly string[];
   tag?: string;
+  /** Keep the derived `— Annotations` nodes in the result. Off for the UI,
+   *  which never asked for them; on for MCP, whose agents read them. */
+  includeDerived?: boolean;
   /** Lifecycle status; aliases normalized. Retired nodes stay hidden without it. */
   status?: string;
   /**
@@ -615,12 +656,18 @@ export async function listNodesForCaller(
   // retired node stays in this listing: here it is an unpublished document its
   // stewards may still need to act on, not one removed from retrieval. An
   // imported vault carrying `status: rejected` registers exactly that way.
-  const frontmatterFilters = {
+  //
+  // Split in two because the operation and `filterDocuments` spell the same
+  // flag differently: the op takes `include_retired`, the function takes
+  // `includeRetired`. Sending both used to be harmless (zod stripped the
+  // stranger); since engine 2.4.0 an unrecognized parameter is a hard error,
+  // so only `listFilters` may reach the op.
+  const listFilters = {
     ...(filters.type ? { type: filters.type } : {}),
     ...(filters.tag ? { tag: filters.tag } : {}),
     ...(filters.status ? { status: filters.status } : {}),
-    includeRetired: true,
   };
+  const frontmatterFilters = { ...listFilters, includeRetired: true };
 
   let documents: Array<{
     id: string;
@@ -645,7 +692,7 @@ export async function listNodesForCaller(
     }>(
       "context_list",
       {
-        ...frontmatterFilters,
+        ...listFilters,
         include_retired: true,
         ...(scopeInEngine
           ? {
@@ -665,7 +712,15 @@ export async function listNodesForCaller(
       nestId,
       filters.folder !== undefined ? { folder: filters.folder } : {},
     );
-    documents = filterDocuments(indexed, frontmatterFilters);
+    documents = filterDocuments(indexed, {
+      ...frontmatterFilters,
+      includeRetired: true,
+    });
+  }
+  // Derived annotation projections are machine-maintained, not documents the
+  // caller wrote — keep them out of every listing that isn't MCP's.
+  if (!filters.includeDerived) {
+    documents = documents.filter((d) => !isDerivedAnnotationsNode(d.id));
   }
   // Narrow BEFORE the access gate and enrichment below — that is the whole
   // saving, since both cost per surviving document. Still applied even when
@@ -842,12 +897,77 @@ function withSubtreeTotals(
 }
 
 /**
- * The nest's folders, WITHOUT touching the vault.
+ * Create a folder with nothing in it.
  *
- * A navigable tree only needs the folder each document sits in, which the DB
- * mirror stores as a column — so this is one GROUP BY rather than a directory
- * walk (`context_folders`) or a full crawl (the id-derived fallback it used
- * before), and it stays correct on a nest the process has never opened.
+ * A folder is a real directory in the vault, so making one means creating that
+ * directory — not seeding a placeholder document, which is what "New folder"
+ * used to do and which then counted as content everywhere (CU-wdqcpzzzut).
+ *
+ * The directory is created by writing the folder's INDEX.md, the same derived
+ * summary `regenerateIndex` maintains for every other folder: it mkdir -p's on
+ * the way in, discovery skips it (DERIVED_VAULT_FILES), and a regeneration
+ * only ever rewrites index files — it never prunes one. Returns the slugified
+ * path actually created.
+ */
+export async function createEmptyFolder(
+  nestId: string,
+  folder: string,
+): Promise<string> {
+  const segments = folderToSegments(folder);
+  if (segments.length === 0) {
+    throw new ValidationError("folder is required");
+  }
+  const path = segments.join("/");
+  const prefix = await storagePrefix(nestId);
+  const vaultPath = prefix ? `${prefix}/${path}` : path;
+  // Already a folder: writing the index again would replace a real summary
+  // with an empty one until the next regeneration. Creating what exists is a
+  // no-op, not an error — a retry of the same name should be harmless.
+  if (await vaultFolderExists(nestId, path)) return path;
+  const title = segments[segments.length - 1]!
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const { storage } = await engineCache.get(nestId);
+  await storage.writeIndexMd(vaultPath, generateIndexMd(vaultPath, title, []));
+  return path;
+}
+
+/**
+ * Folder paths that exist in the vault as directories, community-dialect
+ * (no `nodes/` prefix). Directory entries only — no document is opened.
+ *
+ * The DB mirror derives folders from the documents in them, so a folder
+ * holding nothing is invisible to it. This is how an empty one is still a
+ * folder (CU-wdqcpzzzut): it is a real directory on disk either way.
+ */
+async function vaultFolderPaths(
+  nestId: string,
+  opts: { folder?: string; recursive?: boolean } = {},
+): Promise<string[]> {
+  const prefix = await storagePrefix(nestId);
+  const scope = [prefix, opts.folder].filter(Boolean).join("/");
+  const { storage } = await engineCache.get(nestId);
+  const entries = await storage.listFolders({
+    ...(scope ? { folder: scope } : {}),
+    ...(opts.recursive === false ? { recursive: false } : {}),
+  });
+  return entries
+    .map((e) =>
+      prefix && e.path.startsWith(`${prefix}/`)
+        ? e.path.slice(prefix.length + 1)
+        : e.path,
+    )
+    .filter(Boolean);
+}
+
+/**
+ * The nest's folders, from the DB mirror plus the vault's directory shape.
+ *
+ * Document counts come from the mirror, which stores each document's folder as
+ * a column — one GROUP BY rather than a full crawl (the id-derived fallback it
+ * used before), correct on a nest this process has never opened. Folders with
+ * no document of their own can only come from the vault, so a paths-only walk
+ * (no file is opened) fills those in at count 0.
  *
  * `folder` is a community folder path ("" = nest root), NOT an id prefix; the
  * `nodes/` storage root is added here so callers keep speaking one dialect.
@@ -863,6 +983,9 @@ export async function listNestFolders(
   if (opts.folder !== undefined) assertSafeFolder(opts.folder);
   await ensureNodeIndex(nestId);
   const counts = new Map<string, number>();
+  // Directories first, so a folder holding nothing is still a folder; the
+  // mirror's counts below win wherever it knows the folder.
+  for (const path of await vaultFolderPaths(nestId, opts)) counts.set(path, 0);
   for (const { path, count } of await indexedFolderCounts(nestId)) {
     counts.set(path, count);
     // Ancestors with no document of their own still need a row — a level that
@@ -922,7 +1045,11 @@ export async function nestCensus(
   // nest on every mount — the single most expensive thing the page did, and
   // the one the lazy per-folder loading could not avoid.
   await ensureNodeIndex(nestId);
-  const documents = await readIndexedNodes(nestId);
+  // Same exclusion as the listing — the counts must describe the documents the
+  // Documents tab shows, not those plus the annotation projections.
+  const documents = (await readIndexedNodes(nestId)).filter(
+    (d) => !isDerivedAnnotationsNode(d.id),
+  );
 
   // Same gate as the listing, so the counts describe what this caller can
   // actually reach rather than what is on disk.
@@ -951,6 +1078,12 @@ export async function nestCensus(
     const segs = folder.split("/");
     for (let i = 1; i <= segs.length; i++) paths.add(segs.slice(0, i).join("/"));
   }
+  // Folders holding no document — same vault walk listNestFolders merges, and
+  // like that endpoint the tree itself is the whole nest's shape: counts stay
+  // caller-scoped, but a folder is listed whether or not this caller can reach
+  // a document in it (the nest middleware already withholds both routes from a
+  // share grantee, so the audience is the same either way).
+  for (const path of await vaultFolderPaths(nestId)) paths.add(path);
   // Same roll-up the folders endpoint uses — the two describe the same tree
   // and must not drift.
   const folders = withSubtreeTotals(
@@ -1011,7 +1144,12 @@ export async function listNodesForCallerByEmail(
   userEmail: string,
   filters: ListNodesFilters = {}
 ): Promise<NodeResponse[]> {
-  return listNodesForCaller(nestId, await userIdFromEmail(userEmail), filters);
+  // MCP is the agent surface the annotation projection exists for, so it keeps
+  // seeing those nodes unless a caller says otherwise.
+  return listNodesForCaller(nestId, await userIdFromEmail(userEmail), {
+    includeDerived: true,
+    ...filters,
+  });
 }
 
 export interface CreateNodeInput {
@@ -1195,6 +1333,17 @@ async function createNodeOnce(
   }
   if (requestedType === "table" && !config.TYPE_TABLE_ENABLED) {
     throw new ValidationError("Table nodes are disabled on this server");
+  }
+
+  // Unknown types must fail as a clean 400 here — otherwise they slip through
+  // and throw an opaque 500 from deeper in the write path (the message gave a
+  // caller no idea the real problem was the `type` field).
+  if (!ACCEPTED_NODE_TYPES.has(requestedType)) {
+    throw new ValidationError(
+      `unknown node type "${requestedType}"; allowed: ${[...ACCEPTED_NODE_TYPES]
+        .sort()
+        .join(", ")}`,
+    );
   }
 
   if (input.schedule !== undefined && !isRunnableType(input.type)) {
@@ -1853,6 +2002,10 @@ export const NODE_KEYED_TABLES = [
   // A live capability token bound to one agent node — deleting the agent must
   // revoke it, or a later node at that id answers the old webhook.
   ["trigger_hooks", "agent_node"],
+  // A live public link pinned to one node. Deleting the document must kill the
+  // link, and moving it must carry the link along — otherwise /p/<slug> serves
+  // whatever node next takes that id.
+  ["publish", "node_id"],
   ["edges", "from_node"],
   ["edges", "to_node"],
 ] as const;
@@ -1977,7 +2130,7 @@ export async function moveNode(
     // serializeNodeSafe, not serializeDocument: `moved` came from
     // readDocument, so an empty `tags: []` on disk is back as
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
-    // are already clean (approve rewrites them through safePublishDocument),
+    // are already clean (approve rewrites them through serializeNodeSafe),
     // which is why drafts and pending-review docs were the ones failing.
     await storage.writeDocument(newId, serializeNodeSafe(moved));
 
@@ -2163,6 +2316,10 @@ export async function deleteFolder(
   const docs = await storage.discoverDocuments();
   const targets = docs.map((d) => d.id).filter((id) => isIdUnderFolder(id, rel));
   if (targets.length === 0) {
+    // A folder holding no document is still a directory in the vault (an
+    // explicitly created one, or the remains of a folder whose documents have
+    // all gone), so deleting it is removing that directory.
+    if (await removeVaultFolder(nestId, rel)) return [];
     throw new NotFoundError(`No documents found under folder: ${folder}`);
   }
 
@@ -2184,5 +2341,42 @@ export async function deleteFolder(
       );
     }
   }
+  // The documents are gone but the directory (and its generated INDEX.md) is
+  // not — and a directory is a folder now, so leaving it would keep the folder
+  // in the tree after the user deleted it.
+  await removeVaultFolder(nestId, rel);
   return deleted;
+}
+
+/**
+ * A folder's directory in the vault. `rel` is community-dialect and always
+ * slugified segments, so it cannot climb out of the nest.
+ */
+async function vaultFolderDir(nestId: string, rel: string): Promise<string> {
+  const prefix = await storagePrefix(nestId);
+  return join(
+    resolveNestPath(nestId),
+    ...(prefix ? [prefix] : []),
+    ...rel.split("/"),
+  );
+}
+
+/** Is this folder already a directory in the vault? */
+async function vaultFolderExists(nestId: string, rel: string): Promise<boolean> {
+  if (!rel) return false;
+  try {
+    return (await stat(await vaultFolderDir(nestId, rel))).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove a folder's directory from the vault. Returns false when there was no
+ * such directory.
+ */
+async function removeVaultFolder(nestId: string, rel: string): Promise<boolean> {
+  if (!(await vaultFolderExists(nestId, rel))) return false;
+  await rm(await vaultFolderDir(nestId, rel), { recursive: true, force: true });
+  return true;
 }

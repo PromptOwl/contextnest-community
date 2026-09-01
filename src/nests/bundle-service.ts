@@ -69,7 +69,7 @@ export async function exportNestBundle(
   for (const doc of docs) {
     const approved = approvedByNode.get(doc.id);
     // Drop undefined frontmatter values (e.g. `tags: undefined` on a tagless
-    // doc) — the YAML dumper throws on them, same guard as safePublishDocument.
+    // doc) — the YAML dumper throws on them, same guard serializeNodeSafe uses.
     const frontmatter = stripUndefinedDeep({ ...doc.frontmatter }) as typeof doc.frontmatter;
     let body = doc.body || "";
     if (approved != null) {

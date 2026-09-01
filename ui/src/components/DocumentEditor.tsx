@@ -1,12 +1,24 @@
 /** DocumentEditor — create/edit view; `nodeId === "new"` → POST, else PATCH. Server enforces 403. */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
-import { normalizeTagInput } from "../lib/tag-policy";
+import {
+  newTags,
+  normalizeTagInput,
+  TAG_INPUT_MAX_LENGTH,
+} from "../lib/tag-policy";
+import { relTime, formatServerDate } from "../lib/dates";
 import { useRovingFocus } from "../lib/use-roving-focus";
 import { resolveEditorAccess } from "../lib/editor-access";
 import { Button } from "@/components/ui/button";
@@ -50,6 +62,7 @@ import {
   Check,
   Copy,
   Star,
+  Undo2,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -61,11 +74,13 @@ import {
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
-import { TableViewer } from "./TableViewer";
+import { TableViewer, TableGrid } from "./TableViewer";
+import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { CodeHighlight } from "./CodeHighlight";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { PublishDialog } from "./PublishDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
@@ -199,6 +214,7 @@ export function DocumentEditor({
   // looking at a real nest the caller can administer.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
+  const [showPublish, setShowPublish] = useState(false);
   // Share THIS document with one person (a grant), as opposed to the whole
   // nest above. Same owner/admin gate the /grants routes enforce.
   const [showShareDoc, setShowShareDoc] = useState(false);
@@ -678,6 +694,24 @@ export function DocumentEditor({
   const [nestNodes, setNestNodes] = useState<
     Array<{ id: string; title: string; content?: string; tags?: string[] }>
   >([]);
+  // The nest's folders, including any holding no document. Same cached census
+  // the nest views read, so this costs no extra request in practice.
+  const [nestFolders, setNestFolders] = useState<string[]>([]);
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { census } = await qc.fetchQuery(reads.census(nestId));
+        if (!cancelled) setNestFolders(census.folders.map((f) => f.path));
+      } catch {
+        /* best-effort: the picker still offers document-derived folders */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, nestId, qc]);
   useEffect(() => {
     // New docs need the list too — the folder picker derives its
     // suggestions from existing node ids.
@@ -705,17 +739,18 @@ export function DocumentEditor({
     };
   }, [isNew, loading, nestId]);
 
-  // Every folder prefix in use (ids minus the nodes/ root and the leaf),
-  // so the folder picker suggests existing paths at each depth.
+  // Every folder the picker can offer: the prefixes documents sit under, plus
+  // the nest's folder list — a folder created empty holds no document to
+  // derive it from, so ids alone would hide it (CU-wdqcpzzzut).
   const folderOptions = useMemo(() => {
-    const opts = new Set<string>();
+    const opts = new Set<string>(nestFolders);
     for (const n of nestNodes) {
       const rel = n.id.startsWith("nodes/") ? n.id.slice(6) : n.id;
       const segs = rel.split("/").slice(0, -1);
       for (let i = 1; i <= segs.length; i++) opts.add(segs.slice(0, i).join("/"));
     }
     return [...opts].sort();
-  }, [nestNodes]);
+  }, [nestNodes, nestFolders]);
 
   // Folder path this doc lives under (id minus the "nodes/" root and the leaf
   // slug), prettified for the header breadcrumb so users see where a nested
@@ -1050,27 +1085,40 @@ export function DocumentEditor({
     return () => clearTimeout(t);
   }, [content, isArtifactDraft]);
 
-  const addTag = useCallback(() => {
-    // Split on whitespace/comma, then hold each token to the tag policy
-    // (length cap, letters/digits/._- only) and say what it changed.
+  // What the current input would commit, under the same policy addTag applies
+  // (length cap, letters/digits/._- only, lowercased). Rendered under the
+  // field so a truncation or rewrite is visible BEFORE Enter — a transient
+  // toast after the fact is easy to miss, more so when several tags commit.
+  // The tool preview highlights with lowlight's auto-detection, which tries
+  // every grammar. Keyed on the live body that ran once per keystroke, on the
+  // typing path. Deferred, React keeps the textarea responsive and re-highlights
+  // when it has a spare frame — no debounce timer to tune or clean up.
+  const deferredContent = useDeferredValue(content);
+
+  const tagPreview = useMemo(() => {
     const candidates = tagInput.split(/[\s,]+/).map(normalizeTagInput);
-    const notes = candidates.map((c) => c.note).filter(Boolean) as string[];
     const accepted = candidates
       .map((c) => c.tag)
       .filter((t): t is string => !!t);
+    return {
+      // Already-present tags are dropped here, not at commit, so the preview
+      // never promises to add something the commit would quietly discard.
+      tags: newTags(tags, accepted),
+      notes: candidates.map((c) => c.note).filter(Boolean) as string[],
+    };
+  }, [tagInput, tags]);
+
+  const addTag = useCallback(() => {
+    const { tags: accepted, notes } = tagPreview;
     for (const note of notes) toast.warning(note);
     if (accepted.length === 0) {
       setTagInput("");
       return;
     }
-    const next = [...tags];
-    for (const t of accepted) {
-      if (!next.includes(t)) next.push(t);
-    }
-    setTags(next);
+    setTags([...tags, ...accepted]);
     setTagInput("");
     setTouched(true);
-  }, [tagInput, tags]);
+  }, [tagPreview, tags]);
 
   const removeTag = (t: string) => {
     setTags(tags.filter((x) => x !== t));
@@ -1269,6 +1317,19 @@ export function DocumentEditor({
     if (isNew) return;
     await api.rejectNode(nestId, nodeId, note);
     await loadNode();
+  };
+  // Cancel your own pending review from the document itself — back to Draft,
+  // rather than Delete being the only exit (CU-wdqcq007pe).
+  const handleWithdrawSubmission = async () => {
+    if (isNew) return;
+    try {
+      await api.cancelReview(nestId, nodeId);
+      toast.success("Submission withdrawn — back to Draft");
+      await loadNode();
+    } catch (err: any) {
+      console.error("[DocumentEditor] cancelReview failed", nestId, nodeId, err);
+      toast.error(err?.message || "Failed to withdraw submission");
+    }
   };
   // Flag this doc for deletion — for callers without delete permission. Errors
   // stay inside the dialog (it keeps the typed reason); success closes it.
@@ -1659,8 +1720,16 @@ export function DocumentEditor({
                           <span className="w-4 mr-2" />
                         )}
                         v{v.version}
-                        <span className="ml-auto text-xs text-muted-foreground">
-                          {v.editedBy?.split("@")[0] || ""}
+                        {/* Author AND when — "v3 · taimur" alone gives no way
+                            to tell which past version you are reaching for.
+                            Same editedAt Version History already renders. */}
+                        <span
+                          className="ml-auto text-xs text-muted-foreground"
+                          title={v.editedAt ? formatServerDate(v.editedAt) : undefined}
+                        >
+                          {[v.editedBy?.split("@")[0], relTime(v.editedAt)]
+                            .filter(Boolean)
+                            .join(" · ")}
                         </span>
                       </DropdownMenuItem>
                     ))
@@ -1729,6 +1798,15 @@ export function DocumentEditor({
                 separatorBefore: !isNew ? false : true,
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
+              });
+            // Publishing hosts THIS document on the open web, so it sits with
+            // sharing rather than with the editing actions above.
+            if (canShare && !isNew)
+              moreActions.push({
+                label: "Publish",
+                icon: Share2,
+                testId: "document-editor-publish",
+                onSelect: () => setShowPublish(true),
               });
             // Below admin only: this opens the REQUEST dialog, not a delete.
             // Admins delete from the nest list — this page has never carried a
@@ -1834,10 +1912,25 @@ export function DocumentEditor({
           {isOwnPendingReview && (
             <Alert>
               <AlertCircle className="h-4 w-4" />
-              <AlertDescription>
-                This is still under review. Your edits update the same pending
-                submission — no need to withdraw and resubmit — and the steward
-                reviews your latest version.
+              <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className="flex-1 min-w-[16rem]">
+                  This is still under review. Your edits update the same pending
+                  submission — no need to withdraw and resubmit — and the steward
+                  reviews your latest version.
+                </span>
+                {/* Withdraw belongs with the sentence explaining the state, not
+                    in the header's action row (CU-wdqcq007pe). */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={() => void handleWithdrawSubmission()}
+                  data-testid="document-editor-withdraw"
+                  title="Withdraw this submission and return the document to Draft"
+                >
+                  <Undo2 className="h-3.5 w-3.5 mr-1.5" />
+                  Withdraw
+                </Button>
               </AlertDescription>
             </Alert>
           )}
@@ -2081,6 +2174,9 @@ export function DocumentEditor({
                       }}
                       placeholder='Press Enter or space. Try "#api #v2" or "api, v2"'
                       disabled={fieldsDisabled}
+                      // A hard stop the way Title has one — several tags fit,
+                      // a pasted paragraph does not.
+                      maxLength={TAG_INPUT_MAX_LENGTH}
                       data-testid="document-editor-tag-input"
                     />
                     <Button
@@ -2092,6 +2188,18 @@ export function DocumentEditor({
                       Add
                     </Button>
                   </div>
+                  {tagInput.trim() && (
+                    <p
+                      className="mt-1 text-xs text-muted-foreground"
+                      data-testid="document-editor-tag-preview"
+                    >
+                      {tagPreview.tags.length > 0
+                        ? `Will add: ${tagPreview.tags.join(", ")}`
+                        : "Nothing new to add"}
+                      {tagPreview.notes.length > 0 &&
+                        ` — ${tagPreview.notes.join(" ")}`}
+                    </p>
+                  )}
                 </>
               )}
               {tags.length > 0 && (
@@ -2550,22 +2658,46 @@ export function DocumentEditor({
                         );
                       }
                       if (diffRendered) {
+                        // A table's body is CSV: rendered as markdown it
+                        // collapses into one run-on paragraph, so each side
+                        // gets the same grid the reader sees, with the rows
+                        // the other version doesn't have tinted.
+                        const tableSides =
+                          effectiveType === "table"
+                            ? tableDiffSides(past.content || "", content)
+                            : null;
+                        const renderPane = (
+                          side: "past" | "current",
+                          body: string,
+                        ) =>
+                          tableSides ? (
+                            <TableGrid
+                              columns={tableSides[side].columns}
+                              rows={tableSides[side].rows}
+                              rowClassName={(i) =>
+                                tableSides[side].changed[i]
+                                  ? side === "past"
+                                    ? "bg-red-50 dark:bg-red-950/30"
+                                    : "bg-emerald-50 dark:bg-emerald-950/30"
+                                  : ""
+                              }
+                            />
+                          ) : (
+                            <DocumentViewer content={body} className="px-4 py-3" />
+                          );
                         return (
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div className="border rounded-lg overflow-hidden">
                               <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
                                 v{compareVersion}
                               </div>
-                              <DocumentViewer
-                                content={past.content || ""}
-                                className="px-4 py-3"
-                              />
+                              {renderPane("past", past.content || "")}
                             </div>
                             <div className="border rounded-lg overflow-hidden">
                               <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
                                 current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
                               </div>
-                              <DocumentViewer content={content} className="px-4 py-3" />
+                              {renderPane("current", content)}
                             </div>
                           </div>
                         );
@@ -2594,22 +2726,45 @@ export function DocumentEditor({
                       readOnly={fieldsDisabled}
                     />
                   ) : (
-                    <textarea
-                      value={content}
-                      onChange={(e) => {
-                        if (fieldsDisabled) return;
-                        setContent(e.target.value);
-                        setTouched(true);
-                      }}
-                      onBlur={saveOnBlur}
-                      readOnly={fieldsDisabled}
-                      spellCheck={false}
-                      placeholder={
-                        "The body is code — paste or write the tool's source."
+                    /* Source beside a highlighted rendering of itself, reusing
+                       the read view's lowlight output — flat plain text is hard
+                       to scan while writing a tool.
+                       ponytail: a preview pane, not highlighting under the
+                       caret; swap in CodeMirror if tool authoring grows. */
+                    <div
+                      className={
+                        content.trim() ? "grid gap-3 lg:grid-cols-2" : ""
                       }
-                      className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-                      data-testid="tool-source-editor"
-                    />
+                    >
+                      <textarea
+                        value={content}
+                        onChange={(e) => {
+                          if (fieldsDisabled) return;
+                          setContent(e.target.value);
+                          setTouched(true);
+                        }}
+                        onBlur={saveOnBlur}
+                        readOnly={fieldsDisabled}
+                        spellCheck={false}
+                        placeholder={
+                          "The body is code — paste or write the tool's source."
+                        }
+                        className="w-full min-h-[400px] border rounded-lg bg-background shadow-sm p-4 font-mono text-sm leading-relaxed resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                        data-testid="tool-source-editor"
+                      />
+                      {content.trim() && (
+                        <div className="min-w-0 flex flex-col min-h-[400px] rounded-lg border bg-background shadow-sm overflow-hidden">
+                          <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
+                            Preview
+                          </div>
+                          <CodeHighlight
+                            code={deferredContent}
+                            className="flex-1 text-sm"
+                            data-testid="tool-source-preview"
+                          />
+                        </div>
+                      )}
+                    </div>
                   )
                 ) : rawMode ? (
                   <textarea
@@ -3014,6 +3169,14 @@ export function DocumentEditor({
             /* Sharing changes don't alter this document's content; nothing
                to reload here. The nest list re-reads on next visit. */
           }}
+        />
+      )}
+      {showPublish && (
+        <PublishDialog
+          nestId={nestId}
+          nodeId={nodeId}
+          nodeTitle={title || nodeId}
+          onClose={() => setShowPublish(false)}
         />
       )}
       {leaveIntent && (

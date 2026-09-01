@@ -1,18 +1,26 @@
 import { Hono } from "hono";
-import { serializeDocument } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import type { AuthEnv } from "../auth/middleware.js";
 import { engineCache } from "./engine.js";
-import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
+import {
+  AppError,
+  ValidationError,
+  NotFoundError,
+  ForbiddenError,
+  ConflictError,
+  VaultBusyError,
+  isVaultLockTimeout,
+} from "../shared/errors.js";
 import { rebuildNodeIndex } from "./node-index.js";
 import { queryTableNode } from "../tables/query.js";
 import { trackEvent } from "../telemetry/tracker.js";
-import { syncNodeTags } from "../governance/tag-index-service.js";
 import {
   resolveCallerEmail,
   filterAccessible,
 } from "../governance/access-guard.js";
 import { compilePrompt } from "./prompt-compiler.js";
+import { resolveNodeUrl } from "../governance/title-resolver.js";
+import { requestBaseUrl } from "../shared/base-url.js";
 import {
   nodeToMarkdown,
   nodesToMarkdown,
@@ -29,6 +37,9 @@ import {
   listNestFolders,
   nestCensus,
   RUNNABLE_NODE_TYPES,
+  createNode,
+  createEmptyFolder,
+  isDerivedAnnotationsNode,
 } from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
@@ -237,10 +248,14 @@ function approxTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-function formatContextBlock(node: ContextNode): string {
+function formatContextBlock(node: ContextNode, url?: string): string {
   const tags = (node.frontmatter.tags || []).join(" ");
-  const header = tags
-    ? `# ${node.frontmatter.title}\n\n_tags: ${tags}_\n\n`
+  const meta = [
+    tags ? `_tags: ${tags}_` : null,
+    url ? `_source: ${url}_` : null,
+  ].filter(Boolean);
+  const header = meta.length
+    ? `# ${node.frontmatter.title}\n\n${meta.join("\n")}\n\n`
     : `# ${node.frontmatter.title}\n\n`;
   return header + (node.body || "").trim();
 }
@@ -264,6 +279,7 @@ queryRoutes.post("/context", async (c) => {
   }
 
   const nestId = c.req.param("nestId")!;
+  const baseUrl = requestBaseUrl(c.req.url);
   const { query: queryEngine, storage } = await engineCache.get(nestId);
   // Floor at 50 tokens — anything smaller returns nothing useful. Default
   // is 4000, a typical system-prompt budget.
@@ -414,19 +430,22 @@ queryRoutes.post("/context", async (c) => {
   const accessible = await filterAccessible(nestId, userId, userEmail, documents);
   const permissionFiltered = beforePermission - accessible.length;
 
-  // Public readers must see approved bodies only, never on-disk drafts.
+  // Public readers must see approved bodies only, never on-disk drafts. The
+  // source URL rides along so it resolves once per node, then feeds the budget
+  // pass, the markdown, and the manifest.
   const readable = await Promise.all(
     accessible.map(async (doc) => ({
       ...doc,
       body: await resolveReadableBody(nestId, doc.id, userId, doc.body || ""),
+      url: resolveNodeUrl(doc, { nestId, baseUrl }),
     })),
   );
 
   // ── 4. Budget-fit within max_tokens ──
-  const included: ContextNode[] = [];
+  const included: (ContextNode & { url?: string })[] = [];
   let tokenCount = 0;
   for (const doc of readable) {
-    const block = formatContextBlock(doc);
+    const block = formatContextBlock(doc, doc.url);
     const blockTokens = approxTokens(block);
     if (tokenCount + blockTokens > maxTokens && included.length > 0) break;
     included.push(doc);
@@ -436,7 +455,7 @@ queryRoutes.post("/context", async (c) => {
 
   // ── 5. Format response ──
   const contextMarkdown = included
-    .map(formatContextBlock)
+    .map((n) => formatContextBlock(n, n.url))
     .join("\n\n---\n\n");
 
   trackEvent("context.resolve", {
@@ -452,6 +471,7 @@ queryRoutes.post("/context", async (c) => {
     nodes: included.map((n) => ({
       id: n.id,
       title: n.frontmatter.title,
+      url: n.url,
       tags: n.frontmatter.tags || [],
       type: n.frontmatter.type || "document",
     })),
@@ -542,7 +562,9 @@ queryRoutes.get("/search", async (c) => {
 
   const nestId = c.req.param("nestId")!;
   const { storage } = await engineCache.get(nestId);
-  const matches = matchDocuments(await discoverForSearch(storage), q);
+  const matches = matchDocuments(await discoverForSearch(storage), q).filter(
+    (n) => !isDerivedAnnotationsNode(n.id),
+  );
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
@@ -558,7 +580,11 @@ queryRoutes.get("/search", async (c) => {
 // GET /nests/:nestId/overview
 queryRoutes.get("/overview", async (c) => {
   const { storage } = await engineCache.get(c.req.param("nestId")!);
-  const documents = await storage.discoverDocuments();
+  // Derived annotation projections stay out of the counts and — because this
+  // is where the tag facet comes from — out of tag filtering too.
+  const documents = (await storage.discoverDocuments()).filter(
+    (d) => !isDerivedAnnotationsNode(d.id),
+  );
 
   const types: Record<string, number> = {};
   const tags: Record<string, number> = {};
@@ -609,6 +635,23 @@ queryRoutes.get("/folders", async (c) => {
     ...(q.recursive === "0" || q.recursive === "false" ? { recursive: false } : {}),
   });
   return c.json({ folders });
+});
+
+// POST /nests/:nestId/folders  { "folder": "gtm/deals" }
+//
+// Create a folder with nothing in it. Folders are path-derived, so this
+// records the path instead of seeding a placeholder document that would then
+// count as real content everywhere (CU-wdqcpzzzut). Write tier, like any
+// other POST under a nest.
+queryRoutes.post("/folders", async (c) => {
+  const body = await c.req
+    .json<{ folder?: string }>()
+    .catch(() => ({}) as { folder?: string });
+  if (typeof body.folder !== "string" || !body.folder.trim()) {
+    throw new ValidationError('folder (a string like "gtm/deals") is required');
+  }
+  const folder = await createEmptyFolder(c.req.param("nestId")!, body.folder);
+  return c.json({ folder }, 201);
 });
 
 // POST /nests/:nestId/reindex
@@ -757,12 +800,11 @@ queryRoutes.post("/publish", async (c) => {
     throw new ValidationError("documents array or context_md is required");
   }
 
-  // Content-type toggles gate this bulk path too: it writes documents
-  // directly (no createNode), so without this check a disabled artifact/
-  // table type could still be created here. A disabled type is a POLICY
-  // violation, so it fails the WHOLE batch up front — before any write,
-  // context_md included — with the same message the single-create path
-  // uses. (Malformed rows — missing title/content — keep this endpoint's
+  // Content-type toggles gate this bulk path up front. createNode refuses a
+  // disabled artifact/table below anyway, but that would land the rows before
+  // it and report the rest as failures — and a disabled type is a POLICY
+  // violation, so it fails the WHOLE batch before any write, context_md
+  // included. (Malformed rows — missing title/content — keep this endpoint's
   // existing skip-silently semantics below; those are shape problems,
   // not policy ones.)
   for (const doc of body.documents || []) {
@@ -776,55 +818,67 @@ queryRoutes.post("/publish", async (c) => {
   }
 
   const nestId = c.req.param("nestId")!;
-  const { storage } = await engineCache.get(nestId);
+  const userEmail = await resolveCallerEmail(c.get("userId"));
   const created: string[] = [];
+  const skipped: string[] = [];
+  const failed: Array<{ title: string; error: string }> = [];
 
   if (body.context_md) {
+    // No engine op exists for context.md, so this stays a direct write; the
+    // index regen keeps graph-mode reads (seeded from context.yaml) aware of
+    // it. Document creation below regenerates per doc via the engine.
+    const { storage } = await engineCache.get(nestId);
     await storage.writeContextMd(body.context_md);
+    await storage.regenerateIndex();
   }
 
   for (const doc of body.documents || []) {
     if (!doc.title || !doc.content) continue;
 
-    const slug = doc.title
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "");
-    const id = `nodes/${slug}`;
-    const now = new Date().toISOString();
-    const tags =
-      doc.tags?.map((t) => (t.startsWith("#") ? t : `#${t}`)) || [];
-
-    const node: ContextNode = {
-      id,
-      filePath: "",
-      frontmatter: {
-        title: doc.title,
-        type: (doc.type as any) || "document",
-        tags,
-        status: "draft",
-        version: 1,
-        created_at: now,
-        updated_at: now,
-        metadata: {
-          owners: ["*"],
-          scope: doc.scope || "team",
+    // Route through the canonical create (engine `context_create` underneath)
+    // instead of hand-assembling documents here: same slugs, same governance
+    // rows, same id-occupancy check as every other create surface. The engine
+    // regenerates the index per create, where the old direct-write path
+    // regenerated once for the batch — fine at agent batch sizes, and the cost
+    // of a bulk path that no longer bypasses the vault lock.
+    try {
+      const result = await createNode(
+        nestId,
+        {
+          title: doc.title,
+          content: doc.content,
+          type: doc.type,
+          tags: doc.tags,
+          scope: doc.scope,
         },
-      },
-      body: doc.content,
-      rawContent: "",
-    };
-
-    const serialized = serializeDocument(node);
-    await storage.writeDocument(id, serialized);
-    await syncNodeTags(nestId, id, tags);
-    created.push(id);
+        userEmail,
+      );
+      created.push(result.node.id);
+    } catch (err) {
+      // Occupied id: the legacy handler silently overwrote the existing doc
+      // and restarted its history. Skip instead — republishing a folder must
+      // not destroy version chains — and report it so callers can react.
+      if (err instanceof ConflictError) {
+        skipped.push(doc.title);
+        continue;
+      }
+      // A busy vault fails every remaining document the same way, so stop and
+      // let the caller retry the whole batch: what already landed comes back
+      // as `skipped`, so the retry finishes the job instead of duplicating.
+      if (isVaultLockTimeout(err) || err instanceof VaultBusyError) throw err;
+      // Anything else is one document's problem — an unusable title, a type
+      // the engine rejects. Report it and keep going: aborting the batch left
+      // the earlier writes on disk with nothing in the response naming them.
+      // Only an AppError's message is caller-facing; anything else could carry
+      // a filesystem path, so it goes to the log and the caller gets the
+      // generic line, same as the 500 handler would have given them.
+      if (!(err instanceof AppError)) console.error("bulk publish row failed", err);
+      failed.push({
+        title: doc.title,
+        error: err instanceof AppError ? err.message : "Could not create this document",
+      });
+    }
   }
-
-  // Once for the batch, not per document. Without it context.yaml never learned
-  // about these writes, so graph-mode reads — which seed from that index —
-  // could not see anything this endpoint created.
-  if (created.length > 0 || body.context_md) await storage.regenerateIndex();
 
   trackEvent("nest.publish", { nestId, count: created.length });
 
@@ -833,6 +887,8 @@ queryRoutes.post("/publish", async (c) => {
       published: created.length,
       context_md_updated: !!body.context_md,
       node_ids: created,
+      skipped,
+      failed,
     },
     201,
   );

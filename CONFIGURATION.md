@@ -60,7 +60,7 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `PROMPTOWL_SIGN_IN_GATE` | `open` | Restrict "Sign in with PromptOwl". `open` = anyone may; `admin-only` = only the license owner (admin) may, everyone else uses email/password (admin opens the login page with `?admin=1`); `disabled` = nobody may. Enforced server-side at `POST /auth/promptowl` and surfaced on the health endpoint. Unknown values fall back to `open`. |
 | `MANUAL_SIGN_IN` | `open` | Email + password sign-in mode. `open` = anyone may log in and self-register a new account; `invite-only` = existing/invited users may log in but brand-new self-registration returns `403` (the admin provisions accounts via invite/share/steward and shares the password — there is no self-service "set password", which would be account takeover without email verification); `disabled` = no email/password sign-in at all (`POST /auth/login` and `POST /auth/register` return `403`). Independent of `PROMPTOWL_SIGN_IN_GATE`, so the two methods are controlled separately (e.g. `invite-only` manual + `admin-only` PromptOwl). Also settable from Settings → General. The server refuses `disabled` while PromptOwl sign-in is also `disabled` (that would leave no way to log in). Unknown values fall back to `open`. |
 | `OFFICIAL_COMMUNITY_SSO_SECRET` | `""` | **Official deployment only — leave unset on self-hosted.** Shared HMAC secret enabling the one-click "Open Community" SSO auto-login from PromptOwl. Must exactly match the same-named var on PromptOwl. When unset, `GET /auth/sso` returns `404` and the feature is disabled; self-hosted users keep using the manual device-code flow. |
-| `PUBLIC_BASE_URL` | `""` | This server's canonical external URL (e.g. `https://community.promptowl.ai`). Two uses. (1) Checked against the SSO ticket's `aud` claim so a ticket minted for this server can't be replayed against another — only when `OFFICIAL_COMMUNITY_SSO_SECRET` is set; when unset, the audience check is skipped. (2) **Set this whenever `OIDC_ENABLED=true`.** It's the base for the OIDC `redirect_uri` sent to your IdP and replayed at token exchange. Unset, that URI is derived from the incoming request's `Host` header — fine when your proxy overwrites `Host` with a trusted value, but a proxy that passes an attacker-supplied `Host` through would feed it straight into the redirect URI. Setting this pins the value regardless of what the proxy forwards. (Your IdP's own redirect-URI allowlist is a second line of defence, not a substitute.) |
+| `PUBLIC_BASE_URL` | `""` | This server's canonical external URL (e.g. `https://community.promptowl.ai`). Two uses. (1) Checked against the SSO ticket's `aud` claim so a ticket minted for this server can't be replayed against another — whenever a ticket-signing secret is set (`OFFICIAL_COMMUNITY_SSO_SECRET` on the official deployment, `MCP_SIGNING_SECRET` on a self-hosted one); with neither set no ticket verifies at all, so the audience check is moot. (2) **Set this whenever `OIDC_ENABLED=true`.** It's the base for the OIDC `redirect_uri` sent to your IdP and replayed at token exchange. Unset, that URI is derived from the incoming request's `Host` header — fine when your proxy overwrites `Host` with a trusted value, but a proxy that passes an attacker-supplied `Host` through would feed it straight into the redirect URI. Setting this pins the value regardless of what the proxy forwards. (Your IdP's own redirect-URI allowlist is a second line of defence, not a substitute.) (3) **Set this wherever email- or invite-gated publish links are used.** The magic link mailed by `POST /p/:slug/gate` is built from it; unset, it falls back to the request origin, so a proxy forwarding an attacker-supplied `Host` would send the recipient a one-time access token pointing at the attacker's domain — the classic reset-link poisoning. (4) **Set this wherever `POST /nests/:id/context` citations reach users.** The `url` on each node and the `_source:` line in each context block are built from it; unset, they fall back to the request origin, so a proxy forwarding an untrusted `Host` would put an attacker-influenced URL in front of both the model and the reader as a trustworthy citation. |
 | `OIDC_ENABLED` | `false` | Turn on generic OIDC single sign-on (`GET /auth/oidc/login` / `GET /auth/oidc/callback`). Requires `OIDC_ISSUER`, `OIDC_CLIENT_ID`, and `OIDC_CLIENT_SECRET` — the login-page button only appears once all three are set. Also editable from Settings → Single sign-on. See [Single sign-on (OIDC)](#single-sign-on-oidc). |
 | `OIDC_ISSUER` | `""` | OIDC issuer URL, e.g. `https://login.microsoftonline.com/<tenant>/v2.0` (Microsoft Entra ID) or `https://accounts.google.com` (Google). **`https://` only** — a non-https value is rejected with a warning and SSO stays off. Must serve `<issuer>/.well-known/openid-configuration`. |
 | `OIDC_CLIENT_ID` | `""` | Application (client) ID from your IdP app registration. |
@@ -68,6 +68,11 @@ The server prints a loud warning at startup when `AUTH_MODE=open` is active.
 | `OIDC_ALLOWED_DOMAINS` | `""` (any) | Comma-separated email-domain allowlist, e.g. `acme.com, contractors.acme.com`. When set, only accounts whose asserted email is on a listed domain may sign in (others bounce with `domain_not_allowed`). Empty allows any domain the IdP asserts. |
 | `OIDC_AUTO_PROVISION` | `true` | Create a user automatically on first successful OIDC sign-in (display name from the `name` claim). Set `false` to allow only pre-existing (invited/registered) users — unknown emails bounce with `not_invited`. |
 | `OIDC_DEPARTMENT_TAGGING` | `false` | Auto-tag newly **created** documents with the creator's directory department: `dept:<slugified-department>` (lowercase, spaces → dashes, e.g. `dept:customer-success`) is appended to the document's tags, deduped against user-supplied tags. Applies on create only — never on update, never retroactively — and a user without a stored department is a silent no-op. The department is captured from the OIDC `department` ID-token claim on every SSO login (a login without the claim clears it, so directory moves propagate), so this is only meaningful when your IdP emits that claim — see [Department auto-tagging](#department-auto-tagging). Also editable from Settings → Single sign-on. |
+| `SSO_TOKEN_EXCHANGE_ENABLED` | `false` | Master switch for `POST /auth/token-exchange` — an external agent exchanges an IdP ID token for a short-lived MCP bearer. Also needs `MCP_SIGNING_SECRET` and at least one provider; otherwise the endpoint returns `404`. Security-critical — see [Agent SSO (token exchange)](#agent-sso-token-exchange). |
+| `MCP_SIGNING_SECRET` | `""` | HMAC secret **this** server signs its minted MCP bearers with (distinct from `OFFICIAL_COMMUNITY_SSO_SECRET`, so self-hosted deployments can issue their own). Long random string. `/index` and `/mcp` accept a ticket signed with either secret. Write-only on the Settings API. **Clearing it is the revocation switch** — turning `SSO_TOKEN_EXCHANGE_ENABLED` off stops minting but already-minted bearers stay valid until they expire. |
+| `MCP_TOKEN_TTL_SECONDS` | `300` | Lifetime of a minted MCP bearer, clamped to 30–3600. |
+| `MS_TOKEN_EXCHANGE_ENABLED` / `MS_CLIENT_ID` / `MS_TENANT_ID` | `false` / `""` / `""` | Microsoft Entra provider. `MS_CLIENT_ID` is the audience an inbound token must carry; `MS_TENANT_ID` must be the directory **GUID** (it builds the required issuer `https://login.microsoftonline.com/<tenant>/v2.0` — `common`/`organizations`/a domain name will not match the discovery document and every exchange returns `provider_misconfigured`). |
+| `GOOGLE_TOKEN_EXCHANGE_ENABLED` / `GOOGLE_CLIENT_ID` | `false` / `""` | Google provider. Issuer is fixed (`https://accounts.google.com`); `GOOGLE_CLIENT_ID` is the audience an inbound token must carry. |
 | `ENV_FILE_PATH` | `$DATA_ROOT/.env` | Path to an optional `.env` file the server reads at boot (in addition to `$cwd/.env`). **No longer used for persistence** — the License Setup Page and Settings page now write to the database, not this file (see [Runtime settings persistence](#runtime-settings-persistence)). Kept for operators who bootstrap config from a mounted `.env`. |
 | `TELEMETRY_ENABLED` | `"true"` (set to `"false"` to disable) | Batched, anonymized usage events sent to PromptOwl. Off disables the loop entirely. |
 | `TELEMETRY_INTERVAL_MS` | `3600000` (1 hour) | How often buffered telemetry is flushed to PromptOwl. |
@@ -261,6 +266,83 @@ a toast; codes: `disabled`, `not_configured`, `discovery_failed`,
 `provider_error`, `state_mismatch`, `exchange_failed`, `invalid_token`,
 `email_not_verified`, `domain_not_allowed`, `not_invited`, `rate_limited`,
 `service_error`.
+
+---
+
+## Agent SSO (token exchange)
+
+`POST /auth/token-exchange` lets an external agent, acting for a user your IdP
+(Microsoft Entra / Google) has **already** authenticated, exchange that IdP's ID
+token for a short-lived MCP bearer — no second login, no static API key.
+RFC 8693-shaped. **Off by default and security-critical**: it trusts a token
+minted elsewhere and hands back access, so read this section before enabling it.
+
+Configure it with the `SSO_TOKEN_EXCHANGE_ENABLED` / `MCP_SIGNING_SECRET` /
+`MS_*` / `GOOGLE_*` vars above, or from **Settings → Single sign-on → Agent SSO**
+(superadmin). It reuses `OIDC_ALLOWED_DOMAINS` and `OIDC_AUTO_PROVISION` — the
+same who-may-sign-in policy as browser login.
+
+**Who this is for — and who it is not.** The minted bearer is short-lived by
+design (`MCP_TOKEN_TTL_SECONDS`, default 300s, hard ceiling 3600s), and there is
+no refresh token: renewal means calling `POST /auth/token-exchange` again with
+the IdP token. So this fits a **programmatic** client — an agent runtime, a
+backend service, a desktop app that already did an MSAL/Google sign-in — that
+can re-exchange in code before a session or on a `401`, with no human involved.
+
+It does **not** fit a client whose credential is typed once into a config file
+(Claude Desktop, Cursor, any `mcpServers` JSON block): nothing here rewrites that
+file, and the ceiling is an hour, so the connection would break repeatedly. Those
+clients keep using a long-lived API key (`cnst_…`) — this endpoint is additive
+and changes nothing about API-key or browser sign-in.
+
+**What is verified** on the inbound `subject_token`, before anything is minted:
+
+- **signature** against the provider's JWKS, algorithm pinned to `RS256`
+- **issuer** — exact per provider (the tenant-scoped Entra issuer, or Google's)
+- **audience** — your configured client id, so a token minted for *another*
+  application cannot be replayed here
+- **expiry** (30s clock tolerance)
+- the same `email_verified` + domain-allowlist policy as browser login
+  (see [Email-verification trust assumption](#email-verification-trust-assumption))
+
+**Trust model / documented tradeoff.** Unlike the browser flow there is no
+session to bind, so the OIDC `nonce` binding is intentionally dropped; trust
+rests on signature + issuer + audience + expiry + `email_verified`. That is the
+standard token-exchange model, and it is why the audience check (and a
+correctly scoped IdP app registration) carries the weight here.
+
+**Provisioning fails closed.** JIT-provisioning from a token minted elsewhere is
+only allowed when `OIDC_ALLOWED_DOMAINS` bounds who may self-create. With
+auto-provision on and an empty allowlist, every exchange for an unknown email is
+refused with `no_account`, and the Settings page refuses to save that
+combination — otherwise any account at a public IdP (Google = the whole
+internet) could sign itself up and mint a bearer.
+
+**Entra caveat (`preferred_username`).** Entra v2 tokens often omit `email` and
+carry the address in `preferred_username`, which is a directory attribute — in a
+tenant where guests or external identities can set their own mail attribute, a
+token can assert an address that matches an existing local account. Pinning
+`MS_TENANT_ID` to your own directory bounds that to identities your tenant
+admits; treat inviting a guest as granting whatever that email address owns here.
+
+**Rate limiting.** The per-IP cap on this endpoint reads the client IP from
+`X-Forwarded-For`, so it is only a real cap behind a proxy that overwrites that
+header. Deploy accordingly — an internet-facing server with a pass-through
+header can be sprayed from a single host.
+
+**Scope.** The minted bearer carries `scope: "mcp"`. That is a *route*
+allowlist, not a reduced permission set: it reaches `/index`, `/mcp`, and the
+ticket-eligible `/nests/:id/*` routes (including MCP write tools) with the
+user's full stewardship rights. Keep `MCP_TOKEN_TTL_SECONDS` short.
+
+**Revocation.** Turning the master flag off stops *minting* but does not revoke
+bearers already issued — they remain valid until they expire (≤ 1h). Clear
+`MCP_SIGNING_SECRET` to invalidate every outstanding bearer at once.
+
+Error codes returned by the endpoint: `disabled` (404), `rate_limited` (429),
+`bad_request`, `provider_disabled`, `provider_misconfigured` (400),
+`invalid_subject_token` (401), `email_not_verified`, `domain_not_allowed`,
+`no_account` (403), `server_error` (500).
 
 ---
 

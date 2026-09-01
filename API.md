@@ -157,6 +157,17 @@ RP-initiated logout for an SSO session. Deletes the current session server-side 
 
 Related `/admin/settings` fields (GET/PATCH, superadmin only): `oidc_enabled`, `oidc_issuer` (https URL), `oidc_client_id`, `oidc_client_secret` (**write-only** — PATCH sets/replaces, `null` clears; GET returns only `oidc_client_secret_set: boolean`), `oidc_allowed_domains` (comma-separated), `oidc_auto_provision`, `oidc_department_tagging` (append `dept:<slugified-department>` to a new document's tags on create — create-only, no-op for users without a stored department). Enabling is refused unless issuer + client id + secret are all present.
 
+### POST `/auth/token-exchange`
+Exchange an IdP ID token for a short-lived, scoped **MCP bearer** (RFC 8693-shaped) — for an external agent acting on behalf of a user your IdP already authenticated. No session, no API key. **Off by default; security-critical** — see `CONFIGURATION.md → Agent SSO (token exchange)`.
+
+Body: `{ "provider": "microsoft" | "google", "subject_token": "<IdP ID token>" }`. Response `200`: `{ "access_token", "token_type": "Bearer", "expires_in" }` — send it as `Authorization: Bearer <access_token>` to `/index`, `/mcp`, and the ticket-eligible `/nests/:nestId/*` routes.
+
+The `subject_token` is verified for signature (provider JWKS, `RS256` pinned), issuer (exact per provider — the tenant-scoped Entra issuer or Google's), audience (your configured client id, so a token minted for another app can't be replayed), and expiry (30s tolerance); then the same `email_verified` + `oidc_allowed_domains` policy as browser login, then resolve/JIT the user (`oidc_auto_provision`) and mint. JIT **fails closed**: auto-provision with an empty domain allowlist refuses with `no_account`.
+
+`404 disabled` unless `sso_token_exchange_enabled` **and** `mcp_signing_secret` **and** that provider's toggle are all set (a disabled server doesn't advertise the endpoint). Rate-limited per IP (`429 rate_limited`). Other codes: `400` `bad_request` / `provider_disabled` / `provider_misconfigured`, `401` `invalid_subject_token`, `403` `email_not_verified` / `domain_not_allowed` / `no_account`, `500` `server_error`.
+
+Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchange_enabled`, `mcp_signing_secret` (**write-only** — GET returns only `mcp_signing_secret_set: boolean`), `mcp_token_ttl_seconds` (30–3600), `ms_token_exchange_enabled`, `ms_client_id`, `ms_tenant_id` (directory GUID), `google_token_exchange_enabled`, `google_client_id`. Enabling a provider is refused while `oidc_auto_provision` is on and `oidc_allowed_domains` is empty.
+
 ---
 
 ## 2. Nests
@@ -761,6 +772,10 @@ Response: `{ "review": { "id": "...", "status": "approved", ... } }`.
 ### POST `/nests/:nestId/nodes/:nodeId/cancel-review`
 Cancels the pending review. Returns node to `draft`.
 
+Allowed for the person who submitted it (withdrawing your own submission) and
+for anyone with approve rights on the node. Anyone else gets 403 — read access
+to the nest alone is not enough.
+
 ### GET `/nests/:nestId/review-queue`
 Query: `?status=pending&limit=50&offset=0`
 
@@ -1243,12 +1258,13 @@ Body (give `prompt` OR `selector`; everything else optional):
 - `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`.
 - `max_tokens` — budget, floored at 50, default 4000. Nodes past the budget are dropped (`trace.truncated_by_budget`).
 - 400 `prompt or selector is required` if both missing.
+- Each node carries a `url` deep link, and its context block a matching `_source: <url>_` line, so answers can cite sources. Built from `PUBLIC_BASE_URL`, falling back to the request origin; omitted when neither resolves.
 
 Response (200):
 ```json
 {
-  "context": "# Auth Overview\n\n_tags: #auth #security_\n\n# Auth\n\n...",
-  "nodes": [{ "id": "nodes/auth-overview", "title": "Auth Overview", "tags": ["#auth"], "type": "document" }],
+  "context": "# Auth Overview\n\n_tags: #auth #security_\n_source: http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview_\n\n# Auth\n\n...",
+  "nodes": [{ "id": "nodes/auth-overview", "title": "Auth Overview", "url": "http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview", "tags": ["#auth"], "type": "document" }],
   "trace": {
     "selector_used": "#auth",
     "from_prompt": "how does auth work",
@@ -1352,9 +1368,10 @@ Returns CONTEXT.md content.
 
 ### GET `/nests/:nestId/folders`
 The nest's folder tree on its own, for callers that want the *shape* of the vault
-(a navigable tree, a folder picker) and none of its content. Reads folder rows out
-of the document index — no document is opened, so this stays cheap on a vault where
-listing the documents would not be.
+(a navigable tree, a folder picker) and none of its content. Per-folder counts come
+from the document index and the folders themselves from the vault's directories —
+no document is opened either way, so this stays cheap on a vault where listing the
+documents would not be. A folder holding no document is listed with `count: 0`.
 
 Query: `?folder=<path>` (that subtree only; defaults to the whole nest),
 `?recursive=0` (direct children of `folder` only).
@@ -1366,6 +1383,20 @@ Query: `?folder=<path>` (that subtree only; defaults to the whole nest),
 `count` = documents filed directly in that folder; `total` = the whole subtree
 beneath it. A level that holds only subfolders still gets a row, so it stays
 expandable.
+
+### POST `/nests/:nestId/folders`
+```json
+{ "folder": "gtm/deals" }
+```
+Creates a folder with nothing in it — the directory is created in the vault
+carrying only its generated `INDEX.md`, so no document is added to the nest.
+Each segment is slugified (`GTM/Deals` → `gtm/deals`) and the depth cap applies.
+Creating a folder that already exists is a no-op. Write tier.
+
+```json
+{ "folder": "gtm/deals" }
+```
+Returns 201 with the path actually created.
 
 ### GET `/nests/:nestId/census`
 One call for everything a nest overview needs to describe the *whole* nest,
@@ -1461,7 +1492,102 @@ sees **approved** agent/skill definitions; unapproved drafts are omitted.
   enrichment, so cost scales with the number of runnables, not total nest size.
 
 ### POST `/nests/:nestId/publish`
-Publishes the nest (snapshots + index).
+Bulk-create documents (and/or update `CONTEXT.md`) in one call. Each document
+routes through the same create path as `POST /nests/:nestId/nodes` — same slug
+derivation, same governance rows, same content-type policy gate (a disabled
+`artifact`/`table` type fails the whole batch up front, before any write).
+
+Body: `{ documents?, context_md? }` — at least one required.
+`documents[]` rows are `{ title, content, type?, tags?, scope? }`; rows missing
+`title` or `content` are skipped silently (a shape problem, not a policy one).
+
+A document whose title slugs to an id that already exists is **skipped and
+reported** — never overwritten, so republishing a folder cannot destroy an
+existing document's version history.
+
+A document the create path rejects for its own reasons — a title that is too
+long or carries no sluggable characters, a `type` the engine does not know — is
+**reported in `failed` and the batch continues**. One bad row cannot abandon the
+rest half-written.
+
+```json
+{
+  "published": 2,
+  "context_md_updated": true,
+  "node_ids": ["nodes/alpha", "nodes/beta"],
+  "skipped": ["Existing Doc Title"],
+  "failed": [{ "title": "Bad Row", "error": "..." }]
+}
+```
+
+Returns `201` whenever the batch ran, even if every row landed in `skipped` or
+`failed` — read the arrays, not the status, to know what happened.
+
+`context_md` is written directly rather than through an operation, because none
+exists for it. It is therefore outside the vault write lock and has no `503` to
+return — a `context_md`-only request cannot report contention.
+
+**Partial writes and retries.** The batch is not a transaction: documents are
+created one at a time and the ones written before a failure stay written. The
+one error that stops the batch early is the vault write lock being held past
+its acquire timeout, which answers `503` + `Retry-After`. Retrying is safe and
+finishes the job — every document from the first attempt now exists, so it
+comes back under `skipped` while the remaining ones are created. Expect a
+lower `published` count on the retry; that is the batch converging, not a
+failure.
+
+---
+
+## 8c. Publish links — public hosting of a single document
+
+Expose ONE document as a standalone page at a stable, unguessable
+`/p/<slug>` URL. Distinct from nest visibility (whole-nest read) and from
+grants (authenticated per-user sharing). Managing publish links is owner/admin
+only. Access modes: `public` (no auth), `code` (shared passcode), `email`
+(viewer enters an email → one-time magic link → access logged), `invite`
+(same, but only allow-listed emails get a link). Every served view is logged;
+links are revocable and can carry `expires_at`.
+
+### POST `/nests/:nestId/publications` (owner/admin)
+Body: `{ node_id, access_mode?: "public"|"email"|"code"|"invite",
+comments_enabled?: bool, watermark?: bool, no_download?: bool,
+code?: string (code mode), allowlist?: string[] (invite mode),
+expires_at?: ISO }`. → `201 { publish, link }`.
+
+`watermark` stamps the viewer's email across the page — email/invite gates only,
+since the other two identify nobody. `no_download` blocks copy, right-click,
+drag and printing; both are deterrents, not protection (screenshots and
+developer tools still work). `400` when `node_id` names no document in the nest,
+or when `email`/`invite` is requested on a server with no mail transport
+(`SMTP_URL` + `NOTIFY_EMAIL_FROM`) — their one-time link could never be sent.
+
+### GET `/nests/:nestId/publications` (owner/admin)
+List this nest's publish links with their `link` URLs.
+
+### GET `/nests/:nestId/publications/:id/views` (owner/admin)
+The access log — `{ count, views: [{ email, created_at }] }`.
+
+### DELETE `/nests/:nestId/publications/:id` (owner/admin)
+Revoke — the link 404s immediately.
+
+### Public render surface (no auth chain)
+- `GET /p/:slug` — the document, a gate form (email/code/invite), or — when
+  `comments_enabled` — a reader shell framing the document beside the comment
+  control. Document bodies are served under the strict artifact sandbox
+  (opaque origin); markdown nodes are rendered server-side.
+- `GET /p/:slug/view` — the document itself, always sandboxed. The shell frames
+  it; gated independently, so being the frame source is not authorization.
+- `POST /p/:slug/gate` — submit a code (unlock) or an email (send magic link).
+  Rate limited per link per IP.
+- `GET /p/:slug/verify?token=` — consume a magic link → set session cookie → open.
+  Invite mode re-checks the allow-list here, not only when the link was sent.
+- `POST /p/:slug/comments` — JSON `{ body, email? }`, from the shell's modal.
+  Needs the gate cleared and an identifying email; lands as an unanchored
+  annotation thread for stewards, never on the published page.
+
+Only the approved version is ever served — a document with no approved snapshot
+404s rather than exposing a draft. A revoked, expired or unknown slug answers
+every route above with the same HTML notice, never a hint about which it was.
 
 ---
 

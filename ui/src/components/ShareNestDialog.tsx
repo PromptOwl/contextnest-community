@@ -15,7 +15,7 @@
  * /visibility paths require "admin" — see src/app.ts). Non-admins who
  * reach this dialog get a friendly error rather than a silent no-op.
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -25,8 +25,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -41,9 +39,9 @@ import {
 import {
   Tabs, TabsContent, TabsList, TabsTrigger,
 } from "@/components/ui/tabs";
-import { Globe, Lock, Users, Loader2, AlertCircle } from "lucide-react";
-import * as api from "../lib/api";
+import { Users, AlertCircle } from "lucide-react";
 import { CollaboratorManager } from "./CollaboratorManager";
+import { NestVisibilityControl } from "./NestVisibilityControl";
 import { TeamShareManager } from "./TeamShareManager";
 import { useAuth } from "../auth/AuthContext";
 
@@ -63,60 +61,9 @@ export function ShareNestDialog({
 }: ShareNestDialogProps) {
   const { adminStatus } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
-  const [isPublic, setIsPublic] = useState(false);
-  const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Publishing (→ public) is guarded by an acknowledgement dialog.
   const [confirmPublic, setConfirmPublic] = useState(false);
-
-  useEffect(() => {
-    // Read current visibility straight from the server so the toggle
-    // reflects truth without the parent having to thread it through.
-    api
-      .getNest(nestId)
-      .then((res) => setIsPublic(res.nest?.visibility === "public"))
-      .catch(() => {
-        /* leave default; CollaboratorManager surfaces any real error */
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nestId]);
-
-  const writeVisibility = async (next: boolean, acknowledgePublic?: boolean) => {
-    // Optimistic flip; revert on failure so the switch never lies about
-    // server state (same pattern as NestSettingsModal's stewardship save).
-    setIsPublic(next);
-    setVisibilitySaving(true);
-    setError(null);
-    try {
-      const result = await api.setNestVisibility(
-        nestId,
-        next ? "public" : "private",
-        acknowledgePublic,
-      );
-      if ((result.visibility === "public") !== next) {
-        setIsPublic(!next);
-        setError("Server did not accept the change. You may not have admin access to this nest.");
-        return;
-      }
-      onChanged();
-    } catch (err: any) {
-      setIsPublic(!next);
-      setError(err?.message || "Failed to change visibility");
-    } finally {
-      setVisibilitySaving(false);
-    }
-  };
-
-  const handleVisibilityToggle = async (next: boolean) => {
-    // Going public makes the nest readable by anyone on the internet, outside
-    // your organization — confirm first (and send acknowledge_public). Going
-    // back to private is unguarded.
-    if (next) {
-      setConfirmPublic(true);
-      return;
-    }
-    await writeVisibility(false);
-  };
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -142,37 +89,12 @@ export function ShareNestDialog({
             </Alert>
           )}
 
-          {/* Visibility */}
-          <div className="rounded-lg border p-4 space-y-3">
-            <div className="flex items-start justify-between gap-4">
-              <div className="space-y-1">
-                <Label className="flex items-center gap-2 text-sm font-medium">
-                  {isPublic ? (
-                    <Globe className="h-4 w-4 text-green-600" />
-                  ) : (
-                    <Lock className="h-4 w-4" />
-                  )}
-                  {isPublic ? "Public" : "Private"}
-                </Label>
-                <p className="text-xs text-muted-foreground">
-                  {isPublic
-                    ? "Anyone on this server can read this nest. Editing still requires being added below."
-                    : "Only people added below (and the owner) can see this nest."}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                {visibilitySaving && (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                )}
-                <Switch
-                  checked={isPublic}
-                  onCheckedChange={handleVisibilityToggle}
-                  disabled={visibilitySaving}
-                  aria-label="Toggle public visibility"
-                />
-              </div>
-            </div>
-          </div>
+          {/* Visibility — same control the Collaborators tab renders. */}
+          <NestVisibilityControl
+            nestId={nestId}
+            onChanged={onChanged}
+            onError={setError}
+          />
 
           {/* People and Teams split into tabs so the dialog stays short no
               matter how many collaborators or teams a nest has. Only the
