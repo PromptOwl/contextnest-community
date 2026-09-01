@@ -8,7 +8,9 @@
  */
 import { describe, it, expect } from "vitest";
 import {
+  conventionKey,
   deriveNestCaps,
+  isHomeNode,
   isReaderHiddenView,
   isViewBlockedInReaderMode,
   READER_HIDDEN_VIEWS,
@@ -156,5 +158,34 @@ describe("reader mode blocks deep links into the hidden pages", () => {
     expect(renders("ontology-graph", true)).toBe(false);
     expect(renders("definitions", true)).toBe(false);
     expect(renders("board", false)).toBe(true);
+  });
+});
+
+describe("reader-mode home node matching", () => {
+  const node = { id: "nodes/welcome", title: "Welcome" };
+
+  it("matches the full node id", () => {
+    expect(isHomeNode(node, "nodes/welcome")).toBe(true);
+  });
+
+  it("matches the bare slug people actually type, case-insensitively", () => {
+    // The config field is hand-typed; "welcome" must find nodes/welcome, or the
+    // designation silently loses to the naming convention.
+    expect(isHomeNode(node, "welcome")).toBe(true);
+    expect(isHomeNode(node, "Welcome")).toBe(true);
+    expect(isHomeNode({ id: "nodes/guides/intro" }, "intro")).toBe(true);
+  });
+
+  it("rejects a node that is not the home node", () => {
+    expect(isHomeNode(node, "index")).toBe(false);
+    expect(isHomeNode({ id: "nodes/welcome-guide" }, "welcome")).toBe(false);
+  });
+
+  it("keys a node by id leaf and title for the convention fallback", () => {
+    expect(conventionKey(node)).toEqual(["welcome", "welcome"]);
+    expect(conventionKey({ id: "nodes/a/README", title: "Read Me" })).toEqual([
+      "readme",
+      "read me",
+    ]);
   });
 });

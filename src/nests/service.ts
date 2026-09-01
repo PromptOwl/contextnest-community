@@ -92,29 +92,6 @@ export async function setStewardshipEnabled(
   ]);
 }
 
-/** Whether Public Docs Reader Mode (read-only public docs view) is on for a nest. */
-export async function nestReaderMode(nestId: string): Promise<boolean> {
-  const db = getDb();
-  const row = (await db.get("SELECT reader_mode FROM nests WHERE id = ?", [
-    nestId,
-  ])) as { reader_mode: number } | undefined;
-  return !!row?.reader_mode;
-}
-
-/**
- * The designated reader-mode home/hub node for a nest, or null when unset
- * (callers then resolve a landing node by convention).
- */
-export async function nestReaderHomeNode(
-  nestId: string,
-): Promise<string | null> {
-  const db = getDb();
-  const row = (await db.get(
-    "SELECT reader_home_node FROM nests WHERE id = ?",
-    [nestId],
-  )) as { reader_home_node: string | null } | undefined;
-  return row?.reader_home_node ?? null;
-}
 
 /**
  * Configure Public Docs Reader Mode for a nest (superadmin-only). Either field

@@ -79,6 +79,33 @@ export function deriveNestCaps({
   };
 }
 
+
+/** Lowercased leaf of a node id — "nodes/guides/Welcome" → "welcome". */
+function leafOf(id: string): string {
+  const path = id.startsWith("nodes/") ? id.slice(6) : id;
+  const leaf = path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path;
+  return leaf.toLowerCase();
+}
+
+/**
+ * Whether a node is the designated reader-mode home node. Ids are
+ * `nodes/<slug>` but the config field is typed by hand, so match on the leaf
+ * either way — otherwise "welcome" silently misses `nodes/welcome` and the
+ * convention fallback quietly stands in for the designation. Shared by
+ * ReaderView (resolving the home pane) and NestView (validating before save).
+ */
+export function isHomeNode(node: any, homeNode: string): boolean {
+  return node?.id === homeNode || leafOf(node?.id || "") === leafOf(homeNode);
+}
+
+/**
+ * Node id/title keys matched against the home-node naming convention when no
+ * home node is designated.
+ */
+export function conventionKey(node: any): string[] {
+  return [leafOf(node?.id || ""), String(node?.title || "").toLowerCase()];
+}
+
 /**
  * Shell nest-view tabs hidden by Public Docs Reader Mode — the board, ontology
  * graph and definitions authoring surfaces. In reader mode a public reader sees

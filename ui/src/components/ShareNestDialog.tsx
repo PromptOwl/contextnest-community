@@ -52,8 +52,6 @@ export function ShareNestDialog({
   const { adminStatus } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
   const [error, setError] = useState<string | null>(null);
-  // Publishing (→ public) is guarded by an acknowledgement dialog.
-  const [confirmPublic, setConfirmPublic] = useState(false);
 
   return (
     <Dialog open onOpenChange={onClose}>

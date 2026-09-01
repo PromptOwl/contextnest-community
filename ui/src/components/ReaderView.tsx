@@ -3,6 +3,7 @@ import { FileText, FolderOpen, BookOpen } from "lucide-react";
 import { FolderTree } from "./FolderTree";
 import { DocumentViewer } from "./DocumentViewer";
 import * as api from "../lib/api";
+import { conventionKey, isHomeNode } from "@/lib/nest-caps";
 
 /**
  * Public Docs Reader Mode — a clean, read-only three-pane docs reader.
@@ -33,14 +34,6 @@ export interface ReaderViewProps {
   readerHomeNode: string | null;
 }
 
-/** Leaf id/title used to match the home-node naming convention. */
-function conventionKey(node: any): string[] {
-  const id: string = node?.id || "";
-  const leaf = id.startsWith("nodes/") ? id.slice(6) : id;
-  const bare = leaf.includes("/") ? leaf.slice(leaf.lastIndexOf("/") + 1) : leaf;
-  return [bare.toLowerCase(), String(node?.title || "").toLowerCase()];
-}
-
 export function ReaderView({
   nestId,
   nestName,
@@ -54,7 +47,7 @@ export function ReaderView({
   // else null → the right pane falls back to a synthesized Contents table.
   const homeNode = useMemo(() => {
     if (readerHomeNode) {
-      const exact = nodes.find((n) => n.id === readerHomeNode);
+      const exact = nodes.find((n) => isHomeNode(n, readerHomeNode));
       if (exact) return exact;
     }
     for (const name of HOME_NODE_CONVENTION) {

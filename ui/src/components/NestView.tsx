@@ -80,7 +80,7 @@ import { PublishDialog } from "./PublishDialog";
 import { NestVisibilityControl } from "./NestVisibilityControl";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
-import { deriveNestCaps } from "../lib/nest-caps";
+import { deriveNestCaps, isHomeNode } from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { Button } from "@/components/ui/button";
@@ -1646,6 +1646,12 @@ export function NestView({
 
   const handleReaderHomeNodeSave = async (raw: string) => {
     const home = raw.trim() === "" ? null : raw.trim();
+    // A typo used to save fine and then fall back to the convention, so the
+    // toast said "saved" while the designation did nothing. Refuse instead.
+    if (home && !nodes.some((n) => isHomeNode(n, home))) {
+      toast.error(`No document "${home}" in this nest`);
+      return;
+    }
     setReaderModeSaving(true);
     try {
       const result = await api.setNestReaderMode(nestId, { home_node: home });
@@ -1905,19 +1911,20 @@ export function NestView({
             </Button>
           )}
           {isAdmin && readerModeEnabled && (
-            <input
+            <Input
               type="text"
               defaultValue={readerHomeNode ?? ""}
               key={readerHomeNode ?? ""}
               placeholder="home node (optional)"
               disabled={readerModeSaving}
+              aria-label="Reader mode home node"
               onBlur={(e) => {
                 const val = e.target.value.trim();
                 if (val !== (readerHomeNode ?? "")) {
                   void handleReaderHomeNodeSave(val);
                 }
               }}
-              className="shrink-0 h-7 w-40 rounded-md border bg-background px-2 text-xs"
+              className="shrink-0 h-7 w-40 px-2 text-xs"
               title="Designated landing/hub node id. Blank resolves by convention (welcome / index / readme / home / overview)."
             />
           )}
