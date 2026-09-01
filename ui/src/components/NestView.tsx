@@ -64,7 +64,7 @@ export function NodeTypeIcon({
 }
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
-import { ShareNestDialog } from "./ShareNestDialog";
+import { NestVisibilityControl } from "./NestVisibilityControl";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
 import { deriveNestCaps } from "../lib/nest-caps";
@@ -470,13 +470,10 @@ export function NestView({
     if (newFolderCheck.error) return;
     setCreatingFolder(true);
     try {
-      // Folders are path-derived — seed one with a starter node so it appears
-      // and is immediately usable. Nesting works via "parent/child".
-      await api.createNode(nestId, {
-        title: "Overview",
-        content: `# ${folder.split("/").pop()}\n\nStart here.\n`,
-        folder,
-      });
+      // Folders are path-derived, so the server records the path rather than
+      // seeding a starter document that would count as real content
+      // (CU-wdqcpzzzut). Nesting works via "parent/child".
+      await api.createFolder(nestId, folder);
       setNewFolderPath("");
       setShowNewFolder(false);
       fetchData();
@@ -487,7 +484,6 @@ export function NestView({
       setCreatingFolder(false);
     }
   };
-  const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   // Rename dialog (name + description) — complements the inline header
   // rename, which only covers the name.
@@ -1439,6 +1435,19 @@ export function NestView({
     }
   };
 
+  // Cancel your own pending review — the document goes back to Draft rather
+  // than Delete being the only way out (CU-wdqcq007pe).
+  const withdrawSubmission = async (nodeId: string) => {
+    try {
+      await api.cancelReview(nestId, nodeId);
+      toast.success("Submission withdrawn — back to Draft");
+      fetchData();
+    } catch (err: any) {
+      console.error("[NestView] cancelReview failed", nestId, nodeId, err);
+      toast.error(err?.message || "Failed to withdraw submission");
+    }
+  };
+
   const handleSubmitReview = async (note: string, priority: string) => {
     if (!submitNode) return;
     try {
@@ -1813,7 +1822,13 @@ export function NestView({
             </Button>
           )}
           {canManage && (
-            <Button variant="outline" size="sm" onClick={() => setShowShare(true)}>
+            // Inside the nest, Share IS the Collaborators tab — one surface
+            // for visibility, people and teams (CU-wdqcpzzzy6).
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setActiveTab("collaborators")}
+            >
               <Users className="h-3.5 w-3.5 mr-1.5" />
               Share
             </Button>
@@ -3401,16 +3416,31 @@ export function NestView({
                 </CardHeader>
                 <CardContent className="space-y-2">
                   {myPendingSubmissions.map((r) => (
-                    <button
+                    <div
                       key={r.id}
-                      onClick={() => onOpenDocument(r.nodeId)}
-                      className="w-full flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm hover:bg-muted/50"
+                      className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted/50"
                     >
-                      <span className="truncate">{r.title || r.nodeId}</span>
+                      <button
+                        onClick={() => onOpenDocument(r.nodeId)}
+                        className="flex-1 min-w-0 text-left truncate"
+                      >
+                        {r.title || r.nodeId}
+                      </button>
                       <Badge variant="secondary" className="text-[10px] shrink-0">
                         Awaiting review
                       </Badge>
-                    </button>
+                      {/* Your own submission, so the non-destructive exit
+                          belongs here too (CU-wdqcq007pe). */}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="shrink-0 h-7 px-2 text-muted-foreground"
+                        title="Withdraw this submission and return the document to Draft"
+                        onClick={() => void withdrawSubmission(r.nodeId)}
+                      >
+                        Withdraw
+                      </Button>
+                    </div>
                   ))}
                 </CardContent>
               </Card>
@@ -3755,12 +3785,21 @@ export function NestView({
               <CardHeader className="pb-3">
                 <CardTitle className="text-lg">Collaborators</CardTitle>
                 <CardDescription>
-                  People with direct access to this nest. Sharing grants plain
-                  access (viewer/editor/admin) — it does not make anyone a
-                  steward. Manage visibility from the Share dialog.
+                  Who can reach this nest — visibility, people and teams.
+                  Sharing grants plain access (viewer/editor/admin); it does
+                  not make anyone a steward.
                 </CardDescription>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-4">
+                {/* Visibility lives here rather than only in the Share dialog,
+                    so access management is one surface (CU-wdqcpzzzy6). */}
+                {canManage && (
+                  <NestVisibilityControl
+                    nestId={nestId}
+                    onChanged={fetchData}
+                    onError={(msg) => msg && toast.error(msg)}
+                  />
+                )}
                 <CollaboratorManager
                   nestId={nestId}
                   nestName={nestName}
@@ -3831,14 +3870,6 @@ export function NestView({
         />
       )}
 
-      {showShare && (
-        <ShareNestDialog
-          nestId={nestId}
-          nestName={nestName}
-          onClose={() => setShowShare(false)}
-          onChanged={fetchData}
-        />
-      )}
       {shareFolder && (
         <ShareTargetDialog
           nestId={nestId}
@@ -3916,8 +3947,8 @@ export function NestView({
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
             Name the folder. Nest it with a slash — e.g.{" "}
-            <code className="text-xs">gtm/deals</code>. It's seeded with a starter
-            document so it shows up right away.
+            <code className="text-xs">gtm/deals</code>. It starts empty; add
+            documents to it whenever you like.
           </p>
           <Input
             autoFocus

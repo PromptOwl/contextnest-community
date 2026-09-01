@@ -12,8 +12,11 @@
  * caller's job — pass `onWikiLinkClick(title)` and route navigation
  * however you want.
  *
- * GFM: tables, task lists, strikethrough, and autolinks come from
- * `remark-gfm`.
+ * GFM: tables, task lists, strikethrough, footnotes, and autolinks come
+ * from `remark-gfm`.
+ *
+ * Math: `$…$` / `$$…$$` parse via `remark-math` and typeset with KaTeX.
+ * Invalid TeX renders in red instead of throwing.
  *
  * Text color: the editor's color swatches persist as a raw
  * `<span style="color: …">` (valid CommonMark inline HTML — see
@@ -24,6 +27,10 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
+import { remarkMathNoCurrency } from "@/lib/markdown-math";
 import type { Plugin } from "unified";
 import type { Root, Text } from "mdast";
 import { visit } from "unist-util-visit";
@@ -222,7 +229,15 @@ export function DocumentViewer({
       )}
     >
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkColorSpans, remarkStripHtml, remarkWikiLinks]}
+        remarkPlugins={[
+          remarkGfm,
+          remarkMath,
+          remarkMathNoCurrency,
+          remarkColorSpans,
+          remarkStripHtml,
+          remarkWikiLinks,
+        ]}
+        rehypePlugins={[rehypeKatex]}
         // Cast: Components type keyed on HTML names; `wikilink` not in union.
         components={
           {

@@ -320,6 +320,17 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
       ),
     }));
   };
+  // Withdraw your own pending review — the document goes back to Draft
+  // instead of the only non-destructive exit being Delete (CU-wdqcq007pe).
+  const handleWithdrawReview = async (w: api.WorkItem) => {
+    await api.cancelReview(w.nest_id, w.node_id);
+    setWork((prev) => ({
+      ...prev,
+      waiting: prev.waiting.filter(
+        (x) => !(x.nest_id === w.nest_id && x.node_id === w.node_id),
+      ),
+    }));
+  };
   // A folder or nest deletion item carries a folder path / nest id in node_id,
   // not a document id — opening the editor on it lands on a page for a node
   // that was never there. Send those to the nest instead.
@@ -519,17 +530,49 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                   </div>
                   <div className="divide-y border-t">
                     {work.notifications!.slice(0, 8).map((n) => (
-                      <button
+                      <div
                         key={n.id}
-                        type="button"
-                        onClick={() => openNotification(n)}
-                        className="w-full px-4 py-2 text-xs flex items-center gap-2 text-left hover:bg-amber-500/10"
+                        className="flex items-center gap-2 px-4 py-2 text-xs hover:bg-amber-500/10"
                       >
-                        <span className="flex-1">{n.message}</span>
-                        <span className="text-muted-foreground shrink-0">
-                          {formatServerDate(n.created_at)}
-                        </span>
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => openNotification(n)}
+                          className="flex-1 flex items-center gap-2 text-left"
+                        >
+                          <span className="flex-1">{n.message}</span>
+                          <span className="text-muted-foreground shrink-0">
+                            {formatServerDate(n.created_at)}
+                          </span>
+                        </button>
+                        {/* Per-row dismiss: "Mark all read" alone forces an
+                            all-or-nothing triage (CU-wdqcq007pu). */}
+                        <button
+                          type="button"
+                          title="Mark as read"
+                          aria-label="Mark as read"
+                          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-amber-500/20 hover:text-foreground"
+                          onClick={async () => {
+                            try {
+                              await api.markNotificationsRead([n.id]);
+                              setWork((prev) => ({
+                                ...prev,
+                                notifications: (
+                                  prev.notifications ?? []
+                                ).filter((x) => x.id !== n.id),
+                              }));
+                            } catch (err: any) {
+                              // Same feedback the row's siblings give — a
+                              // silent failure left the row sitting there
+                              // with no explanation.
+                              toast.error(
+                                err?.message || "Failed to mark as read",
+                              );
+                            }
+                          }}
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -678,6 +721,29 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                             }
                           }}
                           title="Withdraw this deletion request"
+                        >
+                          Withdraw
+                        </Button>
+                      )}
+                      {w.type === "review" && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="shrink-0 text-muted-foreground h-7 px-2"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            try {
+                              await handleWithdrawReview(w);
+                              toast.success(
+                                "Submission withdrawn — back to Draft",
+                              );
+                            } catch (err: any) {
+                              toast.error(
+                                err?.message || "Failed to withdraw submission",
+                              );
+                            }
+                          }}
+                          title="Withdraw this submission and return the document to Draft"
                         >
                           Withdraw
                         </Button>

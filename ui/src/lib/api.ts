@@ -1171,6 +1171,22 @@ export async function withdrawDeletionRequest(nestId: string, id: string) {
   );
 }
 
+/** Create a folder with nothing in it — no placeholder document. */
+export async function createFolder(nestId: string, folder: string) {
+  return request<{ folder: string }>(`/nests/${nestId}/folders`, {
+    method: "POST",
+    body: JSON.stringify({ folder }),
+  });
+}
+
+/** Withdraw your own pending review — the document returns to draft. */
+export async function cancelReview(nestId: string, nodeId: string) {
+  return request<{ review: unknown }>(
+    `/nests/${nestId}/nodes/${nodeId}/cancel-review`,
+    { method: "POST" },
+  );
+}
+
 export async function getReviewQueue(nestId: string, status = "pending") {
   return request<{ requests: any[]; total: number }>(
     `/nests/${nestId}/review-queue?status=${encodeURIComponent(status)}`,

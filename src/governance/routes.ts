@@ -1022,13 +1022,16 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
   const nodeId = c.req.param("nodeId")!;
 
   const userEmail = await getUserEmail(c);
-  const request = await reviews.cancelReview({
-    nestId,
-    nodeId,
-    cancelledBy: userEmail,
-  });
-
-  return c.json({ review: request });
+  try {
+    const request = await reviews.cancelReview({
+      nestId,
+      nodeId,
+      cancelledBy: userEmail,
+    });
+    return c.json({ review: request });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 403);
+  }
 });
 
 // ─── Helpers ────────────────────────────────────────────────────────────

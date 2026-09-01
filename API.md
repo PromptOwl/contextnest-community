@@ -748,6 +748,10 @@ Response: `{ "review": { "id": "...", "status": "approved", ... } }`.
 ### POST `/nests/:nestId/nodes/:nodeId/cancel-review`
 Cancels the pending review. Returns node to `draft`.
 
+Allowed for the person who submitted it (withdrawing your own submission) and
+for anyone with approve rights on the node. Anyone else gets 403 — read access
+to the nest alone is not enough.
+
 ### GET `/nests/:nestId/review-queue`
 Query: `?status=pending&limit=50&offset=0`
 
@@ -1340,9 +1344,10 @@ Returns CONTEXT.md content.
 
 ### GET `/nests/:nestId/folders`
 The nest's folder tree on its own, for callers that want the *shape* of the vault
-(a navigable tree, a folder picker) and none of its content. Reads folder rows out
-of the document index — no document is opened, so this stays cheap on a vault where
-listing the documents would not be.
+(a navigable tree, a folder picker) and none of its content. Per-folder counts come
+from the document index and the folders themselves from the vault's directories —
+no document is opened either way, so this stays cheap on a vault where listing the
+documents would not be. A folder holding no document is listed with `count: 0`.
 
 Query: `?folder=<path>` (that subtree only; defaults to the whole nest),
 `?recursive=0` (direct children of `folder` only).
@@ -1354,6 +1359,20 @@ Query: `?folder=<path>` (that subtree only; defaults to the whole nest),
 `count` = documents filed directly in that folder; `total` = the whole subtree
 beneath it. A level that holds only subfolders still gets a row, so it stays
 expandable.
+
+### POST `/nests/:nestId/folders`
+```json
+{ "folder": "gtm/deals" }
+```
+Creates a folder with nothing in it — the directory is created in the vault
+carrying only its generated `INDEX.md`, so no document is added to the nest.
+Each segment is slugified (`GTM/Deals` → `gtm/deals`) and the depth cap applies.
+Creating a folder that already exists is a no-op. Write tier.
+
+```json
+{ "folder": "gtm/deals" }
+```
+Returns 201 with the path actually created.
 
 ### GET `/nests/:nestId/census`
 One call for everything a nest overview needs to describe the *whole* nest,

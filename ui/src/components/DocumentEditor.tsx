@@ -62,6 +62,7 @@ import {
   Check,
   Copy,
   Star,
+  Undo2,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -691,6 +692,24 @@ export function DocumentEditor({
   const [nestNodes, setNestNodes] = useState<
     Array<{ id: string; title: string; content?: string; tags?: string[] }>
   >([]);
+  // The nest's folders, including any holding no document. Same cached census
+  // the nest views read, so this costs no extra request in practice.
+  const [nestFolders, setNestFolders] = useState<string[]>([]);
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { census } = await qc.fetchQuery(reads.census(nestId));
+        if (!cancelled) setNestFolders(census.folders.map((f) => f.path));
+      } catch {
+        /* best-effort: the picker still offers document-derived folders */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, nestId, qc]);
   useEffect(() => {
     // New docs need the list too — the folder picker derives its
     // suggestions from existing node ids.
@@ -718,17 +737,18 @@ export function DocumentEditor({
     };
   }, [isNew, loading, nestId]);
 
-  // Every folder prefix in use (ids minus the nodes/ root and the leaf),
-  // so the folder picker suggests existing paths at each depth.
+  // Every folder the picker can offer: the prefixes documents sit under, plus
+  // the nest's folder list — a folder created empty holds no document to
+  // derive it from, so ids alone would hide it (CU-wdqcpzzzut).
   const folderOptions = useMemo(() => {
-    const opts = new Set<string>();
+    const opts = new Set<string>(nestFolders);
     for (const n of nestNodes) {
       const rel = n.id.startsWith("nodes/") ? n.id.slice(6) : n.id;
       const segs = rel.split("/").slice(0, -1);
       for (let i = 1; i <= segs.length; i++) opts.add(segs.slice(0, i).join("/"));
     }
     return [...opts].sort();
-  }, [nestNodes]);
+  }, [nestNodes, nestFolders]);
 
   // Folder path this doc lives under (id minus the "nodes/" root and the leaf
   // slug), prettified for the header breadcrumb so users see where a nested
@@ -1295,6 +1315,19 @@ export function DocumentEditor({
     if (isNew) return;
     await api.rejectNode(nestId, nodeId, note);
     await loadNode();
+  };
+  // Cancel your own pending review from the document itself — back to Draft,
+  // rather than Delete being the only exit (CU-wdqcq007pe).
+  const handleWithdrawSubmission = async () => {
+    if (isNew) return;
+    try {
+      await api.cancelReview(nestId, nodeId);
+      toast.success("Submission withdrawn — back to Draft");
+      await loadNode();
+    } catch (err: any) {
+      console.error("[DocumentEditor] cancelReview failed", nestId, nodeId, err);
+      toast.error(err?.message || "Failed to withdraw submission");
+    }
   };
   // Flag this doc for deletion — for callers without delete permission. Errors
   // stay inside the dialog (it keeps the typed reason); success closes it.
@@ -1868,10 +1901,25 @@ export function DocumentEditor({
           {isOwnPendingReview && (
             <Alert>
               <AlertCircle className="h-4 w-4" />
-              <AlertDescription>
-                This is still under review. Your edits update the same pending
-                submission — no need to withdraw and resubmit — and the steward
-                reviews your latest version.
+              <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className="flex-1 min-w-[16rem]">
+                  This is still under review. Your edits update the same pending
+                  submission — no need to withdraw and resubmit — and the steward
+                  reviews your latest version.
+                </span>
+                {/* Withdraw belongs with the sentence explaining the state, not
+                    in the header's action row (CU-wdqcq007pe). */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={() => void handleWithdrawSubmission()}
+                  data-testid="document-editor-withdraw"
+                  title="Withdraw this submission and return the document to Draft"
+                >
+                  <Undo2 className="h-3.5 w-3.5 mr-1.5" />
+                  Withdraw
+                </Button>
               </AlertDescription>
             </Alert>
           )}
