@@ -209,6 +209,7 @@ import {
   clearSearch,
   type SearchState,
 } from "./extensions/SearchReplace";
+import { DocumentViewer } from "../DocumentViewer";
 import "./editor-styles.css";
 
 export interface MarkdownEditorHandle {
@@ -269,11 +270,13 @@ export const MarkdownEditor = forwardRef<
   }: MarkdownEditorProps,
   ref: ForwardedRef<MarkdownEditorHandle>,
 ) {
-  // Preview mode keeps the same TipTap instance mounted (so wiki-link,
-  // task-checkbox, and mention decorations render identically) but
-  // flips the doc to read-only — gives the user a true preview of what
-  // a reader will see without having to leave the editor.
+  // Preview renders the markdown through the same reader the view and
+  // comment modes use, not a read-only TipTap — TipTap shows its own editing
+  // model, so anything it has no node for (math, footnotes) stayed as raw
+  // source and the preview lied about how the document would render.
+  // The editor stays mounted, hidden, so toggling back keeps caret and undo.
   const [previewing, setPreviewing] = useState(false);
+  const [previewMarkdown, setPreviewMarkdown] = useState("");
   const qc = useQueryClient();
   const effectiveEditable = editable && !previewing;
 
@@ -1172,7 +1175,12 @@ export const MarkdownEditor = forwardRef<
             }
             uploading={uploading}
             previewing={previewing}
-            onTogglePreview={() => setPreviewing((p) => !p)}
+            onTogglePreview={() =>
+              setPreviewing((p) => {
+                if (!p && editor) setPreviewMarkdown(getEditorMarkdown(editor));
+                return !p;
+              })
+            }
           />
         </div>
       )}
@@ -1364,12 +1372,19 @@ export const MarkdownEditor = forwardRef<
         </BubbleMenu>
       )}
 
+      {previewing && (
+        <DocumentViewer
+          content={previewMarkdown}
+          onWikiLinkClick={(title) => onWikiLinkClick?.(title, null)}
+        />
+      )}
+
       <EditorContent
         ref={scrollRef}
         editor={editor}
         className={cn(
           "min-h-[60vh] max-h-[60vh] overflow-y-auto",
-          previewing && "bg-muted/20",
+          previewing && "hidden",
         )}
         // Click the empty area below the last block → caret to doc end.
         // The ProseMirror node only grows to its content height, so clicks
