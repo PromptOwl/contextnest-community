@@ -3,7 +3,7 @@
  * and see everything that key can touch, instead of a connection per nest:
  *
  *   GET  /llms.txt  — public agent manual: endpoints, MCP, selector grammar,
- *                     hop/skip retrieval semantics, ctx CLI, npm packages
+ *                     hop/skip retrieval semantics, npm packages
  *   GET  /index     — the caller's grounded nest index (markdown or json)
  *   ALL  /mcp       — stateless MCP endpoint: nest_index + cross-nest read
  *                     tools that take a `nest` (id or name) argument
@@ -582,6 +582,11 @@ Streamable HTTP, stateless. Two endpoints:
   (new document in a writable nest; a \`folder\` path creates the folder).
 - \`${B}/nests/<nest-id>/mcp\` — per-nest, full toolset including writes and
   governance (create/update, submit/approve/reject, stewards, sharing).
+  Sharing a slice is one call: \`context_grant\` with
+  \`{ "email", "target_type": "document" | "folder", "target", "role": "read" | "write" }\`
+  — \`target\` is a node id (\`nodes/win-loss-log\`) or a folder prefix
+  (\`nodes/gtm/deals\`). The recipient reaches exactly that document, or
+  everything under that folder, and nothing else in the nest. Owner/admin only.
 
 Claude Code / Cursor / VS Code connect natively via HTTP with the
 \`Authorization: Bearer\` header. Claude Desktop needs the mcp-remote bridge:
@@ -590,20 +595,9 @@ Claude Code / Cursor / VS Code connect natively via HTTP with the
 npx -y mcp-remote ${B}/mcp --header "Authorization: Bearer <api-key>"
 \`\`\`
 
-## ctx CLI (npm: @promptowl/contextnest-cli)
-
-\`npm i -g @promptowl/contextnest-cli\`
-
-- \`ctx push --server ${B} --nest <nest-id> --key <api-key>\` — upload a local
-  vault into a nest (add \`--include-drafts\` for unpublished nodes).
-- All other ctx commands (\`query\`, \`add\`, \`search\`, \`checkpoint\`) operate on
-  a LOCAL vault directory only. For remote reads use the API or MCP above —
-  there is currently no remote \`ctx query\`.
-
 ## npm packages
 
 - \`@promptowl/contextnest-community\` — this server
-- \`@promptowl/contextnest-cli\` — the ctx CLI
 - \`@promptowl/contextnest-engine\` — vault storage + selector/graph engine
 
 ## Conventions

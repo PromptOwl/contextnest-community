@@ -387,6 +387,39 @@ export async function appendRunStep(
 const RUN_STATUSES = ["running", "succeeded", "failed", "cancelled"];
 
 /**
+ * Cancelling a run kills the branch under it: a sub-agent whose parent is gone
+ * has nothing left to report back to, and a runner that later claimed it would
+ * execute work no one is waiting for. Walk the tree level by level and cancel
+ * every still-running descendant. The parent chain is acyclic (spawn guards
+ * reject re-entrancy), but the loop is bounded anyway. Returns how many were
+ * cancelled.
+ */
+export async function cancelDescendants(runId: string): Promise<number> {
+  const db = getDb();
+  const at = new Date().toISOString();
+  const trace = JSON.stringify({ error: "Parent run cancelled" });
+  let frontier = [runId];
+  let cancelled = 0;
+  for (let depth = 0; frontier.length && depth < 64; depth++) {
+    const ph = frontier.map(() => "?").join(",");
+    const kids = (await db.all(
+      `SELECT id FROM runs WHERE parent_run_id IN (${ph}) AND status = 'running'`,
+      frontier as any,
+    )) as Array<{ id: string }>;
+    if (!kids.length) break;
+    frontier = kids.map((k) => k.id);
+    const kph = frontier.map(() => "?").join(",");
+    await db.run(
+      `UPDATE runs SET status = 'cancelled', trace = COALESCE(trace, ?), finished_at = ?
+        WHERE id IN (${kph}) AND status = 'running'`,
+      [trace, at, ...frontier] as any,
+    );
+    cancelled += frontier.length;
+  }
+  return cancelled;
+}
+
+/**
  * Close or update a run's status/trace. Compare-and-swap on `status =
  * 'running'` means two concurrent closers can't both win: exactly one mutates
  * the row, the loser gets a ConflictError instead of a silent last-write-wins.
@@ -418,6 +451,7 @@ export async function closeRun(
     if (!run) throw new NotFoundError("Run not found");
     throw new ConflictError("Run already terminal — status can't be changed");
   }
+  if (status === "cancelled") await cancelDescendants(runId);
   return { status };
 }
 

@@ -39,6 +39,9 @@ export interface Version {
    *  has resolved a review. Drives the "approved by …" hint in the row. */
   resolvedBy?: string;
   resolutionStatus?: "approved" | "rejected" | string;
+  /** The reviewer's own note on that verdict — the rejection reason, or an
+   *  approver's comment. Rendered in the row so it isn't buried behind a click. */
+  resolutionNote?: string;
 }
 
 /**
@@ -401,6 +404,20 @@ export function VersionHistory({
                 {formatDate(previewVersion.editedAt)} · {previewVersion.editedBy}
                 {previewVersion.changeNote && ` · ${previewVersion.changeNote}`}
               </div>
+              {previewVersion.resolutionNote && (
+                <div
+                  className={`mt-1 text-xs break-words border-l-2 pl-2 ${
+                    previewVersion.resolutionStatus === "rejected"
+                      ? "border-red-300 text-red-800"
+                      : "border-green-300 text-green-800"
+                  }`}
+                >
+                  {previewVersion.resolutionStatus === "rejected"
+                    ? "Rejected by"
+                    : "Approved by"}{" "}
+                  {previewVersion.resolvedBy}: {previewVersion.resolutionNote}
+                </div>
+              )}
             </div>
             <ScrollArea className="h-[60vh] max-h-[440px] pr-2">
               {(() => {
@@ -594,6 +611,23 @@ export function VersionHistory({
                           <span className="font-medium text-foreground/80">
                             {version.resolvedBy}
                           </span>
+                        </div>
+                      )}
+                      {/* The reviewer's own words. Sits in the row rather than
+                          behind a click — a rejection whose reason is hidden
+                          reads as an unexplained verdict. */}
+                      {version.resolutionNote && (
+                        <div
+                          className={`text-xs break-words border-l-2 pl-2 ${
+                            version.resolutionStatus === "rejected"
+                              ? "border-red-300 text-red-800"
+                              : "border-green-300 text-green-800"
+                          }`}
+                        >
+                          {version.resolutionStatus === "rejected"
+                            ? "Reason"
+                            : "Reviewer note"}
+                          : {version.resolutionNote}
                         </div>
                       )}
                       {parsed.requestId && (

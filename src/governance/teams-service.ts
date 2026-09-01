@@ -465,7 +465,7 @@ async function mutateMembers(
 
 // ─── Nest share side (nests.shared_teams) ───
 
-function parseSharedTeams(json: string | null | undefined): SharedTeamRef[] {
+export function parseSharedTeams(json: string | null | undefined): SharedTeamRef[] {
   if (!json) return [];
   try {
     const parsed = JSON.parse(json);
@@ -684,14 +684,31 @@ export async function resolveTeamRolesForUser(
   userId: string,
 ): Promise<TeamMemberRole[]> {
   const refs = await listNestTeams(nestId).catch(() => []);
+  return resolveTeamRolesFromShared(refs, userId);
+}
+
+/**
+ * The roles a user holds across an already-resolved list of shared-team refs.
+ *
+ * Split out so a caller that has already read `nests.shared_teams` — the
+ * consolidated permission fetch in shared/access.ts does — doesn't pay a second
+ * read of the same column. One `IN (…)` query for every team rather than one
+ * query per team: this sits on the permission path, so a nest with five teams
+ * shared onto it was five round-trips on every access check.
+ */
+export async function resolveTeamRolesFromShared(
+  refs: SharedTeamRef[],
+  userId: string,
+): Promise<TeamMemberRole[]> {
   if (refs.length === 0) return [];
-  const db = getDb();
+  const ids = [...new Set(refs.map((r) => r.teamId).filter(Boolean))];
+  if (ids.length === 0) return [];
+  const rows = (await getDb().all(
+    `SELECT members FROM teams WHERE id IN (${ids.map(() => "?").join(",")})`,
+    ids,
+  )) as Array<{ members?: string }>;
   const roles = new Set<TeamMemberRole>();
-  for (const ref of refs) {
-    const row = (await db.get("SELECT members FROM teams WHERE id = ?", [
-      ref.teamId,
-    ])) as { members?: string } | undefined;
-    if (!row) continue;
+  for (const row of rows) {
     const member = parseMembers(row.members).find((m) => m.userId === userId);
     if (member) roles.add(member.role);
   }

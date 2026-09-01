@@ -20,6 +20,7 @@ import {
   Clock3,
   Wrench,
   Table2,
+  X,
 } from "lucide-react";
 import {
   listEdges,
@@ -30,6 +31,8 @@ import {
   listRuns,
   getRun,
   triggerRun,
+  cancelRun,
+  isQueued,
   listNodes,
   listSchedules,
   createSchedule,
@@ -62,6 +65,7 @@ import {
 } from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
 import { Button } from "./ui/button";
+import { OverflowMenu, type OverflowAction } from "./ui/overflow-menu";
 import { Badge } from "./ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { Input } from "./ui/input";
@@ -83,12 +87,31 @@ interface Props {
 }
 
 const statusVariant = (
-  s: RunSummary["status"],
+  s: string,
 ): "default" | "secondary" | "destructive" | "outline" => {
   if (s === "succeeded") return "default";
   if (s === "failed" || s === "cancelled") return "destructive";
+  if (s === "queued") return "outline";
   return "secondary"; // running
 };
+
+/**
+ * Left pad for a run row at `level`. The step stops compounding past a few
+ * levels: a deep sub-agent chain otherwise pushed the run id clean out of the
+ * row on a narrow panel, and the nesting is still legible from the arrow and
+ * the `sub · dN` badge, which carries the true depth either way.
+ */
+const INDENT_STEP_REM = 0.85;
+const MAX_INDENT_LEVELS = 6;
+function indentFor(level: number): string {
+  return `${0.75 + Math.min(level, MAX_INDENT_LEVELS) * INDENT_STEP_REM}rem`;
+}
+
+// The wire status is "running" from creation; a run is only really executing
+// once a runner has claimed it, so show the unclaimed stretch as "queued".
+const runStatus = (r: Pick<RunSummary, "status" | "claimed_by">) =>
+  isQueued(r) ? "queued" : r.status;
+const QUEUED_HINT = "Created — waiting for a runner to claim it";
 
 // The step-log icon mirrors the run-trace prototype's read/branch/write/notify.
 const stepIcon = (action: string) => {
@@ -406,11 +429,10 @@ function EdgesPanel({ nestId }: { nestId: string }) {
             <button
               key={mode}
               type="button"
-              className={`px-2.5 h-full ${i > 0 ? "border-l" : ""} ${
-                nWhen === mode
+              className={`px-2.5 h-full ${i > 0 ? "border-l" : ""} ${nWhen === mode
                   ? "bg-primary text-primary-foreground"
                   : "hover:bg-muted"
-              }`}
+                }`}
               onClick={() => setNWhen(mode)}
             >
               {label}
@@ -758,6 +780,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
   // Spawn errors render inline in the row form (the top card's error banner
   // is off-screen when the user is spawning from a deep row).
   const [spawnError, setSpawnError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState<string | null>(null);
   const [nodes, setNodes] = useState<Array<{ id: string; title?: string; type?: string }>>([]);
 
   const load = useCallback(async () => {
@@ -790,6 +813,21 @@ function RunsPanel({ nestId }: { nestId: string }) {
       setSelected(await getRun(id));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load run");
+    }
+  };
+
+  // Cancel a queued/running run. The server rejects a PATCH once terminal, so
+  // a stale row just surfaces that conflict instead of silently reopening.
+  const cancel = async (id: string) => {
+    setCancelling(id);
+    try {
+      await cancelRun(id);
+      await load();
+      if (selected?.id === id) await open(id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel run");
+    } finally {
+      setCancelling(null);
     }
   };
 
@@ -906,7 +944,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
 
   const renderRun = (r: RunSummary, level: number): React.ReactNode => {
     const kids = childrenOf.get(r.id) ?? [];
-    const indent = level ? `${0.75 + level * 1.1}rem` : undefined;
+    const indent = level ? indentFor(level) : undefined;
     // Depth badges below prefer the server's `r.depth` and fall back to render
     // `level` only if it's missing. These can differ when a run's parent is
     // outside the loaded window (rendered as a root at level 0 though its true
@@ -921,63 +959,99 @@ function RunsPanel({ nestId }: { nestId: string }) {
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") void open(r.id);
           }}
-          className={`group w-full cursor-pointer px-3 py-2 hover:bg-muted/40 ${
-            selected?.id === r.id ? "bg-muted/60" : ""
-          }`}
+          className={`group w-full overflow-hidden cursor-pointer px-3 py-2 hover:bg-muted/40 ${selected?.id === r.id ? "bg-muted/60" : ""
+            }`}
           style={{ paddingLeft: indent }}
         >
-          <div className="flex items-center gap-2">
+          {/* min-w-0 lets the row shrink below its content's natural width, so
+              a deep row narrows instead of pushing the actions past the card. */}
+          <div className="flex items-center gap-2 min-w-0">
             {level > 0 && (
-              <CornerDownRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
+              <CornerDownRight
+                className="h-3 w-3 text-muted-foreground/50 shrink-0"
+                // Depth used to ride the title line as a badge. The indent and
+                // this arrow already say "nested"; the exact number is a detail,
+                // so it moves to a tooltip rather than costing a badge's width.
+                aria-label={`Sub-agent at depth ${r.depth ?? level}`}
+              >
+                <title>{`Sub-agent at depth ${r.depth ?? level}`}</title>
+              </CornerDownRight>
             )}
             <NodeTypeIcon type={runType(r.agent_node)} className="h-3.5 w-3.5" />
-            <span className="font-mono text-xs truncate">
-              {r.id.slice(0, 12)}
+            {/* Ellipsis + full id on hover: the list showed a bare head slice
+                that read as a complete, different id from the detail view's. */}
+            {/* min-w keeps the id readable instead of letting it collapse to
+                nothing between the indent and the shrink-0 badges. */}
+            <span
+              className="font-mono text-xs truncate min-w-[6rem]"
+              title={r.id}
+            >
+              {r.id.length > 12 ? `${r.id.slice(0, 12)}…` : r.id}
             </span>
-            <Badge variant={statusVariant(r.status)} className="text-[10px]">
-              {r.status}
+            <Badge
+              variant={statusVariant(runStatus(r))}
+              className="text-[10px]"
+              title={isQueued(r) ? QUEUED_HINT : undefined}
+            >
+              {runStatus(r)}
             </Badge>
-            {level > 0 && (
-              <Badge
-                variant="outline"
-                className="text-[10px] shrink-0"
-                title={`Sub-agent at depth ${r.depth ?? level}`}
-              >
-                sub · d{r.depth ?? level}
-              </Badge>
-            )}
-            {kids.length > 0 && (
-              <span className="text-[10px] text-muted-foreground shrink-0" title="Sub-agents spawned">
-                {kids.length} child{kids.length === 1 ? "" : "ren"}
-              </span>
-            )}
-            {/* Row action — spawn a sub-agent under THIS run. Only running
-                runs can parent one; hidden when sub-agent runs are disabled,
-                and hidden once this run is at the depth OR fan-out cap (a
-                deeper/wider child would be rejected server-side). */}
-            {subagentRunsEnabled &&
-              r.status === "running" &&
-              (r.depth ?? 0) < maxDepth &&
-              childCount(r.id) < maxChildren && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="ml-auto h-6 px-2 text-[11px] text-muted-foreground opacity-0 group-hover:opacity-100 shrink-0"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setSpawnParent(spawnParent === r.id ? "" : r.id);
-                  setSpawnAgent("");
-                  setSpawnInputs("");
-                  setSpawnError(null);
-                }}
-                title="Spawn a sub-agent nested under this run"
-              >
-                <Plus className="h-3 w-3 mr-1" /> sub-agent
-              </Button>
-            )}
+            {/* Row actions collapse into one ⋮ button. As labelled buttons they
+                were the widest thing in the row, and a deeply nested run pushed
+                them past the card's edge.
+                Sub-agent: only running runs can parent one; hidden when the
+                feature is off or this run is at the depth / fan-out cap (a
+                deeper/wider child would be rejected server-side).
+                Cancel: the only way out of a run no runner ever claims. */}
+            {r.status === "running" &&
+              (() => {
+                const actions: OverflowAction[] = [];
+                if (
+                  subagentRunsEnabled &&
+                  (r.depth ?? 0) < maxDepth &&
+                  childCount(r.id) < maxChildren
+                ) {
+                  actions.push({
+                    label:
+                      spawnParent === r.id ? "Close sub-agent form" : "Spawn sub-agent",
+                    icon: Plus,
+                    testId: "run-action-spawn",
+                    onSelect: () => {
+                      setSpawnParent(spawnParent === r.id ? "" : r.id);
+                      setSpawnAgent("");
+                      setSpawnInputs("");
+                      setSpawnError(null);
+                    },
+                  });
+                }
+                actions.push({
+                  label: cancelling === r.id ? "Cancelling…" : "Cancel run",
+                  icon: cancelling === r.id ? Loader2 : X,
+                  iconClassName: cancelling === r.id ? "animate-spin" : undefined,
+                  destructive: true,
+                  disabled: cancelling === r.id,
+                  separatorBefore: true,
+                  testId: "run-action-cancel",
+                  onSelect: () => void cancel(r.id),
+                });
+                return (
+                  <div className="ml-auto shrink-0">
+                    <OverflowMenu
+                      actions={actions}
+                      className="h-6 w-6 text-muted-foreground"
+                      triggerTitle="Run actions"
+                      testId="run-actions"
+                    />
+                  </div>
+                );
+              })()}
           </div>
+          {/* Child count lives here rather than on the title line: it is
+              context, not identity, and the title line has to hold the id and
+              the actions inside the card at every nesting depth. */}
           <div className="text-[11px] text-muted-foreground truncate">
             {runLabel(r.agent_node)} · {timeOf(r.started_at)}
+            {kids.length > 0 &&
+              ` · ${kids.length} child${kids.length === 1 ? "" : "ren"}`}
           </div>
           {r.status === "failed" && r.trace?.error && (
             <div
@@ -993,7 +1067,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
         {subagentRunsEnabled && spawnParent === r.id && (
           <div
             className="border-t bg-muted/20 px-3 py-2.5 space-y-2"
-            style={{ paddingLeft: `${0.75 + (level + 1) * 1.1}rem` }}
+            style={{ paddingLeft: indentFor(level + 1) }}
           >
             <div className="text-[11px] font-medium text-muted-foreground">
               New sub-agent under{" "}
@@ -1158,7 +1232,7 @@ function RunsPanel({ nestId }: { nestId: string }) {
               it and calls the LLM. Point it at this nest:
             </p>
             <pre className="overflow-x-auto rounded bg-background border p-2 font-mono text-[10.5px] leading-relaxed">
-{`docker run -d --name cn-runner --network host \\
+              {`docker run -d --name cn-runner --network host \\
   -e CONTEXTNEST_SERVER=http://localhost:4040 \\
   -e CONTEXTNEST_NEST=${nestId} \\
   -e CONTEXTNEST_KEY=cnst_localdev \\
@@ -1176,38 +1250,47 @@ function RunsPanel({ nestId }: { nestId: string }) {
         </details>
       </div>
 
-      {/* Run list — full width under the form. */}
-      <div className="rounded-lg border divide-y">
-        {loading ? (
-          <div className="px-3 py-6 text-center text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin inline" />
+      {/* Run list + trace side by side, so the details stay visually tied to
+          the selected row. Single column until there's a selection (and on
+          narrow screens, where there's no room for two). */}
+      <div
+        className={`grid gap-4 items-start ${selected ? "lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]" : "grid-cols-1"
+          }`}
+      >
+        <div className="rounded-lg border divide-y min-w-0">
+          {loading ? (
+            <div className="px-3 py-6 text-center text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin inline" />
+            </div>
+          ) : runs.length === 0 ? (
+            <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+              No runs yet. Trigger an agent above.
+            </div>
+          ) : (
+            roots.map((r) => renderRun(r, 0))
+          )}
+        </div>
+
+        {/* Trace / editor — right-hand pane, appears when a run is selected. */}
+        {selected && (
+          <div className="rounded-lg border p-4 min-w-0 lg:sticky lg:top-4">
+            <RunTrace
+              run={selected}
+              children={runs.filter((r) => r.parent_run_id === selected.id)}
+              parent={
+                selected.parent_run_id
+                  ? runs.find((r) => r.id === selected.parent_run_id) ?? null
+                  : null
+              }
+              label={runLabel}
+              typeOf={runType}
+              onOpen={(id) => void open(id)}
+              onCancel={(id) => void cancel(id)}
+              cancelling={cancelling === selected.id}
+            />
           </div>
-        ) : runs.length === 0 ? (
-          <div className="px-3 py-6 text-center text-xs text-muted-foreground">
-            No runs yet. Trigger an agent above.
-          </div>
-        ) : (
-          roots.map((r) => renderRun(r, 0))
         )}
       </div>
-
-      {/* Trace / editor — full width, appears when a run is selected. */}
-      {selected && (
-        <div className="rounded-lg border p-4">
-          <RunTrace
-            run={selected}
-            children={runs.filter((r) => r.parent_run_id === selected.id)}
-            parent={
-              selected.parent_run_id
-                ? runs.find((r) => r.id === selected.parent_run_id) ?? null
-                : null
-            }
-            label={runLabel}
-            typeOf={runType}
-            onOpen={(id) => void open(id)}
-          />
-        </div>
-      )}
     </div>
   );
 }
@@ -1219,6 +1302,8 @@ function RunTrace({
   label = (id) => id,
   typeOf = () => undefined,
   onOpen,
+  onCancel,
+  cancelling = false,
 }: {
   run: RunDetail;
   children?: RunSummary[];
@@ -1226,17 +1311,41 @@ function RunTrace({
   label?: (id: string) => string;
   typeOf?: (id: string) => string | undefined;
   onOpen?: (id: string) => void;
+  onCancel?: (id: string) => void;
+  cancelling?: boolean;
 }) {
   return (
     <div>
       <div className="flex items-center gap-2 mb-1">
         <NodeTypeIcon type={typeOf(run.agent_node)} className="h-4 w-4" />
         <span className="font-mono text-sm">{run.id}</span>
-        <Badge variant={statusVariant(run.status)}>{run.status}</Badge>
+        <Badge
+          variant={statusVariant(runStatus(run))}
+          title={isQueued(run) ? QUEUED_HINT : undefined}
+        >
+          {runStatus(run)}
+        </Badge>
         {(run.depth ?? 0) > 0 && (
           <Badge variant="outline" className="text-[10px]">
             sub-agent · depth {run.depth}
           </Badge>
+        )}
+        {run.status === "running" && onCancel && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="ml-auto h-7"
+            disabled={cancelling}
+            onClick={() => onCancel(run.id)}
+            title="Cancel this run"
+          >
+            {cancelling ? (
+              <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+            ) : (
+              <X className="h-3.5 w-3.5 mr-1" />
+            )}
+            Cancel run
+          </Button>
         )}
       </div>
       <div className="text-xs text-muted-foreground mb-4">
@@ -1273,8 +1382,8 @@ function RunTrace({
                 <CornerDownRight className="h-3 w-3 text-muted-foreground/50 shrink-0" />
                 <NodeTypeIcon type={typeOf(k.agent_node)} className="h-3.5 w-3.5" />
                 <span className="truncate">{label(k.agent_node)}</span>
-                <Badge variant={statusVariant(k.status)} className="text-[10px] shrink-0">
-                  {k.status}
+                <Badge variant={statusVariant(runStatus(k))} className="text-[10px] shrink-0">
+                  {runStatus(k)}
                 </Badge>
                 <span className="ml-auto font-mono text-[10px] text-muted-foreground shrink-0">
                   {k.id.slice(0, 8)}
@@ -1294,7 +1403,9 @@ function RunTrace({
       <div className="space-y-0">
         {run.steps.length === 0 ? (
           <div className="text-xs text-muted-foreground">
-            No steps recorded.
+            {isQueued(run)
+              ? "No steps yet — queued, waiting for a runner to claim it. Start a runner (see “How do I run one?” above) or cancel the run."
+              : "No steps recorded."}
           </div>
         ) : (
           run.steps.map((s: RunStep) => (
@@ -1856,9 +1967,8 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                   <g key={p.id}>
                     <foreignObject x={p.x} y={p.y} width={CARD_W} height={CARD_H + 6}>
                       <div
-                        className={`rounded-lg border-2 bg-background px-2.5 py-1.5 shadow-sm cursor-pointer select-none ${
-                          isSel ? "border-primary ring-2 ring-primary/20" : "border-border"
-                        }`}
+                        className={`rounded-lg border-2 bg-background px-2.5 py-1.5 shadow-sm cursor-pointer select-none ${isSel ? "border-primary ring-2 ring-primary/20" : "border-border"
+                          }`}
                         style={{ width: CARD_W, height: CARD_H }}
                         onClick={(ev) => {
                           ev.stopPropagation();
@@ -1946,9 +2056,8 @@ function CanvasPanel({ nestId }: { nestId: string }) {
                 <button
                   key={mode}
                   type="button"
-                  className={`px-2.5 h-full ${i > 0 ? "border-l" : ""} ${
-                    eWhen === mode ? "bg-primary text-primary-foreground" : "hover:bg-muted"
-                  }`}
+                  className={`px-2.5 h-full ${i > 0 ? "border-l" : ""} ${eWhen === mode ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+                    }`}
                   onClick={() => setEWhen(mode)}
                 >
                   {lbl}

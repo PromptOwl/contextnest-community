@@ -35,6 +35,13 @@ export interface FolderTreeNode {
   children: FolderTreeNode[];
 }
 
+/** A folder the caller knows exists, with its real subtree count, even when
+ *  none of its documents are loaded yet (lazy expansion). */
+export interface KnownFolder {
+  path: string;
+  total: number;
+}
+
 /**
  * Build a real folder hierarchy from a flat list of (folder → docs) groups.
  *
@@ -50,6 +57,7 @@ export interface FolderTreeNode {
 export function buildFolderTree(
   groups: { folder: string; items: any[] }[],
   baseFolder = "",
+  known?: KnownFolder[],
 ): FolderTreeNode {
   const root: FolderTreeNode = {
     path: baseFolder,
@@ -92,6 +100,16 @@ export function buildFolderTree(
     return node;
   };
 
+  // Seed known folders first so a collapsed, never-fetched folder still gets
+  // a row — otherwise the tree could only show what had already loaded.
+  const knownTotals = new Map<string, number>();
+  for (const k of known ?? []) {
+    if (!k.path || k.path === baseFolder) continue;
+    if (baseFolder && !k.path.startsWith(`${baseFolder}/`)) continue;
+    ensure(k.path);
+    knownTotals.set(k.path, k.total);
+  }
+
   for (const g of groups) {
     const folder = g.folder;
     if (!folder || folder === baseFolder || folder === "Root") {
@@ -108,8 +126,10 @@ export function buildFolderTree(
     n.children.sort((a, b) => a.name.localeCompare(b.name));
     let total = n.count;
     for (const c of n.children) total += finalize(c);
-    n.total = total;
-    return total;
+    // The server's count wins when it is larger: rolling up only what is
+    // loaded would badge an unexpanded folder "0" and make it unexpandable.
+    n.total = Math.max(total, knownTotals.get(n.path) ?? 0);
+    return n.total;
   };
   finalize(root);
 
@@ -136,7 +156,12 @@ export function buildFolderTree(
       children: cur.children.map((c) => compact(c, displayDepth + 1)),
     };
   };
-  root.children = root.children.map((c) => compact(c, 0));
+  // Compaction is skipped once folders are lazily loaded: folding `a > b`
+  // into one row removes `a`'s own row, and with it the expand that fetches
+  // `a`. Every level keeps its row so every level can be opened.
+  root.children = known
+    ? root.children
+    : root.children.map((c) => compact(c, 0));
   return root;
 }
 
@@ -146,6 +171,9 @@ interface FolderTreeProps {
   groups: { folder: string; items: any[] }[];
   /** Scope the tree to this folder (drill-down). Defaults to the whole nest. */
   baseFolder?: string;
+  /** Folders known to exist but whose documents may not be loaded yet. Supply
+   *  this to render a lazily-expanded tree; omit it for an eager one. */
+  known?: KnownFolder[];
   /** rem of indent added per nesting level. */
   indentRem?: number;
   /** Collapsed folders hide their subtree. Omit for an always-expanded tree. */
@@ -170,6 +198,7 @@ interface FolderTreeProps {
 export function FolderTree({
   groups,
   baseFolder = "",
+  known,
   indentRem = 1.25,
   isCollapsed,
   renderFolder,
@@ -177,8 +206,8 @@ export function FolderTree({
   className,
 }: FolderTreeProps) {
   const root = useMemo(
-    () => buildFolderTree(groups, baseFolder),
-    [groups, baseFolder],
+    () => buildFolderTree(groups, baseFolder, known),
+    [groups, baseFolder, known],
   );
 
   const rows: ReactNode[] = [];

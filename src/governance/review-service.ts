@@ -15,7 +15,6 @@ import { sendEmailToRecipient } from "../notify/email.js";
 import { insertOrReplace, nowExpr } from "../db/sql.js";
 import { withNodeWriteLock, nodeWriteKey } from "../shared/node-write-lock.js";
 import { engineCache, engineApi, opContext } from "../nodes/engine.js";
-import { safePublishDocument } from "./safe-publish.js";
 import { resolveStewardsForNode, canUserApprove } from "./stewardship-service.js";
 import * as versions from "./version-service.js";
 import {
@@ -483,6 +482,24 @@ export async function cancelReview(params: {
     )) as any;
 
     if (!pending) return null;
+
+    // Withdrawing is the author's own undo, so the submitter always may.
+    // Anyone else needs the rights they'd need to resolve it any other way.
+    if (
+      String(pending.requested_by).toLowerCase() !==
+      params.cancelledBy.toLowerCase()
+    ) {
+      const verdict = await canUserApprove(
+        params.nestId,
+        params.nodeId,
+        params.cancelledBy,
+      );
+      if (!verdict.allowed) {
+        throw new Error(
+          "Only the submitter or a reviewer can withdraw this review",
+        );
+      }
+    }
 
     await db.run(
       `UPDATE review_requests
@@ -1024,6 +1041,29 @@ export async function listDeletionRequests(params: {
  */
 export async function dropDeletionRequest(id: string): Promise<void> {
   await getDb().run("DELETE FROM deletion_requests WHERE id = ?", [id]);
+}
+
+/** Withdraw a pending deletion request. Only the original requester may do so.
+ *  Returns null if the request doesn't exist, isn't pending, or belongs to
+ *  another user. The row is deleted — unlike decline, there's no verdict to
+ *  record when someone changes their own mind. */
+export async function withdrawDeletionRequest(params: {
+  nestId: string;
+  id: string;
+  withdrawnBy: string;
+}): Promise<DeletionRequest | null> {
+  const db = getDb();
+  const pending = await getDeletionRequest(params.id);
+  if (
+    !pending ||
+    pending.nestId !== params.nestId ||
+    pending.status !== "pending" ||
+    pending.requestedBy.toLowerCase() !== params.withdrawnBy.toLowerCase()
+  ) {
+    return null;
+  }
+  await db.run("DELETE FROM deletion_requests WHERE id = ?", [params.id]);
+  return pending;
 }
 
 /** Decline a pending request, keeping the row (and the note) as the record.

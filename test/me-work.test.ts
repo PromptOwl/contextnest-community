@@ -183,3 +183,38 @@ it("bare owner sees the inbox item only when self-approve is on", async () => {
   // Bare owner, self-approve ON → shown.
   expect(data.items.some((w: any) => w.nest_id === onNest)).toBe(true);
 });
+
+it("a review verdict notification carries the document it is about", async () => {
+  // The inbox links to the referenced document; subject_id is the review id,
+  // so the node has to be resolved from review_requests on the read.
+  const nestId = await governedNest(alice, "Verdict Nest");
+  writeFileSync(
+    join(env.dataDir, "nests", nestId, "stewards.yaml"),
+    `version: 1\nnest:\n  - email: ${alice.email}, role: editor\n` +
+      `  - email: ${bob.email}, role: reviewer, can_approve: true\n`,
+  );
+  await jsonRequest(app, "POST", `/nests/${nestId}/stewards/sync`, {}, alice.apiKey);
+  await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/collaborators`,
+    { email: bob.email, permission: "write" },
+    alice.apiKey,
+  );
+  await submitDoc(alice, nestId, "verdict-doc");
+  const approve = await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes/nodes/verdict-doc/approve`,
+    {},
+    bob.apiKey,
+  );
+  expect(approve.status).toBe(200);
+
+  const inbox = await jsonRequest(app, "GET", "/me/notifications", undefined, alice.apiKey);
+  const verdict = inbox.data.notifications.find(
+    (n: any) => n.kind === "review_approved" && n.nest_id === nestId,
+  );
+  expect(verdict).toBeTruthy();
+  expect(verdict.node_id).toBe("nodes/verdict-doc");
+});

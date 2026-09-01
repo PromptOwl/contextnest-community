@@ -247,6 +247,17 @@ export interface AdminSettings {
   oidc_ready?: boolean;
   /** Write-only: string sets/replaces, null clears; never returned. */
   oidc_client_secret?: string | null;
+  /** Agent SSO / token-exchange (POST /auth/token-exchange). Signing secret is
+   *  write-only — only its presence (mcp_signing_secret_set) comes back. */
+  sso_token_exchange_enabled: boolean;
+  mcp_signing_secret_set?: boolean;
+  mcp_signing_secret?: string | null;
+  mcp_token_ttl_seconds: number;
+  ms_token_exchange_enabled: boolean;
+  ms_client_id: string;
+  ms_tenant_id: string;
+  google_token_exchange_enabled: boolean;
+  google_client_id: string;
   anthropic_api_key_masked?: string | null;
   slack_webhook_url: string;
   msteams_webhook_url: string;
@@ -461,7 +472,9 @@ export async function resetUserPassword(userId: string, password?: string) {
   });
 }
 
-// ─── External-client API keys (one per user) ───────────────────────────
+// ─── External-client API keys ──────────────────────────────────────────
+// A user can hold several — one per place they connect from — so rotating
+// the key for one client doesn't disconnect the others.
 
 export interface ApiKeyMeta {
   id: string;
@@ -476,24 +489,30 @@ export async function listApiKeys() {
   return request<{ keys: ApiKeyMeta[] }>("/auth/keys");
 }
 
-/**
- * Mint the caller's external-client API key. Returns 409 if a key
- * already exists — UI should prompt the user to rotate instead.
- */
+export interface ApiKeyMinted {
+  id: string;
+  api_key: string;
+  key_prefix: string;
+  label: string | null;
+}
+
+/** Mint another external-client API key. 409s only at the per-user ceiling. */
 export async function createApiKey(opts?: { label?: string; nest_id?: string }) {
-  return request<{ api_key: string; key_prefix: string }>("/auth/keys", {
+  return request<ApiKeyMinted>("/auth/keys", {
     method: "POST",
     body: JSON.stringify(opts || {}),
   });
 }
 
-/** Rotate the caller's existing key — atomic DELETE + INSERT.
- *  nest_id: null explicitly clears a per-nest scope; omitting keeps it. */
+/** Rotate ONE key — atomic DELETE + INSERT, other keys untouched.
+ *  key_id picks the target; omitting it works only when the account holds
+ *  exactly one key. nest_id: null clears a per-nest scope, omitting keeps it. */
 export async function rotateApiKey(opts?: {
   label?: string;
   nest_id?: string | null;
+  key_id?: string;
 }) {
-  return request<{ api_key: string; key_prefix: string }>("/auth/keys/rotate", {
+  return request<ApiKeyMinted>("/auth/keys/rotate", {
     method: "POST",
     body: JSON.stringify(opts || {}),
   });
@@ -786,8 +805,57 @@ export async function uploadAsset(nestId: string, file: File) {
   return data as { file: string; url: string; markdown: string };
 }
 
+/** Nest-wide shape that rides along with a folder-scoped listing. */
+export interface NestCensus {
+  total: number;
+  folders: Array<{ path: string; count: number; total: number }>;
+  tags: Record<string, number>;
+  types: Record<string, number>;
+  statuses: Record<string, number>;
+  authors: string[];
+  editedLast7d: number;
+  recent: Array<{ id: string; title: string; type: string; updated_at?: string }>;
+}
+
+/**
+ * The whole nest, WITH document bodies.
+ *
+ * `content=1` is not optional here: wiki-link analysis is the reason this call
+ * exists at its widest. Backlinks, unlinked mentions, stale alias links,
+ * related-doc scoring and the orphan/broken-link panel all read `[[targets]]`
+ * out of every document's body, and a nest-wide listing is the only place they
+ * get it. Without the flag they degrade to empty silently — no error, no failed
+ * request, just a permanently blank panel.
+ *
+ * Every caller shares one react-query key, so this is a single cached payload
+ * rather than a fetch per consumer. NOT used by the nest detail page's document
+ * tree — that goes through listFolderNodes, which stays body-free on purpose.
+ */
 export async function listNodes(nestId: string) {
-  return request<{ count: number; nodes: any[] }>(`/nests/${nestId}/nodes`);
+  return request<{ count: number; nodes: any[] }>(
+    `/nests/${nestId}/nodes?content=1`,
+  );
+}
+
+/**
+ * One folder LEVEL — the documents sitting directly in `folder` ("" is the
+ * nest root), never its subtree. The census describes the whole nest so the
+ * caller can render the full folder tree without loading the documents in it.
+ *
+ * Deliberately WITHOUT `content=1`, unlike listNodes: this is the nest detail
+ * page's tree fetch, it renders name/tags/status and no body, and it is the one
+ * request path the node index exists to keep off the filesystem. Anything here
+ * that needs a body should fetch that document.
+ */
+export async function listFolderNodes(nestId: string, folder: string) {
+  return request<{ count: number; nodes: any[] }>(
+    `/nests/${nestId}/nodes?folder=${encodeURIComponent(folder)}`,
+  );
+}
+
+/** The nest-wide shape — one per nest, not per folder level. */
+export async function getNestCensus(nestId: string) {
+  return request<{ census: NestCensus }>(`/nests/${nestId}/census`);
 }
 
 /** Per-node comment (annotation thread) counts for sorting the document list. */
@@ -1092,6 +1160,30 @@ export async function declineDeletionRequest(
   return request<{ request: DeletionRequest }>(
     `/nests/${nestId}/deletion-requests/${id}/decline`,
     { method: "POST", body: JSON.stringify({ note }) },
+  );
+}
+
+/** Withdraw your own pending deletion request. */
+export async function withdrawDeletionRequest(nestId: string, id: string) {
+  return request<{ withdrawn: boolean; request: DeletionRequest }>(
+    `/nests/${nestId}/deletion-requests/${id}/withdraw`,
+    { method: "POST" },
+  );
+}
+
+/** Create a folder with nothing in it — no placeholder document. */
+export async function createFolder(nestId: string, folder: string) {
+  return request<{ folder: string }>(`/nests/${nestId}/folders`, {
+    method: "POST",
+    body: JSON.stringify({ folder }),
+  });
+}
+
+/** Withdraw your own pending review — the document returns to draft. */
+export async function cancelReview(nestId: string, nodeId: string) {
+  return request<{ review: unknown }>(
+    `/nests/${nestId}/nodes/${nodeId}/cancel-review`,
+    { method: "POST" },
   );
 }
 
@@ -1652,6 +1744,48 @@ export async function removeCollaborator(nestId: string, collabId: string) {
   );
 }
 
+// ─── Share grants ───────────────────────────────────────────────────────
+// Access to ONE document or ONE folder for someone who is not a nest-wide
+// collaborator. Distinct from stewardship (review governance) — see
+// src/governance/grants-service.ts. Managing them is owner/admin only.
+
+export interface Grant {
+  id: string;
+  nest_id: string;
+  target_type: "document" | "folder";
+  target: string;
+  user_id: string;
+  role: "read" | "write";
+  granted_by: string;
+  email: string | null;
+  created_at: string;
+}
+
+export async function listGrants(nestId: string) {
+  return request<{ count: number; grants: Grant[] }>(`/nests/${nestId}/grants`);
+}
+
+export async function createGrant(
+  nestId: string,
+  data: {
+    target_type: "document" | "folder";
+    target: string;
+    email: string;
+    role: "read" | "write";
+  },
+) {
+  return request<{ grant: Grant }>(`/nests/${nestId}/grants`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteGrant(nestId: string, grantId: string) {
+  return request<{ deleted: boolean }>(`/nests/${nestId}/grants/${grantId}`, {
+    method: "DELETE",
+  });
+}
+
 // ─── Teams ──────────────────────────────────────────────────────────────
 // A team is a reusable, owner-managed group. Each member carries a role
 // (mirrors the server enum in src/shared/types.ts) applied on every nest the
@@ -1912,6 +2046,8 @@ export interface WatcherNotification {
   message: string;
   created_at: string;
   read_at: string | null;
+  /** Document the row is about, when there is one — null for nest-level rows. */
+  node_id?: string | null;
 }
 
 export interface WorkPagination {
@@ -2001,9 +2137,17 @@ export interface RunSummary {
   finished_at: string | null;
   depth?: number;
   parent_run_id?: string | null;
+  /** Set when a runner claims the run (GET /runs/:id/bundle). Until then the
+      run is only *queued* — the wire status says "running" from creation. */
+  claimed_by?: string | null;
+  claimed_at?: string | null;
   /** Write-tier only; null for read-tier callers. */
   trace?: { error?: string; [k: string]: unknown } | null;
 }
+
+/** A run is only really running once a runner has claimed it. */
+export const isQueued = (r: Pick<RunSummary, "status" | "claimed_by">) =>
+  r.status === "running" && !r.claimed_by;
 
 export interface RunStep {
   seq: number;
@@ -2304,6 +2448,17 @@ export async function getRun(runId: string) {
     `/runs/${runId}`,
   );
   return { ...r.run, steps: r.steps };
+}
+
+/** Cancel a queued or running run (PATCH is rejected once terminal). */
+export async function cancelRun(runId: string, reason?: string) {
+  return request<{ ok: true; status: string }>(`/runs/${runId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      status: "cancelled",
+      trace: { error: reason ?? "Cancelled from the Runs page" },
+    }),
+  });
 }
 
 /** Trigger an agent — returns the run bundle (the runner's entry point). */

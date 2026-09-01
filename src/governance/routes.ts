@@ -27,7 +27,11 @@ import {
   isIdUnderFolder,
 } from "../nodes/service.js";
 import { deleteNest } from "../nests/service.js";
-import { canReadNode, resolveCallerEmail } from "./access-guard.js";
+import {
+  canReadNode,
+  resolveCallerEmail,
+  canRequestDeletion,
+} from "./access-guard.js";
 import { handleAnnotationReply } from "../annotations/routes.js";
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -226,9 +230,31 @@ function denyUnlessNestManager(c: any, what: string) {
     403,
   );
 }
-// Anyone who can read a node may flag it for deletion (POST on the node route
-// below); resolving is write-tier — the middleware already requires 'write' for
-// these paths, the same gate DELETE /nodes/:id passes, so no extra check here.
+/** Editor gate for the two request-deletion routes (see canRequestDeletion). */
+async function mayRequestDeletion(c: any, nestId: string, nodeId: string) {
+  return canRequestDeletion({
+    nestId,
+    userId: c.get("userId"),
+    userEmail: await getUserEmail(c),
+    nodeId,
+    // The middleware promotes open-mode callers; resolving fresh would miss it.
+    permission: c.get("nestPermission"),
+  });
+}
+
+/** 403 unless the caller may request this deletion. */
+function denyUnlessEditor(allowed: boolean, c: any, what: string) {
+  if (allowed) return null;
+  return c.json(
+    {
+      error: `Only an editor, a nest admin, or the nest owner can request the deletion of ${what}.`,
+    },
+    403,
+  );
+}
+
+// Resolving a request is write-tier — the middleware already requires 'write'
+// for those paths, the same gate DELETE /nodes/:id passes, so no extra check.
 
 // POST /nests/:nestId/delete-folder — delete a folder and every document
 // under it. Owner/admin only: a folder delete is many document deletes at
@@ -250,11 +276,19 @@ governanceRoutes.post("/delete-folder", async (c) => {
 });
 
 // POST /nests/:nestId/request-deletion — flag a whole FOLDER or the NEST.
-// Read-tier for the same reason the per-node route is (see there); the path
-// suffix matches the middleware's request-deletion exception, so no new gate.
+// The middleware admits read-tier here (the path suffix matches its
+// request-deletion exception), so the editor gate below is what actually
+// decides: a viewer who can see the nest still cannot propose destroying part
+// of it. A folder or nest flag needs a NEST-scope editor row specifically.
 // Per-document flags keep their own route under /nodes/:nodeId.
 governanceRoutes.post("/request-deletion", async (c) => {
   const nestId = c.req.param("nestId")!;
+  const denied = denyUnlessEditor(
+    await mayRequestDeletion(c, nestId, ""),
+    c,
+    "a folder or a nest",
+  );
+  if (denied) return denied;
   const body = await c.req
     .json<{ targetType?: string; target?: string; reason?: string }>()
     .catch(() => ({}) as any);
@@ -376,6 +410,18 @@ governanceRoutes.post("/deletion-requests/:id/decline", async (c) => {
   });
   if (!request) return c.json({ error: "Deletion request not found" }, 404);
   return c.json({ request });
+});
+
+// POST /nests/:nestId/deletion-requests/:id/withdraw — requester cancels own request
+governanceRoutes.post("/deletion-requests/:id/withdraw", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const request = await reviews.withdrawDeletionRequest({
+    nestId,
+    id: c.req.param("id")!,
+    withdrawnBy: await getUserEmail(c),
+  });
+  if (!request) return c.json({ error: "Deletion request not found or not yours" }, 404);
+  return c.json({ withdrawn: true, request });
 });
 
 // GET /nests/:nestId/feed?filter=all|changes|comments&limit=&offset=
@@ -501,22 +547,35 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
   // previews or restores is fetched by GET .../versions/:version.
   const { versions: versionManager } = await engineCache.get(nestId);
 
-  // Who approved/rejected each version. node_versions carries the status but
-  // not the resolver's email, so the latest resolution per version comes from
-  // review_requests — that is what the row's "approved by X" hint renders.
+  // Who approved/rejected each version, and why. node_versions carries the
+  // status but not the resolver's email or note, so the latest resolution per
+  // version comes from review_requests — that is what the row's "approved by X"
+  // hint and the reviewer's reason render from.
   const resolutions = (await getDb().all(
-    `SELECT version, status, resolved_by
+    `SELECT version, status, resolved_by, resolution_note
        FROM review_requests
       WHERE nest_id = ? AND node_id = ?
         AND status IN ('approved', 'rejected')
         AND resolved_by IS NOT NULL
       ORDER BY resolved_at DESC`,
     [nestId, nodeId],
-  )) as Array<{ version: number; status: string; resolved_by: string }>;
-  const byVersion = new Map<number, { status: string; resolvedBy: string }>();
+  )) as Array<{
+    version: number;
+    status: string;
+    resolved_by: string;
+    resolution_note: string | null;
+  }>;
+  const byVersion = new Map<
+    number,
+    { status: string; resolvedBy: string; resolutionNote?: string }
+  >();
   for (const r of resolutions) {
     if (!byVersion.has(r.version)) {
-      byVersion.set(r.version, { status: r.status, resolvedBy: r.resolved_by });
+      byVersion.set(r.version, {
+        status: r.status,
+        resolvedBy: r.resolved_by,
+        resolutionNote: r.resolution_note?.trim() || undefined,
+      });
     }
   }
 
@@ -524,7 +583,11 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions", async (c) => {
     allVersions.map(async (v) => {
       const r = byVersion.get(v.version);
       const resolution = r
-        ? { resolvedBy: r.resolvedBy, resolutionStatus: r.status }
+        ? {
+            resolvedBy: r.resolvedBy,
+            resolutionStatus: r.status,
+            resolutionNote: r.resolutionNote,
+          }
         : {};
       try {
         const diff = await versionManager.getDiff(nodeId, v.version);
@@ -730,8 +793,8 @@ governanceNodeRoutes.post("/:nodeId{.+}/submit-review", async (c) => {
 });
 
 // POST /nests/:nestId/nodes/:nodeId/request-deletion
-// Read-tier: anyone who can see the node may flag it (that's the point — the
-// people who spot stale content are usually below delete permission).
+// Editor-tier: below that, a reader who cannot change a document should not be
+// proposing it be destroyed either (see canRequestDeletion).
 governanceNodeRoutes.post("/:nodeId{.+}/request-deletion", async (c) => {
   const nestId = c.req.param("nestId")!;
   const nodeId = c.req.param("nodeId")!;
@@ -746,6 +809,14 @@ governanceNodeRoutes.post("/:nodeId{.+}/request-deletion", async (c) => {
     // Same message for "gone" and "no access" — no existence oracle.
     return c.json({ error: `Node not found: ${nodeId}` }, 404);
   }
+  // Access checked first: a stranger gets the same 404 as for a missing node,
+  // and only someone who can already see it learns they lack the rights.
+  const denied = denyUnlessEditor(
+    await mayRequestDeletion(c, nestId, nodeId),
+    c,
+    "a document",
+  );
+  if (denied) return denied;
   // Existence check so a typo'd id can't park a row nobody can ever resolve.
   const { storage } = await engineCache.get(nestId);
   try {
@@ -951,13 +1022,16 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
   const nodeId = c.req.param("nodeId")!;
 
   const userEmail = await getUserEmail(c);
-  const request = await reviews.cancelReview({
-    nestId,
-    nodeId,
-    cancelledBy: userEmail,
-  });
-
-  return c.json({ review: request });
+  try {
+    const request = await reviews.cancelReview({
+      nestId,
+      nodeId,
+      cancelledBy: userEmail,
+    });
+    return c.json({ review: request });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 403);
+  }
 });
 
 // ─── Helpers ────────────────────────────────────────────────────────────

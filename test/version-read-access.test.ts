@@ -131,3 +131,63 @@ describe("public reader — versions of a never-approved node", () => {
   });
 });
 
+
+/**
+ * The list endpoint deliberately ships metadata only (bodies live on disk), so
+ * anything diffing two versions must fetch each body from
+ * `GET .../versions/:version`. Diffing straight off the list's `content` is
+ * what made the editor's Compare paint every line as added.
+ */
+describe("version list carries no bodies", () => {
+  let env: ReturnType<typeof setupTestEnv>;
+  let app: any;
+  let owner: { apiKey: string };
+  let nestId: string;
+
+  beforeAll(async () => {
+    env = setupTestEnv();
+    app = await createTestApp("key");
+    owner = await registerUser(app, "owner@bodies.test", "Owner");
+    const nest = await jsonRequest(app, "POST", "/nests", { name: "Bodies" }, owner.apiKey);
+    nestId = nest.data.nest.id;
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Two Versions", content: "# v1\n\nfirst body" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/nodes/two-versions`,
+      { content: "# v1\n\nsecond body" },
+      owner.apiKey,
+    );
+  });
+
+  afterAll(() => env.cleanup());
+
+  it("returns empty content in the list and the real body per version", async () => {
+    const list = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/two-versions/versions`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(list.status).toBe(200);
+    expect(list.data.versions.length).toBeGreaterThan(1);
+    for (const v of list.data.versions) expect(v.content ?? "").toBe("");
+
+    const first = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/nodes/two-versions/versions/1`,
+      undefined,
+      owner.apiKey,
+    );
+    expect(first.status).toBe(200);
+    expect(first.data.content).toContain("first body");
+  });
+});

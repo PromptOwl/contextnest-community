@@ -1,7 +1,10 @@
 import { getDb } from "../db/client.js";
-import { isLicenseAdminUserId } from "../auth/license.js";
+import { isLicenseAdminUserId, isLicenseAdminEmail } from "../auth/license.js";
 import { isSuperAdmin } from "../governance/access-service.js";
-import { resolveTeamRolesForUser } from "../governance/teams-service.js";
+import {
+  resolveTeamRolesFromShared,
+  parseSharedTeams,
+} from "../governance/teams-service.js";
 import { teamRoleToPermission } from "../governance/roles.js";
 import { ANON_USER_ID } from "./constants.js";
 
@@ -47,83 +50,174 @@ const PERMISSION_LEVELS: Record<NestPermission, number> = {
  * 5. Nest visibility = 'public' -> 'read'
  * 6. Otherwise -> 'none'
  */
+/**
+ * Every fact a permission decision needs about (nest, caller), plus the two
+ * answers derived from them.
+ *
+ * `resolveNestPermission` and `isPublicReader` used to re-fetch the same rows
+ * one query at a time — and both are called on the hot path (every node read,
+ * every MCP tool call, every dashboard card). Between them they cost 6+T
+ * queries twice over, where three of those were the SAME `SELECT email FROM
+ * users` (the license-admin check does its own). One row now answers both.
+ *
+ * Teams stay out of the join: membership lives as JSON in `teams.members`, not
+ * a table this can join to. `shared_teams` rides along on the nest row, so when
+ * teams ARE shared onto the nest it costs one further query for all of them —
+ * and only when the answer isn't already settled at admin/owner.
+ */
+export interface NestAccess {
+  exists: boolean;
+  ownerId: string | null;
+  visibility: string | null;
+  callerEmail: string | null;
+  /** Raw `nest_collaborators.permission`, before any merge. */
+  collaboratorPermission: NestPermission | null;
+  /** An active steward row matches the caller's email. */
+  isSteward: boolean;
+  /** The caller holds at least one document/folder share grant here. */
+  hasGrant: boolean;
+  /** Merged, highest-wins nest permission — what routes gate on. */
+  permission: NestPermission;
+  /** Reaches the nest ONLY because it is public (approved content only). */
+  isPublicReader: boolean;
+}
+
+const higher = (
+  a: NestPermission,
+  b: NestPermission | null | undefined,
+): NestPermission => (b && PERMISSION_LEVELS[b] > PERMISSION_LEVELS[a] ? b : a);
+
+/** One round trip for the whole picture. See NestAccess. */
+export async function resolveNestAccess(
+  nestId: string,
+  userId: string,
+): Promise<NestAccess> {
+  const row = (await getDb().get(
+    `SELECT n.user_id      AS owner_id,
+            n.visibility   AS visibility,
+            n.shared_teams AS shared_teams,
+            u.email        AS caller_email,
+            nc.permission  AS collab_permission,
+            (SELECT 1 FROM stewards s
+               WHERE s.nest_id = n.id AND s.is_active = 1
+                 AND LOWER(s.user_email) = LOWER(u.email)
+               LIMIT 1) AS steward_hit,
+            (SELECT 1 FROM grants g
+               WHERE g.nest_id = n.id AND g.user_id = ?
+               LIMIT 1) AS grant_hit
+       FROM nests n
+       LEFT JOIN users u ON u.id = ?
+       LEFT JOIN nest_collaborators nc
+         ON nc.nest_id = n.id AND nc.user_id = ?
+      WHERE n.id = ?`,
+    [userId, userId, userId, nestId],
+  )) as
+    | {
+        owner_id: string;
+        visibility: string | null;
+        shared_teams: string | null;
+        caller_email: string | null;
+        collab_permission: NestPermission | null;
+        steward_hit: number | boolean | null;
+        grant_hit: number | boolean | null;
+      }
+    | undefined;
+
+  const absent: NestAccess = {
+    exists: false,
+    ownerId: null,
+    visibility: null,
+    callerEmail: null,
+    collaboratorPermission: null,
+    isSteward: false,
+    hasGrant: false,
+    permission: "none",
+    isPublicReader: false,
+  };
+  if (!row) return absent;
+
+  const base = {
+    exists: true,
+    ownerId: row.owner_id,
+    visibility: row.visibility,
+    callerEmail: row.caller_email ?? null,
+    collaboratorPermission: row.collab_permission ?? null,
+    // Postgres returns integer 1, SQLite returns 1 — both truthy, neither a
+    // boolean, so normalize rather than leaking the driver's shape.
+    isSteward: !!row.steward_hit,
+    hasGrant: !!row.grant_hit,
+  };
+
+  // 1. The owner.
+  if (row.owner_id === userId) {
+    return { ...base, permission: "owner", isPublicReader: false };
+  }
+
+  // The caller's email answers BOTH admin checks with no further queries —
+  // isLicenseAdminEmail and isSuperAdmin are pure. The old code paid a users
+  // lookup for each.
+  const email = row.caller_email ?? null;
+  const licenseAdmin = isLicenseAdminEmail(email);
+
+  // 2. The ungoverned commons: the license admin keeps full control of an
+  //    anon-owned nest even once it is private — anon has no login path.
+  if (row.owner_id === ANON_USER_ID && licenseAdmin) {
+    return { ...base, permission: "owner", isPublicReader: false };
+  }
+
+  // 3. Server admins administer every nest, but stay below the owner tier so
+  //    delete/transfer remain the real owner's.
+  if (licenseAdmin || (email && isSuperAdmin(email))) {
+    return { ...base, permission: "admin", isPublicReader: false };
+  }
+
+  // 4. Below owner/admin several sources can grant access at once (direct
+  //    collaborator, team membership, steward, public visibility). They
+  //    combine highest-wins, not first-match: a 'read' collaborator who is
+  //    also an 'admin'-role member of a shared team resolves to 'admin'.
+  let best: NestPermission = higher("none", row.collab_permission);
+
+  // 'admin' is the ceiling below owner, so nothing left can raise it — skip
+  // the team query entirely.
+  if (best !== "admin") {
+    const teamRoles = await resolveTeamRolesFromShared(
+      parseSharedTeams(row.shared_teams),
+      userId,
+    );
+    for (const role of teamRoles) {
+      best = higher(best, teamRoleToPermission(role) as NestPermission);
+    }
+    // Reaching the nest through a team is a membership path, not public
+    // visibility — such a caller sees drafts like any collaborator.
+    if (teamRoles.length > 0) {
+      return { ...base, permission: best, isPublicReader: false };
+    }
+  }
+  if (best === "admin") {
+    return { ...base, permission: best, isPublicReader: false };
+  }
+
+  // Stewards get nest-level read so they can reach what they govern without a
+  // collaborator row. Edit/approve is still enforced per node.
+  if (base.isSteward) best = higher(best, "read");
+  if (row.visibility === "public") best = higher(best, "read");
+
+  // Public reader = the nest is public and NOTHING else let them in. A share
+  // grant is deliberately not in this list: it scopes which nodes they reach,
+  // it doesn't change that their nest-level standing is public-only.
+  const isPublicReader =
+    row.visibility === "public" &&
+    !row.collab_permission &&
+    !base.isSteward;
+
+  return { ...base, permission: best, isPublicReader };
+}
+
 export async function resolveNestPermission(
   nestId: string,
   userId: string,
 ): Promise<NestPermission> {
-  const db = getDb();
-
-  const nest = await db
-    .get("SELECT user_id, visibility FROM nests WHERE id = ?", [nestId]) as { user_id: string; visibility: string } | undefined;
-
-  if (!nest) return "none";
-  if (nest.user_id === userId) return "owner";
-
-  if (nest.user_id === ANON_USER_ID && (await isLicenseAdminUserId(userId))) {
-    return "owner";
-  }
-
-  // Server admins (license admin + access.yaml super_admins) administer every
-  // nest (visibility + collaborators). License admin is the default install's
-  // admin identity; super_admins is the access.yaml extension for multi-admin
-  // setups. Both get the same nest-level 'admin' — owner-only delete/transfer
-  // still stays with the real owner.
-  if (await isLicenseAdminUserId(userId)) return "admin";
-  const caller = await db
-    .get("SELECT email FROM users WHERE id = ?", [userId]) as { email?: string } | undefined;
-  if (caller?.email && isSuperAdmin(caller.email)) {
-    return "admin";
-  }
-
-  // Below owner/admin, several sources can grant access at once (direct
-  // collaborator, team membership, steward, public visibility). They combine
-  // by highest-wins rather than first-match, so e.g. a 'read' collaborator who
-  // is also an 'admin'-role member of a shared team resolves to 'admin'.
-  const higher = (
-    a: NestPermission,
-    b: NestPermission | null | undefined,
-  ): NestPermission => (b && PERMISSION_LEVELS[b] > PERMISSION_LEVELS[a] ? b : a);
-
-  let best: NestPermission = "none";
-
-  const directGrant = await db
-    .get(
-      "SELECT permission FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
-      [nestId, userId],
-    ) as { permission: NestPermission } | undefined;
-  if (directGrant) best = higher(best, directGrant.permission);
-
-  // 'admin' is the ceiling below the owner tier, so nothing left to check can
-  // raise it. Bail out here — this function is on hot paths (every node
-  // read/write check, every MCP tool call), and the team lookup below costs a
-  // query per team shared onto the nest.
-  if (best === "admin") return best;
-
-  // Team membership: the highest permission across the roles the user holds in
-  // any team shared onto this nest (editor maps to 'write', admin to 'admin').
-  for (const role of await resolveTeamRolesForUser(nestId, userId)) {
-    best = higher(best, teamRoleToPermission(role) as NestPermission);
-  }
-  if (best === "admin") return best;
-
-  // Stewards get nest-level read so they can reach the documents/context they
-  // govern, even without a collaborator grant. Matched by email because a
-  // steward row may predate the user registering an account. Edit/approve is
-  // still enforced per node by the governance handlers (resolveUserRoles).
-  const stewardGrant = await db
-    .get(
-      `SELECT 1 FROM stewards s
-         JOIN users u ON u.id = ?
-        WHERE s.nest_id = ? AND s.is_active = 1
-          AND LOWER(s.user_email) = LOWER(u.email)
-        LIMIT 1`,
-      [userId, nestId],
-    );
-  if (stewardGrant) best = higher(best, "read");
-
-  if (nest.visibility === "public") best = higher(best, "read");
-
-  return best;
+  return (await resolveNestAccess(nestId, userId)).permission;
 }
 
 export function permissionLevel(p: NestPermission): number {
@@ -137,39 +231,5 @@ export function permissionLevel(p: NestPermission): number {
  * and pending versions stay private to collaborators/stewards.
  */
 export async function isPublicReader(nestId: string, userId: string): Promise<boolean> {
-  const db = getDb();
-  const nest = await db
-    .get("SELECT user_id, visibility FROM nests WHERE id = ?", [nestId]) as { user_id: string; visibility: string } | undefined;
-  if (!nest) return false;
-  if (nest.visibility !== "public") return false;
-  if (nest.user_id === userId) return false;
-  const directGrant = await db
-    .get(
-      "SELECT 1 FROM nest_collaborators WHERE nest_id = ? AND user_id = ?",
-      [nestId, userId],
-    );
-  if (directGrant) return false;
-  // Server admin (license admin or access.yaml super_admin) holds 'admin' via
-  // resolveNestPermission; they should see drafts/pending like any admin, not
-  // be downgraded to approved-only.
-  if (await isLicenseAdminUserId(userId)) return false;
-  const caller = await db
-    .get("SELECT email FROM users WHERE id = ?", [userId]) as { email?: string } | undefined;
-  if (caller?.email && isSuperAdmin(caller.email)) return false;
-  // A steward is not a mere public reader — they govern (and may see drafts
-  // of) the documents in their scope. Matched by email like resolveNestPermission.
-  const stewardGrant = await db
-    .get(
-      `SELECT 1 FROM stewards s
-         JOIN users u ON u.id = ?
-        WHERE s.nest_id = ? AND s.is_active = 1
-          AND LOWER(s.user_email) = LOWER(u.email)
-        LIMIT 1`,
-      [userId, nestId],
-    );
-  if (stewardGrant) return false;
-  // A member of a team shared onto this nest reaches it via that membership,
-  // not public visibility — they see drafts/pending like any collaborator.
-  if ((await resolveTeamRolesForUser(nestId, userId)).length > 0) return false;
-  return true;
+  return (await resolveNestAccess(nestId, userId)).isPublicReader;
 }

@@ -68,7 +68,9 @@ const HISTORICAL_MIGRATIONS = [
   "032_deletion_requests",
   "033_deletion_request_targets",
   "034_versions_author_status_index",
-  "035_publish",
+  "035_multiple_api_keys_per_user",
+  "036_node_index",
+  "037_publish",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -104,6 +106,7 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       prime_only_review INTEGER NOT NULL DEFAULT 0,
       prime_tags TEXT NOT NULL DEFAULT 'prime-document',
       shared_teams TEXT NOT NULL DEFAULT '[]',
+      index_synced_at TEXT,
       UNIQUE(user_id, slug)
     );
     CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
@@ -120,8 +123,9 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     );
     CREATE INDEX IF NOT EXISTS idx_keys_user ON api_keys(user_id);
     CREATE INDEX IF NOT EXISTS idx_keys_hash ON api_keys(key_hash);
-    -- One api_key row per user (migration 003).
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_unique ON api_keys(user_id);
+    -- Migration 003 capped this at one row per user; 035 lifted it so a user
+    -- can hold one key per place they connect from and rotate them singly.
+    DROP INDEX IF EXISTS idx_api_keys_user_unique;
 
     CREATE TABLE IF NOT EXISTS nest_collaborators (
       id TEXT PRIMARY KEY,
@@ -271,6 +275,30 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     CREATE INDEX IF NOT EXISTS idx_node_tag_by_tag
       ON node_tag_index(nest_id, tag_name);
 
+    -- node_index (migration 036). Derived mirror of the on-disk document set,
+    -- so listings answer from SQL instead of walking the vault.
+    CREATE TABLE IF NOT EXISTS node_index (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      folder TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      type TEXT NOT NULL DEFAULT 'document',
+      status TEXT NOT NULL DEFAULT 'draft',
+      updated_at TEXT,
+      frontmatter_json TEXT NOT NULL,
+      PRIMARY KEY (nest_id, node_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_node_index_folder
+      ON node_index(nest_id, folder);
+
+    -- node_suggestions (migration 036). Which documents have an external edit
+    -- staged — so the listing's pending badge is a SELECT, not a vault walk.
+    CREATE TABLE IF NOT EXISTS node_suggestions (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      PRIMARY KEY (nest_id, node_id)
+    );
+
     -- sessions (migration 003).
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
@@ -402,6 +430,15 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- created before prime shipped still gets the columns on upgrade.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_only_review INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS prime_tags TEXT NOT NULL DEFAULT 'prime-document';
+
+    -- node_index freshness stamp: same inline-plus-explicit-ALTER pattern. The
+    -- inline declaration only reaches a database created after it shipped, and
+    -- EVERY listing reads this column to decide whether to rebuild — so on an
+    -- existing deployment its absence is not a degraded index, it is a 500 on
+    -- the document list. NULL is the correct starting value: it means "rebuild
+    -- from disk before answering", which is exactly right for a nest whose
+    -- index has never been built.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS index_synced_at TEXT;
 
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,

@@ -45,8 +45,8 @@ function walkFiles(root: string): string[] {
 
 /**
  * Build the export .zip for a nest. Caller must have already gated the request
- * (owner/admin). `includeDrafts` adds unapproved draft documents; when false,
- * only approved/published documents are exported.
+ * (any nest reader — viewer and up). `includeDrafts` adds unapproved draft
+ * documents; when false, only approved/published documents are exported.
  */
 export async function exportNestBundle(
   nestId: string,
@@ -69,7 +69,7 @@ export async function exportNestBundle(
   for (const doc of docs) {
     const approved = approvedByNode.get(doc.id);
     // Drop undefined frontmatter values (e.g. `tags: undefined` on a tagless
-    // doc) — the YAML dumper throws on them, same guard as safePublishDocument.
+    // doc) — the YAML dumper throws on them, same guard serializeNodeSafe uses.
     const frontmatter = stripUndefinedDeep({ ...doc.frontmatter }) as typeof doc.frontmatter;
     let body = doc.body || "";
     if (approved != null) {

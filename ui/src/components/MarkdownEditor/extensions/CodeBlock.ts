@@ -1,3 +1,4 @@
+import { textblockTypeInputRule } from "@tiptap/core";
 import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
 import { createLowlight, common } from "lowlight";
 import {
@@ -56,6 +57,23 @@ const LANGUAGES: Array<{ id: string; label: string }> = [
  * so the two layers don't conflict.
  */
 export const CodeBlock = CodeBlockLowlight.extend({
+  addInputRules() {
+    // The inherited shortcut (backtickInputRegex) only fires once a
+    // trailing space follows the fence, e.g. "```js " — pressing Enter
+    // right after "```" doesn't trigger it (Enter is handled by the
+    // keymap's block-split, not routed through the input-rule text
+    // matcher), so the common "type ``` then start writing code" gesture
+    // silently left the backticks as literal text. This rule fires the
+    // instant the third backtick is typed on its own, consistent with the
+    // other block shortcuts ("- ", "1. ", "# ").
+    return [
+      ...(this.parent?.() ?? []),
+      textblockTypeInputRule({
+        find: /^```$/,
+        type: this.type,
+      }),
+    ];
+  },
   addNodeView() {
     return ({ node, editor, getPos }) => {
       const dom = document.createElement("div");

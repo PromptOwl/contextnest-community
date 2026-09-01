@@ -13,6 +13,9 @@ import {
   uploadedTableErrorMessage,
   MAX_CSV_FILE_BYTES,
   LARGE_TABLE_ROW_THRESHOLD,
+  typedColumnIssues,
+  tableTypeIssueMessage,
+  tableDiffSides,
 } from "../ui/src/lib/csv-table";
 
 describe("parseDelimited", () => {
@@ -506,5 +509,68 @@ describe("uploadedTableErrorMessage", () => {
     expect(uploadedTableErrorMessage("empty", { size: 0 })).toBe(
       "No table rows found in that file.",
     );
+  });
+});
+
+describe("typedColumnIssues", () => {
+  const rows = (csv: string) => parseDelimited(csv, ",");
+
+  it("flags a duplicate :key value and a non-numeric :number cell", () => {
+    const issues = typedColumnIssues(
+      rows(
+        "sku:key,price:number,region\nOWL-100,149,EU\nOWL-200,299,US\nOWL-100,notanumber,EU",
+      ),
+    );
+    expect(issues).toEqual([
+      { column: "sku", kind: "duplicate-key", value: "OWL-100", row: 3, count: 1 },
+      { column: "price", kind: "not-a-number", value: "notanumber", row: 3, count: 1 },
+    ]);
+  });
+
+  it("counts repeat offenders once per column", () => {
+    const [issue] = typedColumnIssues(
+      rows("price:number\nnope\n149\nalso-nope"),
+    );
+    expect(issue.count).toBe(2);
+    expect(tableTypeIssueMessage(issue)).toBe(
+      '"price" expects a number but row 1 has "nope" (+1 more).',
+    );
+  });
+
+  it("ignores blanks, untyped columns and clean typed data", () => {
+    expect(
+      typedColumnIssues(
+        rows("sku:key,launched:date,note\nOWL-100,2026-01-05,hi\n,,\nOWL-200,2026-02-01,ok"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("flags an unparseable :date", () => {
+    expect(typedColumnIssues(rows("launched:date\nsomeday"))).toEqual([
+      { column: "launched", kind: "not-a-date", value: "someday", row: 1, count: 1 },
+    ]);
+  });
+});
+
+describe("tableDiffSides", () => {
+  const PAST = "sku:key,price:number\nOWL-100,149\nOWL-200,299";
+  const CURRENT = "sku:key,price:number\nOWL-100,149\nOWL-200,349\nOWL-300,99";
+
+  it("marks rows the other version does not have", () => {
+    const { past, current } = tableDiffSides(PAST, CURRENT);
+    expect(past.columns).toEqual(["sku", "price"]);
+    expect(past.changed).toEqual([false, true]);
+    expect(current.changed).toEqual([false, true, true]);
+  });
+
+  it("pairs duplicate rows one-for-one", () => {
+    const { current } = tableDiffSides("a\nx", "a\nx\nx");
+    expect(current.changed).toEqual([false, true]);
+  });
+
+  it("ignores comment lines and identical bodies", () => {
+    const { past, current } = tableDiffSides("# note\na,b\n1,2", "a,b\n1,2");
+    expect(past.changed).toEqual([false]);
+    expect(current.changed).toEqual([false]);
   });
 });

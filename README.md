@@ -10,12 +10,12 @@
 
 ContextNest Community Edition is a self-hosted server that lets you:
 
-- Store, version, and govern markdown-based context documents ("nests")
+- Store, version, and govern markdown-based context documents ("nests"), filed in folders you can reorganize as the vault grows
 - Import an existing folder or vault of markdown files in one step
 - Export a nest as a portable bundle and re-import it on another self-hosted host
 - Apply stewardship workflows — draft, pending review, approved
 - Share nests with collaborators or publish them read-only to the public
-- Serve approved context to AI agents via MCP, HTTP, or CLI
+- Serve approved context to AI agents via MCP or HTTP — connect one by pasting a generated setup prompt or downloading a ready `.env`
 - Sync with the PromptOwl hosted platform for multi-user collaboration
 
 The server runs locally or on your own infrastructure. Your PromptOwl account handles authentication, entitlement, and governance metadata.
@@ -34,11 +34,6 @@ npx @promptowl/contextnest-community
 ```
 
 The server listens on `http://localhost:3838` by default. Without a valid license the server still runs and serves reads, but write actions return `503` until you activate. See [CONFIGURATION.md](./CONFIGURATION.md) for all environment variables (port, auth mode, storage, telemetry).
-
-> **Optional:** scaffold a local nest with the open-source CLI before connecting:
-> ```bash
-> npx @promptowl/contextnest-cli init
-> ```
 
 ## License setup
 
@@ -104,8 +99,12 @@ For redistribution, hosted-service, OEM, or regulated-industry licensing, contac
 | Admin password reset + user removal (in-platform) | ✅ | ✅ |
 | Wiki backlinks, outline, hover-preview, link health | ✅ | ✅ |
 | Rich editor — tables, callouts, toggles, code highlight, find/replace, image & video upload | ✅ | ✅ |
+| Folder organization — nested folders, move documents, lazy folder tree | ✅ | ✅ |
+| Scales to large vaults — nest listings served from a document index, not a disk crawl | ✅ | ✅ |
 | Steward version revert | ✅ | ✅ |
 | MCP server for AI agents | ✅ | ✅ |
+| One-shot agent setup — generated connect prompt + `.env` download | ✅ | ✅ |
+| Several API keys per account — one credential per client, rotate one at a time | ✅ | ✅ |
 | Centralized multi-tenant admin console | — | ✅ |
 | Single sign-on (OIDC — Entra ID, Google, Okta, Keycloak) | ✅ | ✅ |
 | SAML / SCIM provisioning | — | ✅ |

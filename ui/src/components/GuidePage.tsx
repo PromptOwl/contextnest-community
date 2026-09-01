@@ -105,7 +105,6 @@ const SURFACES: [string, string, string][] = [
   ["This UI", "Humans: edit, review, wire flows, watch runs.", "you're in it"],
   ["REST API", "Everything the UI does — same endpoints, Bearer cnst_… key.", "Connect → API"],
   ["MCP", "Claude Desktop / any MCP client: 23 context_* tools per nest (read, search, create, comment, share…).", "Connect → MCP"],
-  ["CLI (ctx)", "Terminal reads/writes against a nest.", "Connect → CLI"],
   ["Add with AI", "Point an agent at a repo or topic; it pushes generated context in.", "Connect (top)"],
   ["Inbound hooks", "Secret URLs that trigger agents from Slack (@mention / slash), Teams, or any POST.", "Canvas → agent → Triggers"],
   ["Connectors", "Events out to Slack / Teams / webhooks.", "Workflows → Activity"],

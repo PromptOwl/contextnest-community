@@ -8,12 +8,13 @@ import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
-import { canReadNode } from "../governance/access-guard.js";
+import { canReadNode, canRequestDeletion } from "../governance/access-guard.js";
 import {
   resolveNestPermission,
   permissionLevel,
 } from "../shared/access.js";
 import { isStewardshipEnabled } from "../nests/service.js";
+import { VaultBusyError, isVaultLockTimeout } from "../shared/errors.js";
 import { engineApi, opContext } from "../nodes/engine.js";
 import { addCollaborator } from "../nests/sharing-service.js";
 import { queryTableNode } from "../tables/query.js";
@@ -91,6 +92,7 @@ function toolError(
     | "DOCUMENT_ALREADY_EXISTS"
     | "UNAUTHORIZED_ACTION"
     | "VERSION_NOT_FOUND"
+    | "VAULT_BUSY"
     | "INTERNAL",
 ): ToolResult {
   return { text, isError: true, data: { code, message: text } };
@@ -719,6 +721,16 @@ export async function handleToolCall(
   try {
     return await runTool(toolName, args, ctx);
   } catch (err) {
+    // Vault write-lock timeout: map to a typed, retryable tool error HERE —
+    // one seam covering both MCP surfaces — before the SDK flattens the throw
+    // into prose and loses the code. Everything else keeps rethrowing.
+    if (isVaultLockTimeout(err) || err instanceof VaultBusyError) {
+      status = 503;
+      return toolError(
+        "The vault is busy with another write. Retry in a few seconds.",
+        "VAULT_BUSY",
+      );
+    }
     status = 500;
     throw err;
   } finally {
@@ -828,7 +840,12 @@ async function runTool(
         await opContext(nestId, userEmail),
       );
 
-      const visible = await listNodesForCallerByEmail(nestId, userEmail, {});
+      // `withContent` for the body previews below. An explicit whole-vault
+      // call, so paying for the crawl here is honest; the document tree and
+      // context_list do not, and read from the index instead.
+      const visible = await listNodesForCallerByEmail(nestId, userEmail, {
+        withContent: true,
+      });
       const types: Record<string, number> = {};
       const tags: Record<string, number> = {};
       for (const n of visible) {
@@ -1200,6 +1217,20 @@ async function runTool(
           (n) => String(n.frontmatter.title ?? "").toLowerCase() === wanted,
         );
         if (twin) {
+          // A twin with no version rows is invisible to the tools that would
+          // normally resolve it: under stewardship it has no approved version,
+          // so context_get reads "not found" and no draft list carries it. Say
+          // so rather than sending the caller after something they cannot see.
+          // The cause is NOT certain — an interrupted create leaves this state,
+          // and so does a staged import whose registration never finished — so
+          // the message offers writing into it before removing it.
+          const twinVersions = await versions.getVersions(nestId, twin.id);
+          if (twinVersions.length === 0) {
+            return toolError(
+              `A node titled "${twin.frontmatter.title}" already exists (${twin.id}) but has no version history, which is why it doesn't show up in a read or a draft list. It may be an interrupted create or a document whose import never finished. Write into it with context_update "${twin.id}" to keep whatever is there, or remove it with context_delete "${twin.id}" and create again — check its content first.`,
+              "DOCUMENT_ALREADY_EXISTS",
+            );
+          }
           return toolError(
             `A node titled "${twin.frontmatter.title}" already exists (${twin.id}). Titles must be unique — MCP tools resolve documents by title, so a second one would be unreachable. Use context_update to change it, context_move to refile it, or create this one under a different title.`,
             "DOCUMENT_ALREADY_EXISTS",
@@ -1395,6 +1426,11 @@ async function runTool(
 
       // Whole nest.
       if (args.nest === true) {
+        if (
+          !(await canRequestDeletion({ nestId, userId, userEmail, nodeId: "" }))
+        ) {
+          return "Only an editor, a nest admin, or the nest owner can request the deletion of a nest.";
+        }
         const request = await reviews.requestDeletion({
           nestId,
           nodeId: nestId,
@@ -1409,6 +1445,11 @@ async function runTool(
       // Folder — normalized the same way the REST route does, so two people
       // flagging "gtm/deals" and "/nodes/gtm/deals/" collide on one request.
       if (typeof args.folder === "string" && args.folder.trim()) {
+        if (
+          !(await canRequestDeletion({ nestId, userId, userEmail, nodeId: "" }))
+        ) {
+          return "Only an editor, a nest admin, or the nest owner can request the deletion of a folder.";
+        }
         const folder = args.folder
           .trim()
           .replace(/^\/+|\/+$/g, "")
@@ -1432,10 +1473,21 @@ async function runTool(
       // Document — resolved by title or id like every other node tool.
       const node = await resolveTargetNode(storage, args);
       if (typeof node === "string") return node;
-      // Read gate: you may flag anything you can see. That is the point —
-      // whoever notices dead content usually can't delete it.
+      // Read gate first, so a caller who can't see the node learns nothing
+      // beyond "not found"; then the editor gate (see canRequestDeletion —
+      // proposing a deletion is an editor's act, not a reader's).
       if (!(await canReadNode(nestId, node.id, userId, userEmail))) {
         return `Node not found: ${node.id}`;
+      }
+      if (
+        !(await canRequestDeletion({
+          nestId,
+          userId,
+          userEmail,
+          nodeId: node.id,
+        }))
+      ) {
+        return "Only an editor, a nest admin, or the nest owner can request the deletion of a document.";
       }
       const request = await reviews.requestDeletion({
         nestId,

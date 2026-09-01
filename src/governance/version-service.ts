@@ -315,45 +315,118 @@ export async function getNodeTags(
 // and bloating git diffs. Compute from DB instead so the file stays
 // stable across draft → pending → approved cycles.
 
-export async function getDisplayStatus(
-  nestId: string,
-  nodeId: string,
-): Promise<"draft" | "pending_review" | "approved" | "published" | "rejected"> {
-  const db = getDb();
+export type DisplayStatus =
+  | "draft"
+  | "pending_review"
+  | "approved"
+  | "published"
+  | "rejected";
 
+/**
+ * The decision itself, given the three facts it needs. Shared by the
+ * single-node and whole-nest resolvers so the two can never disagree.
+ */
+function decideDisplayStatus(
+  hasPendingReview: boolean,
+  current: { version: number; status: string } | undefined,
+  approvedVersion: number | undefined,
+): DisplayStatus {
   // 1. Any pending review wins — even if the current version row says
   // something else, an open review request is the live workflow state.
-  const pending = (await db.get(
-    "SELECT 1 FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' LIMIT 1",
-    [nestId, nodeId],
-  )) as { 1: number } | undefined;
-  if (pending) return "pending_review";
-
-  // 2. Otherwise look at the current (latest) version's recorded status.
-  const current = (await db.get(
-    `SELECT version, status FROM node_versions
-       WHERE nest_id = ? AND node_id = ?
-       ORDER BY version DESC LIMIT 1`,
-    [nestId, nodeId],
-  )) as { version: number; status: string } | undefined;
+  if (hasPendingReview) return "pending_review";
   if (!current) return "draft";
 
-  // 3. Terminal "published" / "approved" only when the latest version is
+  // 2. Terminal "published" / "approved" only when the latest version is
   // the one pinned in approved_versions. After an author edits past it,
   // the new (latest) version is a draft even though an older row is
   // still serving LLM traffic — display reflects the latest row.
   if (current.status === "published" || current.status === "approved") {
-    const approved = (await db.get(
-      "SELECT approved_version FROM approved_versions WHERE nest_id = ? AND node_id = ?",
-      [nestId, nodeId],
-    )) as { approved_version: number } | undefined;
-    if (approved?.approved_version === current.version) {
+    if (approvedVersion === current.version) {
       return current.status === "published" ? "published" : "approved";
     }
     return "draft";
   }
   if (current.status === "rejected") return "rejected";
   return "draft";
+}
+
+export async function getDisplayStatus(
+  nestId: string,
+  nodeId: string,
+): Promise<DisplayStatus> {
+  const db = getDb();
+
+  const pending = (await db.get(
+    "SELECT 1 FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending' LIMIT 1",
+    [nestId, nodeId],
+  )) as { 1: number } | undefined;
+
+  const current = (await db.get(
+    `SELECT version, status FROM node_versions
+       WHERE nest_id = ? AND node_id = ?
+       ORDER BY version DESC LIMIT 1`,
+    [nestId, nodeId],
+  )) as { version: number; status: string } | undefined;
+
+  const approved =
+    current && (current.status === "published" || current.status === "approved")
+      ? ((await db.get(
+          "SELECT approved_version FROM approved_versions WHERE nest_id = ? AND node_id = ?",
+          [nestId, nodeId],
+        )) as { approved_version: number } | undefined)
+      : undefined;
+
+  return decideDisplayStatus(!!pending, current, approved?.approved_version);
+}
+
+/**
+ * Display status for EVERY document in a nest, in three queries instead of
+ * two or three per node — a 400-document listing was paying ~1000 of them.
+ * Nodes with no version row are absent; callers default those to "draft".
+ */
+export async function getDisplayStatuses(
+  nestId: string,
+): Promise<Map<string, DisplayStatus>> {
+  const db = getDb();
+  const [pendingRows, currentRows, approvedRows] = await Promise.all([
+    db.all(
+      "SELECT DISTINCT node_id FROM review_requests WHERE nest_id = ? AND status = 'pending'",
+      [nestId],
+    ) as Promise<Array<{ node_id: string }>>,
+    // The latest version per node, via a grouped self-join — portable across
+    // the SQLite and Postgres adapters (no window functions, no row values).
+    db.all(
+      `SELECT nv.node_id, nv.version, nv.status
+         FROM node_versions nv
+         JOIN (SELECT node_id, MAX(version) AS max_version
+                 FROM node_versions WHERE nest_id = ? GROUP BY node_id) latest
+           ON latest.node_id = nv.node_id AND latest.max_version = nv.version
+        WHERE nv.nest_id = ?`,
+      [nestId, nestId],
+    ) as Promise<Array<{ node_id: string; version: number; status: string }>>,
+    db.all(
+      "SELECT node_id, approved_version FROM approved_versions WHERE nest_id = ?",
+      [nestId],
+    ) as Promise<Array<{ node_id: string; approved_version: number }>>,
+  ]);
+
+  const pending = new Set(pendingRows.map((r) => r.node_id));
+  const approved = new Map(
+    approvedRows.map((r) => [r.node_id, r.approved_version]),
+  );
+  const current = new Map(currentRows.map((r) => [r.node_id, r]));
+  const statuses = new Map<string, DisplayStatus>();
+  for (const nodeId of new Set([...pending, ...current.keys()])) {
+    statuses.set(
+      nodeId,
+      decideDisplayStatus(
+        pending.has(nodeId),
+        current.get(nodeId),
+        approved.get(nodeId),
+      ),
+    );
+  }
+  return statuses;
 }
 
 // ─── My Drafts ──────────────────────────────────────────────────────────

@@ -25,6 +25,8 @@ interface Props {
   nestName: string;
   /** Open the nest list filtered by a tag (tag chip in the detail panel). */
   onOpenTag?: (tag: string) => void;
+  /** Open a document — graph node double-click, detail panel, orphan list. */
+  onOpenDocument?: (nodeId: string) => void;
   onBack: () => void;
 }
 
@@ -102,7 +104,13 @@ interface View {
  * native deps). The coverage-gaps panel is the headline: unstewarded
  * categories, bottleneck stewards, orphan nodes.
  */
-export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props) {
+export function OntologyGraphView({
+  nestId,
+  nestName,
+  onOpenTag,
+  onOpenDocument,
+  onBack,
+}: Props) {
   const [graph, setGraph] = useState<NestGraph | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -127,6 +135,15 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
     | { mode: "node"; node: GNode; moved: boolean }
     | null
   >(null);
+
+  // Has the user moved the viewport since this graph loaded? Toggling a layer
+  // rebuilds the node set, which re-runs the layout below — and re-fitting
+  // there threw away whatever region they had zoomed into. Reset when a new
+  // graph arrives (nothing to preserve) and when the canvas resizes (the
+  // layout recentres on the new size, so an old viewport can leave it
+  // off-screen entirely).
+  const userMoved = useRef(false);
+  const fittedSize = useRef({ w: 0, h: 0 });
 
   // client px → world coords (undo pan + zoom), for node dragging.
   const toWorld = (clientX: number, clientY: number) => {
@@ -160,6 +177,7 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
   // Zoom by a factor about a screen anchor (default: viewport centre), keeping
   // the world point under the anchor fixed.
   const zoomBy = (factor: number, ax = size.w / 2, ay = size.h / 2) => {
+    userMoved.current = true;
     setView((v) => {
       const k = clamp(v.k * factor, MIN_ZOOM, MAX_ZOOM);
       const wx = (ax - v.x) / v.k;
@@ -206,6 +224,7 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
       const dy = e.clientY - d.py;
       d.px = e.clientX;
       d.py = e.clientY;
+      userMoved.current = true;
       setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
     } else {
       d.moved = true;
@@ -231,7 +250,12 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
     let cancelled = false;
     setLoading(true);
     getNestGraph(nestId)
-      .then((g) => !cancelled && setGraph(g))
+      .then((g) => {
+        if (cancelled) return;
+        // A different graph: no viewport worth keeping, so let it fit.
+        userMoved.current = false;
+        setGraph(g);
+      })
       .catch((e) => !cancelled && setError(e?.message || "Failed to load graph"))
       .finally(() => !cancelled && setLoading(false));
     return () => {
@@ -386,8 +410,16 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
       .stop();
     for (let i = 0; i < 300; i++) simulation.tick();
     setSim({ nodes, links });
-    // Fit the fresh layout into the viewport so a large graph never spills off.
-    fitView(nodes, size.w, size.h);
+    // Fit the fresh layout so a large graph never spills off — but not over a
+    // viewport the user chose. A layer toggle lands here with the same canvas,
+    // so it keeps their pan and zoom; a resize refits, since the layout is
+    // recentred on the new size and the old viewport may not contain it.
+    const resized =
+      fittedSize.current.w !== size.w || fittedSize.current.h !== size.h;
+    if (!userMoved.current || resized) {
+      fitView(nodes, size.w, size.h);
+      fittedSize.current = { w: size.w, h: size.h };
+    }
   }, [data, size.w, size.h]);
 
   const radius = (n: GNode) => 3 + n.val;
@@ -451,7 +483,11 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setView({ x: 0, y: 0, k: 1 })}
+            onClick={() => {
+              // Back to untouched: the next layout fits again, as on load.
+              userMoved.current = false;
+              setView({ x: 0, y: 0, k: 1 });
+            }}
             title="Reset pan & zoom"
           >
             Reset view
@@ -525,9 +561,18 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
                           key={n.id}
                           transform={`translate(${n.x ?? 0},${n.y ?? 0})`}
                           onPointerDown={(e) => onNodeDown(e, n)}
+                          // Single click keeps its job (select + highlight the
+                          // neighborhood); double-click opens the document, the
+                          // navigation Board cards already give (CU-wdqcq0042w).
+                          onDoubleClick={() => {
+                            if (n.kind === "doc") onOpenDocument?.(n.id);
+                          }}
                           style={{ cursor: "grab" }}
                           opacity={inHood ? 1 : 0.25}
                         >
+                          {n.kind === "doc" && onOpenDocument && (
+                            <title>{`Double-click to open "${n.name}"`}</title>
+                          )}
                           <circle
                             r={radius(n)}
                             fill={n.color}
@@ -572,6 +617,16 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
             </div>
             {!signals ? (
               <p className="text-xs text-muted-foreground">—</p>
+            ) : (graph?.nodes.length ?? 0) === 0 ? (
+              // With nothing to govern or connect, "every category has a
+              // steward" and "no orphans" are vacuously true and read as a
+              // clean bill of health for an empty nest (CU-wdqcq0042r).
+              <p className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">
+                  No documents yet
+                </span>{" "}
+                — add content to see governance coverage and connection gaps.
+              </p>
             ) : (
               <div className="space-y-3 text-sm">
                 <GapRow
@@ -595,6 +650,11 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
                   label="Orphan nodes (no links)"
                   items={signals.orphans.map((n) => n.title)}
                   empty="No orphans — everything connects."
+                  onSelect={
+                    onOpenDocument &&
+                    ((i) => onOpenDocument(signals.orphans[i].id))
+                  }
+                  selectTitle={(i) => `Open "${signals.orphans[i].title}"`}
                 />
               </div>
             )}
@@ -610,6 +670,7 @@ export function OntologyGraphView({ nestId, nestName, onOpenTag, onBack }: Props
               neighborhood={neighborhood}
               nodesById={nodesById}
               onOpenTag={onOpenTag}
+              onOpenDocument={onOpenDocument}
             />
           )}
 
@@ -658,6 +719,7 @@ function NodeDetail({
   neighborhood,
   nodesById,
   onOpenTag,
+  onOpenDocument,
 }: {
   node: GNode;
   graph: NestGraph | null;
@@ -667,6 +729,7 @@ function NodeDetail({
   neighborhood: Set<string> | null;
   nodesById: Map<string, GNode>;
   onOpenTag?: (tag: string) => void;
+  onOpenDocument?: (nodeId: string) => void;
 }) {
   const doc = node.kind === "doc" ? graph?.nodes.find((n) => n.id === node.id) : null;
   const linkCount =
@@ -699,6 +762,16 @@ function NodeDetail({
         <div className="font-medium mb-1 break-all">{node.name}</div>
         <div className="text-xs text-muted-foreground capitalize">{node.kind}</div>
       </div>
+      {doc && onOpenDocument && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="w-full h-7 text-xs"
+          onClick={() => onOpenDocument(doc.id)}
+        >
+          Open document
+        </Button>
+      )}
       {doc && (
         <div className="space-y-1 text-xs">
           {doc.tags.length > 0 && (

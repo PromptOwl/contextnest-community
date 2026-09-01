@@ -7,8 +7,8 @@
  * scan / list / approve / reject.
  */
 
-import { readFile } from "fs/promises";
-import { join } from "path";
+import { readFile, readdir } from "fs/promises";
+import { join, relative, sep } from "path";
 import {
   detectDrift,
   stageSuggestion,
@@ -29,6 +29,11 @@ import {
   type NestStorage,
 } from "@promptowl/contextnest-engine";
 import { engineCache } from "../nodes/engine.js";
+import {
+  setSuggestionFlag,
+  markIndexStale,
+  indexedNodeIds,
+} from "../nodes/node-index.js";
 import { getDb } from "../db/client.js";
 import { resolveNestPath } from "../shared/paths.js";
 
@@ -188,7 +193,12 @@ async function scanDocumentForDriftInternal(
 
   const existing = await listSuggestions(storage, documentId);
   const dup = existing.find((s) => s.proposed_hash === drift.actualHash);
-  if (dup) return { meta: dup, created: false };
+  if (dup) {
+    // Already staged — but the flag may predate this table (or a rebuild that
+    // never ran), so assert it rather than assume it.
+    await setSuggestionFlag(nestId, documentId, true);
+    return { meta: dup, created: false };
+  }
 
   const result = await stageSuggestion({
     storage,
@@ -199,7 +209,30 @@ async function scanDocumentForDriftInternal(
     actor,
     docTier: "standard",
   });
+  // The listing reads this flag instead of walking the vault for
+  // `_suggestions/` directories, so staging has to record it.
+  await setSuggestionFlag(nestId, documentId, true);
   return { meta: result.meta, created: true };
+}
+
+/**
+ * Re-derive one document's staged-suggestion flag from disk.
+ *
+ * After a verdict, because approving or rejecting ONE suggestion does not mean
+ * the document has none left. One directory read for one document, on a write
+ * path — not the whole-vault walk the listing used to pay on every request.
+ */
+async function refreshSuggestionFlag(
+  nestId: string,
+  storage: NestStorage,
+  documentId: string,
+): Promise<void> {
+  try {
+    const remaining = await listSuggestions(storage, documentId);
+    await setSuggestionFlag(nestId, documentId, remaining.length > 0);
+  } catch (err) {
+    console.error("[external-edit] flag refresh failed", nestId, documentId, err);
+  }
 }
 
 /** Scan every document in a nest. Returns count of newly-staged suggestions. */
@@ -207,17 +240,83 @@ export async function scanNestForDrift(
   nestId: string,
   actor: string = "system:scanner",
 ): Promise<{ scanned: number; staged: number }> {
-  const { storage, invalidateDiscovery } = await engineCache.get(nestId);
+  const { storage, dropDiscoveryCache } = await engineCache.get(nestId);
   // Edits made outside this process are the whole point of the scan, so it
   // reads disk directly rather than the cached document set — which by
   // definition cannot contain a write this server never made.
-  invalidateDiscovery();
+  //
+  // The memory-only invalidator, NOT invalidateDiscovery. This scan runs on a
+  // timer over EVERY nest (DRIFT_SCAN_INTERVAL_MS, 30s by default), so marking
+  // the DB index stale here left every nest permanently stale — and every
+  // listing then paid a full rebuild crawl, which is the exact cost the index
+  // exists to remove. A scan that finds nothing has proven the mirror right,
+  // not wrong; it is only what the scan FINDS that can invalidate it.
+  dropDiscoveryCache();
   const docs = await storage.discoverDocuments();
   const results = await Promise.all(
     docs.map((doc) => scanDocumentForDriftInternal(nestId, doc.id, actor)),
   );
   const staged = results.filter((r) => r?.created).length;
+
+  // Two ways this scan can prove the mirror wrong, both cheap to check now
+  // that the vault has just been read:
+  //   - it staged an edit, so a document's bytes (and likely its frontmatter)
+  //     moved out of band;
+  //   - the document SET differs, i.e. a file was added or removed outside the
+  //     app — which drift detection alone never reports, since it only visits
+  //     documents discovery already found.
+  // `includeRetired` to match what the index stores; it is a cache hit on the
+  // crawl above, not a second walk.
+  const onDisk = await storage.discoverDocuments({ includeRetired: true });
+  const indexed = await indexedNodeIds(nestId);
+  const membershipMoved =
+    indexed.size !== onDisk.length || onDisk.some((d) => !indexed.has(d.id));
+  if (staged > 0 || membershipMoved) await markIndexStale(nestId);
+
   return { scanned: docs.length, staged };
+}
+
+/**
+ * Document ids with at least one staged suggestion, from ONE directory walk
+ * instead of a glob per document — a listing was opening a `_suggestions`
+ * directory for all 400 nodes of a nest that usually has zero drift.
+ *
+ * Layout is `{docDir}/_suggestions/{docName}/{id}.meta.yaml` (engine
+ * NestStorage.suggestionDir); `_archive` holds resolved ones, not staged.
+ */
+export async function documentsWithSuggestions(
+  nestId: string,
+): Promise<Set<string>> {
+  const root = resolveNestPath(nestId);
+  const ids = new Set<string>();
+  let entries;
+  try {
+    entries = await readdir(root, { recursive: true, withFileTypes: true });
+  } catch (err: any) {
+    // A missing folder genuinely means nothing is staged. Anything else
+    // (permissions, descriptor exhaustion) is NOT that, and this one walk
+    // covers every document — so a swallowed failure drops pending-edit
+    // detection for the WHOLE nest, where the per-node reads it replaced
+    // lost one document each. Still degrade rather than fail the listing:
+    // drift badges are advisory, and a transient fs error should not 500 a
+    // nest. Logged so the difference is visible instead of silent.
+    if (err?.code !== "ENOENT") {
+      console.error("[external-edit] suggestion scan failed", nestId, err);
+    }
+    return ids;
+  }
+  for (const e of entries) {
+    if (!e.isFile() || !e.name.endsWith(".meta.yaml")) continue;
+    const dir = (e as any).parentPath ?? (e as any).path ?? root;
+    const rel = relative(root, dir).split(sep).join("/");
+    const segs = rel.split("/");
+    const marker = segs.lastIndexOf("_suggestions");
+    // The doc name is the segment right after `_suggestions`; anything deeper
+    // is the archive.
+    if (marker === -1 || segs.length !== marker + 2) continue;
+    ids.add([...segs.slice(0, marker), segs[marker + 1]].filter(Boolean).join("/"));
+  }
+  return ids;
 }
 
 /** Get the latest pending external edit for a document, if any.
@@ -493,6 +592,7 @@ export async function approveExternalEdit(input: {
   // either, even though the content change itself is already committed.
   const historyRecorded = await recordVerdict(input.nestId, result.chainEvent);
 
+  await refreshSuggestionFlag(input.nestId, storage, input.documentId);
   return { ...result, historyRecorded };
 }
 
@@ -554,6 +654,7 @@ export async function rejectExternalEdit(input: {
     );
   }
 
+  await refreshSuggestionFlag(input.nestId, storage, input.documentId);
   return { ...result, historyRecorded };
 }
 

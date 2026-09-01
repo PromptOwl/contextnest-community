@@ -205,6 +205,13 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE nests ADD COLUMN prime_tags TEXT NOT NULL DEFAULT 'prime-document'");
   }
 
+  // Freshness stamp for node_index (migration 036). NULL means "rebuild before
+  // answering" — the state every existing nest starts in on upgrade, and the
+  // state any write we could not mirror puts it back into.
+  if (!nestCols.includes("index_synced_at")) {
+    db.exec("ALTER TABLE nests ADD COLUMN index_synced_at TEXT");
+  }
+
   // Admin flag on users (first PromptOwl-authed user becomes the server admin)
   const userCols = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
   if (!userCols.includes("is_admin")) {
@@ -1293,12 +1300,72 @@ export function runMigrations(db: Database.Database): void {
     recordMigration("034_versions_author_status_index");
   }
 
-  // 035: Publish — gated public hosting of a single document (CU-wdqcpzzp7y).
+  // 035: Undo 003's one-key-per-user cap.
+  //
+  // A single key made rotation destructive at a distance: a user who had
+  // wired four clients and lost the plaintext had to rotate to get a
+  // readable key, which silently killed all four. Many keys means one per
+  // place, and rotating one leaves the others alone. The non-unique
+  // idx_keys_user index (created above) still covers lookups by user.
+  if (!hasMigration("035_multiple_api_keys_per_user")) {
+    db.exec(`DROP INDEX IF EXISTS idx_api_keys_user_unique;`);
+    recordMigration("035_multiple_api_keys_per_user");
+  }
+
+  // 036: node_index — the document list, in the database (CU-wdqcq00ar3).
+  //
+  // Document existence/title/type/tags/folder live only on disk, so every
+  // listing re-walked the vault and parsed every file. On a Cloud Storage
+  // mount each of those reads is a network round trip, which is the whole of
+  // the localhost-fast / cloud-slow gap: the in-process discovery cache dies
+  // with the instance, so the cloud pays the crawl and localhost never does.
+  //
+  // Disk stays the source of truth; this is a derived mirror, written through
+  // on every document write and rebuilt from disk whenever nests.index_synced_at
+  // is NULL. frontmatter_json carries the whole frontmatter so a row rehydrates
+  // into the ContextNode shape every consumer already speaks; the plain columns
+  // beside it exist only so folder grouping and type/status filters run in SQL.
+  if (!hasMigration("036_node_index")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS node_index (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          folder TEXT NOT NULL DEFAULT '',
+          title TEXT NOT NULL DEFAULT '',
+          type TEXT NOT NULL DEFAULT 'document',
+          status TEXT NOT NULL DEFAULT 'draft',
+          updated_at TEXT,
+          frontmatter_json TEXT NOT NULL,
+          PRIMARY KEY (nest_id, node_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_node_index_folder
+          ON node_index(nest_id, folder);
+
+        -- Which documents have an external edit staged against them.
+        --
+        -- Its own table rather than a node_index column: node_index rows are
+        -- upserted with INSERT OR REPLACE on every document write, which
+        -- resets any column the write does not carry — and a suggestion's
+        -- existence has nothing to do with the document write that would
+        -- clobber it. Kept in step at the three points that stage, approve or
+        -- reject a suggestion, and refreshed wholesale by a rebuild.
+        CREATE TABLE IF NOT EXISTS node_suggestions (
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          PRIMARY KEY (nest_id, node_id)
+        );
+      `);
+    })();
+    recordMigration("036_node_index");
+  }
+
+  // 037: Publish — gated public hosting of a single document (CU-wdqcpzzp7y).
   //   `publish` holds one shareable /p/<slug> link per document with an access
   //   mode; `access_grant` is the per-publish record store (invite allow-list,
   //   one-time magic-link tokens, cookie sessions, and the view log), keyed by
   //   `kind`. Not in the base DDL — additive feature tables.
-  if (!hasMigration("035_publish")) {
+  if (!hasMigration("037_publish")) {
     db.transaction(() => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS publish (
@@ -1335,12 +1402,12 @@ export function runMigrations(db: Database.Database): void {
         CREATE INDEX IF NOT EXISTS idx_access_grant_token ON access_grant(token_hash);
       `);
     })();
-    recordMigration("035_publish");
+    recordMigration("037_publish");
   }
 
-  // 035b: the viewer overlays (watermark / no-download). Declared inline in the
+  // 037b: the viewer overlays (watermark / no-download). Declared inline in the
   // CREATE TABLE above, so this ALTER only fires for a database that ran an
-  // earlier build of 035 — same inline-plus-explicit-ALTER pattern the teams
+  // earlier build of 037 — same inline-plus-explicit-ALTER pattern the teams
   // and prime columns use.
   {
     const publishCols = (

@@ -49,24 +49,33 @@ Body:
 Clears session cookie. 200.
 
 ### POST `/auth/keys` (auth required)
-Mints an API key for the caller. 409 if one already exists — use rotate.
+Mints an API key for the caller. A user may hold **several** keys — one per place they connect from — so rotating the key for one client doesn't disconnect the rest.
+
+`label` is **required** and must be unique among the caller's keys (compared case-insensitively, after trimming): once the plaintext is gone the name is the only thing that tells two keys apart, so a list of identical entries makes revoking a guess. **400** if it's missing, blank, not a string, or longer than 60 characters; **409** on a duplicate name or at the per-user ceiling (20). Keys created before this rule keep their existing (possibly absent) label.
 ```json
 { "label": "cli", "nest_id": "optional — scope the key to one nest" }
 ```
 Response (201):
 ```json
-{ "api_key": "cnst_...", "id": "uuid", "label": "cli" }
+{ "api_key": "cnst_...", "id": "uuid", "key_prefix": "cnst_abc123...", "label": "cli" }
 ```
 **Plaintext shown once.** Omit `nest_id` for a **user-level key** (works on every nest the user can access — what the Connect dialog mints); a nest-scoped key is rejected on other nests' MCP/API paths.
 
 ### POST `/auth/keys/rotate` (auth required)
-Replaces existing key, returns new plaintext. Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label).
+Replaces **one** key and returns its new plaintext; the caller's other keys are untouched.
+
+`key_id` names the target. Omitting it is only accepted when the account holds exactly one key (pre-multi-key clients) — with several keys and no `key_id` the server answers **400** rather than guessing which to replace. **404** if the id isn't the caller's.
+
+Scope resolution on the optional `nest_id` field: **absent** → keep the prior scope; **`null` (or `""`)** → clear to a user-level key; **a nest id** → scope to that nest. Same for `label` (absent keeps the prior label). Supplying a `label` that matches a *different* key of the caller's is **409**; renaming a key to what it is already called is fine.
+```json
+{ "key_id": "uuid", "label": "optional", "nest_id": "optional" }
+```
 
 ### GET `/auth/keys` (auth required)
-Lists key prefixes (no plaintext).
+Lists the caller's keys — id, prefix, label, `nest_id`, `created_at`, `last_used_at` — oldest first. Never returns plaintext.
 
 ### DELETE `/auth/keys/:keyId` (auth required)
-Revoke a key.
+Revoke one key. 404 if the id isn't the caller's. Anything still using it stops working immediately.
 
 ### POST `/auth/password` (auth required)
 ```json
@@ -147,6 +156,17 @@ The redirect URI (`<base url>/auth/oidc/callback` — register this exact URI at
 RP-initiated logout for an SSO session. Deletes the current session server-side and clears the session cookie plus the `cnst_sso_session` marker. If the issuer advertises an `end_session_endpoint` (Entra/Okta/Keycloak; Google does not), `302`s the browser through it with `post_logout_redirect_uri=<base url>/` so the IdP session ends too; otherwise `302`s straight to `/`. Always clears cookies and always lands on `/`, even if discovery is unreachable. The SPA navigates here (instead of `POST /auth/logout`) only when the non-httpOnly `cnst_sso_session` marker cookie — set on OIDC callback success — is present, so password sessions keep the plain logout.
 
 Related `/admin/settings` fields (GET/PATCH, superadmin only): `oidc_enabled`, `oidc_issuer` (https URL), `oidc_client_id`, `oidc_client_secret` (**write-only** — PATCH sets/replaces, `null` clears; GET returns only `oidc_client_secret_set: boolean`), `oidc_allowed_domains` (comma-separated), `oidc_auto_provision`, `oidc_department_tagging` (append `dept:<slugified-department>` to a new document's tags on create — create-only, no-op for users without a stored department). Enabling is refused unless issuer + client id + secret are all present.
+
+### POST `/auth/token-exchange`
+Exchange an IdP ID token for a short-lived, scoped **MCP bearer** (RFC 8693-shaped) — for an external agent acting on behalf of a user your IdP already authenticated. No session, no API key. **Off by default; security-critical** — see `CONFIGURATION.md → Agent SSO (token exchange)`.
+
+Body: `{ "provider": "microsoft" | "google", "subject_token": "<IdP ID token>" }`. Response `200`: `{ "access_token", "token_type": "Bearer", "expires_in" }` — send it as `Authorization: Bearer <access_token>` to `/index`, `/mcp`, and the ticket-eligible `/nests/:nestId/*` routes.
+
+The `subject_token` is verified for signature (provider JWKS, `RS256` pinned), issuer (exact per provider — the tenant-scoped Entra issuer or Google's), audience (your configured client id, so a token minted for another app can't be replayed), and expiry (30s tolerance); then the same `email_verified` + `oidc_allowed_domains` policy as browser login, then resolve/JIT the user (`oidc_auto_provision`) and mint. JIT **fails closed**: auto-provision with an empty domain allowlist refuses with `no_account`.
+
+`404 disabled` unless `sso_token_exchange_enabled` **and** `mcp_signing_secret` **and** that provider's toggle are all set (a disabled server doesn't advertise the endpoint). Rate-limited per IP (`429 rate_limited`). Other codes: `400` `bad_request` / `provider_disabled` / `provider_misconfigured`, `401` `invalid_subject_token`, `403` `email_not_verified` / `domain_not_allowed` / `no_account`, `500` `server_error`.
+
+Related `/admin/settings` fields (GET/PATCH, superadmin only): `sso_token_exchange_enabled`, `mcp_signing_secret` (**write-only** — GET returns only `mcp_signing_secret_set: boolean`), `mcp_token_ttl_seconds` (30–3600), `ms_token_exchange_enabled`, `ms_client_id`, `ms_tenant_id` (directory GUID), `google_token_exchange_enabled`, `google_client_id`. Enabling a provider is refused while `oidc_auto_provision` is on and `oidc_allowed_domains` is empty.
 
 ---
 
@@ -304,7 +324,45 @@ Removing a collaborator stays admin-only.
 
 ---
 
-## 3a. Teams (group sharing)
+## 3a. Share grants (one document / one folder)
+
+A **grant** gives one person access to a **single document** or **everything under one folder**, without making them a nest-wide collaborator. Access only — a grant is not stewardship and confers no approval rights.
+
+Resolution: a grant covers a node when the node id equals `target` or sits under `target + "/"`. `write` outranks `read` when several grants overlap. A grantee with no nest-wide permission sees **only** the nodes their grants cover — `GET /nests/:id/nodes` is filtered to them.
+
+**Discovery.** A grantee finds the nest by logging in: it is listed in `GET /nests`, and `GET /nests/:id` returns it, both with `permission: "read"`, `roles: ["viewer"]`, and `grant_only: true`. The list card is scoped to their slice, not the nest — `document_count` counts only the documents their grants cover, and `collaborator_*` / `steward_*` come back empty, so being shared one document never reveals how large the nest is or who else works in it. Grant-only nests deliberately do **not** enter the work inbox or `/stats`: those are governance surfaces over documents the grantee can't read.
+
+The nest routes report a grantee as a `read` caller so the nest resolves instead of 404ing, but this buys no authority: rename, delete, import, and settings-write still require `owner`/`admin`, and the remaining nest paths (`/settings`, `/stewards`, `/collaborators`, `/review-queue`, `/feed`, …) are not on the grantee's middleware allow-list at all — they answer `404`. A grantee's reachable surface is exactly: `GET /nests/:id`, `GET /nests/:id/nodes` (filtered), the granted nodes themselves, and the read-query routes (`/query`, `/search`, `/context`, `/export`), each scoped to their grants. Note `resolveNestPermission` still returns `none` for them — that is what routes them into the per-node grant checks.
+
+Managing grants is **owner / nest admin / server admin** (`canManageStewards` — same authority as the steward roster). Everyone else gets `403`.
+
+### GET `/nests/:nestId/grants`
+```json
+{ "count": 1, "grants": [{ "id": "...", "target_type": "document", "target": "nodes/win-loss-log", "user_id": "...", "email": "guest@x.com", "role": "read", "granted_by": "owner@x.com", "created_at": "..." }] }
+```
+The whole nest's sharing roster, annotated with the grantee's email.
+
+### POST `/nests/:nestId/grants`
+```json
+{ "target_type": "document", "target": "nodes/win-loss-log", "email": "guest@x.com", "role": "read" }
+```
+- `target_type` ∈ `document` / `folder`; `role` ∈ `read` / `write` (default `read`).
+- `target` is a node id (`nodes/win-loss-log`) or a folder prefix (`nodes/gtm/deals`).
+- A folder target must name a **subfolder**: a bare `nodes` root would match every node and silently share the whole nest → `400`.
+- Re-granting the same `(target_type, target, user)` updates the role rather than duplicating.
+- Auto-creates a placeholder user (`is_invited = 1`) if the email is unknown, same as collaborator invites.
+- `201 { grant }`.
+
+### DELETE `/nests/:nestId/grants/:id`
+`{ "deleted": true }`, or `404` if the grant isn't in this nest.
+
+Moving a document carries its **document** grants to the new id; deleting it drops them. **Folder** grants pin to a path, so a moved document leaves one share and joins another. Grants do not travel in a nest export bundle.
+
+Agent equivalent: the `context_grant` MCP tool takes the same four fields in one call (see §MCP and `/llms.txt`). In the UI: **Share this document** on a document's ⋯ menu, and the share icon on a folder row in the nest view.
+
+---
+
+## 3b. Teams (group sharing)
 
 A **team** is a reusable, owner-managed group of users. Each member carries a
 **role** (`admin` / `editor` / `viewer`) set on the membership and applied
@@ -450,6 +508,8 @@ Optional query params, applied before the per-node enrichment:
 | `status` | `draft` \| `pending_review` \| `approved` \| `published` \| `rejected`; aliases normalized. Retired docs stay in this listing regardless — here they are unpublished docs their stewards may still act on. |
 | `approved_only` | `1`/`true` — only docs with an approved version, each served at that version rather than the live file. The view a public nest gives a stranger, so an owner can preview what going public would expose. |
 | `limit` | Max nodes to return. A non-numeric value is ignored, not an error. |
+| `folder` | Present (even as `""`) → that one folder level only, for a lazily-expanded document tree. Absent → the whole nest. |
+| `content` | `1`/`true` — include document bodies. **Off by default:** the listing is served from the nest's document index, which holds metadata only, so bodies cost a vault crawl and are opt-in. |
 ```json
 {
   "count": 1,
@@ -464,7 +524,7 @@ Optional query params, applied before the per-node enrichment:
     "collaborators": ["editor@x.com", "grantee@x.com"],
     "created_at": "...",
     "updated_at": "...",
-    "content": "# md body",
+    "content": "# md body — only with ?content=1",
     "schedule": "0 6 * * *"
   }]
 }
@@ -688,6 +748,10 @@ Response: `{ "review": { "id": "...", "status": "approved", ... } }`.
 ### POST `/nests/:nestId/nodes/:nodeId/cancel-review`
 Cancels the pending review. Returns node to `draft`.
 
+Allowed for the person who submitted it (withdrawing your own submission) and
+for anyone with approve rights on the node. Anyone else gets 403 — read access
+to the nest alone is not enough.
+
 ### GET `/nests/:nestId/review-queue`
 Query: `?status=pending&limit=50&offset=0`
 
@@ -720,14 +784,16 @@ Full review history for a node.
 ### POST `/nests/:nestId/nodes/:nodeId/request-deletion`
 Body: `{ "reason": "superseded by the new runbook" }` (required).
 
-Read permission — anyone who can see the node may flag it as stale, which is the point: deleting is write-tier, so the people who notice dead content usually can't act on it. A flagged node is **not** locked or under review; it stays editable and never appears in the review queue. One pending flag per node (`409` on a second), `404` for a node the caller can't read or that doesn't exist. Returns `201 { request }`.
+**Editor permission.** Asking for a deletion is an editor's act: a viewer of any kind — a `read` collaborator, a viewer steward, someone holding a `read` share grant — gets `403`. What counts as an editor is the same three paths that let someone change the document: nest-wide `write`, an editor steward row covering it, or a `write` share grant on it. Deleting outright stays higher still (owner/admin, or the document's own author), so an editor who spots dead content flags it rather than removing it. `404` comes first for a node the caller can't read or that doesn't exist, so the gate is never an existence oracle.
+
+A flagged node is **not** locked or under review; it stays editable and never appears in the review queue. One pending flag per node (`409` on a second). Returns `201 { request }`.
 
 `GET /nests/:nestId/nodes/:nodeId` carries `deletionRequest` — the node's latest flag (`{ status, requestedBy, reason, resolvedBy?, resolutionNote?, resolvedAt? }`) or `null`. `pending` lets a client badge the document and drop its request affordance rather than discovering the `409`; `declined` carries the resolver's note, which is how the person who asked learns the verdict.
 
 ### POST `/nests/:nestId/request-deletion`
 Body: `{ "targetType": "folder" | "nest", "target": "api/limits", "reason": "..." }` (`target` ignored for `nest`).
 
-Read permission, same as the per-document route. A folder target is normalized (`/nodes/api/limits/` → `api/limits`) so two people flagging the same folder collide on one pending request rather than raising two; `404` if no documents live under it. One pending flag per (nest, target type, target).
+Editor permission, same as the per-document route — with one difference: a steward editor needs **nest** scope here, since a row scoped to one document is no mandate over a folder or the whole nest. A folder target is normalized (`/nodes/api/limits/` → `api/limits`) so two people flagging the same folder collide on one pending request rather than raising two; `404` if no documents live under it. One pending flag per (nest, target type, target).
 
 ### POST `/nests/:nestId/delete-folder`
 Body: `{ "folder": "api/limits" }`. **Owner/admin only** — a folder delete is many document deletes at once, so it sits at the nest-management tier, not `write`. Deletes every document under the prefix (sub-folders included) through the normal per-node path, so each gets its review-lock check, row purge and tombstone. Returns `{ deleted, nodeIds }`. Non-admins use the request flow above.
@@ -1168,12 +1234,13 @@ Body (give `prompt` OR `selector`; everything else optional):
 - `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`.
 - `max_tokens` — budget, floored at 50, default 4000. Nodes past the budget are dropped (`trace.truncated_by_budget`).
 - 400 `prompt or selector is required` if both missing.
+- Each node carries a `url` deep link, and its context block a matching `_source: <url>_` line, so answers can cite sources. Built from `PUBLIC_BASE_URL`, falling back to the request origin; omitted when neither resolves.
 
 Response (200):
 ```json
 {
-  "context": "# Auth Overview\n\n_tags: #auth #security_\n\n# Auth\n\n...",
-  "nodes": [{ "id": "nodes/auth-overview", "title": "Auth Overview", "tags": ["#auth"], "type": "document" }],
+  "context": "# Auth Overview\n\n_tags: #auth #security_\n_source: http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview_\n\n# Auth\n\n...",
+  "nodes": [{ "id": "nodes/auth-overview", "title": "Auth Overview", "url": "http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview", "tags": ["#auth"], "type": "document" }],
   "trace": {
     "selector_used": "#auth",
     "from_prompt": "how does auth work",
@@ -1253,9 +1320,9 @@ curl 'http://localhost:3838/nests/<nestId>/nodes/nodes/auth-overview?format=mark
 Public readers receive the **approved** version body, never an unapproved
 working-copy draft (same gate as `/context`).
 
-### GET `/nests/:nestId/export?format=bundle` — portability bundle (owner/admin)
+### GET `/nests/:nestId/export?format=bundle` — portability bundle
 
-Downloads a `.zip` of the nest's documents to move it to another ContextNest host. Each document is serialized from its approved/published state (`status: published`). Owner or admin only. There is **no** separate import endpoint — unzip the bundle and bring it in with the existing folder importer (`POST /nests/import`).
+Downloads a `.zip` of the nest's documents to move it to another ContextNest host. Each document is serialized from its approved/published state (`status: published`). Any collaborator with nest access (viewer and up) may export — same gate as the markdown export above. There is **no** separate import endpoint — unzip the bundle and bring it in with the existing folder importer (`POST /nests/import`).
 
 - `?includeDrafts=1` — also export unapproved draft documents. Default: approved/published only.
 
@@ -1274,6 +1341,70 @@ Nest-level summary stats.
 
 ### GET `/nests/:nestId/context`
 Returns CONTEXT.md content.
+
+### GET `/nests/:nestId/folders`
+The nest's folder tree on its own, for callers that want the *shape* of the vault
+(a navigable tree, a folder picker) and none of its content. Per-folder counts come
+from the document index and the folders themselves from the vault's directories —
+no document is opened either way, so this stays cheap on a vault where listing the
+documents would not be. A folder holding no document is listed with `count: 0`.
+
+Query: `?folder=<path>` (that subtree only; defaults to the whole nest),
+`?recursive=0` (direct children of `folder` only).
+
+```json
+{ "folders": [{ "path": "specs", "count": 4, "total": 11 }] }
+```
+
+`count` = documents filed directly in that folder; `total` = the whole subtree
+beneath it. A level that holds only subfolders still gets a row, so it stays
+expandable.
+
+### POST `/nests/:nestId/folders`
+```json
+{ "folder": "gtm/deals" }
+```
+Creates a folder with nothing in it — the directory is created in the vault
+carrying only its generated `INDEX.md`, so no document is added to the nest.
+Each segment is slugified (`GTM/Deals` → `gtm/deals`) and the depth cap applies.
+Creating a folder that already exists is a no-op. Write tier.
+
+```json
+{ "folder": "gtm/deals" }
+```
+Returns 201 with the path actually created.
+
+### GET `/nests/:nestId/census`
+One call for everything a nest overview needs to describe the *whole* nest,
+whatever folder is open — counts by tag, type and status, the folder tree, the
+author roster, and the recently-edited strip. Gated by the same `filterAccessible`
+pass as the listing, so the numbers describe what this caller can actually reach.
+
+```json
+{
+  "census": {
+    "total": 42,
+    "folders": [{ "path": "specs", "count": 4, "total": 11 }],
+    "tags": { "#api": 7 },
+    "types": { "document": 40, "agent": 2 },
+    "statuses": { "approved": 30, "draft": 12 },
+    "authors": ["a@x.com"],
+    "editedLast7d": 5,
+    "recent": [{ "id": "nodes/foo", "title": "Foo", "type": "document", "updated_at": "..." }]
+  }
+}
+```
+
+### POST `/nests/:nestId/reindex` (write+)
+Force-rebuild the nest's document index from the vault, and return how many
+documents were indexed: `{ "indexed": 42 }`.
+
+The index heals itself — anything that could leave it out of step with disk (an
+out-of-band edit, an import, a write that could not be mirrored) marks the nest
+stale, and the next read rebuilds before answering. This is the manual lever for
+when an operator wants that to happen *now*. A rebuild crawls the whole vault, so
+it is write-tier rather than something a read-only caller can trigger at will;
+below that the answer is `403`.
 
 ### GET `/nests/:nestId/graph` (read+)
 Ontology graph — a read-only assembly over data the nest already holds, for the
@@ -1337,7 +1468,49 @@ sees **approved** agent/skill definitions; unapproved drafts are omitted.
   enrichment, so cost scales with the number of runnables, not total nest size.
 
 ### POST `/nests/:nestId/publish`
-Publishes the nest (snapshots + index).
+Bulk-create documents (and/or update `CONTEXT.md`) in one call. Each document
+routes through the same create path as `POST /nests/:nestId/nodes` — same slug
+derivation, same governance rows, same content-type policy gate (a disabled
+`artifact`/`table` type fails the whole batch up front, before any write).
+
+Body: `{ documents?, context_md? }` — at least one required.
+`documents[]` rows are `{ title, content, type?, tags?, scope? }`; rows missing
+`title` or `content` are skipped silently (a shape problem, not a policy one).
+
+A document whose title slugs to an id that already exists is **skipped and
+reported** — never overwritten, so republishing a folder cannot destroy an
+existing document's version history.
+
+A document the create path rejects for its own reasons — a title that is too
+long or carries no sluggable characters, a `type` the engine does not know — is
+**reported in `failed` and the batch continues**. One bad row cannot abandon the
+rest half-written.
+
+```json
+{
+  "published": 2,
+  "context_md_updated": true,
+  "node_ids": ["nodes/alpha", "nodes/beta"],
+  "skipped": ["Existing Doc Title"],
+  "failed": [{ "title": "Bad Row", "error": "..." }]
+}
+```
+
+Returns `201` whenever the batch ran, even if every row landed in `skipped` or
+`failed` — read the arrays, not the status, to know what happened.
+
+`context_md` is written directly rather than through an operation, because none
+exists for it. It is therefore outside the vault write lock and has no `503` to
+return — a `context_md`-only request cannot report contention.
+
+**Partial writes and retries.** The batch is not a transaction: documents are
+created one at a time and the ones written before a failure stay written. The
+one error that stops the batch early is the vault write lock being held past
+its acquire timeout, which answers `503` + `Retry-After`. Retrying is safe and
+finishes the job — every document from the first attempt now exists, so it
+comes back under `skipped` while the remaining ones are created. Expect a
+lower `published` count on the retry; that is the batch converging, not a
+failure.
 
 ---
 

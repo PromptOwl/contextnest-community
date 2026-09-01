@@ -1,6 +1,6 @@
 {
   "name": "@promptowl/contextnest-community",
-  "version": "1.16.0",
+  "version": "1.19.0",
   "description": "ContextNest Community Edition — self-hosted context governance server for AI workflows. Commercial software by Promptowl LLC.",
   "private": false,
   "type": "module",
@@ -42,7 +42,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.12.0"
   },
   "scripts": {
     "dev": "concurrently -k -n server,ui -c blue,magenta \"npm run dev:server\" \"npm run dev:ui\"",
@@ -69,7 +69,7 @@
   "dependencies": {
     "@hono/node-server": "^1.13.8",
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@promptowl/contextnest-engine": "^2.1.0",
+    "@promptowl/contextnest-engine": "^2.4.0",
     "@tanstack/react-query": "^5.101.4",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.8.2",
@@ -137,6 +137,7 @@
     "cmdk": "^1.0.0",
     "concurrently": "^9.2.1",
     "d3-force": "^3.0.0",
+    "katex": "^0.16.47",
     "lowlight": "^3.3.0",
     "lucide-react": "^0.577.0",
     "markdown-it-container": "^4.0.0",
@@ -144,7 +145,9 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.1.0",
+    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.5.0",
     "tailwindcss": "^3.4.14",

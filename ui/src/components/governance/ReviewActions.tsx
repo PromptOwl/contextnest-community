@@ -88,7 +88,7 @@ export function ReviewActions({
             className="border-red-200 text-red-700 hover:bg-red-50 hover:text-red-800"
             onClick={() => setActionType("reject")}
           >
-            <XCircle className="h-4 w-4 mr-2" /> Request Changes
+            <XCircle className="h-4 w-4 mr-2" /> Reject
           </Button>
         </div>
       </div>
@@ -97,12 +97,12 @@ export function ReviewActions({
         <DialogContent className="sm:max-w-[425px]">
           <DialogHeader>
             <DialogTitle>
-              {actionType === "approve" ? "Approve Document" : "Request Changes"}
+              {actionType === "approve" ? "Approve Document" : "Reject Document"}
             </DialogTitle>
             <DialogDescription>
               {actionType === "approve"
                 ? `Approve "${documentTitle}" (v${version}). This version will become the official AI context for this document.`
-                : `Request changes for "${documentTitle}" (v${version}). The author will be notified with your feedback.`}
+                : `Reject "${documentTitle}" (v${version}). The author will be notified with your feedback.`}
             </DialogDescription>
           </DialogHeader>
 
@@ -158,7 +158,7 @@ export function ReviewActions({
               ) : (
                 <XCircle className="h-4 w-4 mr-2" />
               )}
-              {actionType === "approve" ? "Approve" : "Request Changes"}
+              {actionType === "approve" ? "Approve" : "Reject"}
             </Button>
           </DialogFooter>
         </DialogContent>

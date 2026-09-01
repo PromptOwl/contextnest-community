@@ -17,6 +17,7 @@ import {
   canReadNode,
 } from "../governance/access-guard.js";
 import { isPublicReader } from "../shared/access.js";
+import { resolveNodeGrant } from "../governance/grants-service.js";
 import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
 import {
   nodeToMarkdown,
@@ -41,6 +42,7 @@ import {
   moveNode,
   deleteNode,
   listNodesForCaller,
+  nestCensus,
   getNodeForCaller,
   resolveAuthorship,
   toNodeResponse,
@@ -113,7 +115,17 @@ nodeRoutes.get("/", async (c) => {
       : {}),
     // Ignore junk rather than 400 — a bad ?limit should not fail a listing.
     ...(limit !== undefined && Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+    // Present (even as "") = one folder level only, for the lazily-expanded
+    // document tree. Absent = the whole nest, as every existing caller expects.
+    ...(q.folder !== undefined ? { folder: q.folder } : {}),
+    // Bodies are off by default — the list is served from the DB index, which
+    // holds metadata only. Opt back in and the listing crawls the vault for
+    // them; kept for any client that was reading `content` off this route.
+    ...(q.content === "1" || q.content === "true" ? { withContent: true } : {}),
   });
+  // The nest-wide shape is NOT bundled here: it describes the whole nest
+  // whatever level was asked for, so bundling recomputed it on every folder
+  // expand. It has its own endpoint and its own cache entry.
   return c.json({ count: nodes.length, nodes });
 });
 
@@ -394,6 +406,13 @@ nodeRoutes.get("/:nodeId{.+}", async (c) => {
       response.collaborators = people.collaborators;
     }
   }
+
+  // The caller's share grant on THIS node, if any. A grant is access, not
+  // stewardship, so it appears in neither the nest permission (a grantee reads
+  // as "read" whatever their grant says) nor the per-node steward roles — and
+  // without it the client cannot tell a write grantee from a viewer, and shows
+  // the person who was granted edit rights a read-only document.
+  (response as any).myGrant = await resolveNodeGrant(nestId, userId, nodeId);
 
   // Public readers see approved version body only.
   if (publicReader) {

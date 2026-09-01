@@ -62,6 +62,11 @@ export interface BoardConfig {
   tagNamespace?: string;
   /** Optional explicit column ordering; unknown-but-present keys append after. */
   columnOrder?: string[];
+  /** When true (the tag board), `columnOrder` is the EXHAUSTIVE column set:
+   *  only listed columns show, tags never promoted to a column don't appear,
+   *  and there is no Uncategorized catch-all. Folder/status leave this off and
+   *  keep auto-populating every present column. */
+  explicitColumns?: boolean;
   /** Columns to hide. A card whose only column(s) are hidden falls into
    *  UNCATEGORIZED; a multi-tag card keeps any still-shown column. */
   hiddenColumns?: string[];
@@ -116,6 +121,17 @@ function namespaceOf(config: { tagNamespace?: string }): string {
   return (config.tagNamespace ?? "").trim().split(":")[0]!.trim();
 }
 
+/**
+ * Tags are stored with a leading "#" (normalizeTag, src/nodes/service.ts), but
+ * a tag column key is the bare value — that is what the user types into the
+ * add-column box and what reads best as a heading. Every crossing of that line
+ * goes through these two: strip when deriving a key from stored tags, add back
+ * when writing tags. Without it a hand-typed "doing" column writes "#doing",
+ * matches no key, and the card vanishes from an explicit-column board.
+ */
+const stripHash = (t: string) => (t.startsWith("#") ? t.slice(1) : t);
+const withHash = (t: string) => (t.startsWith("#") ? t : `#${t}`);
+
 /** A saved column layout for one dimension. */
 export interface ColumnLayout {
   columnOrder?: string[];
@@ -142,6 +158,25 @@ export function layoutKey(s: {
   return s.dimension === "tag" ? `tag:${namespaceOf(s)}` : s.dimension;
 }
 
+/**
+ * One saved layout, brought up to date with the current key spelling.
+ *
+ * Tag column keys used to be the tag exactly as stored, "#" and all. A layout
+ * saved back then holds keys like "#GDPR"; card keys are the bare value now, so
+ * every one of those columns renders — and matches nothing, leaving a board of
+ * empty columns. Stripping on read repairs a curated board in place instead of
+ * asking the user to rebuild it. Folder/status keys never carried a "#", so
+ * they are returned untouched.
+ */
+export function migrateLayout(key: string, layout: ColumnLayout): ColumnLayout {
+  if (!key.startsWith("tag:")) return layout;
+  const keys = (a?: string[]) => a && [...new Set(a.map(stripHash))];
+  return {
+    columnOrder: keys(layout.columnOrder),
+    hiddenColumns: keys(layout.hiddenColumns),
+  };
+}
+
 /** The BoardConfig for the active dimension: its own layout, nothing else's. */
 export function resolveConfig(s: BoardSettings): BoardConfig {
   const layout = s.layouts[layoutKey(s)] ?? {};
@@ -153,6 +188,9 @@ export function resolveConfig(s: BoardSettings): BoardConfig {
       layout.columnOrder ??
       (s.dimension === "status" ? STATUS_ORDER : undefined),
     hiddenColumns: layout.hiddenColumns,
+    // The tag board is user-curated: start empty, show only added columns.
+    // Folder and status keep auto-populating every present column.
+    explicitColumns: s.dimension === "tag",
   };
 }
 
@@ -169,14 +207,15 @@ export function cardColumnKeys(node: BoardNode, config: BoardConfig): string[] {
       return [node.status || UNCATEGORIZED];
     case "tag": {
       const ns = namespaceOf(config);
+      const tags = node.tags.map(stripHash);
       // With a namespace, group by the value after the colon; without one,
       // every tag is its own column (which is what a vault of flat tags needs).
       const values = ns
-        ? node.tags
+        ? tags
             .filter((t) => t.startsWith(`${ns}:`))
             .map((t) => t.slice(ns.length + 1))
             .filter(Boolean)
-        : node.tags.filter(Boolean);
+        : tags.filter(Boolean);
       return values.length > 0 ? [...new Set(values)] : [UNCATEGORIZED];
     }
   }
@@ -201,6 +240,15 @@ function shownKeys(
   hidden: Set<string>,
 ): string[] {
   const keys = cardColumnKeys(node, config).filter((k) => !hidden.has(k));
+  // Explicit-column boards (the tag board) show ONLY the columns the user has
+  // added: a card whose tags match none of them simply doesn't appear, and
+  // there is no Uncategorized catch-all.
+  if (config.explicitColumns) {
+    const allowed = new Set(
+      (config.columnOrder ?? []).filter((k) => !hidden.has(k)),
+    );
+    return keys.filter((k) => allowed.has(k));
+  }
   return keys.length > 0 ? keys : [UNCATEGORIZED];
 }
 
@@ -271,6 +319,22 @@ export function buildColumns(
   config: BoardConfig,
 ): BoardColumn[] {
   const hidden = new Set(config.hiddenColumns ?? []);
+  // Explicit-column board: the columns ARE columnOrder (minus hidden), in that
+  // order — nothing auto-appears, nothing trails. An empty order = empty board.
+  if (config.explicitColumns) {
+    const seen = new Set<string>();
+    const keys: string[] = [];
+    for (const key of config.columnOrder ?? []) {
+      if (hidden.has(key) || key === UNCATEGORIZED || seen.has(key)) continue;
+      seen.add(key);
+      keys.push(key);
+    }
+    return keys.map((key) => ({
+      key,
+      label: labelFor(key, config),
+      title: titleFor(key, config),
+    }));
+  }
   const present = new Set<string>();
   for (const n of nodes) {
     for (const key of shownKeys(n, config, hidden)) present.add(key);
@@ -327,6 +391,7 @@ export function groupByColumn(
 
 export type MovePlan =
   | { kind: "move-folder"; folder: string }
+  | { kind: "retag"; tags: string[] }
   | { kind: "unsupported"; reason: string };
 
 /**
@@ -338,25 +403,47 @@ export function planMove(
   node: BoardNode,
   targetKey: string,
   config: BoardConfig,
+  fromKey?: string,
 ): MovePlan {
-  if (cardColumnKey(node, config) === targetKey) {
-    return { kind: "unsupported", reason: "Already in this column." };
-  }
   switch (config.dimension) {
     case "folder":
+      if (cardColumnKey(node, config) === targetKey) {
+        return { kind: "unsupported", reason: "Already in this column." };
+      }
       return { kind: "move-folder", folder: targetKey };
-    // Tag columns are read-only. Beyond the multi-tag ambiguity (a document
-    // sits in one column per tag, so "moved out of this one" means nothing),
-    // a tag swap is not expressible today: PATCH /nodes/:id UNIONS the tags it
-    // is given with the existing set (src/nodes/service.ts), so it can add a
-    // tag but never drop the old one. Retagging needs a real replace there
-    // first — the same gap DocumentEditor's removeTag runs into.
-    case "tag":
-      return {
-        kind: "unsupported",
-        reason:
-          "Tag columns are read-only — a document carries several tags, so edit them in the document view.",
-      };
+    // Dragging between tag columns retags the node: drop the source column's
+    // tag, add the target's. `updateNode` REPLACES the tag set on PATCH
+    // (src/nodes/service.ts), so sending the full next set both adds and
+    // removes in one write — the old "tag columns are read-only / PATCH
+    // unions tags" limitation no longer holds. `fromKey` (the column the card
+    // was dragged out of) disambiguates which tag to drop for a multi-tagged
+    // card; without it we only add.
+    case "tag": {
+      if (targetKey === UNCATEGORIZED) {
+        return {
+          kind: "unsupported",
+          reason: "Drop onto a tag column to add that tag.",
+        };
+      }
+      if (fromKey && fromKey === targetKey) {
+        return { kind: "unsupported", reason: "Already in this column." };
+      }
+      const ns = namespaceOf(config);
+      // Column key → the tag as stored, "#" and all; the existing set is
+      // normalized the same way so the drop actually removes the source tag.
+      const asTag = (key: string) => withHash(ns ? `${ns}:${key}` : key);
+      const removing =
+        fromKey && fromKey !== UNCATEGORIZED ? asTag(fromKey) : null;
+      const toTag = asTag(targetKey);
+      const next = new Set(node.tags.map(withHash));
+      if (removing) next.delete(removing);
+      // Nothing to remove and the target tag is already there → pure no-op.
+      if (!removing && next.has(toTag)) {
+        return { kind: "unsupported", reason: "Already in this column." };
+      }
+      next.add(toTag);
+      return { kind: "retag", tags: [...next] };
+    }
     case "status":
       return {
         kind: "unsupported",

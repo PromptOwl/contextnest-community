@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
-import { resolveNestPermission, isServerAdminUserId } from "../shared/access.js";
+import {
+  resolveNestPermission,
+  resolveNestAccess,
+  isServerAdminUserId,
+} from "../shared/access.js";
 import {
   createNest,
   importNest,
@@ -27,6 +31,7 @@ import {
   deleteUnsyncedFolder,
 } from "./unsynced-service.js";
 import { resolveCallerEmail } from "../governance/access-guard.js";
+import { grantCoversNode } from "../governance/grants-service.js";
 import { ValidationError, NotFoundError, ForbiddenError } from "../shared/errors.js";
 import {
   resolveUserRoles,
@@ -51,16 +56,46 @@ import { ANON_USER_ID } from "../shared/constants.js";
  * Rule: in open mode, anon-owned nests are the ungoverned commons —
  * anyone is effectively the owner.
  */
-async function effectivePermission(nestId: string, userId: string) {
-  if (config.AUTH_MODE === "open") {
-    const db = getDb();
-    const nest = (await db.get(
-      "SELECT user_id FROM nests WHERE id = ?",
-      [nestId],
-    )) as { user_id: string } | undefined;
-    if (nest && nest.user_id === ANON_USER_ID) return "owner" as const;
+/**
+ * As effectivePermission, but hands back the underlying facts too, so a caller
+ * that also needs "is this grant-only?" doesn't re-resolve the whole thing.
+ * `access.permission` is the RAW merge — "none" for a grantee — while the
+ * returned `permission` is the route-layer view.
+ */
+async function effectiveAccess(nestId: string, userId: string) {
+  // One fetch answers the open-mode commons check, the permission merge, and
+  // the grant check below — all three used to be separate round trips.
+  const access = await resolveNestAccess(nestId, userId);
+  if (config.AUTH_MODE === "open" && access.ownerId === ANON_USER_ID) {
+    return { permission: "owner" as const, access };
   }
-  return resolveNestPermission(nestId, userId);
+  const permission = access.permission;
+  // Someone shared a single document or folder holds no nest-wide permission,
+  // so resolveNestPermission answers "none" — and it must keep doing so, since
+  // app.ts routes exactly that answer into the per-node grant checks. At the
+  // route layer, though, "none" means 404, which 404'd the very nest they were
+  // just given a link into: the middleware admitted them, then the handlers
+  // told them it did not exist.
+  //
+  // Treat a grantee as a reader HERE, in the one helper every nest route
+  // shares, rather than per-handler. It widens nothing that matters: handlers
+  // that do real work (rename, delete, import, settings write) demand
+  // owner/admin and now answer 403 instead of 404, and every document read
+  // still runs through the grants themselves (listNodesForCaller and the
+  // middleware), so a grantee sees their slice and no more.
+  if (permission === "none" && access.hasGrant) {
+    return { permission: "read" as const, access };
+  }
+  return { permission, access };
+}
+
+async function effectivePermission(nestId: string, userId: string) {
+  return (await effectiveAccess(nestId, userId)).permission;
+}
+
+/** True when the caller reaches this nest ONLY through a share grant. */
+function isGrantOnly(access: { permission: string; hasGrant: boolean }) {
+  return access.permission === "none" && access.hasGrant;
 }
 
 export const nestRoutes = new Hono<AuthEnv>();
@@ -89,8 +124,45 @@ nestRoutes.get("/", async (c) => {
   // resolves to permission='read' (see resolveNestPermission), so the card
   // would mislabel them "Viewer" unless we surface their steward roles too.
   const callerEmail = await resolveCallerEmail(userId);
+  // Nests the caller reaches ONLY through a share grant (one document or one
+  // folder). resolveNestPermission returns "none" for them by design — a grant
+  // is not nest-wide access — so the card is labelled from these rows instead,
+  // and its counts/roster are scoped below. One query, not one per card.
+  const myGrantRows = (await db.all(
+    "SELECT nest_id, target FROM grants WHERE user_id = ?",
+    [userId],
+  )) as Array<{ nest_id: string; target: string }>;
+  const grantTargetsByNest = new Map<string, Array<{ target: string }>>();
+  for (const r of myGrantRows) {
+    const arr = grantTargetsByNest.get(r.nest_id) ?? [];
+    arr.push({ target: r.target });
+    grantTargetsByNest.set(r.nest_id, arr);
+  }
   const annotate = async (n: { id: string; user_id: string; stewardship_enabled?: number }) => {
-    const permission = await effectivePermission(n.id, userId);
+    const { permission, access } = await effectiveAccess(n.id, userId);
+    // Grant-only card: the caller reaches this nest ONLY through a share
+    // grant, so the card describes their slice (counts scoped below, roster
+    // withheld). The RAW merge on `access` is what distinguishes them —
+    // someone who is both a collaborator and a grantee is a normal reader.
+    if (
+      permission !== "owner" && // open-mode commons promotion outranks a grant
+      isGrantOnly(access)
+    ) {
+      const owner_email =
+        n.user_id === ANON_USER_ID
+          ? null
+          : ((await db.get(ownerEmailSql, [n.user_id])) as { email?: string } | undefined)
+              ?.email ?? null;
+      return {
+        ...n,
+        permission: "read" as const,
+        is_owner: false,
+        owner_email,
+        roles: ["viewer"],
+        grant_only: true,
+        stewardship_enabled: !!n.stewardship_enabled,
+      };
+    }
     const is_owner = permission === "owner";
     const needOwnerEmail = !is_owner && n.user_id !== ANON_USER_ID;
     // Role badge on shared cards. resolveGrantRoles merges the caller's RAW
@@ -117,6 +189,7 @@ nestRoutes.get("/", async (c) => {
       is_owner,
       owner_email,
       roles,
+      grant_only: false,
       stewardship_enabled: !!n.stewardship_enabled,
     };
   };
@@ -141,10 +214,15 @@ nestRoutes.get("/", async (c) => {
   // Coerce with Number(r.c) so document_count is a real number — otherwise the
   // dashboard banner's `sum + n.document_count` concatenates ("40"+"0"+"346"…)
   // instead of adding, producing a giant nonsense total.
+  // The same grouped scan also yields the newest version timestamp per nest,
+  // which is what "recent activity" means for a nest — the nests row itself
+  // only carries created_at.
   const docRows = (await db.all(
-    "SELECT nest_id, COUNT(DISTINCT node_id) AS c FROM node_versions GROUP BY nest_id",
-  )) as Array<{ nest_id: string; c: number }>;
+    `SELECT nest_id, COUNT(DISTINCT node_id) AS c, MAX(created_at) AS last_activity
+       FROM node_versions GROUP BY nest_id`,
+  )) as Array<{ nest_id: string; c: number; last_activity: string | null }>;
   const docByNest = new Map(docRows.map((r) => [r.nest_id, Number(r.c)]));
+  const activityByNest = new Map(docRows.map((r) => [r.nest_id, r.last_activity]));
   const collabRows = (await db.all(
     "SELECT nest_id, COUNT(*) AS c FROM nest_collaborators GROUP BY nest_id",
   )) as Array<{ nest_id: string; c: number }>;
@@ -175,14 +253,46 @@ nestRoutes.get("/", async (c) => {
     if (arr.length < 8) arr.push(r.email);
     collabEmailsByNest.set(r.nest_id, arr);
   }
-  const withMeta = out.map((n) => ({
-    ...n,
-    document_count: docByNest.get(n.id) ?? 0,
-    collaborator_count: collabByNest.get(n.id) ?? 0,
-    steward_count: stewardByNest.get(n.id) ?? 0,
-    steward_emails: stewardEmailsByNest.get(n.id) ?? [],
-    collaborator_emails: collabEmailsByNest.get(n.id) ?? [],
-  }));
+  // A grant-only card must describe the caller's slice, not the nest. The
+  // grouped counts above are nest-wide totals, and the people rows are the
+  // nest's roster — both would tell someone shared one document how many
+  // documents and which colleagues they cannot see. Count the node ids their
+  // grants actually cover (one query for all such nests) and blank the roster.
+  const grantOnlyIds = out.filter((n) => n.grant_only).map((n) => n.id);
+  const grantedDocsByNest = new Map<string, number>();
+  if (grantOnlyIds.length) {
+    const rows = (await db.all(
+      `SELECT DISTINCT nest_id, node_id FROM node_versions
+        WHERE nest_id IN (${grantOnlyIds.map(() => "?").join(",")})`,
+      grantOnlyIds,
+    )) as Array<{ nest_id: string; node_id: string }>;
+    for (const r of rows) {
+      const targets = grantTargetsByNest.get(r.nest_id) ?? [];
+      if (grantCoversNode(targets, r.node_id)) {
+        grantedDocsByNest.set(r.nest_id, (grantedDocsByNest.get(r.nest_id) ?? 0) + 1);
+      }
+    }
+  }
+  const withMeta = out.map((n) =>
+    n.grant_only
+      ? {
+          ...n,
+          document_count: grantedDocsByNest.get(n.id) ?? 0,
+          collaborator_count: 0,
+          steward_count: 0,
+          steward_emails: [] as string[],
+          collaborator_emails: [] as string[],
+        }
+      : {
+          ...n,
+          last_activity: activityByNest.get(n.id) ?? null,
+          document_count: docByNest.get(n.id) ?? 0,
+          collaborator_count: collabByNest.get(n.id) ?? 0,
+          steward_count: stewardByNest.get(n.id) ?? 0,
+          steward_emails: stewardEmailsByNest.get(n.id) ?? [],
+          collaborator_emails: collabEmailsByNest.get(n.id) ?? [],
+        },
+  );
   return c.json({ nests: withMeta });
 });
 
@@ -363,7 +473,7 @@ nestRoutes.get("/:nestId", async (c) => {
   const nestId = c.req.param("nestId")!;
   if (nestId === "unsynced") return handleUnsyncedList(c);
   const userId = c.get("userId");
-  const permission = await effectivePermission(nestId, userId);
+  const { permission, access } = await effectiveAccess(nestId, userId);
   if (permission === "none") {
     throw new NotFoundError("Nest not found");
   }
@@ -382,8 +492,19 @@ nestRoutes.get("/:nestId", async (c) => {
   // reviewer/editor needs their own rows to gate per-node affordances.
   const myStewards = await getStewardsForUser(nestId, email);
 
+  // A reader with no role at all is either a public reader or a share
+  // grantee. Label the grantee so the client can present a shared slice
+  // (viewer badge, no nest-wide affordances) instead of a bare nest.
+  const grant_only = roles.length === 0 && isGrantOnly(access);
+
   const nest = await getNest(nestId);
-  return c.json({ nest, permission, roles, myStewards });
+  return c.json({
+    nest,
+    permission,
+    roles: grant_only ? ["viewer"] : roles,
+    myStewards,
+    grant_only,
+  });
 });
 
 // PATCH /nests/:nestId — rename nest (and/or update description). Owner or

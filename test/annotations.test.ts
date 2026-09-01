@@ -11,7 +11,8 @@ import {
   MAX_CONTEXT_CHARS,
   MAX_QUOTE_CHARS,
 } from "../src/annotations/projection.js";
-import { listThreads } from "../src/annotations/service.js";
+import { listThreads, derivedAnnotationsId } from "../src/annotations/service.js";
+import { listNodesForCallerByEmail } from "../src/nodes/service.js";
 import type { AnnotationThread } from "../src/annotations/types.js";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -312,6 +313,22 @@ describe("annotations: hosted artifact + threaded comments", () => {
   });
 
   it("projects threads into a derived node the nest can pull", async () => {
+    // The feedback + anchor are readable as ordinary node content, so MCP /
+    // context assembly pulls them into the next iteration for free.
+    const derivedId = derivedAnnotationsId(nodeId);
+    const derived = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/nodes/${derivedId}`,
+      undefined,
+      alice.apiKey,
+    );
+    expect(derived.status).toBe(200);
+    expect(derived.data.node.content).toContain("Should be ARR not MRR.");
+    expect(derived.data.node.content).toContain('quote "MRR of $400K"');
+
+    // ...but commenting is not authoring: the projection stays out of the
+    // user-facing listing and the nest's document count.
     const nodes = await jsonRequest(
       app,
       "GET",
@@ -319,14 +336,13 @@ describe("annotations: hosted artifact + threaded comments", () => {
       undefined,
       alice.apiKey,
     );
-    const derived = nodes.data.nodes.find(
-      (n: any) => n.title === "Q3 Deck — Annotations",
-    );
-    expect(derived).toBeDefined();
-    // The feedback + anchor are readable as ordinary node content (so MCP /
-    // context assembly pulls them into the next iteration for free).
-    expect(derived.content).toContain("Should be ARR not MRR.");
-    expect(derived.content).toContain('quote "MRR of $400K"');
+    expect(
+      nodes.data.nodes.some((n: any) => n.id === derivedId),
+    ).toBe(false);
+
+    // MCP is the surface the projection exists for — it still sees it.
+    const forAgent = await listNodesForCallerByEmail(nestId, alice.email);
+    expect(forAgent.some((n) => n.id === derivedId)).toBe(true);
   });
 
   it("does NOT create a derived node when annotating a plain document", async () => {
@@ -394,17 +410,11 @@ describe("annotations: hosted artifact + threaded comments", () => {
     );
 
     // Pre-delete: a thread exists in SQLite and the derived node was minted.
+    // Checked on the agent-facing listing — the user-facing one hides it.
     expect(await listThreads(nestId, tempId)).toHaveLength(1);
-    let nodes = await jsonRequest(
-      app,
-      "GET",
-      `/nests/${nestId}/nodes`,
-      undefined,
-      alice.apiKey,
-    );
-    expect(
-      nodes.data.nodes.some((n: any) => n.title === "Temp Deck — Annotations"),
-    ).toBe(true);
+    const derivedId = derivedAnnotationsId(tempId);
+    let forAgent = await listNodesForCallerByEmail(nestId, alice.email);
+    expect(forAgent.some((n) => n.id === derivedId)).toBe(true);
 
     const del = await jsonRequest(
       app,
@@ -417,16 +427,8 @@ describe("annotations: hosted artifact + threaded comments", () => {
 
     // Post-delete: threads purged (no orphan rows) and derived node gone.
     expect(await listThreads(nestId, tempId)).toHaveLength(0);
-    nodes = await jsonRequest(
-      app,
-      "GET",
-      `/nests/${nestId}/nodes`,
-      undefined,
-      alice.apiKey,
-    );
-    expect(
-      nodes.data.nodes.some((n: any) => n.title === "Temp Deck — Annotations"),
-    ).toBe(false);
+    forAgent = await listNodesForCallerByEmail(nestId, alice.email);
+    expect(forAgent.some((n) => n.id === derivedId)).toBe(false);
   });
 });
 

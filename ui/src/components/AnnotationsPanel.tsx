@@ -225,13 +225,17 @@ export function AnnotationsPanel({
                   }
             }
             onFocus={commenting ? undefined : () => onSetCommentMode?.(true)}
+            // Off-mode copy names the click, not a prerequisite: the box turns
+            // comment mode on itself, so "turn on comment mode to comment" sent
+            // people looking for a switch they had already reached.
             placeholder={
               commenting
                 ? pendingAnchor
                   ? "Comment on the highlighted text…"
                   : "Add a comment…"
-                : "Turn on comment mode to comment…"
+                : "Click here to start commenting…"
             }
+            title={commenting ? undefined : "Click to turn on comment mode"}
             rows={2}
             className={`w-full rounded-md border px-3 py-2 text-sm resize-y ${
               commenting
