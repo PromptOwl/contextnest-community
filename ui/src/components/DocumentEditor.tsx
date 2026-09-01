@@ -1597,17 +1597,6 @@ export function DocumentEditor({
               Submit for review
             </Button>
           )}
-          {isOwnPendingReview && (
-            <Button
-              variant="outline"
-              onClick={() => void handleWithdrawSubmission()}
-              data-testid="document-editor-withdraw"
-              title="Withdraw this submission and return the document to Draft"
-            >
-              <Undo2 className="h-4 w-4 mr-2" />
-              Withdraw
-            </Button>
-          )}
           {/* NOT gated on isViewOnly: that flag answers "may this caller
               author?", and a reviewer-only steward is view-only by definition
               yet is exactly the person meant to act here. Gating approval on it
@@ -1893,10 +1882,25 @@ export function DocumentEditor({
           {isOwnPendingReview && (
             <Alert>
               <AlertCircle className="h-4 w-4" />
-              <AlertDescription>
-                This is still under review. Your edits update the same pending
-                submission — no need to withdraw and resubmit — and the steward
-                reviews your latest version.
+              <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className="flex-1 min-w-[16rem]">
+                  This is still under review. Your edits update the same pending
+                  submission — no need to withdraw and resubmit — and the steward
+                  reviews your latest version.
+                </span>
+                {/* Withdraw belongs with the sentence explaining the state, not
+                    in the header's action row (CU-wdqcq007pe). */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={() => void handleWithdrawSubmission()}
+                  data-testid="document-editor-withdraw"
+                  title="Withdraw this submission and return the document to Draft"
+                >
+                  <Undo2 className="h-3.5 w-3.5 mr-1.5" />
+                  Withdraw
+                </Button>
               </AlertDescription>
             </Alert>
           )}
