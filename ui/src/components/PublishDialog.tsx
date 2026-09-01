@@ -40,7 +40,9 @@ import {
   Eye,
   Ban,
 } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import * as api from "../lib/api";
+import { reads } from "../lib/queries";
 
 interface PublishDialogProps {
   nestId: string;
@@ -81,6 +83,10 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
   // cost anything until someone actually opens the panel.
   const [views, setViews] = useState<Record<string, api.PublicationView[]>>({});
   const [loadingViews, setLoadingViews] = useState<string | null>(null);
+  // Assume mail works until told otherwise, so a slow health read never blocks
+  // a gate that would have been fine.
+  const [emailReady, setEmailReady] = useState(true);
+  const qc = useQueryClient();
 
   async function refreshLinks() {
     setLoadingLinks(true);
@@ -96,8 +102,20 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
 
   useEffect(() => {
     refreshLinks();
+    // The email and invite gates are opened only by a mailed magic link, so
+    // they are unusable on a server with no mail transport. Read it from the
+    // cached health query rather than letting the server reject the publish
+    // after someone has typed out an allow-list.
+    qc.fetchQuery(reads.health())
+      .then((h) => setEmailReady(h.email_configured !== false))
+      .catch(() => setEmailReady(true)); // unknown → let the server decide
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nestId, nodeId]);
+
+  // Never leave a disabled gate selected.
+  useEffect(() => {
+    if (!emailReady && (mode === "email" || mode === "invite")) setMode("public");
+  }, [emailReady, mode]);
 
   async function handleCreate() {
     setError(null);
@@ -201,24 +219,46 @@ export function PublishDialog({ nestId, nodeId, nodeTitle, onClose }: PublishDia
               {MODES.map((m) => {
                 const Icon = m.icon;
                 const active = mode === m.value;
+                const needsMail = m.value === "email" || m.value === "invite";
+                const blocked = needsMail && !emailReady;
                 return (
                   <button
                     key={m.value}
                     type="button"
+                    disabled={blocked}
+                    title={
+                      blocked
+                        ? "This server has no email set up, so nobody could open the link."
+                        : undefined
+                    }
                     onClick={() => setMode(m.value)}
                     className={`flex flex-col items-start gap-1 rounded-lg border p-3 text-left transition-colors ${
-                      active ? "border-primary bg-primary/5" : "hover:bg-muted/50"
+                      blocked
+                        ? "cursor-not-allowed opacity-50"
+                        : active
+                          ? "border-primary bg-primary/5"
+                          : "hover:bg-muted/50"
                     }`}
                   >
                     <span className="flex items-center gap-2 text-sm font-semibold">
                       <Icon className="h-4 w-4" />
                       {m.label}
                     </span>
-                    <span className="text-xs text-muted-foreground">{m.hint}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {blocked ? "Needs email set up" : m.hint}
+                    </span>
                   </button>
                 );
               })}
             </div>
+
+            {!emailReady && (
+              <p className="text-xs text-muted-foreground">
+                Email and invite links are unavailable: this server has no mail
+                transport configured, so the one-time link they rely on could
+                never be delivered.
+              </p>
+            )}
 
             {mode === "code" && (
               <div>

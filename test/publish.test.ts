@@ -35,6 +35,10 @@ let nestId: string;
 
 beforeAll(async () => {
   env = setupTestEnv();
+  // The email and invite gates are refused outright on a server that cannot
+  // send mail, so give this suite a transport to exercise them against.
+  process.env.SMTP_URL = "smtp://localhost:1025";
+  process.env.NOTIFY_EMAIL_FROM = "publish-test@example.com";
   // Owner is the server admin so it can sync a steward roster below.
   app = await createTestApp("key", { superAdmins: ["owner@acme.com"] });
   owner = await registerUser(app, "owner@acme.com", "Owner");
@@ -51,7 +55,11 @@ beforeAll(async () => {
   );
 });
 
-afterAll(() => env.cleanup());
+afterAll(() => {
+  delete process.env.SMTP_URL;
+  delete process.env.NOTIFY_EMAIL_FROM;
+  env.cleanup();
+});
 
 describe("publish management", () => {
   it("owner publishes a document as a public link", async () => {
@@ -178,6 +186,61 @@ describe("code gate", () => {
     });
     expect(opened.status).toBe(200);
     expect(await opened.text()).toContain("hello world deck");
+  });
+});
+
+describe("mail-dependent gates", () => {
+  // A link whose only way in is a mailed one-time link is a dead link on a
+  // server with no mail transport — refuse it instead of minting it.
+  it("refuses email and invite links when the server cannot send mail", async () => {
+    const smtp = process.env.SMTP_URL;
+    const from = process.env.NOTIFY_EMAIL_FROM;
+    delete process.env.SMTP_URL;
+    delete process.env.NOTIFY_EMAIL_FROM;
+    try {
+      for (const access_mode of ["email", "invite"]) {
+        const res = await jsonRequest(
+          app,
+          "POST",
+          `/nests/${nestId}/publications`,
+          { node_id: "nodes/deck-one", access_mode, allowlist: ["a@b.test"] },
+          owner.apiKey,
+        );
+        expect(res.status).toBe(400);
+        expect(String(res.data.error)).toMatch(/email/i);
+      }
+      // Public and passcode links need no mail, so they still publish.
+      for (const body of [
+        { node_id: "nodes/deck-one", access_mode: "public" },
+        { node_id: "nodes/deck-one", access_mode: "code", code: "swordfish" },
+      ]) {
+        const ok = await jsonRequest(
+          app,
+          "POST",
+          `/nests/${nestId}/publications`,
+          body,
+          owner.apiKey,
+        );
+        expect(ok.status).toBe(201);
+      }
+    } finally {
+      process.env.SMTP_URL = smtp;
+      process.env.NOTIFY_EMAIL_FROM = from;
+    }
+  });
+
+  it("advertises mail readiness on /health so the dialog can gate itself", async () => {
+    const ready = await (await app.request("/health")).json();
+    expect(ready.email_configured).toBe(true);
+
+    const smtp = process.env.SMTP_URL;
+    delete process.env.SMTP_URL;
+    try {
+      const off = await (await app.request("/health")).json();
+      expect(off.email_configured).toBe(false);
+    } finally {
+      process.env.SMTP_URL = smtp;
+    }
   });
 });
 

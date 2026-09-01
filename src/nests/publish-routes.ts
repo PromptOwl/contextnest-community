@@ -10,10 +10,10 @@
  */
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
-import { ForbiddenError, NotFoundError } from "../shared/errors.js";
+import { ForbiddenError, NotFoundError, ValidationError } from "../shared/errors.js";
 import { canManageStewards } from "../governance/stewardship-service.js";
 import { requestBaseUrl } from "../shared/base-url.js";
-import { sendEmailToRecipient } from "../notify/email.js";
+import { sendEmailToRecipient, isEmailConfigured } from "../notify/email.js";
 import {
   createPublish,
   listPublish,
@@ -51,6 +51,14 @@ publishRoutes.post("/", async (c) => {
   }>();
 
   const mode = (body.access_mode ?? "public") as PublishMode;
+  // An email or invite link is opened ONLY by clicking a mailed magic link, so
+  // without a mail transport it is a link nobody — not even the person who was
+  // invited — can ever open. Refuse it rather than hand back a dead link.
+  if ((mode === "email" || mode === "invite") && !isEmailConfigured()) {
+    throw new ValidationError(
+      "Email and invite links need email set up on this server (SMTP_URL and NOTIFY_EMAIL_FROM). Use a public or passcode link instead.",
+    );
+  }
   const row = await createPublish({
     nestId,
     nodeId: (body.node_id ?? "").trim(),

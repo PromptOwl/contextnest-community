@@ -207,6 +207,8 @@ export async function getHealth() {
     subagent_max_depth?: number;
     subagent_max_children?: number;
     runner_key_configured?: boolean;
+    /** Mail transport is set up — email/invite publish gates need it. */
+    email_configured?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
