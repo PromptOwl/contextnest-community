@@ -192,11 +192,41 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
   return c.body(shell, 200, { "Content-Type": "text/html; charset=utf-8" });
 }
 
+// Show/hide icons for the passcode field, inline so the gate page still loads
+// nothing external (its `default-src` is wide open, but a gate that depends on
+// a CDN is a gate that breaks offline).
+const EYE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>`;
+const EYE_OFF_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c6.4 0 10 7 10 7a17.6 17.6 0 0 1-2.2 3.14M6.6 6.6A17.7 17.7 0 0 0 2 11s3.6 7 10 7a9 9 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m2 2 20 20"/></svg>`;
+
+/** Reveal toggle for the passcode field. Keeps the caret where it was, so
+ *  toggling mid-entry doesn't cost the reader their place. */
+const GATE_EYE_SCRIPT = `<script>
+  (function () {
+    var input = document.getElementById("cn-code");
+    var btn = document.getElementById("cn-eye");
+    btn.addEventListener("click", function () {
+      var show = input.type === "password";
+      var at = input.selectionStart;
+      input.type = show ? "text" : "password";
+      btn.innerHTML = show ? ${JSON.stringify(EYE_OFF_SVG)} : ${JSON.stringify(EYE_SVG)};
+      btn.setAttribute("aria-label", show ? "Hide code" : "Show code");
+      btn.setAttribute("aria-pressed", show ? "true" : "false");
+      input.focus();
+      try { input.setSelectionRange(at, at); } catch (e) {}
+    });
+  })();
+</script>`;
+
 /** The gate form (ordinary HTML — NOT sandboxed, so its form can post). */
 function gatePage(row: PublishRow, message?: string): string {
   const wantsCode = row.access_mode === "code";
+  // A passcode is typed from a slide, a QR, or someone reading it aloud, so
+  // let the reader check what they typed before submitting.
   const field = wantsCode
-    ? `<label>Access code<input name="code" type="password" autocomplete="off" required autofocus></label>`
+    ? `<label>Access code<span class="wrap">
+        <input id="cn-code" name="code" type="password" autocomplete="off" required autofocus>
+        <button type="button" id="cn-eye" class="eye" aria-label="Show code" aria-pressed="false">${EYE_SVG}</button>
+      </span></label>`
     : `<label>Your email<input name="email" type="email" autocomplete="email" required autofocus></label>`;
   const cta = wantsCode ? "Unlock" : "Send me a link";
   const note = wantsCode
@@ -213,14 +243,19 @@ function gatePage(row: PublishRow, message?: string): string {
     p{color:#78716c;margin:0 0 18px;font-size:14px}
     label{display:block;font-size:13px;font-weight:600;color:#44403c;margin-bottom:16px}
     input{display:block;width:100%;margin-top:6px;padding:10px 12px;border:1px solid #d6d3d1;border-radius:9px;font:inherit;box-sizing:border-box}
+    .wrap{display:block;position:relative}
+    .wrap input{padding-right:44px}
     button{width:100%;background:var(--indigo);color:#fff;font-weight:700;border:0;border-radius:9px;padding:11px;font-size:15px;cursor:pointer}
+    button.eye{position:absolute;top:6px;right:0;width:40px;height:calc(100% - 6px);background:none;border:0;padding:0;color:#78716c;display:grid;place-items:center;cursor:pointer}
+    button.eye:hover{color:#44403c}
+    button.eye svg{width:18px;height:18px;display:block}
     .err{color:#be123c;font-weight:600}
     .brand{font-size:12px;color:#a8a29e;margin:18px 0 0;text-align:center}
   </style></head><body><form class="card" method="POST" action="/p/${esc(row.slug)}/gate">
     <h1>Protected document</h1><p>${esc(note)}</p>${err}${field}
     <button type="submit">${cta}</button>
     <p class="brand">Secured by PromptOwl · ContextNest</p>
-  </form></body></html>`;
+  </form>${wantsCode ? GATE_EYE_SCRIPT : ""}</body></html>`;
 }
 
 /** What a reader sees when a link no longer works — revoked, expired, or never

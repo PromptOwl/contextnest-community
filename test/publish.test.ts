@@ -181,6 +181,37 @@ describe("code gate", () => {
   });
 });
 
+describe("passcode reveal", () => {
+  it("offers a show/hide toggle on the code gate, and not on the email gate", async () => {
+    const coded = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publications`,
+      { node_id: "nodes/deck-one", access_mode: "code", code: "swordfish" },
+      owner.apiKey,
+    );
+    const gate = await (await app.request(`/p/${coded.data.publish.slug}`)).text();
+    expect(gate).toContain('id="cn-eye"');
+    expect(gate).toContain('aria-label="Show code"');
+    // The field still starts masked.
+    expect(gate).toContain('type="password"');
+    // Inline JS no request can exercise — at least prove it parses.
+    const script = gate.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    expect(script).toBeTruthy();
+    expect(() => new Function(script!)).not.toThrow();
+
+    const mailed = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/publications`,
+      { node_id: "nodes/deck-one", access_mode: "email" },
+      owner.apiKey,
+    );
+    const emailGate = await (await app.request(`/p/${mailed.data.publish.slug}`)).text();
+    expect(emailGate).not.toContain('id="cn-eye"');
+  });
+});
+
 describe("email gate", () => {
   it("asks for an email instead of serving content", async () => {
     const created = await jsonRequest(
