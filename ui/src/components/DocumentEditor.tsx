@@ -62,6 +62,7 @@ import {
   Check,
   Copy,
   Star,
+  Undo2,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -1296,6 +1297,19 @@ export function DocumentEditor({
     await api.rejectNode(nestId, nodeId, note);
     await loadNode();
   };
+  // Cancel your own pending review from the document itself — back to Draft,
+  // rather than Delete being the only exit (CU-wdqcq007pe).
+  const handleWithdrawSubmission = async () => {
+    if (isNew) return;
+    try {
+      await api.cancelReview(nestId, nodeId);
+      toast.success("Submission withdrawn — back to Draft");
+      await loadNode();
+    } catch (err: any) {
+      console.error("[DocumentEditor] cancelReview failed", nestId, nodeId, err);
+      toast.error(err?.message || "Failed to withdraw submission");
+    }
+  };
   // Flag this doc for deletion — for callers without delete permission. Errors
   // stay inside the dialog (it keeps the typed reason); success closes it.
   const handleRequestDeletion = async (reason: string) => {
@@ -1581,6 +1595,17 @@ export function DocumentEditor({
             >
               <Send className="h-4 w-4 mr-2" />
               Submit for review
+            </Button>
+          )}
+          {isOwnPendingReview && (
+            <Button
+              variant="outline"
+              onClick={() => void handleWithdrawSubmission()}
+              data-testid="document-editor-withdraw"
+              title="Withdraw this submission and return the document to Draft"
+            >
+              <Undo2 className="h-4 w-4 mr-2" />
+              Withdraw
             </Button>
           )}
           {/* NOT gated on isViewOnly: that flag answers "may this caller

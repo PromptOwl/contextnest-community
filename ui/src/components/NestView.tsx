@@ -1435,6 +1435,19 @@ export function NestView({
     }
   };
 
+  // Cancel your own pending review — the document goes back to Draft rather
+  // than Delete being the only way out (CU-wdqcq007pe).
+  const withdrawSubmission = async (nodeId: string) => {
+    try {
+      await api.cancelReview(nestId, nodeId);
+      toast.success("Submission withdrawn — back to Draft");
+      fetchData();
+    } catch (err: any) {
+      console.error("[NestView] cancelReview failed", nestId, nodeId, err);
+      toast.error(err?.message || "Failed to withdraw submission");
+    }
+  };
+
   const handleSubmitReview = async (note: string, priority: string) => {
     if (!submitNode) return;
     try {
@@ -3403,16 +3416,31 @@ export function NestView({
                 </CardHeader>
                 <CardContent className="space-y-2">
                   {myPendingSubmissions.map((r) => (
-                    <button
+                    <div
                       key={r.id}
-                      onClick={() => onOpenDocument(r.nodeId)}
-                      className="w-full flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm hover:bg-muted/50"
+                      className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted/50"
                     >
-                      <span className="truncate">{r.title || r.nodeId}</span>
+                      <button
+                        onClick={() => onOpenDocument(r.nodeId)}
+                        className="flex-1 min-w-0 text-left truncate"
+                      >
+                        {r.title || r.nodeId}
+                      </button>
                       <Badge variant="secondary" className="text-[10px] shrink-0">
                         Awaiting review
                       </Badge>
-                    </button>
+                      {/* Your own submission, so the non-destructive exit
+                          belongs here too (CU-wdqcq007pe). */}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="shrink-0 h-7 px-2 text-muted-foreground"
+                        title="Withdraw this submission and return the document to Draft"
+                        onClick={() => void withdrawSubmission(r.nodeId)}
+                      >
+                        Withdraw
+                      </Button>
+                    </div>
                   ))}
                 </CardContent>
               </Card>
