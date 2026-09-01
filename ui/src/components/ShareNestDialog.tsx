@@ -27,16 +27,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import {
   Tabs, TabsContent, TabsList, TabsTrigger,
 } from "@/components/ui/tabs";
 import { Users, AlertCircle } from "lucide-react";
@@ -130,31 +120,6 @@ export function ShareNestDialog({
           </Button>
         </DialogFooter>
       </DialogContent>
-
-      {/* Outside-org publish acknowledgement — same guardrail the header
-          toggle uses; the write sends acknowledge_public:true. */}
-      <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This makes the nest readable by anyone on the internet, outside
-              your organization. Anyone with the URL will be able to read it.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setConfirmPublic(false);
-                void writeVisibility(true, true);
-              }}
-            >
-              Make public
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </Dialog>
   );
 }
