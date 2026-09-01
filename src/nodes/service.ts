@@ -9,6 +9,7 @@ import {
   isRejected,
   filterDocuments,
   DocumentNotFoundError,
+  NODE_TYPES,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir } from "node:fs/promises";
@@ -339,6 +340,20 @@ export const RUNNABLE_NODE_TYPES = ["agent", "skill"] as const;
 export function isRunnableType(type: string | undefined): boolean {
   return (RUNNABLE_NODE_TYPES as readonly string[]).includes(type || "");
 }
+
+/**
+ * Node types this server accepts on create: the engine's core NODE_TYPES plus
+ * the community extensions (agent/skill runnables, artifact, table). Anything
+ * outside this set is rejected with a 400 at the create choke point below —
+ * previously an unknown type slipped past here and surfaced as an opaque 500
+ * from deeper in the write path.
+ */
+export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
+  ...NODE_TYPES,
+  ...RUNNABLE_NODE_TYPES,
+  "artifact",
+  "table",
+]);
 
 export function toNodeResponse(node: ContextNode): NodeResponse {
   const fm = node.frontmatter;
@@ -1212,6 +1227,17 @@ async function createNodeOnce(
   }
   if (requestedType === "table" && !config.TYPE_TABLE_ENABLED) {
     throw new ValidationError("Table nodes are disabled on this server");
+  }
+
+  // Unknown types must fail as a clean 400 here — otherwise they slip through
+  // and throw an opaque 500 from deeper in the write path (the message gave a
+  // caller no idea the real problem was the `type` field).
+  if (!ACCEPTED_NODE_TYPES.has(requestedType)) {
+    throw new ValidationError(
+      `unknown node type "${requestedType}"; allowed: ${[...ACCEPTED_NODE_TYPES]
+        .sort()
+        .join(", ")}`,
+    );
   }
 
   if (input.schedule !== undefined && !isRunnableType(input.type)) {

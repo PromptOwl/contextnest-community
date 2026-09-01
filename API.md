@@ -1230,12 +1230,13 @@ Body (give `prompt` OR `selector`; everything else optional):
 - `selector` — explicit selector grammar (e.g. `#auth`). Wins over `prompt`.
 - `max_tokens` — budget, floored at 50, default 4000. Nodes past the budget are dropped (`trace.truncated_by_budget`).
 - 400 `prompt or selector is required` if both missing.
+- Each node carries a `url` deep link, and its context block a matching `_source: <url>_` line, so answers can cite sources. Built from `PUBLIC_BASE_URL`, falling back to the request origin; omitted when neither resolves.
 
 Response (200):
 ```json
 {
-  "context": "# Auth Overview\n\n_tags: #auth #security_\n\n# Auth\n\n...",
-  "nodes": [{ "id": "nodes/auth-overview", "title": "Auth Overview", "tags": ["#auth"], "type": "document" }],
+  "context": "# Auth Overview\n\n_tags: #auth #security_\n_source: http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview_\n\n# Auth\n\n...",
+  "nodes": [{ "id": "nodes/auth-overview", "title": "Auth Overview", "url": "http://localhost:3838/?nest=<nestId>&doc=nodes/auth-overview", "tags": ["#auth"], "type": "document" }],
   "trace": {
     "selector_used": "#auth",
     "from_prompt": "how does auth work",

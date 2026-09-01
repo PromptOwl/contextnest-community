@@ -134,6 +134,19 @@ export function docLink(
 }
 
 /**
+ * Canonical node → URL resolver: the one place a node's user-facing URL is
+ * built, so the future public `/p/:slug` site URL swaps in here instead of at
+ * every call site. `undefined` when nothing resolves, so callers omit the
+ * field rather than emit a broken href.
+ */
+export function resolveNodeUrl(
+  node: { id: string },
+  opts: { nestId: string; baseUrl?: string },
+): string | undefined {
+  return docLink(opts.nestId, node.id, opts.baseUrl) || undefined;
+}
+
+/**
  * Resolve the structured pieces the email connector needs for a document
  * event: the document title, its "Nest / Subfolder" path, and a direct link.
  * `baseUrl` is the request-derived origin used to build the link.
