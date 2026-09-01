@@ -40,6 +40,7 @@ import {
   cardColumnKeys,
   groupByColumn,
   layoutKey,
+  migrateLayout,
   planMove,
   resolveConfig,
   type BoardNode,
@@ -74,10 +75,10 @@ function loadConfig(nestId: string): BoardSettings {
       const layouts: Record<string, ColumnLayout> = {};
       for (const [k, v] of Object.entries(p.layouts ?? {})) {
         if (v && typeof v === "object") {
-          layouts[k] = {
+          layouts[k] = migrateLayout(k, {
             columnOrder: strings((v as any).columnOrder),
             hiddenColumns: strings((v as any).hiddenColumns),
-          };
+          });
         }
       }
       // Saves from before layouts existed kept one shared order; file it under
@@ -87,7 +88,8 @@ function loadConfig(nestId: string): BoardSettings {
         hiddenColumns: strings(p.hiddenColumns),
       };
       if (legacy.columnOrder || legacy.hiddenColumns) {
-        layouts[layoutKey({ dimension, tagNamespace })] ??= legacy;
+        const lk = layoutKey({ dimension, tagNamespace });
+        layouts[lk] ??= migrateLayout(lk, legacy);
       }
       return { dimension, tagNamespace, layouts };
     }
@@ -129,6 +131,9 @@ export function MaturityBoard({
   const [error, setError] = useState<string | null>(null);
   const [config, setConfig] = useState<BoardSettings>(() => loadConfig(nestId));
   const [dragId, setDragId] = useState<string | null>(null);
+  // The column a card was dragged out of — needed on the tag board to know
+  // which tag to drop when retagging a multi-tagged card.
+  const [dragFromCol, setDragFromCol] = useState<string | null>(null);
   const [dropCol, setDropCol] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Same derivation NestView uses. Starts false so a read-only viewer never
@@ -225,13 +230,15 @@ export function MaturityBoard({
   const handleDrop = useCallback(
     async (targetKey: string) => {
       const id = dragId;
+      const from = dragFromCol;
       setDragId(null);
+      setDragFromCol(null);
       setDropCol(null);
       if (!id) return;
       const node = nodes.find((n) => n.id === id);
       if (!node) return;
 
-      const plan = planMove(node, targetKey, effectiveConfig);
+      const plan = planMove(node, targetKey, effectiveConfig, from ?? undefined);
       if (plan.kind === "unsupported") {
         // Silent for a pure no-op (same column); explain the real blockers.
         if (plan.reason !== "Already in this column.") toast(plan.reason);
@@ -243,6 +250,12 @@ export function MaturityBoard({
         if (plan.kind === "move-folder") {
           await api.moveNode(nestId, id, plan.folder);
           toast.success("Moved");
+        } else if (plan.kind === "retag") {
+          // updateNode replaces the tag set, so the plan's full next set both
+          // adds the target column's tag and drops the source column's.
+          await api.updateNode(nestId, id, { tags: plan.tags });
+          // Not "Moved": this rewrites the doc's tags and saves a new version.
+          toast.success("Retagged");
         }
         await load();
       } catch (e: any) {
@@ -251,14 +264,16 @@ export function MaturityBoard({
         setBusy(false);
       }
     },
-    [dragId, nodes, effectiveConfig, nestId, load],
+    [dragId, dragFromCol, nodes, effectiveConfig, nestId, load],
   );
 
-  // Folder is the only dimension a drag can set. Status moves through the
-  // review workflow, and a tag column can hold the same doc more than once
-  // (a doc has many tags), so "moved out of this column" has no single
-  // meaning. Write access is the second, independent condition.
-  const dimensionDraggable = effectiveConfig.dimension === "folder";
+  // Folder and tag drags mutate the node (moveNode / retag). Status moves
+  // through the review workflow, so it stays non-draggable. On the tag board a
+  // card can sit in several columns; the source column (dragFromCol) tells us
+  // which tag to drop. Write access is the second, independent condition.
+  const dimensionDraggable =
+    effectiveConfig.dimension === "folder" ||
+    effectiveConfig.dimension === "tag";
   const draggable = dimensionDraggable && canEditDocs;
 
   // ── Column management: reorder (all dimensions) + hide/add (tag columns) ──
@@ -289,11 +304,24 @@ export function MaturityBoard({
   const hideColumn = useCallback(
     (key: string) =>
       updateLayout({
+        // On an explicit-column board columnOrder IS the column set, so a
+        // removed key must leave it too — otherwise the column stays alive
+        // until the next reorder silently drops it. Folder/status re-derive
+        // their columns from the data, so their saved order is left intact
+        // and a column that repopulates keeps the position it was given.
+        ...(effectiveConfig.explicitColumns
+          ? { columnOrder: orderedKeys.filter((k) => k !== key) }
+          : {}),
         hiddenColumns: [
           ...new Set([...(effectiveConfig.hiddenColumns ?? []), key]),
         ],
       }),
-    [effectiveConfig.hiddenColumns, updateLayout],
+    [
+      orderedKeys,
+      effectiveConfig.explicitColumns,
+      effectiveConfig.hiddenColumns,
+      updateLayout,
+    ],
   );
 
   /**
@@ -315,7 +343,9 @@ export function MaturityBoard({
       const v =
         effectiveConfig.dimension === "folder"
           ? slugifyFolderPath(value)
-          : value.trim();
+          : // Tag column keys are the bare value; "#doing" and "doing" are the
+            // same column (board-dimensions strips the stored "#").
+            value.trim().replace(/^#/, "");
       if (effectiveConfig.dimension === "folder" && !v) {
         // Slugifying to nothing is the same bound the server enforces: a name
         // with no letter or digit has no path to derive.
@@ -474,9 +504,20 @@ export function MaturityBoard({
                 : "Type a namespace (e.g. stage) to group by stage: values only."}
             </li>
             <li>
-              Cards are{" "}
-              <span className="font-medium text-foreground">read-only</span>;
-              drag a header to reorder.
+              {canEditDocs ? (
+                <>
+                  <span className="font-medium text-foreground">
+                    Drag a card
+                  </span>{" "}
+                  between columns to swap its tag; drag a header to reorder.
+                </>
+              ) : (
+                <>
+                  You have{" "}
+                  <span className="font-medium text-foreground">read-only</span>{" "}
+                  access, so cards can't be retagged. Drag a header to reorder.
+                </>
+              )}
             </li>
             <li>
               <span className="font-medium text-foreground">+</span> to add a
@@ -537,8 +578,12 @@ export function MaturityBoard({
       ) : error ? (
         <div className="text-sm text-destructive py-8">{error}</div>
       ) : columns.length === 0 ? (
+        // The tag board starts with no columns by design, so "no documents"
+        // would be a lie — the documents are there, the columns aren't yet.
         <div className="text-sm text-muted-foreground py-8">
-          No documents to show.
+          {effectiveConfig.dimension === "tag"
+            ? "No tag columns yet — add one above to start sorting documents into it."
+            : "No documents to show."}
         </div>
       ) : (
         <div className="flex gap-3 overflow-x-auto pb-4">
@@ -622,7 +667,9 @@ export function MaturityBoard({
                           title={
                             effectiveConfig.dimension === "folder"
                               ? "Remove this empty column"
-                              : "Remove this column — its cards move to Uncategorized"
+                              : // No Uncategorized catch-all on the tag board:
+                                // the cards leave the board, tags untouched.
+                                "Remove this column — its cards drop off the board; their tags aren't changed"
                           }
                         >
                           <X className="h-3.5 w-3.5" />
@@ -638,11 +685,13 @@ export function MaturityBoard({
                       draggable={draggable}
                       onDragStart={(e) => {
                         setDragId(n.id);
+                        setDragFromCol(col.key);
                         e.dataTransfer.effectAllowed = "move";
                         e.dataTransfer.setData("text/plain", n.id);
                       }}
                       onDragEnd={() => {
                         setDragId(null);
+                        setDragFromCol(null);
                         setDropCol(null);
                       }}
                       onClick={() => onOpenDocument(n.id)}

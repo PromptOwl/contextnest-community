@@ -222,7 +222,7 @@ tags:
       dev.apiKey,
     );
     expect(status).toBe(200);
-    // approve() runs safePublishDocument, which bumps engine version 1→2 and
+    // approve() publishes through the engine, which bumps version 1→2 and
     // re-pins approved_version to the bumped value (see review-service.ts).
     // versions[0] is the new v=2 row, written by approve() with
     // status='published' so the DB mirrors the engine's terminal state.

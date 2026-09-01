@@ -76,7 +76,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+  Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
@@ -4004,7 +4004,16 @@ export function NestView({
                   {prettyFolderPath(f)}
                 </SelectItem>
               ))}
-              <SelectItem value="__new__">New folder…</SelectItem>
+              {/* Below the rule: the entries above are destinations, this one
+                  starts a different flow. Undifferentiated, it read as one
+                  more existing folder. */}
+              <SelectSeparator />
+              <SelectItem value="__new__">
+                <span className="inline-flex items-center gap-1.5">
+                  <FolderPlus className="h-3.5 w-3.5" />
+                  New folder…
+                </span>
+              </SelectItem>
             </SelectContent>
           </Select>
           {moveNewFolder !== null && (

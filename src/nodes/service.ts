@@ -9,11 +9,12 @@ import {
   isRejected,
   filterDocuments,
   DocumentNotFoundError,
+  NODE_TYPES,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
 import { rename, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { safePublishDocument, serializeNodeSafe } from "../governance/safe-publish.js";
+import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
 import { inputJsonSchema } from "@promptowl/contextnest-engine/api";
 import {
@@ -23,6 +24,8 @@ import {
   ValidationError,
   ConflictError,
   ForbiddenError,
+  VaultBusyError,
+  isVaultLockTimeout,
 } from "../shared/errors.js";
 import { trackEvent } from "../telemetry/tracker.js";
 import * as versions from "../governance/version-service.js";
@@ -286,6 +289,12 @@ function toSafeError(err: unknown, context: string, message: string): AppError {
       "This document is rejected. Change its status before saving.",
     );
   }
+  // Vault write-lock timeout is retryable state, not an internal fault —
+  // keep it as a 503 the caller can act on instead of a generic 500.
+  if (isVaultLockTimeout(err)) {
+    console.error(`${context}:`, err);
+    return new VaultBusyError();
+  }
   console.error(`${context}:`, err);
   return new AppError(500, message);
 }
@@ -331,6 +340,20 @@ export const RUNNABLE_NODE_TYPES = ["agent", "skill"] as const;
 export function isRunnableType(type: string | undefined): boolean {
   return (RUNNABLE_NODE_TYPES as readonly string[]).includes(type || "");
 }
+
+/**
+ * Node types this server accepts on create: the engine's core NODE_TYPES plus
+ * the community extensions (agent/skill runnables, artifact, table). Anything
+ * outside this set is rejected with a 400 at the create choke point below —
+ * previously an unknown type slipped past here and surfaced as an opaque 500
+ * from deeper in the write path.
+ */
+export const ACCEPTED_NODE_TYPES: ReadonlySet<string> = new Set<string>([
+  ...NODE_TYPES,
+  ...RUNNABLE_NODE_TYPES,
+  "artifact",
+  "table",
+]);
 
 export function toNodeResponse(node: ContextNode): NodeResponse {
   const fm = node.frontmatter;
@@ -615,12 +638,18 @@ export async function listNodesForCaller(
   // retired node stays in this listing: here it is an unpublished document its
   // stewards may still need to act on, not one removed from retrieval. An
   // imported vault carrying `status: rejected` registers exactly that way.
-  const frontmatterFilters = {
+  //
+  // Split in two because the operation and `filterDocuments` spell the same
+  // flag differently: the op takes `include_retired`, the function takes
+  // `includeRetired`. Sending both used to be harmless (zod stripped the
+  // stranger); since engine 2.4.0 an unrecognized parameter is a hard error,
+  // so only `listFilters` may reach the op.
+  const listFilters = {
     ...(filters.type ? { type: filters.type } : {}),
     ...(filters.tag ? { tag: filters.tag } : {}),
     ...(filters.status ? { status: filters.status } : {}),
-    includeRetired: true,
   };
+  const frontmatterFilters = { ...listFilters, includeRetired: true };
 
   let documents: Array<{
     id: string;
@@ -645,7 +674,7 @@ export async function listNodesForCaller(
     }>(
       "context_list",
       {
-        ...frontmatterFilters,
+        ...listFilters,
         include_retired: true,
         ...(scopeInEngine
           ? {
@@ -665,7 +694,10 @@ export async function listNodesForCaller(
       nestId,
       filters.folder !== undefined ? { folder: filters.folder } : {},
     );
-    documents = filterDocuments(indexed, frontmatterFilters);
+    documents = filterDocuments(indexed, {
+      ...frontmatterFilters,
+      includeRetired: true,
+    });
   }
   // Narrow BEFORE the access gate and enrichment below — that is the whole
   // saving, since both cost per surviving document. Still applied even when
@@ -1195,6 +1227,17 @@ async function createNodeOnce(
   }
   if (requestedType === "table" && !config.TYPE_TABLE_ENABLED) {
     throw new ValidationError("Table nodes are disabled on this server");
+  }
+
+  // Unknown types must fail as a clean 400 here — otherwise they slip through
+  // and throw an opaque 500 from deeper in the write path (the message gave a
+  // caller no idea the real problem was the `type` field).
+  if (!ACCEPTED_NODE_TYPES.has(requestedType)) {
+    throw new ValidationError(
+      `unknown node type "${requestedType}"; allowed: ${[...ACCEPTED_NODE_TYPES]
+        .sort()
+        .join(", ")}`,
+    );
   }
 
   if (input.schedule !== undefined && !isRunnableType(input.type)) {
@@ -1977,7 +2020,7 @@ export async function moveNode(
     // serializeNodeSafe, not serializeDocument: `moved` came from
     // readDocument, so an empty `tags: []` on disk is back as
     // `tags: undefined` and the YAML dumper throws on it. Only published docs
-    // are already clean (approve rewrites them through safePublishDocument),
+    // are already clean (approve rewrites them through serializeNodeSafe),
     // which is why drafts and pending-review docs were the ones failing.
     await storage.writeDocument(newId, serializeNodeSafe(moved));
 

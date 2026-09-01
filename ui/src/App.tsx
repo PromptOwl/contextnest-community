@@ -999,6 +999,7 @@ export default function App() {
             initialSearch?: string;
             initialTags?: string[];
             initialFolder?: string;
+            tab?: string;
           }) =>
             setView({
               page: "nest",
@@ -1034,7 +1035,9 @@ export default function App() {
                   openDocument({ ...prev, breadcrumb: stack.slice(0, -1) });
                   return;
                 }
-                openNest();
+                // Documents tab, not the nest's default Overview — every
+                // caller of this is a "back to documents" affordance.
+                openNest({ tab: "documents" });
               }}
               onJumpBreadcrumb={(index) => {
                 // Jump to ancestor at index; drop entries after.
