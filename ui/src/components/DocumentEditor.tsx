@@ -80,6 +80,7 @@ import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { CodeHighlight } from "./CodeHighlight";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { PublishDialog } from "./PublishDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
@@ -213,6 +214,7 @@ export function DocumentEditor({
   // looking at a real nest the caller can administer.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
+  const [showPublish, setShowPublish] = useState(false);
   // Share THIS document with one person (a grant), as opposed to the whole
   // nest above. Same owner/admin gate the /grants routes enforce.
   const [showShareDoc, setShowShareDoc] = useState(false);
@@ -1797,6 +1799,15 @@ export function DocumentEditor({
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
               });
+            // Publishing hosts THIS document on the open web, so it sits with
+            // sharing rather than with the editing actions above.
+            if (canShare && !isNew)
+              moreActions.push({
+                label: "Publish",
+                icon: Share2,
+                testId: "document-editor-publish",
+                onSelect: () => setShowPublish(true),
+              });
             // Below admin only: this opens the REQUEST dialog, not a delete.
             // Admins delete from the nest list — this page has never carried a
             // real delete. Hidden once a flag is already pending.
@@ -3158,6 +3169,14 @@ export function DocumentEditor({
             /* Sharing changes don't alter this document's content; nothing
                to reload here. The nest list re-reads on next visit. */
           }}
+        />
+      )}
+      {showPublish && (
+        <PublishDialog
+          nestId={nestId}
+          nodeId={nodeId}
+          nodeTitle={title || nodeId}
+          onClose={() => setShowPublish(false)}
         />
       )}
       {leaveIntent && (

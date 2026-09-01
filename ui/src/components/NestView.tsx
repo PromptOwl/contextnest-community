@@ -64,6 +64,8 @@ export function NodeTypeIcon({
 }
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
+import { ShareNestDialog } from "./ShareNestDialog";
+import { PublishDialog } from "./PublishDialog";
 import { NestVisibilityControl } from "./NestVisibilityControl";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
@@ -442,6 +444,7 @@ export function NestView({
     setTypeFilter(f.type ?? "all");
   };
   const [reviewNode, setReviewNode] = useState<any | null>(null);
+  const [publishNode, setPublishNode] = useState<any | null>(null);
   const [submitNode, setSubmitNode] = useState<any | null>(null);
   const [versionNode, setVersionNode] = useState<any | null>(null);
   const [versionData, setVersionData] = useState<{
@@ -2805,6 +2808,12 @@ export function NestView({
                             <History className="h-3.5 w-3.5 mr-2" />
                             History
                           </DropdownMenuItem>
+                          {canManage && (
+                            <DropdownMenuItem onSelect={() => setPublishNode(node)}>
+                              <Share2 className="h-3.5 w-3.5 mr-2" />
+                              Publish
+                            </DropdownMenuItem>
+                          )}
                           <DropdownMenuSeparator />
                           {showDeleteAction && (
                             <DropdownMenuItem
@@ -4186,6 +4195,15 @@ export function NestView({
             setReviewNode(null);
             onOpenDocument(nodeId);
           }}
+        />
+      )}
+
+      {publishNode && (
+        <PublishDialog
+          nestId={nestId}
+          nodeId={publishNode.id}
+          nodeTitle={publishNode.title || publishNode.id}
+          onClose={() => setPublishNode(null)}
         />
       )}
 

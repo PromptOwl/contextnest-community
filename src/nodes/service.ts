@@ -2002,6 +2002,10 @@ export const NODE_KEYED_TABLES = [
   // A live capability token bound to one agent node — deleting the agent must
   // revoke it, or a later node at that id answers the old webhook.
   ["trigger_hooks", "agent_node"],
+  // A live public link pinned to one node. Deleting the document must kill the
+  // link, and moving it must carry the link along — otherwise /p/<slug> serves
+  // whatever node next takes that id.
+  ["publish", "node_id"],
   ["edges", "from_node"],
   ["edges", "to_node"],
 ] as const;

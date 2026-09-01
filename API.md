@@ -1514,6 +1514,59 @@ failure.
 
 ---
 
+## 8c. Publish links — public hosting of a single document
+
+Expose ONE document as a standalone page at a stable, unguessable
+`/p/<slug>` URL. Distinct from nest visibility (whole-nest read) and from
+grants (authenticated per-user sharing). Managing publish links is owner/admin
+only. Access modes: `public` (no auth), `code` (shared passcode), `email`
+(viewer enters an email → one-time magic link → access logged), `invite`
+(same, but only allow-listed emails get a link). Every served view is logged;
+links are revocable and can carry `expires_at`.
+
+### POST `/nests/:nestId/publications` (owner/admin)
+Body: `{ node_id, access_mode?: "public"|"email"|"code"|"invite",
+comments_enabled?: bool, watermark?: bool, no_download?: bool,
+code?: string (code mode), allowlist?: string[] (invite mode),
+expires_at?: ISO }`. → `201 { publish, link }`.
+
+`watermark` stamps the viewer's email across the page — email/invite gates only,
+since the other two identify nobody. `no_download` blocks copy, right-click,
+drag and printing; both are deterrents, not protection (screenshots and
+developer tools still work). `400` when `node_id` names no document in the nest,
+or when `email`/`invite` is requested on a server with no mail transport
+(`SMTP_URL` + `NOTIFY_EMAIL_FROM`) — their one-time link could never be sent.
+
+### GET `/nests/:nestId/publications` (owner/admin)
+List this nest's publish links with their `link` URLs.
+
+### GET `/nests/:nestId/publications/:id/views` (owner/admin)
+The access log — `{ count, views: [{ email, created_at }] }`.
+
+### DELETE `/nests/:nestId/publications/:id` (owner/admin)
+Revoke — the link 404s immediately.
+
+### Public render surface (no auth chain)
+- `GET /p/:slug` — the document, a gate form (email/code/invite), or — when
+  `comments_enabled` — a reader shell framing the document beside the comment
+  control. Document bodies are served under the strict artifact sandbox
+  (opaque origin); markdown nodes are rendered server-side.
+- `GET /p/:slug/view` — the document itself, always sandboxed. The shell frames
+  it; gated independently, so being the frame source is not authorization.
+- `POST /p/:slug/gate` — submit a code (unlock) or an email (send magic link).
+  Rate limited per link per IP.
+- `GET /p/:slug/verify?token=` — consume a magic link → set session cookie → open.
+  Invite mode re-checks the allow-list here, not only when the link was sent.
+- `POST /p/:slug/comments` — JSON `{ body, email? }`, from the shell's modal.
+  Needs the gate cleared and an identifying email; lands as an unanchored
+  annotation thread for stewards, never on the published page.
+
+Only the approved version is ever served — a document with no approved snapshot
+404s rather than exposing a draft. A revoked, expired or unknown slug answers
+every route above with the same HTML notice, never a hint about which it was.
+
+---
+
 ## 9b. Workflow plane ("turing")
 
 **Feature-flagged — every route below `404`s unless `FEATURE_WORKFLOW_PLANE=true`** (Settings → Workflow plane). Typed edges, an edge-type registry, and governed runs. Full contract in [`WORKFLOW_PLANE.md`](./WORKFLOW_PLANE.md). Reads are read-tier, mutations write-tier via the standard nest gate.

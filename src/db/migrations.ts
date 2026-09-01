@@ -1359,6 +1359,67 @@ export function runMigrations(db: Database.Database): void {
     })();
     recordMigration("036_node_index");
   }
+
+  // 037: Publish — gated public hosting of a single document (CU-wdqcpzzp7y).
+  //   `publish` holds one shareable /p/<slug> link per document with an access
+  //   mode; `access_grant` is the per-publish record store (invite allow-list,
+  //   one-time magic-link tokens, cookie sessions, and the view log), keyed by
+  //   `kind`. Not in the base DDL — additive feature tables.
+  if (!hasMigration("037_publish")) {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS publish (
+          id TEXT PRIMARY KEY,
+          nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+          node_id TEXT NOT NULL,
+          slug TEXT NOT NULL,
+          access_mode TEXT NOT NULL DEFAULT 'public'
+            CHECK(access_mode IN ('public','email','code','invite')),
+          code_hash TEXT,
+          comments_enabled INTEGER NOT NULL DEFAULT 0,
+          watermark INTEGER NOT NULL DEFAULT 0,
+          no_download INTEGER NOT NULL DEFAULT 0,
+          created_by TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          expires_at TEXT,
+          revoked_at TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_slug ON publish(slug);
+        CREATE INDEX IF NOT EXISTS idx_publish_nest ON publish(nest_id, node_id);
+
+        CREATE TABLE IF NOT EXISTS access_grant (
+          id TEXT PRIMARY KEY,
+          publish_id TEXT NOT NULL REFERENCES publish(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL
+            CHECK(kind IN ('invite','link','session','view')),
+          email TEXT,
+          token_hash TEXT,
+          expires_at TEXT,
+          used_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_access_grant_publish ON access_grant(publish_id, kind);
+        CREATE INDEX IF NOT EXISTS idx_access_grant_token ON access_grant(token_hash);
+      `);
+    })();
+    recordMigration("037_publish");
+  }
+
+  // 037b: the viewer overlays (watermark / no-download). Declared inline in the
+  // CREATE TABLE above, so this ALTER only fires for a database that ran an
+  // earlier build of 037 — same inline-plus-explicit-ALTER pattern the teams
+  // and prime columns use.
+  {
+    const publishCols = (
+      db.prepare("PRAGMA table_info(publish)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (publishCols.length && !publishCols.includes("watermark")) {
+      db.exec("ALTER TABLE publish ADD COLUMN watermark INTEGER NOT NULL DEFAULT 0");
+    }
+    if (publishCols.length && !publishCols.includes("no_download")) {
+      db.exec("ALTER TABLE publish ADD COLUMN no_download INTEGER NOT NULL DEFAULT 0");
+    }
+  }
 }
 
 /**

@@ -207,6 +207,8 @@ export async function getHealth() {
     subagent_max_depth?: number;
     subagent_max_children?: number;
     runner_key_configured?: boolean;
+    /** Mail transport is set up — email/invite publish gates need it. */
+    email_configured?: boolean;
     suspended_reason?: string;
   }>("/health");
 }
@@ -1648,6 +1650,66 @@ export async function rejectExternalEdit(
     `/nests/${nestId}/nodes/${nodeId}/external-edits/${suggestionId}/reject`,
     { method: "POST", body: JSON.stringify({ reason }) },
   );
+}
+
+// ─── Publish (gated public hosting of one document at /p/<slug>) ─────────
+
+export type PublishMode = "public" | "email" | "code" | "invite";
+
+export interface Publication {
+  id: string;
+  slug: string;
+  node_id: string;
+  access_mode: PublishMode;
+  comments_enabled: boolean;
+  watermark: boolean;
+  no_download: boolean;
+  created_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  link?: string;
+}
+
+export interface PublicationView {
+  email: string | null;
+  created_at: string;
+}
+
+export async function listPublications(nestId: string) {
+  return request<{ count: number; publishes: Publication[] }>(
+    `/nests/${nestId}/publications`,
+  );
+}
+
+export async function createPublication(
+  nestId: string,
+  data: {
+    node_id: string;
+    access_mode: PublishMode;
+    comments_enabled?: boolean;
+    watermark?: boolean;
+    no_download?: boolean;
+    code?: string | null;
+    allowlist?: string[];
+    expires_at?: string | null;
+  },
+) {
+  return request<{ publish: Publication; link: string }>(
+    `/nests/${nestId}/publications`,
+    { method: "POST", body: JSON.stringify(data) },
+  );
+}
+
+export async function listPublicationViews(nestId: string, publishId: string) {
+  return request<{ count: number; views: PublicationView[] }>(
+    `/nests/${nestId}/publications/${publishId}/views`,
+  );
+}
+
+export async function revokePublication(nestId: string, publishId: string) {
+  return request<{ revoked: boolean }>(`/nests/${nestId}/publications/${publishId}`, {
+    method: "DELETE",
+  });
 }
 
 // ─── Sharing ────────────────────────────────────────────────────────────
