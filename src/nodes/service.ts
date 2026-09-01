@@ -10,9 +10,10 @@ import {
   filterDocuments,
   DocumentNotFoundError,
   NODE_TYPES,
+  generateIndexMd,
 } from "@promptowl/contextnest-engine";
 import type { ContextNode, NestStorage } from "@promptowl/contextnest-engine";
-import { rename, mkdir } from "node:fs/promises";
+import { rename, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { serializeNodeSafe } from "../governance/safe-publish.js";
 import { engineCache, engineApi, opContext } from "./engine.js";
@@ -896,12 +897,73 @@ function withSubtreeTotals(
 }
 
 /**
- * The nest's folders, WITHOUT touching the vault.
+ * Create a folder with nothing in it.
  *
- * A navigable tree only needs the folder each document sits in, which the DB
- * mirror stores as a column — so this is one GROUP BY rather than a directory
- * walk (`context_folders`) or a full crawl (the id-derived fallback it used
- * before), and it stays correct on a nest the process has never opened.
+ * A folder is a real directory in the vault, so making one means creating that
+ * directory — not seeding a placeholder document, which is what "New folder"
+ * used to do and which then counted as content everywhere (CU-wdqcpzzzut).
+ *
+ * The directory is created by writing the folder's INDEX.md, the same derived
+ * summary `regenerateIndex` maintains for every other folder: it mkdir -p's on
+ * the way in, discovery skips it (DERIVED_VAULT_FILES), and a regeneration
+ * only ever rewrites index files — it never prunes one. Returns the slugified
+ * path actually created.
+ */
+export async function createEmptyFolder(
+  nestId: string,
+  folder: string,
+): Promise<string> {
+  const segments = folderToSegments(folder);
+  if (segments.length === 0) {
+    throw new ValidationError("folder is required");
+  }
+  const path = segments.join("/");
+  const prefix = await storagePrefix(nestId);
+  const vaultPath = prefix ? `${prefix}/${path}` : path;
+  const title = segments[segments.length - 1]!
+    .replace(/-/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const { storage } = await engineCache.get(nestId);
+  await storage.writeIndexMd(vaultPath, generateIndexMd(vaultPath, title, []));
+  return path;
+}
+
+/**
+ * Folder paths that exist in the vault as directories, community-dialect
+ * (no `nodes/` prefix). Directory entries only — no document is opened.
+ *
+ * The DB mirror derives folders from the documents in them, so a folder
+ * holding nothing is invisible to it. This is how an empty one is still a
+ * folder (CU-wdqcpzzzut): it is a real directory on disk either way.
+ */
+async function vaultFolderPaths(
+  nestId: string,
+  opts: { folder?: string; recursive?: boolean } = {},
+): Promise<string[]> {
+  const prefix = await storagePrefix(nestId);
+  const scope = [prefix, opts.folder].filter(Boolean).join("/");
+  const { storage } = await engineCache.get(nestId);
+  const entries = await storage.listFolders({
+    ...(scope ? { folder: scope } : {}),
+    ...(opts.recursive === false ? { recursive: false } : {}),
+  });
+  return entries
+    .map((e) =>
+      prefix && e.path.startsWith(`${prefix}/`)
+        ? e.path.slice(prefix.length + 1)
+        : e.path,
+    )
+    .filter(Boolean);
+}
+
+/**
+ * The nest's folders, from the DB mirror plus the vault's directory shape.
+ *
+ * Document counts come from the mirror, which stores each document's folder as
+ * a column — one GROUP BY rather than a full crawl (the id-derived fallback it
+ * used before), correct on a nest this process has never opened. Folders with
+ * no document of their own can only come from the vault, so a paths-only walk
+ * (no file is opened) fills those in at count 0.
  *
  * `folder` is a community folder path ("" = nest root), NOT an id prefix; the
  * `nodes/` storage root is added here so callers keep speaking one dialect.
@@ -917,6 +979,9 @@ export async function listNestFolders(
   if (opts.folder !== undefined) assertSafeFolder(opts.folder);
   await ensureNodeIndex(nestId);
   const counts = new Map<string, number>();
+  // Directories first, so a folder holding nothing is still a folder; the
+  // mirror's counts below win wherever it knows the folder.
+  for (const path of await vaultFolderPaths(nestId, opts)) counts.set(path, 0);
   for (const { path, count } of await indexedFolderCounts(nestId)) {
     counts.set(path, count);
     // Ancestors with no document of their own still need a row — a level that
@@ -1009,6 +1074,8 @@ export async function nestCensus(
     const segs = folder.split("/");
     for (let i = 1; i <= segs.length; i++) paths.add(segs.slice(0, i).join("/"));
   }
+  // Folders holding no document — same vault walk listNestFolders merges.
+  for (const path of await vaultFolderPaths(nestId)) paths.add(path);
   // Same roll-up the folders endpoint uses — the two describe the same tree
   // and must not drift.
   const folders = withSubtreeTotals(
@@ -2237,6 +2304,10 @@ export async function deleteFolder(
   const docs = await storage.discoverDocuments();
   const targets = docs.map((d) => d.id).filter((id) => isIdUnderFolder(id, rel));
   if (targets.length === 0) {
+    // A folder holding no document is still a directory in the vault (an
+    // explicitly created one, or the remains of a folder whose documents have
+    // all gone), so deleting it is removing that directory.
+    if (await removeVaultFolder(nestId, rel)) return [];
     throw new NotFoundError(`No documents found under folder: ${folder}`);
   }
 
@@ -2258,5 +2329,27 @@ export async function deleteFolder(
       );
     }
   }
+  // The documents are gone but the directory (and its generated INDEX.md) is
+  // not — and a directory is a folder now, so leaving it would keep the folder
+  // in the tree after the user deleted it.
+  await removeVaultFolder(nestId, rel);
   return deleted;
+}
+
+/**
+ * Remove a folder's directory from the vault. Returns false when there was no
+ * such directory. `rel` is community-dialect and always slugified segments, so
+ * it cannot climb out of the nest.
+ */
+async function removeVaultFolder(nestId: string, rel: string): Promise<boolean> {
+  if (!rel) return false;
+  const prefix = await storagePrefix(nestId);
+  const dir = join(resolveNestPath(nestId), ...(prefix ? [prefix] : []), ...rel.split("/"));
+  try {
+    await stat(dir);
+  } catch {
+    return false;
+  }
+  await rm(dir, { recursive: true, force: true });
+  return true;
 }

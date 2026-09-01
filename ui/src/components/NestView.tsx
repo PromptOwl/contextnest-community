@@ -470,13 +470,10 @@ export function NestView({
     if (newFolderCheck.error) return;
     setCreatingFolder(true);
     try {
-      // Folders are path-derived — seed one with a starter node so it appears
-      // and is immediately usable. Nesting works via "parent/child".
-      await api.createNode(nestId, {
-        title: "Overview",
-        content: `# ${folder.split("/").pop()}\n\nStart here.\n`,
-        folder,
-      });
+      // Folders are path-derived, so the server records the path rather than
+      // seeding a starter document that would count as real content
+      // (CU-wdqcpzzzut). Nesting works via "parent/child".
+      await api.createFolder(nestId, folder);
       setNewFolderPath("");
       setShowNewFolder(false);
       fetchData();
@@ -3922,8 +3919,8 @@ export function NestView({
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
             Name the folder. Nest it with a slash — e.g.{" "}
-            <code className="text-xs">gtm/deals</code>. It's seeded with a starter
-            document so it shows up right away.
+            <code className="text-xs">gtm/deals</code>. It starts empty; add
+            documents to it whenever you like.
           </p>
           <Input
             autoFocus
