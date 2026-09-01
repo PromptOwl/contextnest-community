@@ -617,6 +617,16 @@ export function OntologyGraphView({
             </div>
             {!signals ? (
               <p className="text-xs text-muted-foreground">—</p>
+            ) : (graph?.nodes.length ?? 0) === 0 ? (
+              // With nothing to govern or connect, "every category has a
+              // steward" and "no orphans" are vacuously true and read as a
+              // clean bill of health for an empty nest (CU-wdqcq0042r).
+              <p className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">
+                  No documents yet
+                </span>{" "}
+                — add content to see governance coverage and connection gaps.
+              </p>
             ) : (
               <div className="space-y-3 text-sm">
                 <GapRow
