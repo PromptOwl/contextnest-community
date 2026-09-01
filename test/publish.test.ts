@@ -684,5 +684,16 @@ describe("revoke", () => {
     expect(del.status).toBe(200);
     const res = await app.request(`/p/${slug}`);
     expect(res.status).toBe(404);
+    // A reader lands here in a browser, so it has to read as a page — not the
+    // raw JSON error the API layer would otherwise hand back.
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const body = await res.text();
+    expect(body).toContain("This link is no longer available");
+    expect(body).not.toContain('{"error"');
+    // One message for revoked and unknown alike: saying which would confirm
+    // that this slug once existed.
+    const unknown = await app.request("/p/no-such-slug-at-all");
+    expect(unknown.status).toBe(404);
+    expect(await unknown.text()).toContain("This link is no longer available");
   });
 });

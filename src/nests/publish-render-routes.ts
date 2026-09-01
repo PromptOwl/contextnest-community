@@ -18,7 +18,6 @@
  */
 import { Hono } from "hono";
 import MarkdownIt from "markdown-it";
-import { NotFoundError } from "../shared/errors.js";
 import { normalizeEmail } from "../shared/email.js";
 import { isEmailish } from "../config.js";
 import { applyArtifactSandboxHeaders } from "../shared/artifact-sandbox.js";
@@ -167,12 +166,12 @@ async function renderPublished(c: any, row: PublishRow, viewerEmail: string | nu
   } catch {
     // The source node moved or was removed since it was published. Deliberately
     // opaque — a public 404 must not confirm which node ids exist.
-    throw new NotFoundError("Not found");
+    return c.html(unavailablePage(), 404);
   }
   // A null version means readArtifact found no approved snapshot and fell back
   // to the live body. Serving that would put an unapproved draft on the open
   // web, so a document that has never been approved simply has nothing to show.
-  if (artifact.version == null) throw new NotFoundError("Not found");
+  if (artifact.version == null) return c.html(unavailablePage(), 404);
   const type = String(artifact.type ?? "document");
   const body = artifact.html ?? "";
   const isHtml = type === "artifact" || /^\s*<(?:!doctype|html)\b/i.test(body);
@@ -222,6 +221,25 @@ function gatePage(row: PublishRow, message?: string): string {
     <button type="submit">${cta}</button>
     <p class="brand">Secured by PromptOwl · ContextNest</p>
   </form></body></html>`;
+}
+
+/** What a reader sees when a link no longer works — revoked, expired, or never
+ *  real. Deliberately ONE message for all three: saying "revoked" rather than
+ *  "expired" (or "no such link") would confirm which slugs exist. A person
+ *  holding a dead link needs to know to ask for a new one, not which of the
+ *  three it was. */
+function unavailablePage(): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Link unavailable</title><style>
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f4f5;color:#1c1917;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+    .card{background:#fff;border:1px solid #e7e5e4;border-radius:14px;box-shadow:0 4px 24px rgba(20,42,128,.08);padding:32px 34px;max-width:420px;width:calc(100% - 32px);text-align:center}
+    h1{font-size:20px;color:#142a80;margin:0 0 8px}
+    p{color:#78716c;margin:0;font-size:14px}
+    .brand{font-size:12px;color:#a8a29e;margin:18px 0 0}
+  </style></head><body><div class="card">
+    <h1>This link is no longer available</h1>
+    <p>It may have been revoked by its owner, or it may have expired. Ask whoever shared it with you for a new link.</p>
+    <p class="brand">Secured by PromptOwl · ContextNest</p>
+  </div></body></html>`;
 }
 
 function sentPage(): string {
@@ -347,7 +365,7 @@ async function resolveViewer(
 publishRenderRoutes.get("/:slug", async (c) => {
   const slug = c.req.param("slug");
   const row = await publish.getPublishBySlug(slug);
-  if (!publish.isLivePublish(row)) throw new NotFoundError("Not found");
+  if (!publish.isLivePublish(row)) return c.html(unavailablePage(), 404);
 
   const viewer = await resolveViewer(c, row);
   if (!viewer) return c.html(gatePage(row));
@@ -367,9 +385,9 @@ publishRenderRoutes.get("/:slug", async (c) => {
 publishRenderRoutes.get("/:slug/view", async (c) => {
   const slug = c.req.param("slug");
   const row = await publish.getPublishBySlug(slug);
-  if (!publish.isLivePublish(row)) throw new NotFoundError("Not found");
+  if (!publish.isLivePublish(row)) return c.html(unavailablePage(), 404);
   const viewer = await resolveViewer(c, row);
-  if (!viewer) throw new NotFoundError("Not found");
+  if (!viewer) return c.html(unavailablePage(), 404);
   return renderPublished(c, row, viewer.email);
 });
 
@@ -378,7 +396,7 @@ publishRenderRoutes.post("/:slug/comments", async (c) => {
   const slug = c.req.param("slug");
   const row = await publish.getPublishBySlug(slug);
   if (!publish.isLivePublish(row) || row.comments_enabled !== 1) {
-    throw new NotFoundError("Not found");
+    return c.json({ error: "Not found" }, 404);
   }
   // Posting requires clearing the document's own gate, so an unauthenticated
   // writer can never appear on a gated document.
@@ -415,7 +433,7 @@ publishRenderRoutes.post("/:slug/comments", async (c) => {
 publishRenderRoutes.post("/:slug/gate", async (c) => {
   const slug = c.req.param("slug");
   const row = await publish.getPublishBySlug(slug);
-  if (!publish.isLivePublish(row)) throw new NotFoundError("Not found");
+  if (!publish.isLivePublish(row)) return c.html(unavailablePage(), 404);
 
   // Anonymous endpoint: without a clamp, the code gate is an unlimited guessing
   // oracle against a human-chosen passcode, and the email branch is an open
@@ -462,7 +480,7 @@ publishRenderRoutes.post("/:slug/gate", async (c) => {
 publishRenderRoutes.get("/:slug/verify", async (c) => {
   const slug = c.req.param("slug");
   const row = await publish.getPublishBySlug(slug);
-  if (!publish.isLivePublish(row)) throw new NotFoundError("Not found");
+  if (!publish.isLivePublish(row)) return c.html(unavailablePage(), 404);
   const email = await publish.consumeMagicLink(row.id, c.req.query("token") ?? "");
   if (!email) {
     return c.html(gatePage(row, "That link is invalid or has expired. Request a new one."), 401);
