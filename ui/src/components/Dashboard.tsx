@@ -552,13 +552,22 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                           aria-label="Mark as read"
                           className="shrink-0 rounded p-1 text-muted-foreground hover:bg-amber-500/20 hover:text-foreground"
                           onClick={async () => {
-                            await api.markNotificationsRead([n.id]);
-                            setWork((prev) => ({
-                              ...prev,
-                              notifications: (prev.notifications ?? []).filter(
-                                (x) => x.id !== n.id,
-                              ),
-                            }));
+                            try {
+                              await api.markNotificationsRead([n.id]);
+                              setWork((prev) => ({
+                                ...prev,
+                                notifications: (
+                                  prev.notifications ?? []
+                                ).filter((x) => x.id !== n.id),
+                              }));
+                            } catch (err: any) {
+                              // Same feedback the row's siblings give — a
+                              // silent failure left the row sitting there
+                              // with no explanation.
+                              toast.error(
+                                err?.message || "Failed to mark as read",
+                              );
+                            }
                           }}
                         >
                           <Check className="h-3.5 w-3.5" />

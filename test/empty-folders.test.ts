@@ -4,7 +4,7 @@
  * starter document it used to seed (which then counted as real content).
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   setupTestEnv,
@@ -109,6 +109,35 @@ describe("nodes: empty folders", () => {
     );
     const row = folders.data.folders.find((f: any) => f.path === "gtm/deals");
     expect(row.count).toBe(1);
+  });
+
+  it("creating a folder that already exists leaves its content alone", async () => {
+    const again = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/folders`,
+      { folder: "gtm/deals" },
+      dev.apiKey,
+    );
+    expect(again.status).toBe(201);
+
+    // The document filed there in the previous test is untouched, and the
+    // folder's generated index was not replaced by an empty one.
+    const folders = await jsonRequest(
+      app,
+      "GET",
+      `/nests/${nestId}/folders`,
+      undefined,
+      dev.apiKey,
+    );
+    expect(
+      folders.data.folders.find((f: any) => f.path === "gtm/deals").count,
+    ).toBe(1);
+    const index = readFileSync(
+      join(env.dataDir, "nests", nestId, "nodes", "gtm", "deals", "INDEX.md"),
+      "utf-8",
+    );
+    expect(index).toContain("Pipeline");
   });
 
   it("deleting an empty folder removes it from the tree", async () => {

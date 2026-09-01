@@ -920,6 +920,10 @@ export async function createEmptyFolder(
   const path = segments.join("/");
   const prefix = await storagePrefix(nestId);
   const vaultPath = prefix ? `${prefix}/${path}` : path;
+  // Already a folder: writing the index again would replace a real summary
+  // with an empty one until the next regeneration. Creating what exists is a
+  // no-op, not an error — a retry of the same name should be harmless.
+  if (await vaultFolderExists(nestId, path)) return path;
   const title = segments[segments.length - 1]!
     .replace(/-/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
@@ -1074,7 +1078,11 @@ export async function nestCensus(
     const segs = folder.split("/");
     for (let i = 1; i <= segs.length; i++) paths.add(segs.slice(0, i).join("/"));
   }
-  // Folders holding no document — same vault walk listNestFolders merges.
+  // Folders holding no document — same vault walk listNestFolders merges, and
+  // like that endpoint the tree itself is the whole nest's shape: counts stay
+  // caller-scoped, but a folder is listed whether or not this caller can reach
+  // a document in it (the nest middleware already withholds both routes from a
+  // share grantee, so the audience is the same either way).
   for (const path of await vaultFolderPaths(nestId)) paths.add(path);
   // Same roll-up the folders endpoint uses — the two describe the same tree
   // and must not drift.
@@ -2337,19 +2345,34 @@ export async function deleteFolder(
 }
 
 /**
- * Remove a folder's directory from the vault. Returns false when there was no
- * such directory. `rel` is community-dialect and always slugified segments, so
- * it cannot climb out of the nest.
+ * A folder's directory in the vault. `rel` is community-dialect and always
+ * slugified segments, so it cannot climb out of the nest.
  */
-async function removeVaultFolder(nestId: string, rel: string): Promise<boolean> {
-  if (!rel) return false;
+async function vaultFolderDir(nestId: string, rel: string): Promise<string> {
   const prefix = await storagePrefix(nestId);
-  const dir = join(resolveNestPath(nestId), ...(prefix ? [prefix] : []), ...rel.split("/"));
+  return join(
+    resolveNestPath(nestId),
+    ...(prefix ? [prefix] : []),
+    ...rel.split("/"),
+  );
+}
+
+/** Is this folder already a directory in the vault? */
+async function vaultFolderExists(nestId: string, rel: string): Promise<boolean> {
+  if (!rel) return false;
   try {
-    await stat(dir);
+    return (await stat(await vaultFolderDir(nestId, rel))).isDirectory();
   } catch {
     return false;
   }
-  await rm(dir, { recursive: true, force: true });
+}
+
+/**
+ * Remove a folder's directory from the vault. Returns false when there was no
+ * such directory.
+ */
+async function removeVaultFolder(nestId: string, rel: string): Promise<boolean> {
+  if (!(await vaultFolderExists(nestId, rel))) return false;
+  await rm(await vaultFolderDir(nestId, rel), { recursive: true, force: true });
   return true;
 }
