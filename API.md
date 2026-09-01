@@ -240,6 +240,12 @@ Configure **Public Docs Reader Mode** — a clean, read-only public docs view of
 - `enabled` (optional boolean) — toggle reader mode. When on, read-only callers (public/anonymous readers) get a stripped three-pane docs reader instead of the tabbed authoring UI; owners/editors/reviewers/admins keep the full UI.
 - `home_node` (optional string | null) — the designated landing/hub node id. `null` (or a blank string) clears it, so the landing node resolves by convention (first node whose id/title is `welcome | index | readme | home | overview`, case-insensitive; else the synthesized Contents table). A non-string, non-null value is rejected `400`.
 - At least one of `enabled` / `home_node` must be present (`400` otherwise).
+- **`home_node` is a soft pointer, not validated at write time.** An id matching no node in the nest is stored as sent, and the reader falls back to the convention as if it were unset — so an API caller gets no signal that the designation missed. The reader matches on either the full node id (`nodes/welcome`) or its bare slug (`welcome`), case-insensitively; the UI refuses an id that names no document before saving, rather than relying on that fallback.
+
+Rejections are the standard error shape:
+```json
+{ "error": "home_node must be a string or null" }
+```
 
 **Reader mode enforces nothing.** It is presentation only: it hides authoring surfaces from callers who are already read-only. It grants no access, gates no route, and changes no permission — who can read the nest is still decided by visibility, collaborators and stewardship.
 
