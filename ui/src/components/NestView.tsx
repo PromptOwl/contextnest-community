@@ -4,6 +4,7 @@
  */
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
+import { BULK_REVIEW_LIMIT } from "../lib/constants";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
@@ -97,6 +98,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import {
   Tabs, TabsList, TabsTrigger, TabsContent,
@@ -264,6 +266,20 @@ export function NestView({
   // affordances for non-admin reviewers/editors who can't read the roster.
   const [myStewards, setMyStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
+  // Bulk review selection, by node id. A reviewer clearing a folder import
+  // makes the same call on every item, so let them say it once.
+  const [bulkSelected, setBulkSelected] = useState<Set<string>>(new Set());
+  const [bulkAction, setBulkAction] = useState<"approve" | "reject" | null>(
+    null,
+  );
+  // This component is reused across nests (jumping between nests from the
+  // search palette keeps the same page), so a selection has to be dropped when
+  // the nest under it changes — otherwise node ids from the nest you left ride
+  // along into a batch aimed at the one you arrived in.
+  useEffect(() => {
+    setBulkSelected(new Set());
+    setBulkAction(null);
+  }, [nestId]);
   // Pending "please delete this" flags raised by people below admin.
   const [deletionRequests, setDeletionRequests] = useState<api.DeletionRequest[]>([]);
   // Node being flagged (dialog open when set), and the queue row being resolved
@@ -1538,6 +1554,43 @@ export function NestView({
     fetchData();
   };
 
+  // One decision over many documents. The server applies them item by item
+  // through the same approve/reject the single-document flow uses, so partial
+  // success is normal: report what failed and why, keep the successes, and
+  // leave the failures selected so a second attempt is one click away.
+  const runBulkReview = async (
+    action: "approve" | "reject",
+    note: string,
+  ) => {
+    const nodeIds = [...bulkSelected];
+    const { succeeded, failed, results } = await api.bulkReview(
+      nestId,
+      action,
+      nodeIds,
+      note || undefined,
+    );
+    const verb = action === "approve" ? "approved" : "rejected";
+    if (failed === 0) {
+      toast.success(`${succeeded} document${succeeded === 1 ? "" : "s"} ${verb}`);
+      setBulkSelected(new Set());
+    } else {
+      // Each distinct reason, not just the first — a mixed batch fails for
+      // more than one.
+      const reasons = [
+        ...new Set(
+          results.filter((r) => !r.ok).map((r) => r.error || "Unknown reason"),
+        ),
+      ];
+      toast.warning(`${succeeded} ${verb}, ${failed} could not be`, {
+        description: reasons.join(" "),
+        duration: 10000,
+      });
+      setBulkSelected(new Set(results.filter((r) => !r.ok).map((r) => r.nodeId)));
+    }
+    setBulkAction(null);
+    fetchData();
+  };
+
   // Destructive and irreversible, so it confirms first — through the same
   // ReasonDialog the deletion-request flows use. Throwing keeps the failure
   // (423 review lock, 403) inside the dialog instead of a dead-end alert.
@@ -2133,8 +2186,20 @@ export function NestView({
           <CardContent>
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <FileText className="h-4 w-4" />
+              {/* An empty nest has nothing to be approved or AI-ready, so the
+                  readiness line would be a promise about content that isn't
+                  there — say what's true instead (CU-wdqcq00x8y). */}
               <span>
-                {stewardshipEnabled ? "In your context" : "Auto-approved, AI-ready"}
+                {/* Gated on the same cold-load flag as the count above: every
+                    stat is 0 until the first read lands, and claiming an empty
+                    nest before then is wrong on a slow connection. */}
+                {initialLoad
+                  ? "Loading…"
+                  : stats.total === 0
+                    ? "No documents yet"
+                    : stewardshipEnabled
+                      ? "In your context"
+                      : "Auto-approved, AI-ready"}
               </span>
             </div>
           </CardContent>
@@ -2173,7 +2238,13 @@ export function NestView({
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <CheckCircle2 className="h-4 w-4" />
-                  <span>Approved for AI</span>
+                  <span>
+                    {initialLoad
+                      ? "Loading…"
+                      : stats.total === 0
+                        ? "Nothing to evaluate yet"
+                        : "Approved for AI"}
+                  </span>
                 </div>
               </CardContent>
             </Card>
@@ -3242,7 +3313,16 @@ export function NestView({
                       className="space-y-1"
                       groups={docGroups}
                       baseFolder={baseFolder}
-                      known={knownFolders}
+                      // Unfiltered, the tree is seeded with every folder in the
+                      // nest so one whose documents were never fetched still has
+                      // a row to expand. Under a filter that seeding is wrong
+                      // twice over: it lists folders holding no match, and it
+                      // suppresses chain compaction, so a single hit four levels
+                      // down costs four rows of empty scaffolding. A filtered
+                      // list already answers from the whole nest, so drop the
+                      // seed and let the tree show only folders that matched —
+                      // as one "F1 / F2 / F3" row per chain.
+                      known={hasActiveFilters ? undefined : knownFolders}
                       isCollapsed={(p) =>
                         // A filtered list shows every match, wherever it lives.
                         hasActiveFilters ? false : !expandedFolders.has(p)
@@ -3665,8 +3745,86 @@ export function NestView({
                 </CardContent>
               </Card>
             )}
+            {/* Bulk bar — only with something selectable, and it stays out of
+                the way until the first row is picked. */}
+            {feedFilter !== "comments" && reviewableQueue.length > 1 && (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
+                <Checkbox
+                  // Partial selections read as "some", not "none".
+                  checked={
+                    bulkSelected.size === 0
+                      ? false
+                      : bulkSelected.size === reviewableQueue.length
+                        ? true
+                        : "indeterminate"
+                  }
+                  onCheckedChange={(next: boolean | "indeterminate") =>
+                    setBulkSelected(
+                      next === true
+                        ? new Set(reviewableQueue.map((r) => r.nodeId))
+                        : new Set(),
+                    )
+                  }
+                  aria-label="Select every document you can review"
+                  data-testid="review-queue-select-all"
+                />
+                <span className="text-muted-foreground">
+                  {bulkSelected.size > 0
+                    ? `${bulkSelected.size} selected`
+                    : `Select all ${reviewableQueue.length}`}
+                </span>
+                {bulkSelected.size > BULK_REVIEW_LIMIT && (
+                  <span className="text-destructive">
+                    Up to {BULK_REVIEW_LIMIT} at a time — deselect{" "}
+                    {bulkSelected.size - BULK_REVIEW_LIMIT}.
+                  </span>
+                )}
+                {bulkSelected.size > 0 && (
+                  <div className="ml-auto flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      disabled={bulkSelected.size > BULK_REVIEW_LIMIT}
+                      onClick={() => setBulkAction("approve")}
+                      data-testid="bulk-approve"
+                    >
+                      Approve {bulkSelected.size}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={bulkSelected.size > BULK_REVIEW_LIMIT}
+                      onClick={() => setBulkAction("reject")}
+                      data-testid="bulk-reject"
+                    >
+                      Reject {bulkSelected.size}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setBulkSelected(new Set())}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
             <ReviewQueue
               requests={feedFilter === "comments" ? [] : reviewableQueue}
+              selectedNodeIds={bulkSelected}
+              // Rows only offer a checkbox when there is a batch to make — one
+              // reviewable document has no bar to act on the selection, so a
+              // box there is a dead end.
+              onToggleSelect={
+                reviewableQueue.length > 1
+                  ? (nodeId) =>
+                      setBulkSelected((prev) => {
+                        const next = new Set(prev);
+                        next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId);
+                        return next;
+                      })
+                  : undefined
+              }
               // Feed mode (interleaved comment rows) except on the Changes
               // chip, which renders the legacy changes-only queue untouched.
               comments={feedFilter === "changes" ? undefined : feedComments}
@@ -3946,7 +4104,9 @@ export function NestView({
                 <CardDescription>
                   Who can reach this nest — visibility, people and teams.
                   Sharing grants plain access (viewer/editor/admin); it does
-                  not make anyone a steward.
+                  not make anyone a steward.{" "}
+                  {!stewardshipEnabled &&
+                    "Stewards need Stewardship & Approval Workflow turned on in Nest settings."}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -4493,6 +4653,30 @@ export function NestView({
           confirmLabel="Remove steward"
           destructive
           onConfirm={handleRemoveSteward}
+        />
+      )}
+
+      {bulkAction && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setBulkAction(null)}
+          title={
+            bulkAction === "approve"
+              ? `Approve ${bulkSelected.size} document${bulkSelected.size === 1 ? "" : "s"}?`
+              : `Reject ${bulkSelected.size} document${bulkSelected.size === 1 ? "" : "s"}?`
+          }
+          description={
+            bulkAction === "approve"
+              ? "Approving publishes each one. Anything you can't review, or that changed since this queue loaded, is reported back and left alone."
+              : "Each author gets the same reason and the work goes back to them."
+          }
+          // Reject demands a reason in bulk exactly as it does one at a time;
+          // approve's note stays optional (ReasonDialog drops the field).
+          label={bulkAction === "reject" ? "Why?" : undefined}
+          placeholder="Shared with every author in this batch"
+          confirmLabel={bulkAction === "approve" ? "Approve all" : "Reject all"}
+          destructive={bulkAction === "reject"}
+          onConfirm={(reason) => runBulkReview(bulkAction, reason)}
         />
       )}
 

@@ -41,6 +41,11 @@ interface ShareNestDialogProps {
   onClose: () => void;
   /** Fired after any change so the parent can refresh its nest/list state. */
   onChanged: () => void;
+  /** Whether the nest runs the stewardship workflow. Stewards can only be
+   *  assigned when it does, so pointing at them otherwise sends the reader
+   *  looking for a tab that isn't rendered. Passed in — the caller already
+   *  holds the nest settings, and this dialog need not fetch them again. */
+  stewardshipEnabled?: boolean;
 }
 
 export function ShareNestDialog({
@@ -48,6 +53,7 @@ export function ShareNestDialog({
   nestName,
   onClose,
   onChanged,
+  stewardshipEnabled = false,
 }: ShareNestDialogProps) {
   const { adminStatus } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
@@ -63,9 +69,15 @@ export function ShareNestDialog({
           </DialogTitle>
           <DialogDescription>
             Sharing applies to the <strong>whole nest</strong> — every
-            document in it. To restrict who can touch an individual document,
-            assign stewards instead. Sharing grants plain access; it does not
-            make anyone a steward.
+            document in it. Sharing grants plain access; it does not make
+            anyone a steward.{" "}
+            {stewardshipEnabled ? (
+              <>To restrict who can touch an individual document, assign
+              stewards on the nest's Stewards tab instead.</>
+            ) : (
+              <>Per-document control comes from stewards, which need
+              Stewardship &amp; Approval Workflow turned on in Nest settings.</>
+            )}
           </DialogDescription>
         </DialogHeader>
 

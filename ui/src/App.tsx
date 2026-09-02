@@ -13,6 +13,7 @@ import { GuidePage } from "./components/GuidePage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
+import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
@@ -22,7 +23,7 @@ import {
   isViewBlockedInReaderMode,
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText, Keyboard } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
@@ -201,11 +202,15 @@ export default function App() {
   const [view, setView] = useState<View>({ page: "dashboard" });
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
+  // "missing" is "no ?nest to open"; "unreachable" is "there was one and it
+  // didn't resolve" — a deleted nest, a typo'd id, or access that was revoked.
+  // They render differently: only the second one owes the user an explanation.
   const [deepLinkProbe, setDeepLinkProbe] = useState<
     | { status: "idle" }
     | { status: "loading" }
     | { status: "ok"; nestId: string; nestName: string }
     | { status: "missing" }
+    | { status: "unreachable" }
   >(() => {
     if (typeof window === "undefined") return { status: "idle" };
     const params = new URLSearchParams(window.location.search);
@@ -302,6 +307,27 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [canQuickOpen]);
+
+  // `?` opens the shortcut cheatsheet — but only when it isn't a character
+  // being typed, so it never eats a question mark in a document or a field.
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "?" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (
+        el?.isContentEditable ||
+        el?.tagName === "INPUT" ||
+        el?.tagName === "TEXTAREA" ||
+        el?.tagName === "SELECT"
+      )
+        return;
+      e.preventDefault();
+      setShowShortcuts(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const confirmLogout = useCallback(async () => {
     setLogoutPending(true);
@@ -438,7 +464,7 @@ export default function App() {
             : undefined,
         });
       } catch {
-        if (!cancelled) setDeepLinkProbe({ status: "missing" });
+        if (!cancelled) setDeepLinkProbe({ status: "unreachable" });
       }
     })();
     return () => {
@@ -454,6 +480,10 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (deepLinkProbe.status === "loading") return;
+    // An unresolved ?nest stays in the URL while its error screen is up, so
+    // "Try again" (and a plain refresh) has an id to re-probe. Going back to
+    // the dashboard flips the probe to "missing" and this clears it then.
+    if (deepLinkProbe.status === "unreachable") return;
     const params = new URLSearchParams(window.location.search);
     if (view.page === "document") {
       params.set("nest", view.nestId);
@@ -727,8 +757,14 @@ export default function App() {
     deepLinkProbe.status === "loading"
   ) {
     return (
+      // Branded, and worded as loading: a bare "Connecting..." on a blank page
+      // read as a connection fault rather than a normal boot (CU-wdqcpzzzrr).
       <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-pulse text-muted-foreground">Connecting...</div>
+        <div className="flex flex-col items-center gap-3 animate-pulse">
+          <img src={logoUrl ?? hootieIcon} alt="" className="h-10 w-10" />
+          <span className="text-sm font-medium">ContextNest</span>
+          <span className="text-xs text-muted-foreground">Loading your nests…</span>
+        </div>
       </div>
     );
   }
@@ -825,6 +861,11 @@ export default function App() {
           }}
         />
       )}
+      {/* Sits with the other always-mounted chrome so `?` works on every
+          screen, not only inside a nest (CU-wdqcpzzzvk). */}
+      {showShortcuts && (
+        <ShortcutsDialog onClose={() => setShowShortcuts(false)} />
+      )}
     </>
   );
 
@@ -833,6 +874,42 @@ export default function App() {
     return (
       <>
         <Login />
+        {logoutChrome}
+      </>
+    );
+  }
+
+  // A ?nest link that didn't resolve. Falling through to the dashboard made a
+  // stale bookmark look like it had simply opened the app, leaving no way to
+  // tell "deleted" from "no access" from "bad link" (CU-wdqcpzzzrm).
+  if (deepLinkProbe.status === "unreachable") {
+    return (
+      <>
+        <div className="min-h-screen flex items-center justify-center px-4">
+          <div className="text-center">
+            <p className="text-lg font-medium">
+              This nest doesn't exist or you don't have access.
+            </p>
+            <p className="text-sm text-muted-foreground mt-1">
+              It may have been deleted, the link may be out of date, or the
+              request may simply have failed.
+            </p>
+            <div className="mt-4 flex items-center justify-center gap-2">
+              {/* A dropped request looks the same as a deleted nest from here,
+                  so offer the re-probe rather than making a network blip a
+                  permanent verdict. */}
+              <Button
+                variant="outline"
+                onClick={() => setDeepLinkProbe({ status: "loading" })}
+              >
+                Try again
+              </Button>
+              <Button onClick={() => setDeepLinkProbe({ status: "missing" })}>
+                Back to dashboard
+              </Button>
+            </div>
+          </div>
+        </div>
         {logoutChrome}
       </>
     );
@@ -867,18 +944,24 @@ export default function App() {
           </button>
 
           <div className="flex items-center gap-2">
-            {/* Prominent search entry — pulls full-text search out of the
-                buried Documents filter bar. Opens the same QuickOpen palette
-                as ⌘K. Shown wherever QuickOpen is available (nest/document). */}
-            {(view.page === "nest" || view.page === "document") && (
+            {/* The ONE search entry point, on every page the palette works on
+                — the Dashboard used to carry its own field-styled button, so
+                the same feature looked like two (CU-wdqcq012uv). What differs
+                between pages is scope, and the palette states that itself. */}
+            {canQuickOpen && (
               <button
                 onClick={() => setShowQuickOpen(true)}
-                title="Search this nest (⌘K)"
-                className="hidden sm:flex items-center gap-2 h-8 pl-2.5 pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                title={
+                  view.page === "dashboard"
+                    ? "Search nests and documents (⌘K)"
+                    : "Search this nest (⌘K)"
+                }
+                className="flex items-center gap-2 h-8 pl-2.5 pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                data-testid="global-search-trigger"
               >
                 <Search className="h-3.5 w-3.5" />
                 <span>Search</span>
-                <kbd className="ml-1 text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
+                <kbd className="ml-1 hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
                   ⌘K
                 </kbd>
               </button>
@@ -925,6 +1008,7 @@ export default function App() {
                 onTeams={() => setView({ page: "teams" })}
                 onSettings={() => setView({ page: "settings" })}
                 onGuide={() => setView({ page: "guide" })}
+                onShortcuts={() => setShowShortcuts(true)}
                 onTrace={() => setView({ page: "trace" })}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
@@ -1002,7 +1086,6 @@ export default function App() {
       <main className={`${shellWidth} mx-auto px-4 py-4 min-w-0 overflow-x-clip`}>
         {view.page === "dashboard" && (
           <Dashboard
-            onOpenSearch={() => setShowQuickOpen(true)}
             onManageKeys={() => setView({ page: "api-keys" })}
             onSelectNest={(id, name, isOwner, isAnonOwned) =>
               setView({
@@ -1323,6 +1406,7 @@ interface UserMenuProps {
   onTeams: () => void;
   onSettings: () => void;
   onGuide: () => void;
+  onShortcuts: () => void;
   onTrace: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
@@ -1336,6 +1420,7 @@ function UserMenu({
   onTeams,
   onSettings,
   onGuide,
+  onShortcuts,
   onTrace,
   onChangePassword,
   onLogout,
@@ -1417,6 +1502,10 @@ function UserMenu({
         <DropdownMenuItem onSelect={onGuide} className="cursor-pointer">
           <BookOpen className="h-3.5 w-3.5 mr-2" />
           How it works
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={onShortcuts} className="cursor-pointer">
+          <Keyboard className="h-3.5 w-3.5 mr-2" />
+          Keyboard shortcuts
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem

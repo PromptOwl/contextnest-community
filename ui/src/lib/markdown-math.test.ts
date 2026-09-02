@@ -6,7 +6,7 @@ import remarkRehype from "remark-rehype";
 import rehypeKatex from "rehype-katex";
 import remarkStringify from "remark-stringify";
 import { visit } from "unist-util-visit";
-import { remarkMathNoCurrency } from "./markdown-math";
+import { remarkMathNoCurrency, unescapeMathSpans } from "./markdown-math";
 
 function mathNodes(md: string) {
   const processor = unified()
@@ -61,5 +61,32 @@ describe("KaTeX rendering", () => {
 
   it("marks malformed TeX instead of throwing", async () => {
     expect(await classes("Broken $\\frac{1}$ here")).toContain("katex-error");
+  });
+});
+
+describe("unescapeMathSpans", () => {
+  it("restores backslash commands the editor escaped", () => {
+    expect(unescapeMathSpans("Inline $\\\\frac{1}{2}$.")).toBe(
+      "Inline $\\frac{1}{2}$.",
+    );
+    expect(unescapeMathSpans("$$\\\\int\\_0^1 x^2 dx$$")).toBe(
+      "$$\\int_0^1 x^2 dx$$",
+    );
+  });
+
+  it("keeps an author's own LaTeX line break", () => {
+    // `\\` in LaTeX is a line break; the serializer doubles it to `\\\\`.
+    expect(unescapeMathSpans("$$a \\\\\\\\ b$$")).toBe("$$a \\\\ b$$");
+  });
+
+  it("leaves prose escapes and currency alone", () => {
+    expect(unescapeMathSpans("A \\_literal\\_ underscore.")).toBe(
+      "A \\_literal\\_ underscore.",
+    );
+    expect(unescapeMathSpans("costs $5 and $10")).toBe("costs $5 and $10");
+  });
+
+  it("leaves math that needs no unescaping untouched", () => {
+    expect(unescapeMathSpans("$E=mc^2$")).toBe("$E=mc^2$");
   });
 });

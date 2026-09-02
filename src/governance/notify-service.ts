@@ -189,8 +189,13 @@ export async function notifyNestInvite(params: {
   inviteeEmail: string;
   permission: string;
   nestName: string;
+  /** Team the access came through, when it wasn't granted to the person directly. */
+  viaTeam?: string;
 }): Promise<void> {
-  const { nestId, inviteeEmail, permission, nestName } = params;
+  const { nestId, inviteeEmail, permission, nestName, viaTeam } = params;
+  const message = viaTeam
+    ? `Your team "${viaTeam}" was given access to "${nestName}" as ${permissionLabel(permission)}`
+    : `You were added to "${nestName}" as ${permissionLabel(permission)}`;
   try {
     await getDb().run(
       `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
@@ -200,7 +205,7 @@ export async function notifyNestInvite(params: {
         nestId,
         inviteeEmail.toLowerCase(),
         nestId,
-        `You were added to "${nestName}" as ${permissionLabel(permission)}`,
+        message,
         new Date().toISOString(),
       ],
     );

@@ -810,6 +810,34 @@ Returns ALL reviews for the nest (server does not gate by reviewer scope).
 
 So Postman will see more rows than the UI; that's expected.
 
+### POST `/nests/:nestId/review-queue/bulk`
+Body: `{ "nodeIds": ["nodes/a", "nodes/b"], "action": "approve" | "reject", "note": "..." }`
+
+One decision applied to several pending documents. Each item runs through the
+same `approve` / `reject` as the per-document routes, so permission resolution,
+state validation, history and notifications are identical — this is a wrapper,
+not a second governance path. A rejection still requires `note`, and there is no
+override: forcing past a refusal stays a per-document decision.
+
+Partial success is the normal outcome, so the call returns `200` with a per-item
+report rather than failing the batch:
+
+```json
+{
+  "action": "approve",
+  "succeeded": 2,
+  "failed": 1,
+  "results": [
+    { "nodeId": "nodes/a", "ok": true },
+    { "nodeId": "nodes/b", "ok": true },
+    { "nodeId": "nodes/c", "ok": false, "error": "Approvals go to assigned reviewers…" }
+  ]
+}
+```
+
+Duplicate ids collapse. Up to **50** ids per call; an empty or oversized
+selection is refused up front (`400`) rather than silently truncated.
+
 ### GET `/nests/:nestId/nodes/:nodeId/reviews`
 Full review history for a node.
 

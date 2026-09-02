@@ -14,8 +14,10 @@ import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import {
+  clampTagInput,
   newTags,
   normalizeTagInput,
+  tagKey,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
 import { relTime, formatServerDate } from "../lib/dates";
@@ -901,8 +903,12 @@ export function DocumentEditor({
       // number, and `title.trim()` later would throw "trim is not a function".
       const loadedTitle = node?.title == null ? "" : String(node.title);
       const loadedContent = node?.content == null ? "" : String(node.content);
+      // Legacy tags were stored raw (leading #, mixed case), so they render
+      // and compare differently from anything typed today. Canonicalise on load:
+      // chips read consistently, the duplicate guard sees one key per tag, and
+      // the next save migrates the document (CU-wdqcq00x8e).
       const loadedTags = Array.isArray(node?.tags)
-        ? node.tags.map((t: unknown) => String(t))
+        ? newTags([], node.tags.map((t: unknown) => tagKey(String(t))))
         : [];
       setTitle(loadedTitle);
       setContent(loadedContent);
@@ -1110,7 +1116,15 @@ export function DocumentEditor({
 
   const addTag = useCallback(() => {
     const { tags: accepted, notes } = tagPreview;
-    for (const note of notes) toast.warning(note);
+    // A paste commits several tags at once, and one transient toast per
+    // rewrite is unreadable — stack them into a single summary and leave the
+    // per-tag detail to the persistent preview above (CU-wdqcq00x8h).
+    if (notes.length === 1) toast.warning(notes[0]);
+    else if (notes.length > 1)
+      toast.warning(`${notes.length} tags normalized`, {
+        description: notes.join(" "),
+        duration: 8000,
+      });
     if (accepted.length === 0) {
       setTagInput("");
       return;
@@ -1568,7 +1582,10 @@ export function DocumentEditor({
               title={title || undefined}
               data-testid="document-editor-header-title"
             >
-              {title || (isNew ? "New document" : "Untitled")}
+              {/* "Untitled" is a fact about a saved document, not about one
+                  still loading — while the fetch is in flight say so instead
+                  of flashing it (CU-wdqcpzzzrr). */}
+              {title || (isNew ? "New document" : loading ? "Loading…" : "Untitled")}
             </h3>
             {!isNew && status && <StatusBadge status={status} />}
             {/* Pending only. A DECLINED flag is a past event, not a state of
@@ -1738,8 +1755,8 @@ export function DocumentEditor({
             </DropdownMenu>
           )}
           {/* Secondary actions collapse into one ⋮ menu to keep the header
-              uncluttered. Grouped by use: version history + markdown-source
-              view toggle, then sharing (copy link, share nest). Compare stays
+              uncluttered. Grouped by use: version history, then sharing
+              (copy link, share nest). Compare stays
               a visible button because it carries active "Comparing vN" state
               the flat menu can't surface. */}
           {(() => {
@@ -1751,16 +1768,8 @@ export function DocumentEditor({
                 testId: "document-editor-history",
                 onSelect: openVersions,
               });
-            // Tool/table nodes ALWAYS edit as raw source (no rich editor
-            // exists for them), so there's nothing to toggle.
-            if (!isSourceOnly)
-              moreActions.push({
-                // Toggle: the label names the mode you switch TO.
-                label: rawMode ? "Rich editor" : "Markdown source",
-                icon: Code2,
-                testId: "document-editor-markdown-toggle",
-                onSelect: () => setRawMode((v) => !v),
-              });
+            // The markdown-source toggle lives on the Content label instead —
+            // it is a writing control, not a document action.
             if (!isNew)
               moreActions.push({
                 label: "Copy link",
@@ -1942,7 +1951,7 @@ export function DocumentEditor({
                 className="text-3xl font-bold leading-tight text-foreground"
                 data-testid="document-editor-title"
               >
-                {title || "Untitled"}
+                {title || (loading ? "Loading…" : "Untitled")}
               </h1>
             ) : (
               // Labeled, outlined title field — required like Content, and
@@ -2164,7 +2173,7 @@ export function DocumentEditor({
                   <div className="flex items-center gap-2">
                     <Input
                       value={tagInput}
-                      onChange={(e) => setTagInput(e.target.value)}
+                      onChange={(e) => setTagInput(clampTagInput(e.target.value))}
                       onKeyDown={(e) => {
                         // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
                         if (e.key === "Enter" || e.key === "," || e.key === " ") {
@@ -2592,16 +2601,41 @@ export function DocumentEditor({
                   }
                 }}
               >
-                <label className="block text-sm font-medium mb-1">
-                  {isArtifactDraft
-                    ? "Artifact HTML"
-                    : effectiveType === "tool"
-                      ? "Tool source (code)"
-                      : effectiveType === "table"
-                        ? "Table data (CSV)"
-                        : "Content"}
-                  {canEditContent && <span className="text-destructive"> *</span>}
-                </label>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="block text-sm font-medium">
+                    {isArtifactDraft
+                      ? "Artifact HTML"
+                      : effectiveType === "tool"
+                        ? "Tool source (code)"
+                        : effectiveType === "table"
+                          ? "Table data (CSV)"
+                          : "Content"}
+                    {canEditContent && <span className="text-destructive"> *</span>}
+                  </label>
+                  {/* Rich editor ↔ raw markdown. It belongs on the field it
+                      switches, not buried in the header's ⋮ menu — it is used
+                      while writing, and the label names the mode you get. The
+                      click must not reach the wrapper, which enters edit mode. */}
+                  {!isSourceOnly && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setRawMode((v) => !v);
+                      }}
+                      className="inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                      title={
+                        rawMode
+                          ? "Back to the rich editor"
+                          : "Edit the raw markdown source"
+                      }
+                      data-testid="document-editor-markdown-toggle"
+                    >
+                      <Code2 className="h-3 w-3" />
+                      {rawMode ? "Rich editor" : "Markdown source"}
+                    </button>
+                  )}
+                </div>
                 {compareVersion != null ? (
                   /* Ever-present inline diff: current vs a chosen past version. */
                   <div data-testid="document-editor-inline-diff">
@@ -3164,6 +3198,7 @@ export function DocumentEditor({
         <ShareNestDialog
           nestId={nestId}
           nestName={nestName}
+          stewardshipEnabled={stewardshipEnabled}
           onClose={() => setShowShare(false)}
           onChanged={() => {
             /* Sharing changes don't alter this document's content; nothing

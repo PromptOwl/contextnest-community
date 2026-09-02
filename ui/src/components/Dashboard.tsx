@@ -7,9 +7,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { reads, useNests } from "../lib/queries";
 import { useAuth } from "../auth/AuthContext";
 import {
-  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft, Search,
+  FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft,
 } from "lucide-react";
-import { ANON_USER_ID } from "../lib/constants";
+import { ANON_USER_ID, BULK_REVIEW_LIMIT } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
 import { toast } from "sonner";
 import { AllNestsBar } from "./AllNestsBar";
@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
@@ -57,14 +58,12 @@ interface DashboardProps {
     isAnonOwned: boolean,
   ) => void;
   onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
-  /** Opens the cross-nest search palette (the same one Cmd/Ctrl+K opens). */
-  onOpenSearch?: () => void;
   /** Opens the API keys page — keys are minted and rotated there, never
    *  inline in a connect dialog. */
   onManageKeys?: () => void;
 }
 
-export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKeys }: DashboardProps) {
+export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: DashboardProps) {
   const { adminStatus, authMode, isAdmin } = useAuth();
   const currentUserEmail = adminStatus?.me?.email ?? null;
   const [work, setWork] = useState<{
@@ -87,6 +86,13 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
   // Deletion flag being resolved from the inbox, and which dialog it opens.
   const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
   const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
+  // Bulk review straight from the inbox, keyed "<nestId>:<nodeId>" since this
+  // list spans nests. Deletion rows are never selectable — they resolve
+  // through their own flow and carry a different decision.
+  const [workSelected, setWorkSelected] = useState<Set<string>>(new Set());
+  const [workBulkAction, setWorkBulkAction] = useState<
+    "approve" | "reject" | null
+  >(null);
   // Served from the shared read cache: coming back to the dashboard paints the
   // previous list immediately and revalidates behind it. `isLoading` is true
   // only on a genuine first load with nothing cached, so the loader below still
@@ -219,6 +225,13 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
         notifications: next.notifications ?? prev.notifications,
         pagination: next.pagination,
       }));
+      // A selection only means anything against the rows on screen. Carrying
+      // it across a page turn (or over rows that just got resolved) left the
+      // bar counting items the batch would then find nothing to act on.
+      const onPage = new Set(next.items.map((w) => `${w.nest_id}:${w.node_id}`));
+      setWorkSelected(
+        (prev) => new Set([...prev].filter((key) => onPage.has(key))),
+      );
     } catch (e) {
       console.error("[Dashboard] goToWorkPage failed", e);
     } finally {
@@ -295,6 +308,96 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
   const rejectReviewItem = async (w: api.WorkItem, note: string) => {
     await api.rejectReview(w.nest_id, w.node_id, note);
     dropWorkItem(w);
+  };
+
+  /** Review rows in the inbox — the only ones a batch decision applies to. */
+  const reviewItems = work.items.filter((w) => w.type === "review");
+  const workKey = (w: api.WorkItem) => `${w.nest_id}:${w.node_id}`;
+
+  // The cap is per call and a call is per nest, so what matters is the biggest
+  // per-nest group, not the total selection. How many to deselect, or 0.
+  const workSelectionOverflow = (() => {
+    const perNest = new Map<string, number>();
+    for (const w of reviewItems) {
+      if (!workSelected.has(workKey(w))) continue;
+      perNest.set(w.nest_id, (perNest.get(w.nest_id) ?? 0) + 1);
+    }
+    const biggest = Math.max(0, ...perNest.values());
+    return Math.max(0, biggest - BULK_REVIEW_LIMIT);
+  })();
+
+  // One decision over a selection that spans nests. The batch endpoint is
+  // per-nest (a batch is bounded by the vault it writes to), so the selection
+  // is grouped and each nest gets one call — the calls run together because
+  // they touch different vaults, while items inside a nest stay sequential.
+  const runWorkBulkReview = async (
+    action: "approve" | "reject",
+    note: string,
+  ) => {
+    const chosen = reviewItems.filter((w) => workSelected.has(workKey(w)));
+    // Belt and braces: the selection is pruned as the inbox reloads, so this
+    // should not happen — reporting "0 approved" as a success if it ever did
+    // would be worse than saying nothing happened.
+    if (chosen.length === 0) {
+      toast.info("Nothing selected on this page");
+      setWorkSelected(new Set());
+      setWorkBulkAction(null);
+      return;
+    }
+    const byNest = new Map<string, string[]>();
+    for (const w of chosen) {
+      byNest.set(w.nest_id, [...(byNest.get(w.nest_id) ?? []), w.node_id]);
+    }
+    const outcomes = await Promise.all(
+      [...byNest].map(([nestId, nodeIds]) =>
+        api
+          .bulkReview(nestId, action, nodeIds, note || undefined)
+          .then((res) => ({ nestId, ...res }))
+          // A whole nest's call failing (offline, 403) is reported like any
+          // other failure rather than losing the nests that did go through.
+          .catch((err: any) => ({
+            nestId,
+            succeeded: 0,
+            failed: nodeIds.length,
+            results: nodeIds.map((nodeId) => ({
+              nodeId,
+              ok: false,
+              error: err?.message || "Request failed",
+            })),
+          })),
+      ),
+    );
+    const succeeded = outcomes.reduce((n, o) => n + o.succeeded, 0);
+    const failed = outcomes.reduce((n, o) => n + o.failed, 0);
+    const stillFailing = new Set(
+      outcomes.flatMap((o) =>
+        o.results.filter((r) => !r.ok).map((r) => `${o.nestId}:${r.nodeId}`),
+      ),
+    );
+    const verb = action === "approve" ? "approved" : "rejected";
+    if (failed === 0) {
+      toast.success(`${succeeded} document${succeeded === 1 ? "" : "s"} ${verb}`);
+    } else {
+      // Items fail for different reasons ("not a steward", "already
+      // resolved"), so name each distinct one rather than whichever came first.
+      const reasons = [
+        ...new Set(
+          outcomes
+            .flatMap((o) => o.results)
+            .filter((r) => !r.ok)
+            .map((r) => r.error || "Unknown reason"),
+        ),
+      ];
+      toast.warning(`${succeeded} ${verb}, ${failed} could not be`, {
+        description: reasons.join(" "),
+        duration: 10000,
+      });
+    }
+    // Keep the failures selected so a retry is one click, and let the inbox
+    // reload decide what is actually left.
+    setWorkSelected(stillFailing);
+    setWorkBulkAction(null);
+    void goToWorkPage(work.pagination?.offset ?? 0);
   };
 
   // Resolve a deletion flag straight from the inbox. Delete needs a confirm and
@@ -386,6 +489,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
         (i) => !(i.nest_id === w.nest_id && i.node_id === w.node_id),
       ),
     }));
+    // A row resolved on its own can't stay in the batch selection.
+    setWorkSelected((prev) => {
+      const next = new Set(prev);
+      next.delete(`${w.nest_id}:${w.node_id}`);
+      return next;
+    });
     void goToWorkPage(work.pagination?.offset ?? 0);
   };
 
@@ -600,6 +709,70 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                 </div>
               ) : (
                 <div className="rounded-lg border divide-y overflow-hidden">
+                  {/* Batch decision bar — a folder import lands here as many
+                      rows carrying the same decision. Reviews only. */}
+                  {reviewItems.length > 1 && (
+                    <div className="flex flex-wrap items-center gap-2 bg-muted/40 px-4 py-2 text-sm">
+                      <Checkbox
+                        // Partial selections read as "some", not "none".
+                        checked={
+                          workSelected.size === 0
+                            ? false
+                            : workSelected.size === reviewItems.length
+                              ? true
+                              : "indeterminate"
+                        }
+                        onCheckedChange={(next: boolean | "indeterminate") =>
+                          setWorkSelected(
+                            next === true
+                              ? new Set(reviewItems.map(workKey))
+                              : new Set(),
+                          )
+                        }
+                        aria-label="Select every review waiting on you"
+                        data-testid="work-select-all"
+                      />
+                      <span className="text-muted-foreground">
+                        {workSelected.size > 0
+                          ? `${workSelected.size} selected`
+                          : `Select all ${reviewItems.length} reviews`}
+                      </span>
+                      {workSelectionOverflow > 0 && (
+                        <span className="text-destructive">
+                          Up to {BULK_REVIEW_LIMIT} per nest — deselect{" "}
+                          {workSelectionOverflow}.
+                        </span>
+                      )}
+                      {workSelected.size > 0 && (
+                        <div className="ml-auto flex items-center gap-2">
+                          <Button
+                            size="sm"
+                            disabled={workSelectionOverflow > 0}
+                            onClick={() => setWorkBulkAction("approve")}
+                            data-testid="work-bulk-approve"
+                          >
+                            Approve {workSelected.size}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={workSelectionOverflow > 0}
+                            onClick={() => setWorkBulkAction("reject")}
+                            data-testid="work-bulk-reject"
+                          >
+                            Reject {workSelected.size}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setWorkSelected(new Set())}
+                          >
+                            Clear
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {work.items.map((w) => {
                     const key = `${w.nest_id}:${w.node_id}`;
                     return (
@@ -607,6 +780,23 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
                         key={key}
                         className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
                       >
+                        {reviewItems.length > 1 && (
+                          <Checkbox
+                            checked={workSelected.has(key)}
+                            // Deletion rows keep their own two-way decision, so
+                            // they hold the column without being selectable.
+                            disabled={w.type !== "review"}
+                            onCheckedChange={() =>
+                              setWorkSelected((prev) => {
+                                const next = new Set(prev);
+                                next.has(key) ? next.delete(key) : next.add(key);
+                                return next;
+                              })
+                            }
+                            aria-label={`Select ${w.title}`}
+                            className={w.type === "review" ? "" : "invisible"}
+                          />
+                        )}
                         <span
                           className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${w.type === "deletion"
                               ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
@@ -906,20 +1096,8 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
               </p>
             </div>
             <div className="flex items-center gap-2">
-              {/* Styled as a field rather than a button: the palette it opens is
-              where you type, and a search box is what people look for. */}
-              {onOpenSearch && (
-                <button
-                  type="button"
-                  onClick={onOpenSearch}
-                  className="flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50"
-                  data-testid="global-search-trigger"
-                >
-                  <Search className="h-4 w-4" />
-                  Search nests &amp; documents
-                  <kbd className="ml-2 rounded border px-1 text-[10px]">⌘K</kbd>
-                </button>
-              )}
+              {/* Search lives in the header on every page — one entry point,
+                  not a second one styled differently here (CU-wdqcq012uv). */}
               <Button variant="outline" onClick={() => setShowImport(true)}>
                 <FolderInput className="h-4 w-4 mr-2" />
                 Import Folder
@@ -936,48 +1114,69 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
             <AllNestsBar nests={allNests} onManageKeys={onManageKeys} />
           )}
 
-          {/* Create form */}
-          {showCreate && (
-            <Card>
-              <CardContent className="pt-6">
-                <form onSubmit={handleCreate} className="space-y-3">
-                  <div className="space-y-1">
-                    <Label>Name</Label>
-                    <Input
-                      placeholder="Team Knowledge"
-                      value={newName}
-                      onChange={(e) => {
-                        setNewName(e.target.value);
-                        if (createError) setCreateError(null);
-                      }}
-                      aria-invalid={!!createError}
-                      autoFocus
-                    />
-                    {createError && (
-                      <p className="text-xs text-destructive">{createError}</p>
-                    )}
-                  </div>
-                  <div className="space-y-1">
-                    <Label>Description (optional)</Label>
-                    <Textarea
-                      placeholder="Shared docs for the engineering team"
-                      value={newDesc}
-                      onChange={(e) => setNewDesc(e.target.value)}
-                      rows={3}
-                    />
-                  </div>
-                  <div className="flex gap-2">
-                    <Button type="submit" disabled={!!nestNameProblem(newName)}>
-                      Create Nest
-                    </Button>
-                    <Button type="button" variant="outline" onClick={() => { setShowCreate(false); setCreateError(null); }}>
-                      Cancel
-                    </Button>
-                  </div>
-                </form>
-              </CardContent>
-            </Card>
-          )}
+          {/* Create nest — a modal, like Import Folder, rather than a form
+              that expands the page under the buttons. Both are the same kind
+              of action: step aside, fill in a short form, come back
+              (CU-wdqcpzzzrp). */}
+          <Dialog
+            open={showCreate}
+            onOpenChange={(open) => {
+              if (open) return;
+              setShowCreate(false);
+              setCreateError(null);
+            }}
+          >
+            <DialogContent className="sm:max-w-[480px]">
+              <DialogHeader>
+                <DialogTitle>New nest</DialogTitle>
+                <DialogDescription>
+                  A nest holds a set of documents and the governance around them.
+                </DialogDescription>
+              </DialogHeader>
+              <form onSubmit={handleCreate} className="space-y-3">
+                <div className="space-y-1">
+                  <Label>Name</Label>
+                  <Input
+                    placeholder="Team Knowledge"
+                    value={newName}
+                    onChange={(e) => {
+                      setNewName(e.target.value);
+                      if (createError) setCreateError(null);
+                    }}
+                    aria-invalid={!!createError}
+                    autoFocus
+                  />
+                  {createError && (
+                    <p className="text-xs text-destructive">{createError}</p>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  <Label>Description (optional)</Label>
+                  <Textarea
+                    placeholder="Shared docs for the engineering team"
+                    value={newDesc}
+                    onChange={(e) => setNewDesc(e.target.value)}
+                    rows={3}
+                  />
+                </div>
+                <DialogFooter>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      setShowCreate(false);
+                      setCreateError(null);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button type="submit" disabled={!!nestNameProblem(newName)}>
+                    Create Nest
+                  </Button>
+                </DialogFooter>
+              </form>
+            </DialogContent>
+          </Dialog>
 
           {/* Grid controls — filter/sort the cards in place, the way the
               in-nest Documents browser does. Hidden until there are enough
@@ -1518,6 +1717,31 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
             );
             setRenameTarget(null);
           }}
+        />
+      )}
+
+      {workBulkAction && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setWorkBulkAction(null)}
+          title={
+            workBulkAction === "approve"
+              ? `Approve ${workSelected.size} document${workSelected.size === 1 ? "" : "s"}?`
+              : `Reject ${workSelected.size} document${workSelected.size === 1 ? "" : "s"}?`
+          }
+          description={
+            workBulkAction === "approve"
+              ? "Approving publishes each one. Anything that changed since this inbox loaded is reported back and left alone."
+              : "Each author gets the same reason and the work goes back to them."
+          }
+          // Rejecting in bulk demands a reason exactly as one at a time does.
+          label={workBulkAction === "reject" ? "Why?" : undefined}
+          placeholder="Shared with every author in this batch"
+          confirmLabel={
+            workBulkAction === "approve" ? "Approve all" : "Reject all"
+          }
+          destructive={workBulkAction === "reject"}
+          onConfirm={(reason) => runWorkBulkReview(workBulkAction, reason)}
         />
       )}
 

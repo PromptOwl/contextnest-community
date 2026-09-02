@@ -27,15 +27,24 @@ export interface TagCandidate {
  * the commit read this, so what is promised is what lands.
  */
 export function newTags(existing: string[], candidates: string[]): string[] {
-  const have = new Set(existing.map((t) => t.toLowerCase()));
+  const have = new Set(existing.map(tagKey));
   const out: string[] = [];
   for (const t of candidates) {
-    const key = t.toLowerCase();
+    const key = tagKey(t);
     if (have.has(key)) continue;
     have.add(key);
     out.push(t);
   }
   return out;
+}
+
+/**
+ * The value two tags are compared by. A legacy tag stored with its "#" (or in
+ * mixed case) has to key the same as the bare, lowercased form the normalizer
+ * produces — otherwise "#bug" and "bug" land on one document as two tags.
+ */
+export function tagKey(tag: string): string {
+  return normalizeTagInput(tag).tag ?? tag.trim().toLowerCase();
 }
 
 export function normalizeTagInput(raw: string): TagCandidate {
@@ -66,4 +75,19 @@ export function normalizeTagInput(raw: string): TagCandidate {
     return { tag: cleaned, note: `"${bare}" was simplified to "${cleaned}".` };
   }
   return { tag: cleaned, note: null };
+}
+
+/**
+ * Each whitespace/comma-separated token trimmed to the real tag limit. The
+ * field holds several tags at once, so a flat 40-char cap on the input itself
+ * would eat a pasted "api, v2, docs" — cap per token instead, so nothing typed
+ * past the limit survives to be silently discarded on commit.
+ */
+export function clampTagInput(raw: string): string {
+  return raw.replace(/[^\s,]+/g, (token) => {
+    // Leading #s are stripped before the length check, so they don't count
+    // against the tag limit.
+    const hashes = /^#*/.exec(token)![0];
+    return hashes + token.slice(hashes.length, hashes.length + MAX_TAG_LENGTH);
+  });
 }
