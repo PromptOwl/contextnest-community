@@ -936,48 +936,69 @@ export function Dashboard({ onSelectNest, onOpenReview, onOpenSearch, onManageKe
             <AllNestsBar nests={allNests} onManageKeys={onManageKeys} />
           )}
 
-          {/* Create form */}
-          {showCreate && (
-            <Card>
-              <CardContent className="pt-6">
-                <form onSubmit={handleCreate} className="space-y-3">
-                  <div className="space-y-1">
-                    <Label>Name</Label>
-                    <Input
-                      placeholder="Team Knowledge"
-                      value={newName}
-                      onChange={(e) => {
-                        setNewName(e.target.value);
-                        if (createError) setCreateError(null);
-                      }}
-                      aria-invalid={!!createError}
-                      autoFocus
-                    />
-                    {createError && (
-                      <p className="text-xs text-destructive">{createError}</p>
-                    )}
-                  </div>
-                  <div className="space-y-1">
-                    <Label>Description (optional)</Label>
-                    <Textarea
-                      placeholder="Shared docs for the engineering team"
-                      value={newDesc}
-                      onChange={(e) => setNewDesc(e.target.value)}
-                      rows={3}
-                    />
-                  </div>
-                  <div className="flex gap-2">
-                    <Button type="submit" disabled={!!nestNameProblem(newName)}>
-                      Create Nest
-                    </Button>
-                    <Button type="button" variant="outline" onClick={() => { setShowCreate(false); setCreateError(null); }}>
-                      Cancel
-                    </Button>
-                  </div>
-                </form>
-              </CardContent>
-            </Card>
-          )}
+          {/* Create nest — a modal, like Import Folder, rather than a form
+              that expands the page under the buttons. Both are the same kind
+              of action: step aside, fill in a short form, come back
+              (CU-wdqcpzzzrp). */}
+          <Dialog
+            open={showCreate}
+            onOpenChange={(open) => {
+              if (open) return;
+              setShowCreate(false);
+              setCreateError(null);
+            }}
+          >
+            <DialogContent className="sm:max-w-[480px]">
+              <DialogHeader>
+                <DialogTitle>New nest</DialogTitle>
+                <DialogDescription>
+                  A nest holds a set of documents and the governance around them.
+                </DialogDescription>
+              </DialogHeader>
+              <form onSubmit={handleCreate} className="space-y-3">
+                <div className="space-y-1">
+                  <Label>Name</Label>
+                  <Input
+                    placeholder="Team Knowledge"
+                    value={newName}
+                    onChange={(e) => {
+                      setNewName(e.target.value);
+                      if (createError) setCreateError(null);
+                    }}
+                    aria-invalid={!!createError}
+                    autoFocus
+                  />
+                  {createError && (
+                    <p className="text-xs text-destructive">{createError}</p>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  <Label>Description (optional)</Label>
+                  <Textarea
+                    placeholder="Shared docs for the engineering team"
+                    value={newDesc}
+                    onChange={(e) => setNewDesc(e.target.value)}
+                    rows={3}
+                  />
+                </div>
+                <DialogFooter>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      setShowCreate(false);
+                      setCreateError(null);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button type="submit" disabled={!!nestNameProblem(newName)}>
+                    Create Nest
+                  </Button>
+                </DialogFooter>
+              </form>
+            </DialogContent>
+          </Dialog>
 
           {/* Grid controls — filter/sort the cards in place, the way the
               in-nest Documents browser does. Hidden until there are enough
