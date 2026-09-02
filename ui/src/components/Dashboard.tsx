@@ -58,8 +58,6 @@ interface DashboardProps {
     isAnonOwned: boolean,
   ) => void;
   onOpenReview: (nestId: string, nestName: string, nodeId: string) => void;
-  /** Opens the cross-nest search palette (the same one Cmd/Ctrl+K opens). */
-
   /** Opens the API keys page — keys are minted and rotated there, never
    *  inline in a connect dialog. */
   onManageKeys?: () => void;
@@ -227,6 +225,13 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
         notifications: next.notifications ?? prev.notifications,
         pagination: next.pagination,
       }));
+      // A selection only means anything against the rows on screen. Carrying
+      // it across a page turn (or over rows that just got resolved) left the
+      // bar counting items the batch would then find nothing to act on.
+      const onPage = new Set(next.items.map((w) => `${w.nest_id}:${w.node_id}`));
+      setWorkSelected(
+        (prev) => new Set([...prev].filter((key) => onPage.has(key))),
+      );
     } catch (e) {
       console.error("[Dashboard] goToWorkPage failed", e);
     } finally {
@@ -330,6 +335,15 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     note: string,
   ) => {
     const chosen = reviewItems.filter((w) => workSelected.has(workKey(w)));
+    // Belt and braces: the selection is pruned as the inbox reloads, so this
+    // should not happen — reporting "0 approved" as a success if it ever did
+    // would be worse than saying nothing happened.
+    if (chosen.length === 0) {
+      toast.info("Nothing selected on this page");
+      setWorkSelected(new Set());
+      setWorkBulkAction(null);
+      return;
+    }
     const byNest = new Map<string, string[]>();
     for (const w of chosen) {
       byNest.set(w.nest_id, [...(byNest.get(w.nest_id) ?? []), w.node_id]);
@@ -364,13 +378,20 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     if (failed === 0) {
       toast.success(`${succeeded} document${succeeded === 1 ? "" : "s"} ${verb}`);
     } else {
-      const first = outcomes
-        .flatMap((o) => o.results)
-        .find((r) => !r.ok);
-      toast.warning(
-        `${succeeded} ${verb}, ${failed} could not be — ${first?.error ?? "unknown reason"}`,
-        { duration: 10000 },
-      );
+      // Items fail for different reasons ("not a steward", "already
+      // resolved"), so name each distinct one rather than whichever came first.
+      const reasons = [
+        ...new Set(
+          outcomes
+            .flatMap((o) => o.results)
+            .filter((r) => !r.ok)
+            .map((r) => r.error || "Unknown reason"),
+        ),
+      ];
+      toast.warning(`${succeeded} ${verb}, ${failed} could not be`, {
+        description: reasons.join(" "),
+        duration: 10000,
+      });
     }
     // Keep the failures selected so a retry is one click, and let the inbox
     // reload decide what is actually left.
@@ -468,6 +489,12 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
         (i) => !(i.nest_id === w.nest_id && i.node_id === w.node_id),
       ),
     }));
+    // A row resolved on its own can't stay in the batch selection.
+    setWorkSelected((prev) => {
+      const next = new Set(prev);
+      next.delete(`${w.nest_id}:${w.node_id}`);
+      return next;
+    });
     void goToWorkPage(work.pagination?.offset ?? 0);
   };
 
@@ -687,9 +714,13 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                   {reviewItems.length > 1 && (
                     <div className="flex flex-wrap items-center gap-2 bg-muted/40 px-4 py-2 text-sm">
                       <Checkbox
+                        // Partial selections read as "some", not "none".
                         checked={
-                          workSelected.size > 0 &&
-                          workSelected.size === reviewItems.length
+                          workSelected.size === 0
+                            ? false
+                            : workSelected.size === reviewItems.length
+                              ? true
+                              : "indeterminate"
                         }
                         onCheckedChange={(next: boolean | "indeterminate") =>
                           setWorkSelected(

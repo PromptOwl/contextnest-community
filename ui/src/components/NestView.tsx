@@ -272,6 +272,14 @@ export function NestView({
   const [bulkAction, setBulkAction] = useState<"approve" | "reject" | null>(
     null,
   );
+  // This component is reused across nests (jumping between nests from the
+  // search palette keeps the same page), so a selection has to be dropped when
+  // the nest under it changes — otherwise node ids from the nest you left ride
+  // along into a batch aimed at the one you arrived in.
+  useEffect(() => {
+    setBulkSelected(new Set());
+    setBulkAction(null);
+  }, [nestId]);
   // Pending "please delete this" flags raised by people below admin.
   const [deletionRequests, setDeletionRequests] = useState<api.DeletionRequest[]>([]);
   // Node being flagged (dialog open when set), and the queue row being resolved
@@ -1566,11 +1574,17 @@ export function NestView({
       toast.success(`${succeeded} document${succeeded === 1 ? "" : "s"} ${verb}`);
       setBulkSelected(new Set());
     } else {
-      const first = results.find((r) => !r.ok);
-      toast.warning(
-        `${succeeded} ${verb}, ${failed} could not be — ${first?.error ?? "unknown reason"}`,
-        { duration: 10000 },
-      );
+      // Each distinct reason, not just the first — a mixed batch fails for
+      // more than one.
+      const reasons = [
+        ...new Set(
+          results.filter((r) => !r.ok).map((r) => r.error || "Unknown reason"),
+        ),
+      ];
+      toast.warning(`${succeeded} ${verb}, ${failed} could not be`, {
+        description: reasons.join(" "),
+        duration: 10000,
+      });
       setBulkSelected(new Set(results.filter((r) => !r.ok).map((r) => r.nodeId)));
     }
     setBulkAction(null);
@@ -2176,11 +2190,16 @@ export function NestView({
                   readiness line would be a promise about content that isn't
                   there — say what's true instead (CU-wdqcq00x8y). */}
               <span>
-                {stats.total === 0
-                  ? "No documents yet"
-                  : stewardshipEnabled
-                    ? "In your context"
-                    : "Auto-approved, AI-ready"}
+                {/* Gated on the same cold-load flag as the count above: every
+                    stat is 0 until the first read lands, and claiming an empty
+                    nest before then is wrong on a slow connection. */}
+                {initialLoad
+                  ? "Loading…"
+                  : stats.total === 0
+                    ? "No documents yet"
+                    : stewardshipEnabled
+                      ? "In your context"
+                      : "Auto-approved, AI-ready"}
               </span>
             </div>
           </CardContent>
@@ -2220,7 +2239,11 @@ export function NestView({
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <CheckCircle2 className="h-4 w-4" />
                   <span>
-                    {stats.total === 0 ? "Nothing to evaluate yet" : "Approved for AI"}
+                    {initialLoad
+                      ? "Loading…"
+                      : stats.total === 0
+                        ? "Nothing to evaluate yet"
+                        : "Approved for AI"}
                   </span>
                 </div>
               </CardContent>
@@ -3727,9 +3750,13 @@ export function NestView({
             {feedFilter !== "comments" && reviewableQueue.length > 1 && (
               <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
                 <Checkbox
+                  // Partial selections read as "some", not "none".
                   checked={
-                    bulkSelected.size > 0 &&
-                    bulkSelected.size === reviewableQueue.length
+                    bulkSelected.size === 0
+                      ? false
+                      : bulkSelected.size === reviewableQueue.length
+                        ? true
+                        : "indeterminate"
                   }
                   onCheckedChange={(next: boolean | "indeterminate") =>
                     setBulkSelected(
@@ -3785,12 +3812,18 @@ export function NestView({
             <ReviewQueue
               requests={feedFilter === "comments" ? [] : reviewableQueue}
               selectedNodeIds={bulkSelected}
-              onToggleSelect={(nodeId) =>
-                setBulkSelected((prev) => {
-                  const next = new Set(prev);
-                  next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId);
-                  return next;
-                })
+              // Rows only offer a checkbox when there is a batch to make — one
+              // reviewable document has no bar to act on the selection, so a
+              // box there is a dead end.
+              onToggleSelect={
+                reviewableQueue.length > 1
+                  ? (nodeId) =>
+                      setBulkSelected((prev) => {
+                        const next = new Set(prev);
+                        next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId);
+                        return next;
+                      })
+                  : undefined
               }
               // Feed mode (interleaved comment rows) except on the Changes
               // chip, which renders the legacy changes-only queue untouched.

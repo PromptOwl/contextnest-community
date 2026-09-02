@@ -233,7 +233,10 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
               // is keyboard-first and has one input, so there is nothing else
               // worth tabbing to, and reaching for the mouse to widen a search
               // broke the flow (CU-wdqcq012uu). The tabs stay focusable too.
-              if (e.key === "Tab" && nestId && !e.shiftKey) {
+              // Either direction: the input is the palette's first focusable
+              // element, so letting Shift+Tab through moved focus to the page
+              // behind an open modal.
+              if (e.key === "Tab" && nestId) {
                 e.preventDefault();
                 setAllNests((v) => !v);
               }

@@ -9,6 +9,7 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError, ConflictError } from "../shared/errors.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
@@ -231,7 +232,11 @@ governanceRoutes.post("/review-queue/bulk", async (c) => {
     action?: "approve" | "reject";
     note?: string;
   }>();
-  const nodeIds = [...new Set(body.nodeIds ?? [])];
+  // Every route that turns a caller-supplied id into a storage read goes
+  // through this chokepoint. The pending-review row lookup would refuse a
+  // traversal id anyway, but that is an implicit guard the next refactor could
+  // lose — the explicit one costs nothing here.
+  const nodeIds = [...new Set(body.nodeIds ?? [])].map(assertSafeNodeId);
   if (nodeIds.length === 0) {
     throw new ValidationError("Select at least one document to review");
   }

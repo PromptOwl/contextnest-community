@@ -480,6 +480,10 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (deepLinkProbe.status === "loading") return;
+    // An unresolved ?nest stays in the URL while its error screen is up, so
+    // "Try again" (and a plain refresh) has an id to re-probe. Going back to
+    // the dashboard flips the probe to "missing" and this clears it then.
+    if (deepLinkProbe.status === "unreachable") return;
     const params = new URLSearchParams(window.location.search);
     if (view.page === "document") {
       params.set("nest", view.nestId);
@@ -887,14 +891,23 @@ export default function App() {
               This nest doesn't exist or you don't have access.
             </p>
             <p className="text-sm text-muted-foreground mt-1">
-              It may have been deleted, or the link may be out of date.
+              It may have been deleted, the link may be out of date, or the
+              request may simply have failed.
             </p>
-            <Button
-              className="mt-4"
-              onClick={() => setDeepLinkProbe({ status: "missing" })}
-            >
-              Back to dashboard
-            </Button>
+            <div className="mt-4 flex items-center justify-center gap-2">
+              {/* A dropped request looks the same as a deleted nest from here,
+                  so offer the re-probe rather than making a network blip a
+                  permanent verdict. */}
+              <Button
+                variant="outline"
+                onClick={() => setDeepLinkProbe({ status: "loading" })}
+              >
+                Try again
+              </Button>
+              <Button onClick={() => setDeepLinkProbe({ status: "missing" })}>
+                Back to dashboard
+              </Button>
+            </div>
           </div>
         </div>
         {logoutChrome}
@@ -1073,7 +1086,6 @@ export default function App() {
       <main className={`${shellWidth} mx-auto px-4 py-4 min-w-0 overflow-x-clip`}>
         {view.page === "dashboard" && (
           <Dashboard
-
             onManageKeys={() => setView({ page: "api-keys" })}
             onSelectNest={(id, name, isOwner, isAnonOwned) =>
               setView({

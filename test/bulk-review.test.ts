@@ -187,3 +187,16 @@ describe("bulk review", () => {
     expect(tooMany.status).toBe(400);
   });
 });
+
+describe("bulk review input safety", () => {
+  it("refuses a traversal id outright rather than reporting it per item", async () => {
+    const { status } = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/review-queue/bulk`,
+      { nodeIds: ["../other-nest/nodes/secret"], action: "approve" },
+      reviewer.apiKey,
+    );
+    expect(status).toBe(400);
+  });
+});
