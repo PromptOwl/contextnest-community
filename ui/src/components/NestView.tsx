@@ -64,6 +64,7 @@ export function NodeTypeIcon({
 }
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
+import { PushConfirmationModal } from "./PushConfirmationModal";
 import { ShareNestDialog } from "./ShareNestDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
@@ -323,6 +324,13 @@ export function NestView({
   const [allowSelfApprove, setAllowSelfApprove] = useState(false);
   const [primeOnlyReview, setPrimeOnlyReview] = useState(false);
   const [primeTags, setPrimeTags] = useState<string[]>([]);
+  // Push Confirmation Gate (superadmin-set). Held-push count drives the badge.
+  const [requirePushConfirmation, setRequirePushConfirmation] = useState(false);
+  // Held ctx pushes awaiting confirmation (reviewer view). Empty when the
+  // caller can't review or nothing is held.
+  const [pendingPushes, setPendingPushes] = useState<api.PendingPush[]>([]);
+  // The held push whose confirm modal is open, if any.
+  const [openPushId, setOpenPushId] = useState<string | null>(null);
   const [visibility, setVisibility] = useState<"private" | "public">("private");
   const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [isImported, setIsImported] = useState(false);
@@ -344,6 +352,21 @@ export function NestView({
   const canManageGovernance =
     (isAdmin && (isOwner || isAnonOwned)) ||
     (!isAdmin && (isOwner || permission === "owner" || permission === "admin"));
+
+  // Held ctx pushes awaiting confirmation. Best-effort: the endpoint is
+  // reviewer-only (403 for anyone else) — swallow it and show nothing.
+  const refetchPendingPushes = useCallback(async () => {
+    try {
+      const res = await api.getPendingPushes(nestId, "pending");
+      setPendingPushes(res.pending_pushes);
+    } catch {
+      setPendingPushes([]);
+    }
+  }, [nestId]);
+  useEffect(() => {
+    void refetchPendingPushes();
+  }, [refetchPendingPushes]);
+
   // Caller's merged effective roles (collaborator + steward), nest-wide.
   const [roles, setRoles] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
@@ -836,6 +859,7 @@ export function NestView({
     setAllowSelfApprove(settingsData.allow_self_approve);
     setPrimeOnlyReview(!!settingsData.prime_only_review);
     setPrimeTags(settingsData.prime_tags ?? []);
+    setRequirePushConfirmation(!!(settingsData as any).require_push_confirmation);
     setExternalEdits(externalData.entries);
     if (nestMeta?.nest?.visibility) {
       setVisibility(nestMeta.nest.visibility);
@@ -1673,6 +1697,39 @@ export function NestView({
         <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-background/60">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" /> Importing…
+          </div>
+        </div>
+      )}
+
+      {/* Held pushes banner — surfaces ctx pushes waiting on confirmation
+          (Push Confirmation Gate). Each card opens the confirm modal. */}
+      {pendingPushes.length > 0 && (
+        <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3 space-y-2">
+          <div className="flex items-center gap-2 text-sm font-medium text-amber-800 dark:text-amber-300">
+            <Upload className="h-4 w-4" />
+            <span>Pushes awaiting confirmation</span>
+            <Badge variant="secondary">{pendingPushes.length}</Badge>
+          </div>
+          <div className="space-y-1.5">
+            {pendingPushes.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setOpenPushId(p.id)}
+                className="w-full flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2 text-left text-sm hover:bg-accent"
+              >
+                <span className="min-w-0 truncate">
+                  <span className="font-medium">
+                    {p.doc_count} document{p.doc_count === 1 ? "" : "s"}
+                  </span>{" "}
+                  from{" "}
+                  {p.submitter_label || p.submitter_email || "an API key"}
+                </span>
+                <span className="text-xs text-muted-foreground shrink-0">
+                  Review →
+                </span>
+              </button>
+            ))}
           </div>
         </div>
       )}
@@ -3855,6 +3912,8 @@ export function NestView({
           allowSelfApprove={allowSelfApprove}
           primeOnlyReview={primeOnlyReview}
           primeTags={primeTags}
+          requirePushConfirmation={requirePushConfirmation}
+          isServerAdmin={isAdmin}
           canManageStewardship={canManageGovernance}
           onClose={() => setShowSettings(false)}
           onChanged={(next) => {
@@ -3866,6 +3925,21 @@ export function NestView({
             setAllowSelfApprove(next.allowSelfApprove);
             setPrimeOnlyReview(next.primeOnlyReview);
             setPrimeTags(next.primeTags);
+            setRequirePushConfirmation(next.requirePushConfirmation);
+            fetchData();
+          }}
+        />
+      )}
+
+      {openPushId && (
+        <PushConfirmationModal
+          nestId={nestId}
+          pendingId={openPushId}
+          existingNodeIds={new Set(nodes.map((n: any) => n.id))}
+          onClose={() => setOpenPushId(null)}
+          onDecided={() => {
+            void refetchPendingPushes();
+            // A confirmed push wrote documents — refresh the nest view.
             fetchData();
           }}
         />

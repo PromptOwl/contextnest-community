@@ -33,6 +33,7 @@ import { resolveNodeGrant } from "./governance/grants-service.js";
 import { nodeRoutes } from "./nodes/routes.js";
 import { annotationRoutes } from "./annotations/routes.js";
 import { queryRoutes } from "./nodes/query-routes.js";
+import { pushRoutes } from "./nests/push-routes.js";
 import { mcpRoutes } from "./mcp/routes.js";
 import { edgeTypeRoutes } from "./workflow/edge-type-routes.js";
 import { edgeRoutes } from "./workflow/edge-routes.js";
@@ -1605,6 +1606,10 @@ export function createApp(): Hono<AuthEnv> {
         path.includes("/can-access") ||
         path.includes("/can-approve") ||
         path.includes("/can-edit") ||
+        // Push Confirmation Gate — held-push review + per-key allowlist are
+        // governance surfaces, licensed like /review-queue (even on GET).
+        path.includes("/pending-pushes") ||
+        path.includes("/push-allowlist") ||
         isCommentPath ||
         isActivityPath ||
         isFeedPath ||
@@ -1721,6 +1726,12 @@ export function createApp(): Hono<AuthEnv> {
       path.includes("/reject") ||
       path.includes("/submit-review") ||
       path.includes("/cancel-review");
+    // Confirm/reject a held push (Push Confirmation Gate) is admitted at
+    // read-tier so a read-only reviewer steward can decide it; the handler's
+    // own canConfirmPush is the real gate (submitter OR reviewer/owner/admin).
+    // (reject already matches isStewardActionPath's /reject; confirm needs this.)
+    const isPushDecisionPath =
+      /\/pending-pushes\/[^/]+\/(confirm|reject)$/.test(path);
     // Hosted-artifact annotations are a read-tier collaboration action:
     // anyone who can SEE the artifact (notably read-only reviewers — the people
     // most likely to annotate) may open a thread, reply, resolve or reopen.
@@ -1809,6 +1820,7 @@ export function createApp(): Hono<AuthEnv> {
     } else if (
       c.req.method !== "GET" &&
       !isStewardActionPath &&
+      !isPushDecisionPath &&
       !isCommentAction &&
       !isDeletionRequestAction &&
       !isAnnotationAction &&
@@ -1965,6 +1977,10 @@ export function createApp(): Hono<AuthEnv> {
   nestsApp.route("/:nestId/nodes", annotationRoutes);
   nestsApp.route("/:nestId/nodes", governanceNodeRoutes);
   nestsApp.route("/:nestId/nodes", nodeRoutes);
+  // Push Confirmation Gate — MUST precede queryRoutes so this /publish (the
+  // gated one) wins under the LinearRouter (first registered match wins).
+  // Also owns /pending-pushes* and /push-allowlist.
+  nestsApp.route("/:nestId", pushRoutes);
   nestsApp.route("/:nestId", queryRoutes);
   nestsApp.route("/:nestId", sharingRoutes);
   nestsApp.route("/:nestId/grants", grantRoutes);

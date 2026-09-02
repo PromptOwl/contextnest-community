@@ -23,6 +23,7 @@ import {
   Info,
   UserCheck,
   Star,
+  ShieldCheck,
 } from "lucide-react";
 import * as api from "../lib/api";
 
@@ -33,6 +34,10 @@ interface NestSettingsModalProps {
   allowSelfApprove: boolean;
   primeOnlyReview: boolean;
   primeTags: string[];
+  /** Push Confirmation Gate (superadmin-set). */
+  requirePushConfirmation: boolean;
+  /** True only for a server superadmin — gates the push-confirmation switch. */
+  isServerAdmin: boolean;
   /** False hides the stewardship section. Server still enforces. */
   canManageStewardship: boolean;
   onClose: () => void;
@@ -41,6 +46,7 @@ interface NestSettingsModalProps {
     allowSelfApprove: boolean;
     primeOnlyReview: boolean;
     primeTags: string[];
+    requirePushConfirmation: boolean;
   }) => void;
 }
 
@@ -51,6 +57,8 @@ export function NestSettingsModal({
   allowSelfApprove,
   primeOnlyReview,
   primeTags,
+  requirePushConfirmation,
+  isServerAdmin,
   canManageStewardship,
   onClose,
   onChanged,
@@ -58,6 +66,7 @@ export function NestSettingsModal({
   const [enabled, setEnabled] = useState(stewardshipEnabled);
   const [selfApprove, setSelfApprove] = useState(allowSelfApprove);
   const [primeOnly, setPrimeOnly] = useState(primeOnlyReview);
+  const [pushConfirm, setPushConfirm] = useState(requirePushConfirmation);
   const [primeTagText, setPrimeTagText] = useState(primeTags.join(", "));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -88,11 +97,16 @@ export function NestSettingsModal({
     const primeOnlyChanged = primeOnly !== primeOnlyReview;
     const primeTagsChanged =
       nextPrimeTags.join(",") !== primeTags.join(",");
+    // Only a superadmin may change this; never send it otherwise (a per-field
+    // 403 would otherwise reject the whole PATCH for a non-superadmin).
+    const pushConfirmChanged =
+      isServerAdmin && pushConfirm !== requirePushConfirmation;
     if (
       !stewardshipChanged &&
       !selfApproveChanged &&
       !primeOnlyChanged &&
-      !primeTagsChanged
+      !primeTagsChanged &&
+      !pushConfirmChanged
     ) {
       onClose();
       return;
@@ -105,13 +119,17 @@ export function NestSettingsModal({
         ...(selfApproveChanged ? { allow_self_approve: selfApprove } : {}),
         ...(primeOnlyChanged ? { prime_only_review: primeOnly } : {}),
         ...(primeTagsChanged ? { prime_tags: nextPrimeTags } : {}),
+        ...(pushConfirmChanged
+          ? { require_push_confirmation: pushConfirm }
+          : {}),
       });
       // Trust the server's response, not our optimistic local state, in
       // case the permission check rejected silently or the DB rejected.
       if (
         result.stewardship_enabled !== enabled ||
         result.allow_self_approve !== selfApprove ||
-        result.prime_only_review !== primeOnly
+        result.prime_only_review !== primeOnly ||
+        (pushConfirmChanged && result.require_push_confirmation !== pushConfirm)
       ) {
         setError(
           "Server did not accept the change. You may not have permission to change these settings.",
@@ -126,6 +144,7 @@ export function NestSettingsModal({
         allowSelfApprove: result.allow_self_approve,
         primeOnlyReview: result.prime_only_review,
         primeTags: result.prime_tags,
+        requirePushConfirmation: result.require_push_confirmation,
       });
     } catch (err: any) {
       setError(err.message);
@@ -315,6 +334,53 @@ export function NestSettingsModal({
                 editor, which overrides its tags.
               </p>
             </div>
+          </div>
+          )}
+
+          {/* Push Confirmation Gate — SERVER superadmin only. Rendered for
+              everyone who can manage the nest so the posture is visible, but
+              the switch is enabled only for a superadmin; others see it
+              read-only with a tooltip. The server enforces a per-field 403. */}
+          {canManageStewardship && (
+          <div className="rounded-lg border p-4 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div className="space-y-1">
+                <Label className="flex items-center gap-2 text-sm font-medium">
+                  <ShieldCheck className="h-4 w-4" />
+                  Require confirmation for pushes (ctx push)
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  Default off. When on, a <code>ctx push</code> to this nest is
+                  held pending review instead of applying — it lands only after
+                  a reviewer confirms it here. Whitelisted keys (via
+                  &ldquo;Always allow&rdquo; on the confirm modal) skip the gate.
+                  {" "}
+                  <strong>Superadmin only.</strong>
+                </p>
+              </div>
+              <span
+                title={
+                  isServerAdmin
+                    ? undefined
+                    : "Only a server superadmin can change this."
+                }
+              >
+                <Switch
+                  checked={pushConfirm}
+                  onCheckedChange={setPushConfirm}
+                  disabled={!isServerAdmin}
+                />
+              </span>
+            </div>
+            {!isServerAdmin && (
+              <div className="flex items-start gap-2 text-xs text-muted-foreground pt-2 border-t">
+                <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                <div>
+                  This is a server-wide governance control. Ask a superadmin to
+                  change it.
+                </div>
+              </div>
+            )}
           </div>
           )}
         </div>

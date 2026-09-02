@@ -190,7 +190,8 @@ Owner only.
   "stewardship_enabled": false,
   "allow_self_approve": false,
   "prime_only_review": false,
-  "prime_tags": ["prime-document"]
+  "prime_tags": ["prime-document"],
+  "require_push_confirmation": false
 }
 ```
 
@@ -204,8 +205,63 @@ Every field is optional; only the ones present are changed.
 - `allow_self_approve` — owner/admin writes publish immediately instead of drafting.
 - `prime_only_review` — in a governed nest, only **prime** documents need approval; everything else self-publishes. Off by default.
 - `prime_tags` — tags that mark a document prime. Accepts an array or a comma-separated string; stored and returned normalized (no leading `#`, lowercased, deduped). See `STEWARDSHIP.md → Prime documents`.
+- `require_push_confirmation` — the **Push Confirmation Gate** (see below). **Superadmin-only to SET**: a PATCH carrying this field from anyone who is not a server superadmin is refused with a per-field `403` (`{ "error": ..., "field": "require_push_confirmation" }`) and no other field in the same body is applied. Readable by anyone who can read the nest. Off by default.
 
 Turning stewardship **off** wipes stewards and pending reviews and is owner-only; the other fields are non-destructive and never change the state of anything already published.
+
+## Push Confirmation Gate
+
+When a nest has `require_push_confirmation` on, a `ctx push` (`POST /nests/:id/publish`) from a non-whitelisted API key is **held** as a pending record instead of applying — it lands only after a reviewer confirms it in the web UI. Superadmin-set; default off (immediate-apply, as before).
+
+### POST `/nests/:nestId/publish`
+
+The real ctx-push endpoint. Body: `{ documents?: [{ title, content, type?, tags?, scope? }], context_md? }`.
+
+- **Ungated nest, or a whitelisted key** → applies immediately: `201 { published, context_md_updated, node_ids }` (unchanged).
+- **Gated nest, non-whitelisted key** → held: `202`
+  ```json
+  {
+    "status": "pending_confirmation",
+    "pending_id": "…",
+    "confirm_url": "/nests/:id/pending-pushes/:pid/confirm",
+    "poll_url": "/nests/:id/pending-pushes/:pid",
+    "message": "…",
+    "expires_at": "<ISO-8601>"
+  }
+  ```
+
+Requires `write`. Doc/folder grantees cannot reach it. The held payload is bounded by `MAX_PENDING_PUSH_BYTES` and expires after `PENDING_PUSH_TTL_MS` (see `CONFIGURATION.md`).
+
+### GET `/nests/:nestId/pending-pushes?status=pending|applied|rejected|expired`
+
+Reviewer view (owner/admin/reviewer only) of held pushes → `{ pending_pushes: [...], count }`.
+
+### GET `/nests/:nestId/pending-pushes/:pid`
+
+The poll endpoint. **Readable by the submitter (same key/user that pushed) OR a reviewer** — the CLI polls with the pushing key.
+```json
+{
+  "id": "…", "status": "pending|applied|rejected|expired",
+  "nest_name": "…", "doc_count": 3, "manifest": [{ "id", "title", "type", "tags" }],
+  "submitter_label": "…", "submitter_email": "…", "submitter_user_id": "…",
+  "created_at": "…", "expires_at": "…",
+  "decided_by": "…", "decided_at": "…", "applied_node_count": 3
+}
+```
+
+### POST `/nests/:nestId/pending-pushes/:pid/confirm`  `{ always_allow?: boolean }`
+
+Confirm rights: the **submitter OR a reviewer/owner/admin**. Applies the stored payload through the real apply path and returns the updated record. Confirming a push that is no longer pending (already applied/rejected/expired) → `409`. `always_allow: true` whitelists the submitter's exact API key for future pushes to this nest.
+
+### POST `/nests/:nestId/pending-pushes/:pid/reject`
+
+Same rights as confirm. Marks the push `rejected`; nothing is ever written. `409` if not pending.
+
+### GET / DELETE `/nests/:nestId/push-allowlist`
+
+Reviewer-only. `GET` → `{ allowlist: [{ user_id, key_id, created_by_user_id, created_at }], count }` (`key_id: null` = all of that user's keys). `DELETE { user_id, key_id? }` removes one entry → `{ removed }`.
+
+These routes are governance-licensed (`503` without a valid license).
 
 ### PATCH `/nests/:nestId/visibility` (admin)
 ```json

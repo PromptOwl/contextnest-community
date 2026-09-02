@@ -611,4 +611,29 @@ export const config = {
     const mb = parseInt(process.env.VIDEO_MAX_MB || "30", 10);
     return (Number.isFinite(mb) && mb > 0 ? mb : 30) * 1024 * 1024;
   },
+  /**
+   * Push Confirmation Gate — max serialized size (bytes) of a single held push
+   * (pending_pushes.payload_blob). A gated push carries its FULL staged payload
+   * so a later confirm applies it byte-for-byte, so it must be bounded like any
+   * other stored body. Default 5 MB; override via MAX_PENDING_PUSH_BYTES.
+   */
+  get MAX_PENDING_PUSH_BYTES() {
+    const n = parseInt(
+      process.env.MAX_PENDING_PUSH_BYTES || String(5 * 1024 * 1024),
+      10,
+    );
+    return Number.isFinite(n) && n > 0 ? n : 5 * 1024 * 1024;
+  },
+  /**
+   * Push Confirmation Gate — time-to-live (ms) for a held push before it lazily
+   * expires (reported as `expired`, and no longer confirmable). Default 7 days;
+   * override via PENDING_PUSH_TTL_MS.
+   */
+  get PENDING_PUSH_TTL_MS() {
+    const n = parseInt(
+      process.env.PENDING_PUSH_TTL_MS || String(7 * 24 * 60 * 60 * 1000),
+      10,
+    );
+    return Number.isFinite(n) && n > 0 ? n : 7 * 24 * 60 * 60 * 1000;
+  },
 };

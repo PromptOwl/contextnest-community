@@ -70,6 +70,7 @@ const HISTORICAL_MIGRATIONS = [
   "034_versions_author_status_index",
   "035_multiple_api_keys_per_user",
   "036_node_index",
+  "037_push_confirmation",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -106,9 +107,13 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       prime_tags TEXT NOT NULL DEFAULT 'prime-document',
       shared_teams TEXT NOT NULL DEFAULT '[]',
       index_synced_at TEXT,
+      require_push_confirmation INTEGER NOT NULL DEFAULT 0,
       UNIQUE(user_id, slug)
     );
     CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
+    -- Push Confirmation Gate (migration 037): declared inline above; explicit
+    -- ALTER for databases created before it shipped.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS require_push_confirmation INTEGER NOT NULL DEFAULT 0;
 
     CREATE TABLE IF NOT EXISTS api_keys (
       id TEXT PRIMARY KEY,
@@ -644,6 +649,41 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON deletion_requests(nest_id, target_type, node_id) WHERE status = 'pending';
     CREATE INDEX IF NOT EXISTS idx_deletion_requests_nest
       ON deletion_requests(nest_id, status);
+
+    -- Push Confirmation Gate (migration 037). pending_pushes holds a gated ctx
+    -- push in full (payload_blob) until a reviewer confirms; push_allowlist is
+    -- PER-API-KEY (key_id '' = any of that user's keys), never keyed on nest
+    -- alone. SQLite parity in migrations.ts 037_push_confirmation.
+    CREATE TABLE IF NOT EXISTS pending_pushes (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      submitter_user_id TEXT NOT NULL,
+      submitter_key_id TEXT,
+      submitter_label TEXT,
+      submitter_email TEXT,
+      doc_count INTEGER NOT NULL DEFAULT 0,
+      manifest_json TEXT NOT NULL DEFAULT '[]',
+      payload_blob TEXT NOT NULL,
+      context_md TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'applied', 'rejected', 'expired')),
+      created_at TEXT NOT NULL,
+      decided_at TEXT,
+      decided_by_user_id TEXT,
+      applied_node_count INTEGER,
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_pushes_nest_status
+      ON pending_pushes(nest_id, status, created_at);
+
+    CREATE TABLE IF NOT EXISTS push_allowlist (
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      key_id TEXT NOT NULL DEFAULT '',
+      created_by_user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (nest_id, user_id, key_id)
+    );
 
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,

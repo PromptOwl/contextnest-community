@@ -108,7 +108,7 @@ describe("activity feed: changes + comments, newest first", () => {
     const { status, data } = await getFeed("");
     expect(status).toBe(200);
     expect(data.total).toBe(5);
-    expect(data.counts).toEqual({ changes: 1, comments: 4 });
+    expect(data.counts).toEqual({ changes: 1, comments: 4, pending_pushes: 0 });
 
     expect(data.items.map((i: any) => i.type)).toEqual([
       "comment", // 12:00 long comment on Alpha
@@ -235,7 +235,7 @@ describe("activity feed: changes + comments, newest first", () => {
     // Totals stay authoritative even when the page is empty — the UI's
     // chip badge and load-more affordance bind to these.
     expect(data.total).toBe(4);
-    expect(data.counts).toEqual({ changes: 1, comments: 4 });
+    expect(data.counts).toEqual({ changes: 1, comments: 4, pending_pushes: 0 });
     expect(data.offset).toBe(10);
     expect(data.limit).toBe(2);
   });

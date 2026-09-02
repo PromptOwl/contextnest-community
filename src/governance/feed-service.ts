@@ -22,6 +22,11 @@ import { getDb } from "../db/client.js";
 import { filterAccessible } from "./access-guard.js";
 import { canUserApprove } from "./stewardship-service.js";
 import { buildTitleMap } from "./title-resolver.js";
+import {
+  expirePendingPushes,
+  isNestReviewer,
+} from "../nests/push-confirmation-service.js";
+import type { PushManifestEntry } from "../nodes/publish-apply.js";
 import type { ReviewRequest } from "./types.js";
 
 export type FeedFilter = "all" | "changes" | "comments";
@@ -56,14 +61,31 @@ export interface CommentFeedItem {
   isReply: boolean;
 }
 
-export type FeedItem = ChangeFeedItem | CommentFeedItem;
+/** A held push awaiting confirmation (Push Confirmation Gate). */
+export interface PendingPushFeedItem {
+  type: "pending_push";
+  /** The pending_pushes id. */
+  id: string;
+  nestId: string;
+  nestName: string;
+  docCount: number;
+  manifest: PushManifestEntry[];
+  submitterLabel: string | null;
+  submitterEmail: string | null;
+  createdAt: string;
+  expiresAt: string;
+  /** Whether THIS caller may confirm/reject it (submitter OR reviewer). */
+  canConfirm: boolean;
+}
+
+export type FeedItem = ChangeFeedItem | CommentFeedItem | PendingPushFeedItem;
 
 export interface NestFeed {
   items: FeedItem[];
   /** Total items matching the active filter (pre-pagination). */
   total: number;
   /** Per-type totals regardless of filter — the UI badge binds to changes. */
-  counts: { changes: number; comments: number };
+  counts: { changes: number; comments: number; pending_pushes: number };
 }
 
 const SNIPPET_CHARS = 200;
@@ -220,23 +242,85 @@ export async function getNestFeed(params: {
     }
   }
 
+  // ── Pending pushes (Push Confirmation Gate) ─────────────────────────────
+  // Held ctx pushes awaiting confirmation. They ride the "changes" lane (a
+  // pending write, like a review request), never the comments lane.
+  let pendingPushes: PendingPushFeedItem[] = [];
+  let pendingPushesTotal = 0;
+  {
+    await expirePendingPushes(params.nestId);
+    pendingPushesTotal = (
+      (await db.get(
+        "SELECT COUNT(*) AS c FROM pending_pushes WHERE nest_id = ? AND status = 'pending'",
+        [params.nestId],
+      )) as { c: number }
+    ).c;
+    if (filter !== "comments" && pendingPushesTotal > 0) {
+      const rows = (await db.all(
+        `SELECT * FROM pending_pushes
+          WHERE nest_id = ? AND status = 'pending'
+          ORDER BY created_at DESC, id DESC
+          LIMIT ?`,
+        [params.nestId, fetchWindow],
+      )) as any[];
+      // One nest-level reviewer check; per-item canConfirm folds in "am I the
+      // submitter" so a write-tier submitter sees its own held push actionable.
+      const reviewer = await isNestReviewer(
+        params.nestId,
+        params.userId,
+        params.userEmail,
+      );
+      const nameRow = (await db.get("SELECT name FROM nests WHERE id = ?", [
+        params.nestId,
+      ])) as { name?: string } | undefined;
+      const nestName = nameRow?.name ?? params.nestId;
+      pendingPushes = rows.map((row) => {
+        let manifest: PushManifestEntry[] = [];
+        try {
+          manifest = JSON.parse(row.manifest_json);
+        } catch {
+          manifest = [];
+        }
+        return {
+          type: "pending_push" as const,
+          id: row.id,
+          nestId: row.nest_id,
+          nestName,
+          docCount: row.doc_count,
+          manifest,
+          submitterLabel: row.submitter_label,
+          submitterEmail: row.submitter_email,
+          createdAt: row.created_at,
+          expiresAt: row.expires_at,
+          canConfirm: reviewer || row.submitter_user_id === params.userId,
+        };
+      });
+    }
+  }
+
   // ── Merge newest-first + page ───────────────────────────────────────────
-  const merged: FeedItem[] = [...changes, ...comments].sort((a, b) => {
-    const byTime = b.createdAt.localeCompare(a.createdAt);
-    if (byTime !== 0) return byTime;
-    return b.id.localeCompare(a.id);
-  });
+  const merged: FeedItem[] = [...changes, ...comments, ...pendingPushes].sort(
+    (a, b) => {
+      const byTime = b.createdAt.localeCompare(a.createdAt);
+      if (byTime !== 0) return byTime;
+      return b.id.localeCompare(a.id);
+    },
+  );
 
   const total =
     filter === "changes"
-      ? changesTotal
+      ? changesTotal + pendingPushesTotal
       : filter === "comments"
         ? commentsTotal
-        : changesTotal + commentsTotal;
+        : changesTotal + commentsTotal + pendingPushesTotal;
 
   return {
     items: merged.slice(offset, offset + limit),
     total,
-    counts: { changes: changesTotal, comments: commentsTotal },
+    counts: {
+      changes: changesTotal,
+      comments: commentsTotal,
+      pending_pushes: pendingPushesTotal,
+    },
   };
 }

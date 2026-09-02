@@ -11,6 +11,13 @@ export type AuthEnv = {
     userId: string;
     nestScope: string | null;
     nestPermission: NestPermission;
+    // The API key the request authenticated with, when it used a Bearer key
+    // (null for cookie/session requests and open mode). Lets pending-push rows
+    // and the push allowlist attribute to — and key on — the exact credential
+    // that pushed, so `ctx push` from one key can be whitelisted without
+    // whitelisting every other key the same user holds.
+    apiKeyId: string | null;
+    apiKeyLabel: string | null;
   };
 };
 
@@ -37,6 +44,10 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
     if (userId) {
       c.set("userId", userId);
       c.set("nestScope", null);
+      // Cookie sessions carry no API key — a pending row raised by the browser
+      // is attributed to the user, not a key (key_id null = all their keys).
+      c.set("apiKeyId", null);
+      c.set("apiKeyLabel", null);
       return next();
     }
   }
@@ -46,9 +57,11 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
   if (key) {
     const keyHash = hashApiKey(key);
     const record = await db.get(
-      "SELECT user_id, nest_id FROM api_keys WHERE key_hash = ?",
+      "SELECT id, label, user_id, nest_id FROM api_keys WHERE key_hash = ?",
       [keyHash],
-    ) as { user_id: string; nest_id: string | null } | undefined;
+    ) as
+      | { id: string; label: string | null; user_id: string; nest_id: string | null }
+      | undefined;
 
     if (record) {
       await db.run(
@@ -57,6 +70,10 @@ export const authMiddleware = createMiddleware<AuthEnv>(async (c, next) => {
       );
       c.set("userId", record.user_id);
       c.set("nestScope", record.nest_id);
+      // Attribute the request to the exact key it came in on, so pending-push
+      // rows record who pushed and the allowlist can key on the credential.
+      c.set("apiKeyId", record.id);
+      c.set("apiKeyLabel", record.label ?? null);
       return next();
     }
   }
