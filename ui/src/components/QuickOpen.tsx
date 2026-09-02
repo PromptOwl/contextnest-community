@@ -11,7 +11,7 @@
  * (CU-wdqcq0042v) — the same palette silently changing scope with the page
  * made "No matches" read as "that document does not exist".
  */
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Database, FileText, Loader2, Search } from "lucide-react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
@@ -278,8 +278,16 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
             </div>
           ) : (
             results.map((r, i) => (
+              <Fragment key={`${r.kind}:${r.nest_id ?? ""}${r.id}`}>
+                {/* Results arrive nests-first, so a header before each run
+                    labels the two kinds without reordering or re-indexing
+                    anything the keyboard selection depends on. */}
+                {r.kind !== results[i - 1]?.kind && (
+                  <div className="px-3 pb-0.5 pt-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {r.kind === "nest" ? "Nests" : "Documents"}
+                  </div>
+                )}
               <button
-                key={`${r.kind}:${r.nest_id ?? ""}${r.id}`}
                 type="button"
                 className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm ${
                   i === selected ? "bg-muted" : "hover:bg-muted/50"
@@ -325,6 +333,7 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
                   )}
                 </div>
               </button>
+              </Fragment>
             ))
           )}
         </div>
