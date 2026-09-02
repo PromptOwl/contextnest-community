@@ -212,6 +212,16 @@ export function runMigrations(db: Database.Database): void {
     db.exec("ALTER TABLE nests ADD COLUMN index_synced_at TEXT");
   }
 
+  // Public Docs Reader Mode — a superadmin-enabled, read-only public docs view.
+  // `reader_mode` off by default; `reader_home_node` names the designated
+  // landing/hub node (nullable — resolved by convention when unset).
+  if (!nestCols.includes("reader_mode")) {
+    db.exec("ALTER TABLE nests ADD COLUMN reader_mode INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!nestCols.includes("reader_home_node")) {
+    db.exec("ALTER TABLE nests ADD COLUMN reader_home_node TEXT");
+  }
+
   // Admin flag on users (first PromptOwl-authed user becomes the server admin)
   const userCols = (db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>).map((c) => c.name);
   if (!userCols.includes("is_admin")) {

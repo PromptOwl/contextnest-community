@@ -16,7 +16,11 @@ import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
-import { deriveNestCaps } from "./lib/nest-caps";
+import {
+  deriveNestCaps,
+  isReaderHiddenView,
+  isViewBlockedInReaderMode,
+} from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
 import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
@@ -76,6 +80,10 @@ type View =
       /** Which of NestView's own tabs is open, mirrored to ?tab= so a link
        *  to the Review Queue lands on the Review Queue. Absent = overview. */
       tab?: string;
+      /** Public Docs Reader Mode is on for this nest AND the caller is
+       *  read-only — the shell hides the board/graph/definitions tabs and
+       *  NestView renders the stripped ReaderView. */
+      readerMode?: boolean;
     }
   | {
       page: "document";
@@ -108,6 +116,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       page: "workflows";
@@ -115,6 +124,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       page: "definitions";
@@ -122,6 +132,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       page: "board";
@@ -129,6 +140,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       /** Nest-scoped activity trace (owner/nest-admin) — ActivityTracePage
@@ -138,6 +150,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     };
 
 /** The views of a single nest, in switcher order. "Nest" (not "Documents")
@@ -334,13 +347,24 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const { nest, permission } = await getNest(nestId);
+        const { nest, permission, roles, myStewards } = await getNest(nestId);
         if (cancelled) return;
         // Deep-link / refresh nav has no is_owner from a nest-list row, so
         // derive it from the authoritative permission — resolveNestPermission
         // returns "owner" only for the real owner. Hardcoding false here hid
         // owner-only UI (Nest settings) after a refresh, even for the owner.
         const isOwner = permission === "owner";
+        // Public Docs Reader Mode strips the shell tabs (board/graph/
+        // definitions) and swaps NestView for the docs reader — but ONLY for a
+        // read-only caller. Owners/editors/reviewers/admins keep authoring.
+        const readerMode = deriveNestCaps({
+          roles: roles ?? [],
+          permission,
+          myStewards: (myStewards ?? []) as any,
+          isOwner,
+          isAdmin,
+          readerMode: !!nest.reader_mode,
+        }).isReaderView;
         setDeepLinkProbe({
           status: "ok",
           nestId: nest.id,
@@ -373,6 +397,21 @@ export default function App() {
           : sub === "board" ? "board"
           : sub === "trace" ? "nest-trace"
           : null;
+        // In reader mode the board / ontology-graph / definitions pages are
+        // hidden — a deep link into one must not enter it (the tab is gone, but
+        // the page state is top-level and would otherwise render the full
+        // authoring view). Fall back to the nest page, same as an unknown ?tab.
+        if (subPage && isViewBlockedInReaderMode(subPage, readerMode)) {
+          setView({
+            page: "nest",
+            nestId: nest.id,
+            nestName: nest.name,
+            isOwner,
+            isAnonOwned: false,
+            readerMode,
+          });
+          return;
+        }
         if (subPage) {
           setView({
             page: subPage,
@@ -380,6 +419,7 @@ export default function App() {
             nestName: nest.name,
             isOwner,
             isAnonOwned: false,
+            readerMode,
           });
           return;
         }
@@ -389,6 +429,7 @@ export default function App() {
           nestName: nest.name,
           isOwner,
           isAnonOwned: false,
+          readerMode,
           // ?tab=<slug> → open on that NestView tab. Unknown slugs are
           // dropped rather than passed through, so a stale link can't leave
           // Radix with a value that matches no trigger (blank content area).
@@ -475,6 +516,38 @@ export default function App() {
     }
   }, [view, deepLinkProbe.status]);
 
+  // Reader mode is a property of the nest and the caller, not of how the user
+  // navigated here. The deep-link probe seeds view.readerMode for the first
+  // paint; the nest-scoped fetch below resolves it for every other entry point
+  // (dashboard, back arrow, wiki-link nav), which never carried it.
+  const [nestIsReaderView, setNestIsReaderView] = useState<boolean | null>(null);
+  const readerMode = isNestScoped(view)
+    ? (nestIsReaderView ?? view.readerMode ?? false)
+    : false;
+
+  // Reader-mode render guard: the board / ontology-graph / definitions pages
+  // are hidden in reader mode, but they are top-level view.page states, so a
+  // reader who reaches one another way (a stale in-app link, a restored state)
+  // would otherwise land on the full authoring page. Redirect to the nest page
+  // — the deep-link probe already blocks the URL entry point; this closes the
+  // remaining paths. The render conditionals also require !readerMode, so
+  // the hidden page never paints for the frame before this effect corrects it.
+  useEffect(() => {
+    if (
+      isNestScoped(view) &&
+      isViewBlockedInReaderMode(view.page, readerMode)
+    ) {
+      setView({
+        page: "nest",
+        nestId: view.nestId,
+        nestName: view.nestName,
+        isOwner: view.isOwner,
+        isAnonOwned: view.isAnonOwned,
+        readerMode,
+      });
+    }
+  }, [view, readerMode]);
+
   // Caller's write access on the nest currently in view, for gating the
   // Workflows tab (an execution plane — every action inside it mutates).
   // null = not resolved yet; the tab stays hidden until we know, so a viewer
@@ -483,26 +556,28 @@ export default function App() {
   const nestScopedIsOwner = isNestScoped(view) ? view.isOwner : false;
   const [nestCanEdit, setNestCanEdit] = useState<boolean | null>(null);
   useEffect(() => {
-    if (!nestScopedId) {
-      setNestCanEdit(null);
-      return;
-    }
+    setNestCanEdit(null);
+    setNestIsReaderView(null);
+    if (!nestScopedId) return;
     let cancelled = false;
     getNest(nestScopedId)
       .then((meta: any) => {
         if (cancelled) return;
-        setNestCanEdit(
-          deriveNestCaps({
-            roles: meta?.roles ?? [],
-            permission: meta?.permission ?? null,
-            myStewards: meta?.myStewards ?? [],
-            isOwner: nestScopedIsOwner,
-            isAdmin,
-          }).canEditDocs,
-        );
+        const caps = deriveNestCaps({
+          roles: meta?.roles ?? [],
+          permission: meta?.permission ?? null,
+          myStewards: meta?.myStewards ?? [],
+          isOwner: nestScopedIsOwner,
+          isAdmin,
+          readerMode: !!meta?.nest?.reader_mode,
+        });
+        setNestCanEdit(caps.canEditDocs);
+        setNestIsReaderView(caps.isReaderView);
       })
       .catch(() => {
-        if (!cancelled) setNestCanEdit(false);
+        if (cancelled) return;
+        setNestCanEdit(false);
+        setNestIsReaderView(false);
       });
     return () => {
       cancelled = true;
@@ -886,6 +961,7 @@ export default function App() {
                   nestName: view.nestName,
                   isOwner: view.isOwner,
                   isAnonOwned: view.isAnonOwned,
+                  readerMode,
                 } as View)
               }
             >
@@ -894,7 +970,12 @@ export default function App() {
                   (v) =>
                     v.page !== "workflows" ||
                     (workflowPlaneEnabled && nestCanEdit === true),
-                ).map((v) => {
+                )
+                  // Public Docs Reader Mode presents a clean, read-only docs
+                  // view — the board, ontology graph and definitions authoring
+                  // surfaces are hidden so a public reader sees only the docs.
+                  .filter((v) => !readerMode || !isReaderHiddenView(v.page))
+                  .map((v) => {
                   const Icon = v.icon;
                   return (
                     <TabsTrigger key={v.page} value={v.page} className="gap-1.5">
@@ -1127,14 +1208,16 @@ export default function App() {
             />
           );
         })()}
-        {view.page === "definitions" && (
+        {view.page === "definitions" &&
+          !isViewBlockedInReaderMode(view.page, readerMode) && (
           <DefinitionsPage
             nestId={view.nestId}
             nestName={view.nestName}
             onBack={leaveNest}
           />
         )}
-        {view.page === "board" && (
+        {view.page === "board" &&
+          !isViewBlockedInReaderMode(view.page, readerMode) && (
           <MaturityBoard
             nestId={view.nestId}
             nestName={view.nestName}
@@ -1175,7 +1258,8 @@ export default function App() {
         {view.page === "docs" && (
           <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}
-        {view.page === "ontology-graph" && (
+        {view.page === "ontology-graph" &&
+          !isViewBlockedInReaderMode(view.page, readerMode) && (
           <OntologyGraphView
             nestId={view.nestId}
             nestName={view.nestName}

@@ -1905,7 +1905,11 @@ export function createApp(): Hono<AuthEnv> {
     // would wrongly gate `…/nodes/collaborators-guide` as a collaborators route
     // and 403 a write user editing that doc. parts[1] is the resource segment.
     const resource = parts[1];
-    if (resource === "visibility") {
+    if (resource === "visibility" || resource === "reader-mode") {
+      // reader-mode is a superadmin-only surface, but the admin tier is as far
+      // as this middleware goes (resolveNestPermission maps the server/super
+      // admin to "admin"); its handler hard-gates on isServerAdminUserId so a
+      // plain nest-admin collaborator can't reach it.
       required = "admin";
     } else if (resource === "collaborators") {
       // Viewing the roster (GET) and inviting (POST) are open to write+

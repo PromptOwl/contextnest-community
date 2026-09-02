@@ -92,6 +92,32 @@ export async function setStewardshipEnabled(
   ]);
 }
 
+
+/**
+ * Configure Public Docs Reader Mode for a nest (superadmin-only). Either field
+ * may be updated independently; `enabled` toggles the read-only public view and
+ * `homeNode` designates (or clears, with null) the landing/hub node.
+ */
+export async function setReaderMode(
+  nestId: string,
+  opts: { enabled?: boolean; homeNode?: string | null },
+): Promise<void> {
+  const db = getDb();
+  const sets: string[] = [];
+  const params: Array<string | number | null> = [];
+  if (opts.enabled !== undefined) {
+    sets.push("reader_mode = ?");
+    params.push(opts.enabled ? 1 : 0);
+  }
+  if (opts.homeNode !== undefined) {
+    sets.push("reader_home_node = ?");
+    params.push(opts.homeNode ?? null);
+  }
+  if (sets.length === 0) return;
+  params.push(nestId);
+  await db.run(`UPDATE nests SET ${sets.join(", ")} WHERE id = ?`, params);
+}
+
 /** Whether the nest lets a submitter approve their own version (bypass SoD). */
 export async function nestAllowsSelfApprove(
   nestId: string,

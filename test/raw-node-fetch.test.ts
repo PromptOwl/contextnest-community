@@ -395,7 +395,7 @@ describe("?format=raw for public readers (approved snapshot only)", () => {
       app,
       "PATCH",
       `/nests/${nestId}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       owner.apiKey,
     );
     // Diverge the working copy on disk — a draft edit that was never

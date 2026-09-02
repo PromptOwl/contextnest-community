@@ -74,7 +74,7 @@ beforeAll(async () => {
     app,
     "PATCH",
     `/nests/${nestId}/visibility`,
-    { visibility: "public" },
+    { visibility: "public", acknowledge_public: true },
     owner.apiKey,
   );
 }, 30000);

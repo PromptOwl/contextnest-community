@@ -29,6 +29,9 @@ interface DocumentPickerModalProps {
    *  it from the list (linking to yourself is pointless). */
   excludeNodeId?: string;
   onSelect: (node: { id: string; title: string }) => void;
+  /** Dialog copy. Defaults to the editor's link-insertion wording. */
+  title?: string;
+  description?: string;
 }
 
 interface PickerNode {
@@ -43,6 +46,8 @@ export function DocumentPickerModal({
   nestId,
   excludeNodeId,
   onSelect,
+  title = "Link to a document",
+  description = "Pick a document in this nest. The link will use this title and point at the document — clicking it inside the editor opens the target.",
 }: DocumentPickerModalProps) {
   // Full list preloaded on open — never overwritten by search, so it can
   // be restored when the query is cleared.
@@ -123,12 +128,8 @@ export function DocumentPickerModal({
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[520px] max-h-[80vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle>Link to a document</DialogTitle>
-          <DialogDescription>
-            Pick a document in this nest. The link will use this title and
-            point at the document — clicking it inside the editor opens the
-            target.
-          </DialogDescription>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
 
         <div className="relative">

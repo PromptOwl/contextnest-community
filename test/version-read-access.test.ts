@@ -58,7 +58,7 @@ describe("public reader — versions of a never-approved node", () => {
       app,
       "PATCH",
       `/nests/${nestId}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       owner.apiKey,
     );
   });

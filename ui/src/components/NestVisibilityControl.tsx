@@ -6,10 +6,24 @@
  * same control instead of the tab deferring visibility to the dialog
  * (CU-wdqcpzzzy6). Self-fetches the current value; reports failures through
  * `onError` so each host renders them where it already shows errors.
+ *
+ * Going public is guarded here rather than in each host: the server requires
+ * acknowledge_public and 409s without it, so the control that owns the switch
+ * owns the acknowledgement too.
  */
 import { useEffect, useState } from "react";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Globe, Lock, Loader2 } from "lucide-react";
 import * as api from "../lib/api";
 
@@ -23,6 +37,9 @@ interface Props {
 export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
   const [isPublic, setIsPublic] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
+  // becomes readable by anyone on the internet, outside your organization.
+  const [confirmPublic, setConfirmPublic] = useState(false);
 
   useEffect(() => {
     // Read current visibility straight from the server so the toggle
@@ -35,7 +52,7 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
       });
   }, [nestId]);
 
-  const toggle = async (next: boolean) => {
+  const apply = async (next: boolean, acknowledgePublic?: boolean) => {
     // Optimistic flip; revert on failure so the switch never lies about
     // server state (same pattern as NestSettingsModal's stewardship save).
     setIsPublic(next);
@@ -45,6 +62,7 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
       const result = await api.setNestVisibility(
         nestId,
         next ? "public" : "private",
+        acknowledgePublic,
       );
       if ((result.visibility === "public") !== next) {
         setIsPublic(!next);
@@ -60,6 +78,16 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
     } finally {
       setSaving(false);
     }
+  };
+
+  const toggle = async (next: boolean) => {
+    // Confirm before going public — the switch only moves once acknowledged.
+    // Going back to private needs no acknowledgement.
+    if (next) {
+      setConfirmPublic(true);
+      return;
+    }
+    await apply(false);
   };
 
   return (
@@ -92,6 +120,29 @@ export function NestVisibilityControl({ nestId, onChanged, onError }: Props) {
           />
         </div>
       </div>
+
+      <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This makes the nest readable by anyone on the internet, outside
+              your organization. Anyone with the URL will be able to read it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setConfirmPublic(false);
+                void apply(true, true);
+              }}
+            >
+              Make public
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
