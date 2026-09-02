@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { CountSkeleton } from "@/components/ui/count-skeleton";
 import {
@@ -87,6 +88,13 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   // Deletion flag being resolved from the inbox, and which dialog it opens.
   const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
   const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
+  // Bulk review straight from the inbox, keyed "<nestId>:<nodeId>" since this
+  // list spans nests. Deletion rows are never selectable — they resolve
+  // through their own flow and carry a different decision.
+  const [workSelected, setWorkSelected] = useState<Set<string>>(new Set());
+  const [workBulkAction, setWorkBulkAction] = useState<
+    "approve" | "reject" | null
+  >(null);
   // Served from the shared read cache: coming back to the dashboard paints the
   // previous list immediately and revalidates behind it. `isLoading` is true
   // only on a genuine first load with nothing cached, so the loader below still
@@ -295,6 +303,68 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const rejectReviewItem = async (w: api.WorkItem, note: string) => {
     await api.rejectReview(w.nest_id, w.node_id, note);
     dropWorkItem(w);
+  };
+
+  /** Review rows in the inbox — the only ones a batch decision applies to. */
+  const reviewItems = work.items.filter((w) => w.type === "review");
+  const workKey = (w: api.WorkItem) => `${w.nest_id}:${w.node_id}`;
+
+  // One decision over a selection that spans nests. The batch endpoint is
+  // per-nest (a batch is bounded by the vault it writes to), so the selection
+  // is grouped and each nest gets one call — the calls run together because
+  // they touch different vaults, while items inside a nest stay sequential.
+  const runWorkBulkReview = async (
+    action: "approve" | "reject",
+    note: string,
+  ) => {
+    const chosen = reviewItems.filter((w) => workSelected.has(workKey(w)));
+    const byNest = new Map<string, string[]>();
+    for (const w of chosen) {
+      byNest.set(w.nest_id, [...(byNest.get(w.nest_id) ?? []), w.node_id]);
+    }
+    const outcomes = await Promise.all(
+      [...byNest].map(([nestId, nodeIds]) =>
+        api
+          .bulkReview(nestId, action, nodeIds, note || undefined)
+          .then((res) => ({ nestId, ...res }))
+          // A whole nest's call failing (offline, 403) is reported like any
+          // other failure rather than losing the nests that did go through.
+          .catch((err: any) => ({
+            nestId,
+            succeeded: 0,
+            failed: nodeIds.length,
+            results: nodeIds.map((nodeId) => ({
+              nodeId,
+              ok: false,
+              error: err?.message || "Request failed",
+            })),
+          })),
+      ),
+    );
+    const succeeded = outcomes.reduce((n, o) => n + o.succeeded, 0);
+    const failed = outcomes.reduce((n, o) => n + o.failed, 0);
+    const stillFailing = new Set(
+      outcomes.flatMap((o) =>
+        o.results.filter((r) => !r.ok).map((r) => `${o.nestId}:${r.nodeId}`),
+      ),
+    );
+    const verb = action === "approve" ? "approved" : "rejected";
+    if (failed === 0) {
+      toast.success(`${succeeded} document${succeeded === 1 ? "" : "s"} ${verb}`);
+    } else {
+      const first = outcomes
+        .flatMap((o) => o.results)
+        .find((r) => !r.ok);
+      toast.warning(
+        `${succeeded} ${verb}, ${failed} could not be — ${first?.error ?? "unknown reason"}`,
+        { duration: 10000 },
+      );
+    }
+    // Keep the failures selected so a retry is one click, and let the inbox
+    // reload decide what is actually left.
+    setWorkSelected(stillFailing);
+    setWorkBulkAction(null);
+    void goToWorkPage(work.pagination?.offset ?? 0);
   };
 
   // Resolve a deletion flag straight from the inbox. Delete needs a confirm and
@@ -600,6 +670,58 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                 </div>
               ) : (
                 <div className="rounded-lg border divide-y overflow-hidden">
+                  {/* Batch decision bar — a folder import lands here as many
+                      rows carrying the same decision. Reviews only. */}
+                  {reviewItems.length > 1 && (
+                    <div className="flex flex-wrap items-center gap-2 bg-muted/40 px-4 py-2 text-sm">
+                      <Checkbox
+                        checked={
+                          workSelected.size > 0 &&
+                          workSelected.size === reviewItems.length
+                        }
+                        onCheckedChange={(next: boolean | "indeterminate") =>
+                          setWorkSelected(
+                            next === true
+                              ? new Set(reviewItems.map(workKey))
+                              : new Set(),
+                          )
+                        }
+                        aria-label="Select every review waiting on you"
+                        data-testid="work-select-all"
+                      />
+                      <span className="text-muted-foreground">
+                        {workSelected.size > 0
+                          ? `${workSelected.size} selected`
+                          : `Select all ${reviewItems.length} reviews`}
+                      </span>
+                      {workSelected.size > 0 && (
+                        <div className="ml-auto flex items-center gap-2">
+                          <Button
+                            size="sm"
+                            onClick={() => setWorkBulkAction("approve")}
+                            data-testid="work-bulk-approve"
+                          >
+                            Approve {workSelected.size}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setWorkBulkAction("reject")}
+                            data-testid="work-bulk-reject"
+                          >
+                            Reject {workSelected.size}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setWorkSelected(new Set())}
+                          >
+                            Clear
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {work.items.map((w) => {
                     const key = `${w.nest_id}:${w.node_id}`;
                     return (
@@ -607,6 +729,23 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                         key={key}
                         className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
                       >
+                        {reviewItems.length > 1 && (
+                          <Checkbox
+                            checked={workSelected.has(key)}
+                            // Deletion rows keep their own two-way decision, so
+                            // they hold the column without being selectable.
+                            disabled={w.type !== "review"}
+                            onCheckedChange={() =>
+                              setWorkSelected((prev) => {
+                                const next = new Set(prev);
+                                next.has(key) ? next.delete(key) : next.add(key);
+                                return next;
+                              })
+                            }
+                            aria-label={`Select ${w.title}`}
+                            className={w.type === "review" ? "" : "invisible"}
+                          />
+                        )}
                         <span
                           className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${w.type === "deletion"
                               ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
@@ -1527,6 +1666,31 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
             );
             setRenameTarget(null);
           }}
+        />
+      )}
+
+      {workBulkAction && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setWorkBulkAction(null)}
+          title={
+            workBulkAction === "approve"
+              ? `Approve ${workSelected.size} document${workSelected.size === 1 ? "" : "s"}?`
+              : `Reject ${workSelected.size} document${workSelected.size === 1 ? "" : "s"}?`
+          }
+          description={
+            workBulkAction === "approve"
+              ? "Approving publishes each one. Anything that changed since this inbox loaded is reported back and left alone."
+              : "Each author gets the same reason and the work goes back to them."
+          }
+          // Rejecting in bulk demands a reason exactly as one at a time does.
+          label={workBulkAction === "reject" ? "Why?" : undefined}
+          placeholder="Shared with every author in this batch"
+          confirmLabel={
+            workBulkAction === "approve" ? "Approve all" : "Reject all"
+          }
+          destructive={workBulkAction === "reject"}
+          onConfirm={(reason) => runWorkBulkReview(workBulkAction, reason)}
         />
       )}
 
