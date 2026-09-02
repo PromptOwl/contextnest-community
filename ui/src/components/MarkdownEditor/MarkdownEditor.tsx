@@ -402,7 +402,11 @@ export const MarkdownEditor = forwardRef<
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
-        heading: { levels: [1, 2, 3] },
+        // Toolbar exposes H1–H3, but markdown does not stop there: with the
+        // schema capped at 3, `#### x` stayed literal text on typing AND on
+        // load, so a document written elsewhere lost its deeper headings.
+        // Accept every markdown level; the toolbar still offers the top three.
+        heading: { levels: [1, 2, 3, 4, 5, 6] },
         link: false,
         // Replaced by the lowlight code block (syntax highlight + picker + copy).
         codeBlock: false,
