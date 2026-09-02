@@ -81,7 +81,7 @@ function ScopeTab({
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`max-w-[16rem] truncate rounded px-1.5 py-0.5 ${
+      className={`max-w-[16rem] truncate rounded px-1.5 py-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
         active
           ? "bg-muted font-medium text-foreground"
           : "hover:bg-muted/60"
@@ -211,6 +211,11 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
       <div
         className="w-full max-w-lg rounded-lg border bg-background shadow-xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
+        // Esc closes from anywhere in the palette, not only from the input —
+        // focus may be sitting on a scope tab.
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onClose();
+        }}
       >
         <div className="flex items-center gap-2 border-b px-3">
           {searching ? (
@@ -224,6 +229,14 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape") onClose();
+              // Tab flips the scope instead of leaving the field: the palette
+              // is keyboard-first and has one input, so there is nothing else
+              // worth tabbing to, and reaching for the mouse to widen a search
+              // broke the flow (CU-wdqcq012uu). The tabs stay focusable too.
+              if (e.key === "Tab" && nestId && !e.shiftKey) {
+                e.preventDefault();
+                setAllNests((v) => !v);
+              }
               if (e.key === "ArrowDown") {
                 e.preventDefault();
                 setSelected((s) => Math.min(s + 1, results.length - 1));
@@ -262,6 +275,7 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
                 onClick={() => setAllNests(true)}
                 label="All nests"
               />
+              <kbd className="rounded border px-1 text-[10px]">tab</kbd>
             </div>
           ) : (
             <span className="font-medium text-foreground">all nests</span>
