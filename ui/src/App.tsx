@@ -13,6 +13,7 @@ import { GuidePage } from "./components/GuidePage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
+import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
@@ -22,7 +23,7 @@ import {
   isViewBlockedInReaderMode,
 } from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText, Keyboard } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
@@ -306,6 +307,27 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [canQuickOpen]);
+
+  // `?` opens the shortcut cheatsheet — but only when it isn't a character
+  // being typed, so it never eats a question mark in a document or a field.
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "?" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (
+        el?.isContentEditable ||
+        el?.tagName === "INPUT" ||
+        el?.tagName === "TEXTAREA" ||
+        el?.tagName === "SELECT"
+      )
+        return;
+      e.preventDefault();
+      setShowShortcuts(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const confirmLogout = useCallback(async () => {
     setLogoutPending(true);
@@ -835,6 +857,11 @@ export default function App() {
           }}
         />
       )}
+      {/* Sits with the other always-mounted chrome so `?` works on every
+          screen, not only inside a nest (CU-wdqcpzzzvk). */}
+      {showShortcuts && (
+        <ShortcutsDialog onClose={() => setShowShortcuts(false)} />
+      )}
     </>
   );
 
@@ -962,6 +989,7 @@ export default function App() {
                 onTeams={() => setView({ page: "teams" })}
                 onSettings={() => setView({ page: "settings" })}
                 onGuide={() => setView({ page: "guide" })}
+                onShortcuts={() => setShowShortcuts(true)}
                 onTrace={() => setView({ page: "trace" })}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
@@ -1360,6 +1388,7 @@ interface UserMenuProps {
   onTeams: () => void;
   onSettings: () => void;
   onGuide: () => void;
+  onShortcuts: () => void;
   onTrace: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
@@ -1373,6 +1402,7 @@ function UserMenu({
   onTeams,
   onSettings,
   onGuide,
+  onShortcuts,
   onTrace,
   onChangePassword,
   onLogout,
@@ -1454,6 +1484,10 @@ function UserMenu({
         <DropdownMenuItem onSelect={onGuide} className="cursor-pointer">
           <BookOpen className="h-3.5 w-3.5 mr-2" />
           How it works
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={onShortcuts} className="cursor-pointer">
+          <Keyboard className="h-3.5 w-3.5 mr-2" />
+          Keyboard shortcuts
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
