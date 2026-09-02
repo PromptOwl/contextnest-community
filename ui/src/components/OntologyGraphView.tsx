@@ -14,7 +14,7 @@ import {
   forceCollide,
   type SimulationNodeDatum,
 } from "d3-force";
-import { AlertTriangle, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, FolderTree } from "lucide-react";
+import { AlertTriangle, Info, Users, Link2, Tag, Loader2, ZoomIn, ZoomOut, Maximize2, Copy, Check, FolderTree } from "lucide-react";
 import { getNestGraph, type NestGraph } from "../lib/api";
 import { copyTextWithToast } from "../lib/clipboard";
 import { Button } from "./ui/button";
@@ -613,7 +613,14 @@ export function OntologyGraphView({
         <div className="space-y-4">
           <div className="border border-border rounded-lg bg-card p-3">
             <div className="flex items-center gap-1.5 font-medium text-sm mb-2">
-              <AlertTriangle className="h-4 w-4 text-amber-500" /> Coverage gaps
+              {/* An empty nest is not a coverage gap — the warning icon is
+                  reserved for real ones (CU-wdqcq00x8x). */}
+              {(graph?.nodes.length ?? 0) === 0 ? (
+                <Info className="h-4 w-4 text-muted-foreground" />
+              ) : (
+                <AlertTriangle className="h-4 w-4 text-amber-500" />
+              )}{" "}
+              Coverage gaps
             </div>
             {!signals ? (
               <p className="text-xs text-muted-foreground">—</p>
