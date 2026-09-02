@@ -274,7 +274,24 @@ export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProp
                 ? "Searching…"
                 : global && !query.trim()
                   ? "Type to search nests and documents"
-                  : "No matches"}
+                  : !global && query.trim() ? (
+                    // A scoped miss is not "it doesn't exist" — name the nest
+                    // that was searched and offer the wider one right here,
+                    // where the dead end is (CU-wdqcq012ut).
+                    <>
+                      No matches in {nestName ?? "this nest"}.{" "}
+                      <button
+                        type="button"
+                        onClick={() => setAllNests(true)}
+                        className="font-medium text-foreground underline underline-offset-2 hover:no-underline"
+                        data-testid="quick-open-widen-scope"
+                      >
+                        Search all nests
+                      </button>
+                    </>
+                  ) : (
+                    "No matches"
+                  )}
             </div>
           ) : (
             results.map((r, i) => (
