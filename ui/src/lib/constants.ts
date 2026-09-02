@@ -13,3 +13,8 @@ export const ANON_EMAIL = "admin@localhost";
  * reason inline instead of a swallowed 400.
  */
 export const MAX_FOLDER_DEPTH = 8;
+
+/** Documents one bulk approve/reject may carry. Mirrors the server's cap
+ *  (BULK_REVIEW_LIMIT in governance/routes.ts) so an oversized selection is
+ *  refused where it is made, not as a blanket 400 after the fact. */
+export const BULK_REVIEW_LIMIT = 50;

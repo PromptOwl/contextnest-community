@@ -4,6 +4,7 @@
  */
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
+import { BULK_REVIEW_LIMIT } from "../lib/constants";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
@@ -3736,10 +3737,17 @@ export function NestView({
                     ? `${bulkSelected.size} selected`
                     : `Select all ${reviewableQueue.length}`}
                 </span>
+                {bulkSelected.size > BULK_REVIEW_LIMIT && (
+                  <span className="text-destructive">
+                    Up to {BULK_REVIEW_LIMIT} at a time — deselect{" "}
+                    {bulkSelected.size - BULK_REVIEW_LIMIT}.
+                  </span>
+                )}
                 {bulkSelected.size > 0 && (
                   <div className="ml-auto flex items-center gap-2">
                     <Button
                       size="sm"
+                      disabled={bulkSelected.size > BULK_REVIEW_LIMIT}
                       onClick={() => setBulkAction("approve")}
                       data-testid="bulk-approve"
                     >
@@ -3748,6 +3756,7 @@ export function NestView({
                     <Button
                       size="sm"
                       variant="outline"
+                      disabled={bulkSelected.size > BULK_REVIEW_LIMIT}
                       onClick={() => setBulkAction("reject")}
                       data-testid="bulk-reject"
                     >

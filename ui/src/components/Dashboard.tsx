@@ -9,7 +9,7 @@ import { useAuth } from "../auth/AuthContext";
 import {
   FileText, Plus, Database, Copy, Check, Bot, Monitor, Globe, Trash2, Loader2, Users, Eye, Pencil, Shield, FolderInput, CheckCircle2, FolderSync, Folder, Inbox, ChevronRight, ChevronLeft,
 } from "lucide-react";
-import { ANON_USER_ID } from "../lib/constants";
+import { ANON_USER_ID, BULK_REVIEW_LIMIT } from "../lib/constants";
 import { copyTextWithToast } from "../lib/clipboard";
 import { toast } from "sonner";
 import { AllNestsBar } from "./AllNestsBar";
@@ -308,6 +308,18 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   /** Review rows in the inbox — the only ones a batch decision applies to. */
   const reviewItems = work.items.filter((w) => w.type === "review");
   const workKey = (w: api.WorkItem) => `${w.nest_id}:${w.node_id}`;
+
+  // The cap is per call and a call is per nest, so what matters is the biggest
+  // per-nest group, not the total selection. How many to deselect, or 0.
+  const workSelectionOverflow = (() => {
+    const perNest = new Map<string, number>();
+    for (const w of reviewItems) {
+      if (!workSelected.has(workKey(w))) continue;
+      perNest.set(w.nest_id, (perNest.get(w.nest_id) ?? 0) + 1);
+    }
+    const biggest = Math.max(0, ...perNest.values());
+    return Math.max(0, biggest - BULK_REVIEW_LIMIT);
+  })();
 
   // One decision over a selection that spans nests. The batch endpoint is
   // per-nest (a batch is bounded by the vault it writes to), so the selection
@@ -694,10 +706,17 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                           ? `${workSelected.size} selected`
                           : `Select all ${reviewItems.length} reviews`}
                       </span>
+                      {workSelectionOverflow > 0 && (
+                        <span className="text-destructive">
+                          Up to {BULK_REVIEW_LIMIT} per nest — deselect{" "}
+                          {workSelectionOverflow}.
+                        </span>
+                      )}
                       {workSelected.size > 0 && (
                         <div className="ml-auto flex items-center gap-2">
                           <Button
                             size="sm"
+                            disabled={workSelectionOverflow > 0}
                             onClick={() => setWorkBulkAction("approve")}
                             data-testid="work-bulk-approve"
                           >
@@ -706,6 +725,7 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                           <Button
                             size="sm"
                             variant="outline"
+                            disabled={workSelectionOverflow > 0}
                             onClick={() => setWorkBulkAction("reject")}
                             data-testid="work-bulk-reject"
                           >

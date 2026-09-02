@@ -71,11 +71,14 @@ beforeAll(async () => {
   // Approvals go to assigned reviewers, so the batch needs one — the same
   // rule the single-document flow enforces, and the nest owner can't steward
   // their own nest.
+  // Read-only on purpose: a reviewer steward normally holds plain read
+  // collaborator access, and the batch must admit them the way the
+  // single-document approve/reject does.
   await jsonRequest(
     app,
     "POST",
     `/nests/${nestId}/collaborators`,
-    { email: reviewer.email, permission: "write" },
+    { email: reviewer.email, permission: "read" },
     owner.apiKey,
   );
   await jsonRequest(

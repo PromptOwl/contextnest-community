@@ -1838,11 +1838,15 @@ export function createApp(): Hono<AuthEnv> {
     // plus a reviewer steward row — before their handler can even
     // decide. Let read-permission users through for these paths and
     // trust the handler.
+    // The batch approve/reject belongs here for the same reason: it is a
+    // wrapper over those per-document decisions and re-checks every item
+    // through them. Exact trailing segment, so a node slug can't reach it.
     const isStewardActionPath =
       path.includes("/approve") ||
       path.includes("/reject") ||
       path.includes("/submit-review") ||
-      path.includes("/cancel-review");
+      path.includes("/cancel-review") ||
+      /\/review-queue\/bulk$/.test(path);
     // Hosted-artifact annotations are a read-tier collaboration action:
     // anyone who can SEE the artifact (notably read-only reviewers — the people
     // most likely to annotate) may open a thread, reply, resolve or reopen.
