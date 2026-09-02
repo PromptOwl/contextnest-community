@@ -3955,7 +3955,9 @@ export function NestView({
                 <CardDescription>
                   Who can reach this nest — visibility, people and teams.
                   Sharing grants plain access (viewer/editor/admin); it does
-                  not make anyone a steward.
+                  not make anyone a steward.{" "}
+                  {!stewardshipEnabled &&
+                    "Stewards need Stewardship & Approval Workflow turned on in Nest settings."}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">

@@ -3181,6 +3181,7 @@ export function DocumentEditor({
         <ShareNestDialog
           nestId={nestId}
           nestName={nestName}
+          stewardshipEnabled={stewardshipEnabled}
           onClose={() => setShowShare(false)}
           onChanged={() => {
             /* Sharing changes don't alter this document's content; nothing
