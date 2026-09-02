@@ -67,3 +67,18 @@ export function normalizeTagInput(raw: string): TagCandidate {
   }
   return { tag: cleaned, note: null };
 }
+
+/**
+ * Each whitespace/comma-separated token trimmed to the real tag limit. The
+ * field holds several tags at once, so a flat 40-char cap on the input itself
+ * would eat a pasted "api, v2, docs" — cap per token instead, so nothing typed
+ * past the limit survives to be silently discarded on commit.
+ */
+export function clampTagInput(raw: string): string {
+  return raw.replace(/[^\s,]+/g, (token) => {
+    // Leading #s are stripped before the length check, so they don't count
+    // against the tag limit.
+    const hashes = /^#*/.exec(token)![0];
+    return hashes + token.slice(hashes.length, hashes.length + MAX_TAG_LENGTH);
+  });
+}

@@ -14,6 +14,7 @@ import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import {
+  clampTagInput,
   newTags,
   normalizeTagInput,
   TAG_INPUT_MAX_LENGTH,
@@ -2164,7 +2165,7 @@ export function DocumentEditor({
                   <div className="flex items-center gap-2">
                     <Input
                       value={tagInput}
-                      onChange={(e) => setTagInput(e.target.value)}
+                      onChange={(e) => setTagInput(clampTagInput(e.target.value))}
                       onKeyDown={(e) => {
                         // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
                         if (e.key === "Enter" || e.key === "," || e.key === " ") {
