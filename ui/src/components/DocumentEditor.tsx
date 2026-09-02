@@ -17,6 +17,7 @@ import {
   clampTagInput,
   newTags,
   normalizeTagInput,
+  tagKey,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
 import { relTime, formatServerDate } from "../lib/dates";
@@ -902,8 +903,12 @@ export function DocumentEditor({
       // number, and `title.trim()` later would throw "trim is not a function".
       const loadedTitle = node?.title == null ? "" : String(node.title);
       const loadedContent = node?.content == null ? "" : String(node.content);
+      // Legacy tags were stored raw (leading #, mixed case), so they render
+      // and compare differently from anything typed today. Canonicalise on load:
+      // chips read consistently, the duplicate guard sees one key per tag, and
+      // the next save migrates the document (CU-wdqcq00x8e).
       const loadedTags = Array.isArray(node?.tags)
-        ? node.tags.map((t: unknown) => String(t))
+        ? newTags([], node.tags.map((t: unknown) => tagKey(String(t))))
         : [];
       setTitle(loadedTitle);
       setContent(loadedContent);

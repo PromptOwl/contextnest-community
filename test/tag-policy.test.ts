@@ -2,7 +2,7 @@
  * Document tag policy: what the editor accepts, rewrites, or refuses.
  */
 import { describe, it, expect } from "vitest";
-import { normalizeTagInput, newTags, clampTagInput, MAX_TAG_LENGTH } from "../ui/src/lib/tag-policy";
+import { normalizeTagInput, newTags, clampTagInput, tagKey, MAX_TAG_LENGTH } from "../ui/src/lib/tag-policy";
 
 describe("normalizeTagInput", () => {
   it("keeps a plain tag and strips a leading #", () => {
@@ -39,6 +39,7 @@ describe("normalizeTagInput", () => {
 
 describe("newTags", () => {
   it("drops a candidate already present in any casing", () => {
+    expect(newTags(["#bug"], ["bug"])).toEqual([]);
     expect(newTags(["Bug", "api"], ["bug", "v2"])).toEqual(["v2"]);
   });
 
@@ -71,5 +72,16 @@ describe("clampTagInput", () => {
 
   it("leaves a short input untouched", () => {
     expect(clampTagInput("api, v2 ")).toBe("api, v2 ");
+  });
+});
+
+describe("tagKey", () => {
+  it("keys a legacy '#bug' the same as a freshly typed 'bug'", () => {
+    expect(tagKey("#bug")).toBe(tagKey("bug"));
+    expect(tagKey("#Bug")).toBe("bug");
+  });
+
+  it("keeps an unusable value as its own key rather than dropping it", () => {
+    expect(tagKey("!!!")).toBe("!!!");
   });
 });
