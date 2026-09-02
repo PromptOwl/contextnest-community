@@ -1116,7 +1116,15 @@ export function DocumentEditor({
 
   const addTag = useCallback(() => {
     const { tags: accepted, notes } = tagPreview;
-    for (const note of notes) toast.warning(note);
+    // A paste commits several tags at once, and one transient toast per
+    // rewrite is unreadable — stack them into a single summary and leave the
+    // per-tag detail to the persistent preview above (CU-wdqcq00x8h).
+    if (notes.length === 1) toast.warning(notes[0]);
+    else if (notes.length > 1)
+      toast.warning(`${notes.length} tags normalized`, {
+        description: notes.join(" "),
+        duration: 8000,
+      });
     if (accepted.length === 0) {
       setTagInput("");
       return;
