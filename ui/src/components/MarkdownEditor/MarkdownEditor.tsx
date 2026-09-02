@@ -1925,6 +1925,7 @@ function Toolbar({
           active
           onClick={onTogglePreview}
           title="Back to editing"
+          label="Edit"
         >
           <Pencil className="h-3.5 w-3.5" />
         </ToolbarButton>
@@ -2132,9 +2133,13 @@ function Toolbar({
 
       <Divider />
 
+      {/* Labelled, not icon-only: math and footnotes stay raw source in the
+          editor, so a reader who can't find the rendered view assumes they
+          aren't supported (CU-wdqcq00x8v). */}
       <ToolbarButton
         onClick={onTogglePreview}
         title="Preview — see how it will render"
+        label="Preview"
       >
         <Eye className="h-3.5 w-3.5" />
       </ToolbarButton>
@@ -2153,12 +2158,15 @@ function ToolbarButton({
   onClick,
   disabled,
   title,
+  label,
   children,
 }: {
   active?: boolean;
   onClick: () => void;
   disabled?: boolean;
   title: string;
+  /** Visible text beside the icon — for controls a tooltip alone won't teach. */
+  label?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -2176,11 +2184,12 @@ function ToolbarButton({
       disabled={disabled}
       title={title}
       className={cn(
-        "h-7 w-7 p-0",
+        label ? "h-7 gap-1 px-2" : "h-7 w-7 p-0",
         active && "bg-muted text-foreground",
       )}
     >
       {children}
+      {label && <span className="text-xs">{label}</span>}
     </Button>
   );
 }
