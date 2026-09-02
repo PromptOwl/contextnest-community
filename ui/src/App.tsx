@@ -931,18 +931,24 @@ export default function App() {
           </button>
 
           <div className="flex items-center gap-2">
-            {/* Prominent search entry — pulls full-text search out of the
-                buried Documents filter bar. Opens the same QuickOpen palette
-                as ⌘K. Shown wherever QuickOpen is available (nest/document). */}
-            {(view.page === "nest" || view.page === "document") && (
+            {/* The ONE search entry point, on every page the palette works on
+                — the Dashboard used to carry its own field-styled button, so
+                the same feature looked like two (CU-wdqcq012uv). What differs
+                between pages is scope, and the palette states that itself. */}
+            {canQuickOpen && (
               <button
                 onClick={() => setShowQuickOpen(true)}
-                title="Search this nest (⌘K)"
-                className="hidden sm:flex items-center gap-2 h-8 pl-2.5 pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                title={
+                  view.page === "dashboard"
+                    ? "Search nests and documents (⌘K)"
+                    : "Search this nest (⌘K)"
+                }
+                className="flex items-center gap-2 h-8 pl-2.5 pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                data-testid="global-search-trigger"
               >
                 <Search className="h-3.5 w-3.5" />
                 <span>Search</span>
-                <kbd className="ml-1 text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
+                <kbd className="ml-1 hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
                   ⌘K
                 </kbd>
               </button>
@@ -1067,7 +1073,7 @@ export default function App() {
       <main className={`${shellWidth} mx-auto px-4 py-4 min-w-0 overflow-x-clip`}>
         {view.page === "dashboard" && (
           <Dashboard
-            onOpenSearch={() => setShowQuickOpen(true)}
+
             onManageKeys={() => setView({ page: "api-keys" })}
             onSelectNest={(id, name, isOwner, isAnonOwned) =>
               setView({
