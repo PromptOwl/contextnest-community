@@ -1319,6 +1319,28 @@ export async function rejectNode(
   });
 }
 
+/**
+ * Approve or reject several pending documents in one request. One call, not N,
+ * so the batch is bounded server-side and reported as one outcome — items can
+ * fail individually (not a steward for it, already resolved) while the rest
+ * still land.
+ */
+export async function bulkReview(
+  nestId: string,
+  action: "approve" | "reject",
+  nodeIds: string[],
+  note?: string,
+): Promise<{
+  succeeded: number;
+  failed: number;
+  results: Array<{ nodeId: string; ok: boolean; error?: string }>;
+}> {
+  return request(`/nests/${nestId}/review-queue/bulk`, {
+    method: "POST",
+    body: JSON.stringify({ action, nodeIds, note }),
+  });
+}
+
 // Steward/editor reverts a node to an earlier version (writes its content as
 // a new version; history is preserved).
 export async function revertToVersion(

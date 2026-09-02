@@ -97,6 +97,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import {
   Tabs, TabsList, TabsTrigger, TabsContent,
@@ -264,6 +265,12 @@ export function NestView({
   // affordances for non-admin reviewers/editors who can't read the roster.
   const [myStewards, setMyStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
+  // Bulk review selection, by node id. A reviewer clearing a folder import
+  // makes the same call on every item, so let them say it once.
+  const [bulkSelected, setBulkSelected] = useState<Set<string>>(new Set());
+  const [bulkAction, setBulkAction] = useState<"approve" | "reject" | null>(
+    null,
+  );
   // Pending "please delete this" flags raised by people below admin.
   const [deletionRequests, setDeletionRequests] = useState<api.DeletionRequest[]>([]);
   // Node being flagged (dialog open when set), and the queue row being resolved
@@ -1535,6 +1542,37 @@ export function NestView({
     else if (update.scope === "tag") payload.tagName = update.target;
     await api.updateSteward(nestId, editingSteward.id, payload);
     toast.success("Steward updated");
+    fetchData();
+  };
+
+  // One decision over many documents. The server applies them item by item
+  // through the same approve/reject the single-document flow uses, so partial
+  // success is normal: report what failed and why, keep the successes, and
+  // leave the failures selected so a second attempt is one click away.
+  const runBulkReview = async (
+    action: "approve" | "reject",
+    note: string,
+  ) => {
+    const nodeIds = [...bulkSelected];
+    const { succeeded, failed, results } = await api.bulkReview(
+      nestId,
+      action,
+      nodeIds,
+      note || undefined,
+    );
+    const verb = action === "approve" ? "approved" : "rejected";
+    if (failed === 0) {
+      toast.success(`${succeeded} document${succeeded === 1 ? "" : "s"} ${verb}`);
+      setBulkSelected(new Set());
+    } else {
+      const first = results.find((r) => !r.ok);
+      toast.warning(
+        `${succeeded} ${verb}, ${failed} could not be — ${first?.error ?? "unknown reason"}`,
+        { duration: 10000 },
+      );
+      setBulkSelected(new Set(results.filter((r) => !r.ok).map((r) => r.nodeId)));
+    }
+    setBulkAction(null);
     fetchData();
   };
 
@@ -3674,8 +3712,68 @@ export function NestView({
                 </CardContent>
               </Card>
             )}
+            {/* Bulk bar — only with something selectable, and it stays out of
+                the way until the first row is picked. */}
+            {feedFilter !== "comments" && reviewableQueue.length > 1 && (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
+                <Checkbox
+                  checked={
+                    bulkSelected.size > 0 &&
+                    bulkSelected.size === reviewableQueue.length
+                  }
+                  onCheckedChange={(next: boolean | "indeterminate") =>
+                    setBulkSelected(
+                      next === true
+                        ? new Set(reviewableQueue.map((r) => r.nodeId))
+                        : new Set(),
+                    )
+                  }
+                  aria-label="Select every document you can review"
+                  data-testid="review-queue-select-all"
+                />
+                <span className="text-muted-foreground">
+                  {bulkSelected.size > 0
+                    ? `${bulkSelected.size} selected`
+                    : `Select all ${reviewableQueue.length}`}
+                </span>
+                {bulkSelected.size > 0 && (
+                  <div className="ml-auto flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => setBulkAction("approve")}
+                      data-testid="bulk-approve"
+                    >
+                      Approve {bulkSelected.size}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setBulkAction("reject")}
+                      data-testid="bulk-reject"
+                    >
+                      Reject {bulkSelected.size}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setBulkSelected(new Set())}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
             <ReviewQueue
               requests={feedFilter === "comments" ? [] : reviewableQueue}
+              selectedNodeIds={bulkSelected}
+              onToggleSelect={(nodeId) =>
+                setBulkSelected((prev) => {
+                  const next = new Set(prev);
+                  next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId);
+                  return next;
+                })
+              }
               // Feed mode (interleaved comment rows) except on the Changes
               // chip, which renders the legacy changes-only queue untouched.
               comments={feedFilter === "changes" ? undefined : feedComments}
@@ -4504,6 +4602,30 @@ export function NestView({
           confirmLabel="Remove steward"
           destructive
           onConfirm={handleRemoveSteward}
+        />
+      )}
+
+      {bulkAction && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setBulkAction(null)}
+          title={
+            bulkAction === "approve"
+              ? `Approve ${bulkSelected.size} document${bulkSelected.size === 1 ? "" : "s"}?`
+              : `Reject ${bulkSelected.size} document${bulkSelected.size === 1 ? "" : "s"}?`
+          }
+          description={
+            bulkAction === "approve"
+              ? "Approving publishes each one. Anything you can't review, or that changed since this queue loaded, is reported back and left alone."
+              : "Each author gets the same reason and the work goes back to them."
+          }
+          // Reject demands a reason in bulk exactly as it does one at a time;
+          // approve's note stays optional (ReasonDialog drops the field).
+          label={bulkAction === "reject" ? "Why?" : undefined}
+          placeholder="Shared with every author in this batch"
+          confirmLabel={bulkAction === "approve" ? "Approve all" : "Reject all"}
+          destructive={bulkAction === "reject"}
+          onConfirm={(reason) => runBulkReview(bulkAction, reason)}
         />
       )}
 
