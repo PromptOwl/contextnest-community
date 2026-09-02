@@ -201,11 +201,15 @@ export default function App() {
   const [view, setView] = useState<View>({ page: "dashboard" });
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
+  // "missing" is "no ?nest to open"; "unreachable" is "there was one and it
+  // didn't resolve" — a deleted nest, a typo'd id, or access that was revoked.
+  // They render differently: only the second one owes the user an explanation.
   const [deepLinkProbe, setDeepLinkProbe] = useState<
     | { status: "idle" }
     | { status: "loading" }
     | { status: "ok"; nestId: string; nestName: string }
     | { status: "missing" }
+    | { status: "unreachable" }
   >(() => {
     if (typeof window === "undefined") return { status: "idle" };
     const params = new URLSearchParams(window.location.search);
@@ -438,7 +442,7 @@ export default function App() {
             : undefined,
         });
       } catch {
-        if (!cancelled) setDeepLinkProbe({ status: "missing" });
+        if (!cancelled) setDeepLinkProbe({ status: "unreachable" });
       }
     })();
     return () => {
@@ -833,6 +837,33 @@ export default function App() {
     return (
       <>
         <Login />
+        {logoutChrome}
+      </>
+    );
+  }
+
+  // A ?nest link that didn't resolve. Falling through to the dashboard made a
+  // stale bookmark look like it had simply opened the app, leaving no way to
+  // tell "deleted" from "no access" from "bad link" (CU-wdqcpzzzrm).
+  if (deepLinkProbe.status === "unreachable") {
+    return (
+      <>
+        <div className="min-h-screen flex items-center justify-center px-4">
+          <div className="text-center">
+            <p className="text-lg font-medium">
+              This nest doesn't exist or you don't have access.
+            </p>
+            <p className="text-sm text-muted-foreground mt-1">
+              It may have been deleted, or the link may be out of date.
+            </p>
+            <Button
+              className="mt-4"
+              onClick={() => setDeepLinkProbe({ status: "missing" })}
+            >
+              Back to dashboard
+            </Button>
+          </div>
+        </div>
         {logoutChrome}
       </>
     );
