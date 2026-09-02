@@ -45,14 +45,17 @@ import { Markdown, type MarkdownStorage } from "tiptap-markdown";
 // `parseHTML`, so color survives save + reopen without any custom code here.
 
 // Unescape `\[\[ \]\]` — prosemirror-markdown escapes `[`/`]` as link syntax.
-// Same escaping kills GFM footnotes (`\[^1\]`), so restore those too.
+// Same escaping kills GFM footnotes (`\[^1\]`), so restore those too — and
+// LaTeX inside `$…$`, where the same escaping hides the command from KaTeX.
 function getEditorMarkdown(editor: Editor): string {
   const storage = editor.storage as unknown as { markdown: MarkdownStorage };
   const md = storage.markdown.getMarkdown();
-  return md
-    .replace(/\\\[\\\[/g, "[[")
-    .replace(/\\\]\\\]/g, "]]")
-    .replace(/\\\[\^([^\]\\\s]+)\\?\]/g, "[^$1]");
+  return unescapeMathSpans(
+    md
+      .replace(/\\\[\\\[/g, "[[")
+      .replace(/\\\]\\\]/g, "]]")
+      .replace(/\\\[\^([^\]\\\s]+)\\?\]/g, "[^$1]"),
+  );
 }
 
 // Engine ids: `nodes/<slug>`. Slug = on-disk filename.
@@ -178,6 +181,7 @@ import {
   type Delimiter,
 } from "@/lib/csv-table";
 import { cn } from "@/lib/utils";
+import { unescapeMathSpans } from "@/lib/markdown-math";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
