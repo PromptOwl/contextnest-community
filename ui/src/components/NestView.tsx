@@ -65,6 +65,7 @@ export function NodeTypeIcon({
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
 import { ReaderView } from "./ReaderView";
+import { DocumentPickerModal } from "./DocumentPickerModal";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -80,7 +81,7 @@ import { PublishDialog } from "./PublishDialog";
 import { NestVisibilityControl } from "./NestVisibilityControl";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
-import { deriveNestCaps, isHomeNode } from "../lib/nest-caps";
+import { deriveNestCaps } from "../lib/nest-caps";
 import { DeleteNestDialog } from "./DeleteNestDialog";
 import { RenameNestDialog } from "./RenameNestDialog";
 import { Button } from "@/components/ui/button";
@@ -92,8 +93,11 @@ import {
   Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
@@ -347,6 +351,12 @@ export function NestView({
   const [readerModeEnabled, setReaderModeEnabled] = useState(false);
   const [readerHomeNode, setReaderHomeNode] = useState<string | null>(null);
   const [readerModeSaving, setReaderModeSaving] = useState(false);
+  const [readerDialogOpen, setReaderDialogOpen] = useState(false);
+  const [homeNodePickerOpen, setHomeNodePickerOpen] = useState(false);
+  // Title of the saved home node — the stored value is an id, and an id is not
+  // what people recognise. Resolved from the full document list, which the
+  // picker has usually already cached.
+  const [readerHomeTitle, setReaderHomeTitle] = useState<string | null>(null);
   const [isImported, setIsImported] = useState(false);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
@@ -1644,14 +1654,25 @@ export function NestView({
     }
   };
 
-  const handleReaderHomeNodeSave = async (raw: string) => {
-    const home = raw.trim() === "" ? null : raw.trim();
-    // A typo used to save fine and then fall back to the convention, so the
-    // toast said "saved" while the designation did nothing. Refuse instead.
-    if (home && !nodes.some((n) => isHomeNode(n, home))) {
-      toast.error(`No document "${home}" in this nest`);
+  useEffect(() => {
+    if (!readerDialogOpen || !readerHomeNode) {
+      setReaderHomeTitle(null);
       return;
     }
+    let cancelled = false;
+    qc.fetchQuery(reads.node(nestId, readerHomeNode))
+      .then(({ node }: any) => {
+        if (!cancelled) setReaderHomeTitle(node?.title || readerHomeNode);
+      })
+      .catch(() => {
+        if (!cancelled) setReaderHomeTitle(readerHomeNode);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [readerDialogOpen, readerHomeNode, nestId, qc]);
+
+  const handleReaderHomeNodeSave = async (home: string | null) => {
     setReaderModeSaving(true);
     try {
       const result = await api.setNestReaderMode(nestId, { home_node: home });
@@ -1882,25 +1903,20 @@ export function NestView({
             )
           )}
           {/* Public Docs Reader Mode — superadmin-only config (isAdmin ==
-              server/super admin). Toggles the clean read-only docs view that
-              public readers see; the input designates the landing/hub node
-              (blank → resolve by convention). */}
+              server/super admin). A menu rather than a toggle: the landing
+              document is part of the same setting, and changing it must not
+              mean switching reader mode off and on again. */}
           {isAdmin && (
             <Button
               variant="outline"
               size="sm"
-              onClick={handleReaderModeToggle}
-              disabled={readerModeSaving}
+              onClick={() => setReaderDialogOpen(true)}
               className={`shrink-0 h-7 gap-1.5 ${
                 readerModeEnabled
                   ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
                   : ""
               }`}
-              title={
-                readerModeEnabled
-                  ? "Public Docs Reader Mode is ON — public readers get a clean docs view. Click to turn off."
-                  : "Turn on Public Docs Reader Mode — a clean, read-only docs view for public readers."
-              }
+              title="Public Docs Reader Mode — the clean, read-only docs view public readers get."
             >
               {readerModeSaving ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1909,24 +1925,6 @@ export function NestView({
               )}
               {readerModeEnabled ? "Reader: On" : "Reader: Off"}
             </Button>
-          )}
-          {isAdmin && readerModeEnabled && (
-            <Input
-              type="text"
-              defaultValue={readerHomeNode ?? ""}
-              key={readerHomeNode ?? ""}
-              placeholder="home node (optional)"
-              disabled={readerModeSaving}
-              aria-label="Reader mode home node"
-              onBlur={(e) => {
-                const val = e.target.value.trim();
-                if (val !== (readerHomeNode ?? "")) {
-                  void handleReaderHomeNodeSave(val);
-                }
-              }}
-              className="shrink-0 h-7 w-40 px-2 text-xs"
-              title="Designated landing/hub node id. Blank resolves by convention (welcome / index / readme / home / overview)."
-            />
           )}
           {isImported && (
             <Badge
@@ -4151,6 +4149,107 @@ export function NestView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Reader mode settings — the switch and the landing document in one
+          place, so changing the home document never means turning the mode off
+          and on again. */}
+      <Dialog open={readerDialogOpen} onOpenChange={setReaderDialogOpen}>
+        <DialogContent className="sm:max-w-[520px]">
+          <DialogHeader>
+            <DialogTitle>Public Docs Reader Mode</DialogTitle>
+            <DialogDescription>
+              A clean, read-only docs view for people who can only read this
+              nest. Owners, editors and reviewers keep the full authoring UI,
+              and reader mode grants no access on its own.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="rounded-lg border p-4 flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <Label className="text-sm font-medium">Reader mode</Label>
+              <p className="text-xs text-muted-foreground">
+                {readerModeEnabled
+                  ? "Read-only visitors get the docs reader."
+                  : "Everyone gets the standard nest view."}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {readerModeSaving && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+              )}
+              <Switch
+                checked={readerModeEnabled}
+                onCheckedChange={() => void handleReaderModeToggle()}
+                disabled={readerModeSaving}
+                aria-label="Toggle Public Docs Reader Mode"
+              />
+            </div>
+          </div>
+
+          {readerModeEnabled && (
+            <div className="rounded-lg border p-4 space-y-2">
+              <Label className="text-sm font-medium">Home document</Label>
+              <p className="text-xs text-muted-foreground">
+                Reader mode opens on this document and keeps it in the side
+                pane. Left unset, it resolves one by convention (welcome /
+                index / readme / home / overview).
+              </p>
+              <div className="flex items-center gap-2 pt-1">
+                <div className="min-w-0 flex-1 truncate text-sm">
+                  {readerHomeNode ? (
+                    (readerHomeTitle ?? "Loading…")
+                  ) : (
+                    <span className="text-muted-foreground">
+                      Resolved by convention
+                    </span>
+                  )}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setHomeNodePickerOpen(true)}
+                  disabled={readerModeSaving}
+                >
+                  {readerHomeNode ? "Change" : "Choose"}
+                </Button>
+                {readerHomeNode && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void handleReaderHomeNodeSave(null)}
+                    disabled={readerModeSaving}
+                  >
+                    Clear
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReaderDialogOpen(false)}>
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reader mode's landing document, picked from the real document list —
+          the field used to take a hand-typed node id, so a title people could
+          see on the page ("Product Capabilities") was refused as missing. */}
+      {homeNodePickerOpen && (
+        <DocumentPickerModal
+          isOpen={homeNodePickerOpen}
+          onClose={() => setHomeNodePickerOpen(false)}
+          nestId={nestId}
+          title="Choose the reader home document"
+          description="Reader mode opens on this document and keeps it in the side pane. Close without picking to resolve one by convention (welcome / index / readme / home / overview)."
+          onSelect={(node) => {
+            setReaderHomeTitle(node.title);
+            void handleReaderHomeNodeSave(node.id);
+          }}
+        />
+      )}
 
       {/* Outside-org publish acknowledgement — flipping a nest to public makes
           it readable by anyone on the internet, outside your organization.
