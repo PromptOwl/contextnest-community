@@ -2133,8 +2133,15 @@ export function NestView({
           <CardContent>
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <FileText className="h-4 w-4" />
+              {/* An empty nest has nothing to be approved or AI-ready, so the
+                  readiness line would be a promise about content that isn't
+                  there — say what's true instead (CU-wdqcq00x8y). */}
               <span>
-                {stewardshipEnabled ? "In your context" : "Auto-approved, AI-ready"}
+                {stats.total === 0
+                  ? "No documents yet"
+                  : stewardshipEnabled
+                    ? "In your context"
+                    : "Auto-approved, AI-ready"}
               </span>
             </div>
           </CardContent>
@@ -2173,7 +2180,9 @@ export function NestView({
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <CheckCircle2 className="h-4 w-4" />
-                  <span>Approved for AI</span>
+                  <span>
+                    {stats.total === 0 ? "Nothing to evaluate yet" : "Approved for AI"}
+                  </span>
                 </div>
               </CardContent>
             </Card>
