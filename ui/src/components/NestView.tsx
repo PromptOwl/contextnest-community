@@ -3290,7 +3290,16 @@ export function NestView({
                       className="space-y-1"
                       groups={docGroups}
                       baseFolder={baseFolder}
-                      known={knownFolders}
+                      // Unfiltered, the tree is seeded with every folder in the
+                      // nest so one whose documents were never fetched still has
+                      // a row to expand. Under a filter that seeding is wrong
+                      // twice over: it lists folders holding no match, and it
+                      // suppresses chain compaction, so a single hit four levels
+                      // down costs four rows of empty scaffolding. A filtered
+                      // list already answers from the whole nest, so drop the
+                      // seed and let the tree show only folders that matched —
+                      // as one "F1 / F2 / F3" row per chain.
+                      known={hasActiveFilters ? undefined : knownFolders}
                       isCollapsed={(p) =>
                         // A filtered list shows every match, wherever it lives.
                         hasActiveFilters ? false : !expandedFolders.has(p)
