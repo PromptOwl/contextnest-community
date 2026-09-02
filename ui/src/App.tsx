@@ -731,8 +731,14 @@ export default function App() {
     deepLinkProbe.status === "loading"
   ) {
     return (
+      // Branded, and worded as loading: a bare "Connecting..." on a blank page
+      // read as a connection fault rather than a normal boot (CU-wdqcpzzzrr).
       <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-pulse text-muted-foreground">Connecting...</div>
+        <div className="flex flex-col items-center gap-3 animate-pulse">
+          <img src={logoUrl ?? hootieIcon} alt="" className="h-10 w-10" />
+          <span className="text-sm font-medium">ContextNest</span>
+          <span className="text-xs text-muted-foreground">Loading your nests…</span>
+        </div>
       </div>
     );
   }

@@ -1582,7 +1582,10 @@ export function DocumentEditor({
               title={title || undefined}
               data-testid="document-editor-header-title"
             >
-              {title || (isNew ? "New document" : "Untitled")}
+              {/* "Untitled" is a fact about a saved document, not about one
+                  still loading — while the fetch is in flight say so instead
+                  of flashing it (CU-wdqcpzzzrr). */}
+              {title || (isNew ? "New document" : loading ? "Loading…" : "Untitled")}
             </h3>
             {!isNew && status && <StatusBadge status={status} />}
             {/* Pending only. A DECLINED flag is a past event, not a state of
@@ -1956,7 +1959,7 @@ export function DocumentEditor({
                 className="text-3xl font-bold leading-tight text-foreground"
                 data-testid="document-editor-title"
               >
-                {title || "Untitled"}
+                {title || (loading ? "Loading…" : "Untitled")}
               </h1>
             ) : (
               // Labeled, outlined title field — required like Content, and
