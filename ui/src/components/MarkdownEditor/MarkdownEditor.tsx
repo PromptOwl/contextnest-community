@@ -58,6 +58,18 @@ function getEditorMarkdown(editor: Editor): string {
   );
 }
 
+/** Heading levels the schema accepts, and the icon each one shows. Kept
+ *  together so the toolbar and the StarterKit config can't drift apart. */
+const HEADING_LEVELS = [1, 2, 3, 4, 5, 6] as const;
+const HEADING_ICONS = {
+  1: Heading1,
+  2: Heading2,
+  3: Heading3,
+  4: Heading4,
+  5: Heading5,
+  6: Heading6,
+} as const;
+
 // Engine ids: `nodes/<slug>`. Slug = on-disk filename.
 export function slugFromNodeId(id: string): string {
   if (!id) return "";
@@ -143,6 +155,9 @@ import {
   Heading1,
   Heading2,
   Heading3,
+  Heading4,
+  Heading5,
+  Heading6,
   List,
   ListOrdered,
   CheckSquare,
@@ -402,11 +417,10 @@ export const MarkdownEditor = forwardRef<
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
-        // Toolbar exposes H1–H3, but markdown does not stop there: with the
-        // schema capped at 3, `#### x` stayed literal text on typing AND on
-        // load, so a document written elsewhere lost its deeper headings.
-        // Accept every markdown level; the toolbar still offers the top three.
-        heading: { levels: [1, 2, 3, 4, 5, 6] },
+        // Every markdown heading level. Capped at 3, `#### x` stayed literal
+        // text both when typed and when a document written elsewhere was
+        // loaded — its deeper headings were flattened on the way in.
+        heading: { levels: [...HEADING_LEVELS] },
         link: false,
         // Replaced by the lowlight code block (syntax highlight + picker + copy).
         codeBlock: false,
@@ -1978,33 +1992,22 @@ function Toolbar({
 
       <Divider />
 
-      <ToolbarButton
-        active={editor.isActive("heading", { level: 1 })}
-        onClick={() =>
-          editor.chain().focus().toggleHeading({ level: 1 }).run()
-        }
-        title="Heading 1"
-      >
-        <Heading1 className="h-3.5 w-3.5" />
-      </ToolbarButton>
-      <ToolbarButton
-        active={editor.isActive("heading", { level: 2 })}
-        onClick={() =>
-          editor.chain().focus().toggleHeading({ level: 2 }).run()
-        }
-        title="Heading 2"
-      >
-        <Heading2 className="h-3.5 w-3.5" />
-      </ToolbarButton>
-      <ToolbarButton
-        active={editor.isActive("heading", { level: 3 })}
-        onClick={() =>
-          editor.chain().focus().toggleHeading({ level: 3 }).run()
-        }
-        title="Heading 3"
-      >
-        <Heading3 className="h-3.5 w-3.5" />
-      </ToolbarButton>
+      {/* Every level the schema accepts gets a button: markdown shortcuts
+          reach H6, so stopping the toolbar at H3 left three levels that could
+          be typed but never clicked (CU-wdqcpzzuv6). */}
+      {HEADING_LEVELS.map((level) => {
+        const Icon = HEADING_ICONS[level];
+        return (
+          <ToolbarButton
+            key={level}
+            active={editor.isActive("heading", { level })}
+            onClick={() => editor.chain().focus().toggleHeading({ level }).run()}
+            title={`Heading ${level}`}
+          >
+            <Icon className="h-3.5 w-3.5" />
+          </ToolbarButton>
+        );
+      })}
 
       <Divider />
 
