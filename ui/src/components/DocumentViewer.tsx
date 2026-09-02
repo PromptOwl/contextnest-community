@@ -65,7 +65,10 @@ const remarkWikiLinks: Plugin<[], Root> = () => (tree) => {
             "data-wiki-target": target,
             "data-wiki-display": display,
           },
-          hChildren: [{ type: "text", value: display }],
+          // «Title» is Hootie's wiki-link convention — the guillemets read as
+          // "this points at another document" without relying on link colour
+          // alone. The target and the hover preview use the bare title.
+          hChildren: [{ type: "text", value: `«${display}»` }],
         },
       });
       lastIndex = wikiLinkRegex.lastIndex;
