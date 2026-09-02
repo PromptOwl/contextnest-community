@@ -1755,8 +1755,8 @@ export function DocumentEditor({
             </DropdownMenu>
           )}
           {/* Secondary actions collapse into one ⋮ menu to keep the header
-              uncluttered. Grouped by use: version history + markdown-source
-              view toggle, then sharing (copy link, share nest). Compare stays
+              uncluttered. Grouped by use: version history, then sharing
+              (copy link, share nest). Compare stays
               a visible button because it carries active "Comparing vN" state
               the flat menu can't surface. */}
           {(() => {
@@ -1768,16 +1768,8 @@ export function DocumentEditor({
                 testId: "document-editor-history",
                 onSelect: openVersions,
               });
-            // Tool/table nodes ALWAYS edit as raw source (no rich editor
-            // exists for them), so there's nothing to toggle.
-            if (!isSourceOnly)
-              moreActions.push({
-                // Toggle: the label names the mode you switch TO.
-                label: rawMode ? "Rich editor" : "Markdown source",
-                icon: Code2,
-                testId: "document-editor-markdown-toggle",
-                onSelect: () => setRawMode((v) => !v),
-              });
+            // The markdown-source toggle lives on the Content label instead —
+            // it is a writing control, not a document action.
             if (!isNew)
               moreActions.push({
                 label: "Copy link",
@@ -2609,16 +2601,41 @@ export function DocumentEditor({
                   }
                 }}
               >
-                <label className="block text-sm font-medium mb-1">
-                  {isArtifactDraft
-                    ? "Artifact HTML"
-                    : effectiveType === "tool"
-                      ? "Tool source (code)"
-                      : effectiveType === "table"
-                        ? "Table data (CSV)"
-                        : "Content"}
-                  {canEditContent && <span className="text-destructive"> *</span>}
-                </label>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="block text-sm font-medium">
+                    {isArtifactDraft
+                      ? "Artifact HTML"
+                      : effectiveType === "tool"
+                        ? "Tool source (code)"
+                        : effectiveType === "table"
+                          ? "Table data (CSV)"
+                          : "Content"}
+                    {canEditContent && <span className="text-destructive"> *</span>}
+                  </label>
+                  {/* Rich editor ↔ raw markdown. It belongs on the field it
+                      switches, not buried in the header's ⋮ menu — it is used
+                      while writing, and the label names the mode you get. The
+                      click must not reach the wrapper, which enters edit mode. */}
+                  {!isSourceOnly && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setRawMode((v) => !v);
+                      }}
+                      className="inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                      title={
+                        rawMode
+                          ? "Back to the rich editor"
+                          : "Edit the raw markdown source"
+                      }
+                      data-testid="document-editor-markdown-toggle"
+                    >
+                      <Code2 className="h-3 w-3" />
+                      {rawMode ? "Rich editor" : "Markdown source"}
+                    </button>
+                  )}
+                </div>
                 {compareVersion != null ? (
                   /* Ever-present inline diff: current vs a chosen past version. */
                   <div data-testid="document-editor-inline-diff">
