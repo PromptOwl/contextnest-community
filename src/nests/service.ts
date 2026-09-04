@@ -33,6 +33,16 @@ export async function isImportedNest(nestId: string): Promise<boolean> {
   return !!row?.is_imported;
 }
 
+/**
+ * Nest names are plain text. Strip tag-shaped markup before it is stored so no
+ * downstream surface that renders unescaped (exports, email) inherits it; a
+ * name that is nothing but markup collapses to "" and fails the empty/slug
+ * guards its callers already run.
+ */
+function plainName(name: string): string {
+  return name.replace(/<[^>]*>/g, "").trim();
+}
+
 function toSlug(name: string): string {
   return name
     .toLowerCase()
@@ -274,7 +284,7 @@ export async function renameNest(
   const params: any[] = [];
 
   if (patch.name !== undefined) {
-    const trimmed = patch.name.trim();
+    const trimmed = plainName(patch.name);
     if (!trimmed) throw new ValidationError("Name cannot be empty");
     const slug = toSlug(trimmed);
     if (!slug) throw new ValidationError("Name must contain at least one alphanumeric character");
@@ -317,7 +327,7 @@ export async function createNest(
   const id = uuid();
   const db = getDb();
 
-  const trimmed = name.trim();
+  const trimmed = plainName(name);
   if (!trimmed) throw new ValidationError("Name cannot be empty");
   const slug = toSlug(trimmed);
   if (!slug) {
@@ -375,7 +385,7 @@ export async function createNest(
  * nest lists as real with silently missing documents.
  */
 export async function importNest(userId: string, name: string): Promise<Nest> {
-  const nm = (name || "").trim();
+  const nm = plainName(name || "");
   if (!nm) {
     throw new ValidationError("name is required");
   }
