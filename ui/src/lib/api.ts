@@ -611,6 +611,12 @@ export interface ImportedFile {
  *  well under every hop's ceiling and each one reports its own HTTP status. */
 const IMPORT_CHUNK_BYTES = 4 * 1024 * 1024;
 
+/** Biggest single file an import request can carry. A file over the chunk
+ *  budget cannot be split, so it used to ship alone in one oversized body and
+ *  the server answered 413 — failing the WHOLE import, not just that file.
+ *  Under the server's MAX_BODY_BYTES (10MB) with room for JSON escaping. */
+const IMPORT_FILE_MAX_BYTES = 8 * 1024 * 1024;
+
 /** Import a folder the user picked in their browser. The browser reads the
  *  folder and uploads each file; the server writes them into the workspace.
  *
@@ -636,10 +642,17 @@ export async function importNest(
   // batching exists to avoid.
   const encoder = new TextEncoder();
   const chunks: ImportedFile[][] = [];
+  const oversized: string[] = [];
   let cur: ImportedFile[] = [];
   let curBytes = 0;
   for (const f of files) {
     const size = encoder.encode(f.path).length + encoder.encode(f.content ?? "").length;
+    // Too big to travel in any request. Reported like a server-side rejection
+    // instead of sent, so one huge file no longer 413s the whole import.
+    if (size > IMPORT_FILE_MAX_BYTES) {
+      oversized.push(f.path);
+      continue;
+    }
     // A single file over budget still goes alone rather than being split.
     if (cur.length && curBytes + size > IMPORT_CHUNK_BYTES) {
       chunks.push(cur);
@@ -654,7 +667,7 @@ export async function importNest(
   onProgress?.(0, files.length);
   // Files the server refused (an unsafe path), gathered across every chunk so
   // the caller can report a partial import honestly instead of a clean one.
-  const rejected: string[] = [];
+  const rejected: string[] = [...oversized];
   const first = await request<{ nest: any; documents?: number; rejected?: string[] }>(
     "/nests/import",
     {

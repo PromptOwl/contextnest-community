@@ -52,6 +52,7 @@ function isSkippedDir(name: string): boolean {
 // the server actually registers.
 const META_FILES = new Set([
   "INDEX.md", "CONTEXT.md", "CLAUDE.md", "GEMINI.md", "AGENTS.md", "QWEN.md",
+  "README.md",
 ]);
 
 /** How many collected files will actually become documents. The upload also
@@ -295,7 +296,8 @@ export function ImportFolderModal({ isOpen, onClose, onImported }: ImportFolderM
         setProgress(null);
         setError(
           `Imported, but ${rejected.length} file${rejected.length === 1 ? "" : "s"} ` +
-            `could not be read: ${rejected.slice(0, 5).join(", ")}` +
+            `could not be read or ${rejected.length === 1 ? "was" : "were"} too large: ` +
+            `${rejected.slice(0, 5).join(", ")}` +
             (rejected.length > 5 ? `, and ${rejected.length - 5} more` : ""),
         );
         return;
