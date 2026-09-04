@@ -35,12 +35,22 @@ export async function isImportedNest(nestId: string): Promise<boolean> {
 
 /**
  * Nest names are plain text. Strip tag-shaped markup before it is stored so no
- * downstream surface that renders unescaped (exports, email) inherits it; a
- * name that is nothing but markup collapses to "" and fails the empty/slug
- * guards its callers already run.
+ * downstream surface that renders unescaped (exports, email) inherits it.
+ *
+ * A name that was nothing but markup strips to "" — reporting that as an empty
+ * name is confusing, since the user did type something, so it gets its own
+ * message naming the actual problem.
  */
-function plainName(name: string): string {
-  return name.replace(/<[^>]*>/g, "").trim();
+function plainName(name: string, emptyMessage = "Name cannot be empty"): string {
+  const typed = (name ?? "").trim();
+  if (!typed) throw new ValidationError(emptyMessage);
+  const stripped = typed.replace(/<[^>]*>/g, "").trim();
+  if (!stripped) {
+    throw new ValidationError(
+      "That's not a valid nest name — it's only HTML markup. Use plain text.",
+    );
+  }
+  return stripped;
 }
 
 function toSlug(name: string): string {
@@ -285,7 +295,6 @@ export async function renameNest(
 
   if (patch.name !== undefined) {
     const trimmed = plainName(patch.name);
-    if (!trimmed) throw new ValidationError("Name cannot be empty");
     const slug = toSlug(trimmed);
     if (!slug) throw new ValidationError("Name must contain at least one alphanumeric character");
     const conflict = (await db.get(
@@ -328,7 +337,6 @@ export async function createNest(
   const db = getDb();
 
   const trimmed = plainName(name);
-  if (!trimmed) throw new ValidationError("Name cannot be empty");
   const slug = toSlug(trimmed);
   if (!slug) {
     throw new ValidationError(
@@ -385,10 +393,7 @@ export async function createNest(
  * nest lists as real with silently missing documents.
  */
 export async function importNest(userId: string, name: string): Promise<Nest> {
-  const nm = plainName(name || "");
-  if (!nm) {
-    throw new ValidationError("name is required");
-  }
+  const nm = plainName(name || "", "name is required");
 
   const db = getDb();
   const id = uuid();
