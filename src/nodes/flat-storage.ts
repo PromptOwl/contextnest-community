@@ -4,20 +4,9 @@ import { join, relative, sep } from "path";
 import { NestStorage } from "@promptowl/contextnest-engine";
 import type { ContextNode } from "@promptowl/contextnest-engine";
 import { isSkippedSegment } from "../fs/vault-import.js";
+import { isMetaFile } from "./meta-files.js";
 import { mapBatched } from "../shared/batch.js";
 
-// Engine- and agent-generated files that live alongside documents but are
-// NOT themselves documents. The engine excludes these in structured mode;
-// we replicate that for flat discovery so an imported vault doesn't surface
-// its CLAUDE.md / INDEX.md / CONTEXT.md as editable nodes.
-const META_FILES = new Set([
-  "INDEX.md",
-  "CONTEXT.md",
-  "CLAUDE.md",
-  "GEMINI.md",
-  "AGENTS.md",
-  "QWEN.md",
-]);
 
 /**
  * NestStorage variant for imported folders.
@@ -49,7 +38,9 @@ export class FlatNestStorage extends NestStorage {
     const ids: string[] = [];
     for (const e of entries) {
       if (!e.isFile() || !e.name.endsWith(".md")) continue;
-      if (META_FILES.has(e.name)) continue;
+      // Engine- and agent-generated files ride along on import but are not
+      // documents (isMetaFile).
+      if (isMetaFile(e.name)) continue;
       // Dirent.parentPath (Node ≥20.12); `path` is the older alias.
       const dir = (e as any).parentPath ?? (e as any).path ?? root;
       const rel = relative(root, join(dir, e.name)).split(sep).join("/");
