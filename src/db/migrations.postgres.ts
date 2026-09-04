@@ -70,6 +70,7 @@ const HISTORICAL_MIGRATIONS = [
   "034_versions_author_status_index",
   "035_multiple_api_keys_per_user",
   "036_node_index",
+  "037_publish",
 ];
 
 export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> {
@@ -106,6 +107,8 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       prime_tags TEXT NOT NULL DEFAULT 'prime-document',
       shared_teams TEXT NOT NULL DEFAULT '[]',
       index_synced_at TEXT,
+      reader_mode INTEGER NOT NULL DEFAULT 0,
+      reader_home_node TEXT,
       UNIQUE(user_id, slug)
     );
     CREATE INDEX IF NOT EXISTS idx_nests_user ON nests(user_id);
@@ -359,6 +362,43 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
       ON grants(nest_id, target_type, target, user_id);
     CREATE INDEX IF NOT EXISTS idx_grants_user ON grants(nest_id, user_id);
 
+    CREATE TABLE IF NOT EXISTS publish (
+      id TEXT PRIMARY KEY,
+      nest_id TEXT NOT NULL REFERENCES nests(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      access_mode TEXT NOT NULL DEFAULT 'public'
+        CHECK(access_mode IN ('public','email','code','invite')),
+      code_hash TEXT,
+      comments_enabled INTEGER NOT NULL DEFAULT 0,
+      watermark INTEGER NOT NULL DEFAULT 0,
+      no_download INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT,
+      revoked_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_slug ON publish(slug);
+    CREATE INDEX IF NOT EXISTS idx_publish_nest ON publish(nest_id, node_id);
+
+    CREATE TABLE IF NOT EXISTS access_grant (
+      id TEXT PRIMARY KEY,
+      publish_id TEXT NOT NULL REFERENCES publish(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK(kind IN ('invite','link','session','view')),
+      email TEXT,
+      token_hash TEXT,
+      expires_at TEXT,
+      used_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_access_grant_publish ON access_grant(publish_id, kind);
+    CREATE INDEX IF NOT EXISTS idx_access_grant_token ON access_grant(token_hash);
+
+    -- Viewer overlays, declared inline above; explicit ALTERs so a database
+    -- created by an earlier build of 037 still gets them on upgrade.
+    ALTER TABLE publish ADD COLUMN IF NOT EXISTS watermark INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE publish ADD COLUMN IF NOT EXISTS no_download INTEGER NOT NULL DEFAULT 0;
+
     CREATE TABLE IF NOT EXISTS teams (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -401,6 +441,12 @@ export async function runPostgresMigrations(db: DatabaseAdapter): Promise<void> 
     -- from disk before answering", which is exactly right for a nest whose
     -- index has never been built.
     ALTER TABLE nests ADD COLUMN IF NOT EXISTS index_synced_at TEXT;
+
+    -- Public Docs Reader Mode: same inline-plus-explicit-ALTER pattern so a
+    -- database created before reader mode shipped still gets the columns on
+    -- upgrade. reader_mode is off by default; reader_home_node is nullable.
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_mode INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE nests ADD COLUMN IF NOT EXISTS reader_home_node TEXT;
 
     CREATE TABLE IF NOT EXISTS schedules (
       id TEXT PRIMARY KEY,

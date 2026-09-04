@@ -18,6 +18,8 @@ import { normalizeEmail } from "../shared/email.js";
 import { isEmailish } from "../config.js";
 import { sendEmailToRecipient } from "../notify/email.js";
 import { nestName, docLink } from "./title-resolver.js";
+import { notifyNestInvite } from "./notify-service.js";
+import { teamRoleToPermission } from "./roles.js";
 import {
   ValidationError,
   NotFoundError,
@@ -514,6 +516,7 @@ export async function shareTeamWithNest(params: {
 }): Promise<SharedTeamRef[]> {
   const db = getDb();
   let sharedMembers: TeamMember[] = [];
+  let sharedTeamName = "";
   const refs = await db.transaction(async (tx) => {
     const team = (await tx.get(
       "SELECT id, name, owner_id, members FROM teams WHERE id = ?",
@@ -557,6 +560,7 @@ export async function shareTeamWithNest(params: {
     // does not force stewardship.
     const members = parseMembers(team.members);
     sharedMembers = members;
+    sharedTeamName = team.name;
     const hasGovernanceRole = members.some(
       (m) => m.role === "viewer" || m.role === "editor",
     );
@@ -568,9 +572,10 @@ export async function shareTeamWithNest(params: {
     return refs;
   });
 
-  // Email every team member that the nest was shared with them — one send per
-  // distinct role (each carries a different access level), best-effort so a
-  // dead SMTP never fails the share. Skip the person doing the sharing.
+  // Tell every team member the nest was shared with them: an email per
+  // distinct role (each carries a different access level) plus an inbox row
+  // each, the same surface a direct invite lands in. Best-effort so neither a
+  // dead SMTP nor a failed insert fails the share. Skip the person sharing.
   try {
     const caller = (await db.get("SELECT email FROM users WHERE id = ?", [
       params.callerUserId,
@@ -595,6 +600,20 @@ export async function shareTeamWithNest(params: {
         permission: role,
         by: caller?.email || undefined,
       });
+      // The inbox message names the access level in collaborator terms, so a
+      // team viewer reads "Viewer" the way a directly invited one does.
+      const permission = teamRoleToPermission(role) ?? role;
+      // Awaited, unlike the email: a local insert costs nothing and the row
+      // is then there for the member's very next inbox read.
+      for (const email of emails) {
+        await notifyNestInvite({
+          nestId: params.nestId,
+          inviteeEmail: email,
+          permission,
+          nestName: shareNestName,
+          viaTeam: sharedTeamName,
+        });
+      }
     }
   } catch (err) {
     console.error("[notify] team-share email fan-out failed", params.nestId, err);

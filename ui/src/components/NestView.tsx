@@ -4,6 +4,7 @@
  */
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import * as api from "../lib/api";
+import { BULK_REVIEW_LIMIT } from "../lib/constants";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reads } from "../lib/queries";
 import { matchesFilters } from "../lib/node-filter";
@@ -25,7 +26,7 @@ import {
   Pencil, Trash2, FileWarning, Globe, Lock, FolderInput, Users,
   LayoutGrid, List as ListIcon, Star, X, MoreVertical,
   FolderOpen, ChevronRight, FileStack, Bot, Zap, FolderPlus, Wrench, Table2,
-  Activity, Share2,
+  Activity, Share2, BookOpen,
 } from "lucide-react";
 import { ConnectModal } from "./ConnectModal";
 import { FolderTree, prettyFolder, prettyFolderPath } from "./FolderTree";
@@ -64,7 +65,21 @@ export function NodeTypeIcon({
 }
 import { GenerateContextModal } from "./GenerateContextModal";
 import { NestSettingsModal } from "./NestSettingsModal";
+import { ReaderView } from "./ReaderView";
+import { DocumentPickerModal } from "./DocumentPickerModal";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { PublishDialog } from "./PublishDialog";
+import { NestVisibilityControl } from "./NestVisibilityControl";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { NestPageHeader } from "./NestPageHeader";
 import { deriveNestCaps } from "../lib/nest-caps";
@@ -79,8 +94,12 @@ import {
   Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import {
-  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog";
+import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import {
   Tabs, TabsList, TabsTrigger, TabsContent,
 } from "@/components/ui/tabs";
@@ -247,6 +266,20 @@ export function NestView({
   // affordances for non-admin reviewers/editors who can't read the roster.
   const [myStewards, setMyStewards] = useState<Steward[]>([]);
   const [reviewQueue, setReviewQueue] = useState<ReviewRequest[]>([]);
+  // Bulk review selection, by node id. A reviewer clearing a folder import
+  // makes the same call on every item, so let them say it once.
+  const [bulkSelected, setBulkSelected] = useState<Set<string>>(new Set());
+  const [bulkAction, setBulkAction] = useState<"approve" | "reject" | null>(
+    null,
+  );
+  // This component is reused across nests (jumping between nests from the
+  // search palette keeps the same page), so a selection has to be dropped when
+  // the nest under it changes — otherwise node ids from the nest you left ride
+  // along into a batch aimed at the one you arrived in.
+  useEffect(() => {
+    setBulkSelected(new Set());
+    setBulkAction(null);
+  }, [nestId]);
   // Pending "please delete this" flags raised by people below admin.
   const [deletionRequests, setDeletionRequests] = useState<api.DeletionRequest[]>([]);
   // Node being flagged (dialog open when set), and the queue row being resolved
@@ -325,6 +358,21 @@ export function NestView({
   const [primeTags, setPrimeTags] = useState<string[]>([]);
   const [visibility, setVisibility] = useState<"private" | "public">("private");
   const [visibilitySaving, setVisibilitySaving] = useState(false);
+  // Publishing (→ public) is guarded by an acknowledgement dialog: the nest
+  // becomes readable by anyone on the internet, outside your organization.
+  const [confirmPublic, setConfirmPublic] = useState(false);
+  // Public Docs Reader Mode (superadmin-only config). reader_mode flips the
+  // read-only presentation to the clean docs reader; reader_home_node names the
+  // designated landing/hub node (empty → resolve by convention).
+  const [readerModeEnabled, setReaderModeEnabled] = useState(false);
+  const [readerHomeNode, setReaderHomeNode] = useState<string | null>(null);
+  const [readerModeSaving, setReaderModeSaving] = useState(false);
+  const [readerDialogOpen, setReaderDialogOpen] = useState(false);
+  const [homeNodePickerOpen, setHomeNodePickerOpen] = useState(false);
+  // Title of the saved home node — the stored value is an id, and an id is not
+  // what people recognise. Resolved from the full document list, which the
+  // picker has usually already cached.
+  const [readerHomeTitle, setReaderHomeTitle] = useState<string | null>(null);
   const [isImported, setIsImported] = useState(false);
   // Caller's nest-level permission (from GET /nests/:id).
   const [permission, setPermission] = useState<string | null>(null);
@@ -442,6 +490,7 @@ export function NestView({
     setTypeFilter(f.type ?? "all");
   };
   const [reviewNode, setReviewNode] = useState<any | null>(null);
+  const [publishNode, setPublishNode] = useState<any | null>(null);
   const [submitNode, setSubmitNode] = useState<any | null>(null);
   const [versionNode, setVersionNode] = useState<any | null>(null);
   const [versionData, setVersionData] = useState<{
@@ -470,13 +519,10 @@ export function NestView({
     if (newFolderCheck.error) return;
     setCreatingFolder(true);
     try {
-      // Folders are path-derived — seed one with a starter node so it appears
-      // and is immediately usable. Nesting works via "parent/child".
-      await api.createNode(nestId, {
-        title: "Overview",
-        content: `# ${folder.split("/").pop()}\n\nStart here.\n`,
-        folder,
-      });
+      // Folders are path-derived, so the server records the path rather than
+      // seeding a starter document that would count as real content
+      // (CU-wdqcpzzzut). Nesting works via "parent/child".
+      await api.createFolder(nestId, folder);
       setNewFolderPath("");
       setShowNewFolder(false);
       fetchData();
@@ -487,7 +533,6 @@ export function NestView({
       setCreatingFolder(false);
     }
   };
-  const [showShare, setShowShare] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   // Rename dialog (name + description) — complements the inline header
   // rename, which only covers the name.
@@ -843,6 +888,8 @@ export function NestView({
     if (nestMeta?.nest) {
       setIsImported(!!(nestMeta.nest as any).is_imported);
       setNestDescription((nestMeta.nest as any).description ?? null);
+      setReaderModeEnabled(!!(nestMeta.nest as any).reader_mode);
+      setReaderHomeNode((nestMeta.nest as any).reader_home_node ?? null);
     }
     if (nestMeta?.permission) {
       setPermission(nestMeta.permission);
@@ -1110,6 +1157,8 @@ export function NestView({
     artifact: "Artifact",
     agent: "Agent",
     skill: "Skill",
+    tool: "Tool",
+    table: "Table",
   };
   // Colored pill for a non-document node type, shown on each list/card row so
   // the kind is scannable. `document` returns null (the default — no pill).
@@ -1200,10 +1249,12 @@ export function NestView({
     myStewards,
     isOwner,
     isAdmin,
+    readerMode: readerModeEnabled,
   });
   // canReviewDocs is folded into isReadOnly inside caps; per-row review uses
   // canReviewNode for scope resolution, so it isn't destructured here.
-  const { canManage, collabCanWrite, canEditDocs, isReadOnly } = caps;
+  const { canManage, collabCanWrite, canEditDocs, isReadOnly, isReaderView } =
+    caps;
 
   // Map nodeId → submitter so the per-row Review button can hide on
   // docs the current user submitted (separation-of-duties: authors must
@@ -1437,6 +1488,19 @@ export function NestView({
     }
   };
 
+  // Cancel your own pending review — the document goes back to Draft rather
+  // than Delete being the only way out (CU-wdqcq007pe).
+  const withdrawSubmission = async (nodeId: string) => {
+    try {
+      await api.cancelReview(nestId, nodeId);
+      toast.success("Submission withdrawn — back to Draft");
+      fetchData();
+    } catch (err: any) {
+      console.error("[NestView] cancelReview failed", nestId, nodeId, err);
+      toast.error(err?.message || "Failed to withdraw submission");
+    }
+  };
+
   const handleSubmitReview = async (note: string, priority: string) => {
     if (!submitNode) return;
     try {
@@ -1487,6 +1551,43 @@ export function NestView({
     else if (update.scope === "tag") payload.tagName = update.target;
     await api.updateSteward(nestId, editingSteward.id, payload);
     toast.success("Steward updated");
+    fetchData();
+  };
+
+  // One decision over many documents. The server applies them item by item
+  // through the same approve/reject the single-document flow uses, so partial
+  // success is normal: report what failed and why, keep the successes, and
+  // leave the failures selected so a second attempt is one click away.
+  const runBulkReview = async (
+    action: "approve" | "reject",
+    note: string,
+  ) => {
+    const nodeIds = [...bulkSelected];
+    const { succeeded, failed, results } = await api.bulkReview(
+      nestId,
+      action,
+      nodeIds,
+      note || undefined,
+    );
+    const verb = action === "approve" ? "approved" : "rejected";
+    if (failed === 0) {
+      toast.success(`${succeeded} document${succeeded === 1 ? "" : "s"} ${verb}`);
+      setBulkSelected(new Set());
+    } else {
+      // Each distinct reason, not just the first — a mixed batch fails for
+      // more than one.
+      const reasons = [
+        ...new Set(
+          results.filter((r) => !r.ok).map((r) => r.error || "Unknown reason"),
+        ),
+      ];
+      toast.warning(`${succeeded} ${verb}, ${failed} could not be`, {
+        description: reasons.join(" "),
+        duration: 10000,
+      });
+      setBulkSelected(new Set(results.filter((r) => !r.ok).map((r) => r.nodeId)));
+    }
+    setBulkAction(null);
     fetchData();
   };
 
@@ -1555,18 +1656,85 @@ export function NestView({
   // flip with revert on failure, mirroring ShareNestDialog so the control
   // never lies about server state. Surfaces the public/private switch outside
   // the Share dialog, where it was easy to miss. (CU-wdqcpztgwk)
-  const handleVisibilityToggle = async () => {
-    const next = visibility === "public" ? "private" : "public";
+  const applyVisibility = async (
+    next: "private" | "public",
+    acknowledgePublic?: boolean,
+  ) => {
+    const prev = visibility;
     setVisibility(next);
     setVisibilitySaving(true);
     try {
-      const result = await api.setNestVisibility(nestId, next);
+      const result = await api.setNestVisibility(
+        nestId,
+        next,
+        acknowledgePublic,
+      );
       if (result?.visibility) setVisibility(result.visibility);
     } catch (err: any) {
-      setVisibility(next === "public" ? "private" : "public"); // revert
+      setVisibility(prev); // revert
       toast.error(err?.message || "Failed to change visibility");
     } finally {
       setVisibilitySaving(false);
+    }
+  };
+
+  const handleVisibilityToggle = async () => {
+    // Going public makes the nest readable by anyone on the internet, outside
+    // your organization — confirm first (and send acknowledge_public). Going
+    // back to private is unguarded.
+    if (visibility !== "public") {
+      setConfirmPublic(true);
+      return;
+    }
+    await applyVisibility("private");
+  };
+
+  // Public Docs Reader Mode config (superadmin-only; the server hard-gates on
+  // isServerAdminUserId). Optimistic flip with revert on failure.
+  const handleReaderModeToggle = async () => {
+    const next = !readerModeEnabled;
+    setReaderModeEnabled(next);
+    setReaderModeSaving(true);
+    try {
+      const result = await api.setNestReaderMode(nestId, { enabled: next });
+      setReaderModeEnabled(!!result.reader_mode);
+      setReaderHomeNode(result.reader_home_node ?? null);
+    } catch (err: any) {
+      setReaderModeEnabled(!next); // revert
+      toast.error(err?.message || "Failed to change reader mode");
+    } finally {
+      setReaderModeSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!readerDialogOpen || !readerHomeNode) {
+      setReaderHomeTitle(null);
+      return;
+    }
+    let cancelled = false;
+    qc.fetchQuery(reads.node(nestId, readerHomeNode))
+      .then(({ node }: any) => {
+        if (!cancelled) setReaderHomeTitle(node?.title || readerHomeNode);
+      })
+      .catch(() => {
+        if (!cancelled) setReaderHomeTitle(readerHomeNode);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [readerDialogOpen, readerHomeNode, nestId, qc]);
+
+  const handleReaderHomeNodeSave = async (home: string | null) => {
+    setReaderModeSaving(true);
+    try {
+      const result = await api.setNestReaderMode(nestId, { home_node: home });
+      setReaderHomeNode(result.reader_home_node ?? null);
+      toast.success("Saved reader home node");
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to set reader home node");
+    } finally {
+      setReaderModeSaving(false);
     }
   };
 
@@ -1633,6 +1801,31 @@ export function NestView({
     },
     [nestId, fetchData, onOpenDocument],
   );
+
+  // Public Docs Reader Mode: a read-only caller of a reader-mode nest gets the
+  // stripped docs reader instead of the full tabbed authoring layout. Gated on
+  // caps.isReaderView (reader_mode && isReadOnly), so owners/editors/reviewers/
+  // admins never lose the authoring UI.
+  if (isReaderView) {
+    return (
+      <div className="relative">
+        <div className="mb-3">
+          <Button variant="ghost" size="sm" onClick={onBack} className="gap-1.5">
+            <ArrowLeft className="h-4 w-4" />
+            Back
+          </Button>
+        </div>
+        <ReaderView
+          nestId={nestId}
+          nestName={editableName}
+          nodes={nodes}
+          tocGroups={tocGroups}
+          knownFolders={knownFolders}
+          readerHomeNode={readerHomeNode}
+        />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1762,6 +1955,30 @@ export function NestView({
               </Badge>
             )
           )}
+          {/* Public Docs Reader Mode — superadmin-only config (isAdmin ==
+              server/super admin). A menu rather than a toggle: the landing
+              document is part of the same setting, and changing it must not
+              mean switching reader mode off and on again. */}
+          {isAdmin && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setReaderDialogOpen(true)}
+              className={`shrink-0 h-7 gap-1.5 ${
+                readerModeEnabled
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                  : ""
+              }`}
+              title="Public Docs Reader Mode — the clean, read-only docs view public readers get."
+            >
+              {readerModeSaving ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <BookOpen className="h-3.5 w-3.5" />
+              )}
+              {readerModeEnabled ? "Reader: On" : "Reader: Off"}
+            </Button>
+          )}
           {isImported && (
             <Badge
               variant="outline"
@@ -1811,7 +2028,13 @@ export function NestView({
             </Button>
           )}
           {canManage && (
-            <Button variant="outline" size="sm" onClick={() => setShowShare(true)}>
+            // Inside the nest, Share IS the Collaborators tab — one surface
+            // for visibility, people and teams (CU-wdqcpzzzy6).
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setActiveTab("collaborators")}
+            >
               <Users className="h-3.5 w-3.5 mr-1.5" />
               Share
             </Button>
@@ -1963,8 +2186,20 @@ export function NestView({
           <CardContent>
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <FileText className="h-4 w-4" />
+              {/* An empty nest has nothing to be approved or AI-ready, so the
+                  readiness line would be a promise about content that isn't
+                  there — say what's true instead (CU-wdqcq00x8y). */}
               <span>
-                {stewardshipEnabled ? "In your context" : "Auto-approved, AI-ready"}
+                {/* Gated on the same cold-load flag as the count above: every
+                    stat is 0 until the first read lands, and claiming an empty
+                    nest before then is wrong on a slow connection. */}
+                {initialLoad
+                  ? "Loading…"
+                  : stats.total === 0
+                    ? "No documents yet"
+                    : stewardshipEnabled
+                      ? "In your context"
+                      : "Auto-approved, AI-ready"}
               </span>
             </div>
           </CardContent>
@@ -2003,7 +2238,13 @@ export function NestView({
               <CardContent>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <CheckCircle2 className="h-4 w-4" />
-                  <span>Approved for AI</span>
+                  <span>
+                    {initialLoad
+                      ? "Loading…"
+                      : stats.total === 0
+                        ? "Nothing to evaluate yet"
+                        : "Approved for AI"}
+                  </span>
                 </div>
               </CardContent>
             </Card>
@@ -2788,6 +3029,12 @@ export function NestView({
                             <History className="h-3.5 w-3.5 mr-2" />
                             History
                           </DropdownMenuItem>
+                          {canManage && (
+                            <DropdownMenuItem onSelect={() => setPublishNode(node)}>
+                              <Share2 className="h-3.5 w-3.5 mr-2" />
+                              Publish
+                            </DropdownMenuItem>
+                          )}
                           <DropdownMenuSeparator />
                           {showDeleteAction && (
                             <DropdownMenuItem
@@ -3066,7 +3313,16 @@ export function NestView({
                       className="space-y-1"
                       groups={docGroups}
                       baseFolder={baseFolder}
-                      known={knownFolders}
+                      // Unfiltered, the tree is seeded with every folder in the
+                      // nest so one whose documents were never fetched still has
+                      // a row to expand. Under a filter that seeding is wrong
+                      // twice over: it lists folders holding no match, and it
+                      // suppresses chain compaction, so a single hit four levels
+                      // down costs four rows of empty scaffolding. A filtered
+                      // list already answers from the whole nest, so drop the
+                      // seed and let the tree show only folders that matched —
+                      // as one "F1 / F2 / F3" row per chain.
+                      known={hasActiveFilters ? undefined : knownFolders}
                       isCollapsed={(p) =>
                         // A filtered list shows every match, wherever it lives.
                         hasActiveFilters ? false : !expandedFolders.has(p)
@@ -3399,16 +3655,31 @@ export function NestView({
                 </CardHeader>
                 <CardContent className="space-y-2">
                   {myPendingSubmissions.map((r) => (
-                    <button
+                    <div
                       key={r.id}
-                      onClick={() => onOpenDocument(r.nodeId)}
-                      className="w-full flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm hover:bg-muted/50"
+                      className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted/50"
                     >
-                      <span className="truncate">{r.title || r.nodeId}</span>
+                      <button
+                        onClick={() => onOpenDocument(r.nodeId)}
+                        className="flex-1 min-w-0 text-left truncate"
+                      >
+                        {r.title || r.nodeId}
+                      </button>
                       <Badge variant="secondary" className="text-[10px] shrink-0">
                         Awaiting review
                       </Badge>
-                    </button>
+                      {/* Your own submission, so the non-destructive exit
+                          belongs here too (CU-wdqcq007pe). */}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="shrink-0 h-7 px-2 text-muted-foreground"
+                        title="Withdraw this submission and return the document to Draft"
+                        onClick={() => void withdrawSubmission(r.nodeId)}
+                      >
+                        Withdraw
+                      </Button>
+                    </div>
                   ))}
                 </CardContent>
               </Card>
@@ -3474,8 +3745,86 @@ export function NestView({
                 </CardContent>
               </Card>
             )}
+            {/* Bulk bar — only with something selectable, and it stays out of
+                the way until the first row is picked. */}
+            {feedFilter !== "comments" && reviewableQueue.length > 1 && (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
+                <Checkbox
+                  // Partial selections read as "some", not "none".
+                  checked={
+                    bulkSelected.size === 0
+                      ? false
+                      : bulkSelected.size === reviewableQueue.length
+                        ? true
+                        : "indeterminate"
+                  }
+                  onCheckedChange={(next: boolean | "indeterminate") =>
+                    setBulkSelected(
+                      next === true
+                        ? new Set(reviewableQueue.map((r) => r.nodeId))
+                        : new Set(),
+                    )
+                  }
+                  aria-label="Select every document you can review"
+                  data-testid="review-queue-select-all"
+                />
+                <span className="text-muted-foreground">
+                  {bulkSelected.size > 0
+                    ? `${bulkSelected.size} selected`
+                    : `Select all ${reviewableQueue.length}`}
+                </span>
+                {bulkSelected.size > BULK_REVIEW_LIMIT && (
+                  <span className="text-destructive">
+                    Up to {BULK_REVIEW_LIMIT} at a time — deselect{" "}
+                    {bulkSelected.size - BULK_REVIEW_LIMIT}.
+                  </span>
+                )}
+                {bulkSelected.size > 0 && (
+                  <div className="ml-auto flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      disabled={bulkSelected.size > BULK_REVIEW_LIMIT}
+                      onClick={() => setBulkAction("approve")}
+                      data-testid="bulk-approve"
+                    >
+                      Approve {bulkSelected.size}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={bulkSelected.size > BULK_REVIEW_LIMIT}
+                      onClick={() => setBulkAction("reject")}
+                      data-testid="bulk-reject"
+                    >
+                      Reject {bulkSelected.size}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setBulkSelected(new Set())}
+                    >
+                      Clear
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
             <ReviewQueue
               requests={feedFilter === "comments" ? [] : reviewableQueue}
+              selectedNodeIds={bulkSelected}
+              // Rows only offer a checkbox when there is a batch to make — one
+              // reviewable document has no bar to act on the selection, so a
+              // box there is a dead end.
+              onToggleSelect={
+                reviewableQueue.length > 1
+                  ? (nodeId) =>
+                      setBulkSelected((prev) => {
+                        const next = new Set(prev);
+                        next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId);
+                        return next;
+                      })
+                  : undefined
+              }
               // Feed mode (interleaved comment rows) except on the Changes
               // chip, which renders the legacy changes-only queue untouched.
               comments={feedFilter === "changes" ? undefined : feedComments}
@@ -3753,12 +4102,23 @@ export function NestView({
               <CardHeader className="pb-3">
                 <CardTitle className="text-lg">Collaborators</CardTitle>
                 <CardDescription>
-                  People with direct access to this nest. Sharing grants plain
-                  access (viewer/editor/admin) — it does not make anyone a
-                  steward. Manage visibility from the Share dialog.
+                  Who can reach this nest — visibility, people and teams.
+                  Sharing grants plain access (viewer/editor/admin); it does
+                  not make anyone a steward.{" "}
+                  {!stewardshipEnabled &&
+                    "Stewards need Stewardship & Approval Workflow turned on in Nest settings."}
                 </CardDescription>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-4">
+                {/* Visibility lives here rather than only in the Share dialog,
+                    so access management is one surface (CU-wdqcpzzzy6). */}
+                {canManage && (
+                  <NestVisibilityControl
+                    nestId={nestId}
+                    onChanged={fetchData}
+                    onError={(msg) => msg && toast.error(msg)}
+                  />
+                )}
                 <CollaboratorManager
                   nestId={nestId}
                   nestName={nestName}
@@ -3829,14 +4189,6 @@ export function NestView({
         />
       )}
 
-      {showShare && (
-        <ShareNestDialog
-          nestId={nestId}
-          nestName={nestName}
-          onClose={() => setShowShare(false)}
-          onChanged={fetchData}
-        />
-      )}
       {shareFolder && (
         <ShareTargetDialog
           nestId={nestId}
@@ -3914,8 +4266,8 @@ export function NestView({
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
             Name the folder. Nest it with a slash — e.g.{" "}
-            <code className="text-xs">gtm/deals</code>. It's seeded with a starter
-            document so it shows up right away.
+            <code className="text-xs">gtm/deals</code>. It starts empty; add
+            documents to it whenever you like.
           </p>
           <Input
             autoFocus
@@ -3957,6 +4309,133 @@ export function NestView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Reader mode settings — the switch and the landing document in one
+          place, so changing the home document never means turning the mode off
+          and on again. */}
+      <Dialog open={readerDialogOpen} onOpenChange={setReaderDialogOpen}>
+        <DialogContent className="sm:max-w-[520px]">
+          <DialogHeader>
+            <DialogTitle>Public Docs Reader Mode</DialogTitle>
+            <DialogDescription>
+              A clean, read-only docs view for people who can only read this
+              nest. Owners, editors and reviewers keep the full authoring UI,
+              and reader mode grants no access on its own.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="rounded-lg border p-4 flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <Label className="text-sm font-medium">Reader mode</Label>
+              <p className="text-xs text-muted-foreground">
+                {readerModeEnabled
+                  ? "Read-only visitors get the docs reader."
+                  : "Everyone gets the standard nest view."}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {readerModeSaving && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+              )}
+              <Switch
+                checked={readerModeEnabled}
+                onCheckedChange={() => void handleReaderModeToggle()}
+                disabled={readerModeSaving}
+                aria-label="Toggle Public Docs Reader Mode"
+              />
+            </div>
+          </div>
+
+          {readerModeEnabled && (
+            <div className="rounded-lg border p-4 space-y-2">
+              <Label className="text-sm font-medium">Home document</Label>
+              <p className="text-xs text-muted-foreground">
+                Reader mode opens on this document and keeps it in the side
+                pane. Left unset, it resolves one by convention (welcome /
+                index / readme / home / overview).
+              </p>
+              <div className="flex items-center gap-2 pt-1">
+                <div className="min-w-0 flex-1 truncate text-sm">
+                  {readerHomeNode ? (
+                    (readerHomeTitle ?? "Loading…")
+                  ) : (
+                    <span className="text-muted-foreground">
+                      Resolved by convention
+                    </span>
+                  )}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setHomeNodePickerOpen(true)}
+                  disabled={readerModeSaving}
+                >
+                  {readerHomeNode ? "Change" : "Choose"}
+                </Button>
+                {readerHomeNode && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void handleReaderHomeNodeSave(null)}
+                    disabled={readerModeSaving}
+                  >
+                    Clear
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReaderDialogOpen(false)}>
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reader mode's landing document, picked from the real document list —
+          the field used to take a hand-typed node id, so a title people could
+          see on the page ("Product Capabilities") was refused as missing. */}
+      {homeNodePickerOpen && (
+        <DocumentPickerModal
+          isOpen={homeNodePickerOpen}
+          onClose={() => setHomeNodePickerOpen(false)}
+          nestId={nestId}
+          title="Choose the reader home document"
+          description="Reader mode opens on this document and keeps it in the side pane. Close without picking to resolve one by convention (welcome / index / readme / home / overview)."
+          onSelect={(node) => {
+            setReaderHomeTitle(node.title);
+            void handleReaderHomeNodeSave(node.id);
+          }}
+        />
+      )}
+
+      {/* Outside-org publish acknowledgement — flipping a nest to public makes
+          it readable by anyone on the internet, outside your organization.
+          Confirm sends acknowledge_public:true; the server 409s without it. */}
+      <AlertDialog open={confirmPublic} onOpenChange={setConfirmPublic}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Make this nest public?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This makes the nest readable by anyone on the internet, outside
+              your organization. Anyone with the URL will be able to read it.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setConfirmPublic(false);
+                void applyVisibility("public", true);
+              }}
+            >
+              Make public
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Move to folder — the keyboard-accessible path to the same move the
           drag-and-drop performs; both funnel through handleMoveNode. */}
@@ -4156,6 +4635,15 @@ export function NestView({
         />
       )}
 
+      {publishNode && (
+        <PublishDialog
+          nestId={nestId}
+          nodeId={publishNode.id}
+          nodeTitle={publishNode.title || publishNode.id}
+          onClose={() => setPublishNode(null)}
+        />
+      )}
+
       {removeStewardId && (
         <ReasonDialog
           open
@@ -4165,6 +4653,30 @@ export function NestView({
           confirmLabel="Remove steward"
           destructive
           onConfirm={handleRemoveSteward}
+        />
+      )}
+
+      {bulkAction && (
+        <ReasonDialog
+          open
+          onOpenChange={(o) => !o && setBulkAction(null)}
+          title={
+            bulkAction === "approve"
+              ? `Approve ${bulkSelected.size} document${bulkSelected.size === 1 ? "" : "s"}?`
+              : `Reject ${bulkSelected.size} document${bulkSelected.size === 1 ? "" : "s"}?`
+          }
+          description={
+            bulkAction === "approve"
+              ? "Approving publishes each one. Anything you can't review, or that changed since this queue loaded, is reported back and left alone."
+              : "Each author gets the same reason and the work goes back to them."
+          }
+          // Reject demands a reason in bulk exactly as it does one at a time;
+          // approve's note stays optional (ReasonDialog drops the field).
+          label={bulkAction === "reject" ? "Why?" : undefined}
+          placeholder="Shared with every author in this batch"
+          confirmLabel={bulkAction === "approve" ? "Approve all" : "Reject all"}
+          destructive={bulkAction === "reject"}
+          onConfirm={(reason) => runBulkReview(bulkAction, reason)}
         />
       )}
 

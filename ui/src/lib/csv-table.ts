@@ -119,6 +119,97 @@ export function isNumericLike(cell: string): boolean {
   return NUMERIC_LIKE.test(cell.trim());
 }
 
+/** One column's worth of data that contradicts its declared header type. */
+export interface TableTypeIssue {
+  /** Column name, directives stripped. */
+  column: string;
+  kind: "duplicate-key" | "not-a-number" | "not-a-date";
+  /** First offending value, for the message. */
+  value: string;
+  /** 1-based data row the first offender sits on (the header is row 0). */
+  row: number;
+  /** How many cells in this column hit this issue. */
+  count: number;
+}
+
+/**
+ * Check data rows against the `:key` / `:number` / `:date` directives their
+ * header declares — the constraints table-query relies on. Advisory, not a
+ * gate: a table is a human-maintained fact store, and an import with one bad
+ * cell is still worth saving. Blank cells are "not filled in", never invalid.
+ *
+ * `rows` is header-first and already stripped of `#` comment lines, matching
+ * what the server's parseTable reads.
+ */
+export function typedColumnIssues(rows: string[][]): TableTypeIssue[] {
+  const header = rows[0] ?? [];
+  const issues: TableTypeIssue[] = [];
+
+  header.forEach((raw, col) => {
+    const parts = raw.split(":").map((p) => p.trim());
+    const name = parts[0];
+    const directives = new Set(parts.slice(1).map((d) => d.toLowerCase()));
+    const isKey = directives.has("key");
+    const wrongType = directives.has("number")
+      ? (cell: string) => !isNumericLike(cell)
+      : directives.has("date")
+        ? (cell: string) => Number.isNaN(Date.parse(cell))
+        : null;
+    if (!isKey && !wrongType) return;
+
+    const seen = new Set<string>();
+    let duplicate: TableTypeIssue | null = null;
+    let mistyped: TableTypeIssue | null = null;
+
+    for (let i = 1; i < rows.length; i++) {
+      const cell = (rows[i][col] ?? "").trim();
+      if (!cell) continue;
+      if (isKey) {
+        const k = cell.toLowerCase();
+        if (seen.has(k)) {
+          if (duplicate) duplicate.count += 1;
+          else
+            duplicate = {
+              column: name,
+              kind: "duplicate-key",
+              value: cell,
+              row: i,
+              count: 1,
+            };
+        } else {
+          seen.add(k);
+        }
+      }
+      if (wrongType?.(cell)) {
+        if (mistyped) mistyped.count += 1;
+        else
+          mistyped = {
+            column: name,
+            kind: directives.has("number") ? "not-a-number" : "not-a-date",
+            value: cell,
+            row: i,
+            count: 1,
+          };
+      }
+    }
+    if (duplicate) issues.push(duplicate);
+    if (mistyped) issues.push(mistyped);
+  });
+
+  return issues;
+}
+
+/** One-line, human-readable rendering of an issue. */
+export function tableTypeIssueMessage(issue: TableTypeIssue): string {
+  const more = issue.count > 1 ? ` (+${issue.count - 1} more)` : "";
+  const where = `row ${issue.row}`;
+  if (issue.kind === "duplicate-key") {
+    return `"${issue.column}" is a :key column but "${issue.value}" repeats at ${where}${more}.`;
+  }
+  const expected = issue.kind === "not-a-number" ? "a number" : "a date";
+  return `"${issue.column}" expects ${expected} but ${where} has "${issue.value}"${more}.`;
+}
+
 /**
  * Heuristic: does the first row look like a header?
  *
@@ -371,5 +462,72 @@ export function delimitedToMarkdownTable(
     markdown: rowsToMarkdownTable(rows, { hasHeader }),
     dataRows: rows.length - (hasHeader ? 1 : 0),
     hasHeader,
+  };
+}
+
+/** One side of a table-vs-table comparison, ready to render as a grid. */
+export interface TableDiffSide {
+  columns: string[];
+  rows: string[][];
+  /** Per row: true when the other version has no matching row. */
+  changed: boolean[];
+}
+
+/** Header + data rows of a table body, comment and blank lines dropped — the
+ *  same rows the server's table parser reads. */
+function tableRows(body: string): string[][] {
+  return parseDelimited(body, ",").filter(
+    (r) =>
+      !(r[0] ?? "").trimStart().startsWith("#") &&
+      r.some((c) => c.trim() !== ""),
+  );
+}
+
+/**
+ * Compare two CSV table bodies row-wise, so each version can render as a grid
+ * with its added/removed rows marked. A table diffed as prose collapses into
+ * one run-on paragraph — exactly what a reviewer cannot check.
+ *
+ * Matching is whole-row and multiset-aware (two identical rows on one side
+ * need two on the other), which is all a fact store needs: the row is the unit
+ * that gets added, dropped or corrected.
+ */
+export function tableDiffSides(
+  past: string,
+  current: string,
+): { past: TableDiffSide; current: TableDiffSide } {
+  const key = (row: string[]) => row.map((c) => c.trim()).join(" ");
+  const side = (body: string) => {
+    const rows = tableRows(body);
+    return {
+      columns: (rows[0] ?? []).map((h) => h.split(":")[0].trim()),
+      rows: rows.slice(1),
+    };
+  };
+  const a = side(past);
+  const b = side(current);
+
+  const counts = (rows: string[][]) => {
+    const m = new Map<string, number>();
+    for (const r of rows) {
+      const k = key(r);
+      m.set(k, (m.get(k) ?? 0) + 1);
+    }
+    return m;
+  };
+  // Each match consumes one from the other side's tally, so duplicates pair
+  // up one-for-one instead of every copy matching the same row.
+  const mark = (rows: string[][], other: Map<string, number>) =>
+    rows.map((r) => {
+      const k = key(r);
+      const left = other.get(k) ?? 0;
+      if (left <= 0) return true;
+      other.set(k, left - 1);
+      return false;
+    });
+
+  return {
+    past: { ...a, changed: mark(a.rows, counts(b.rows)) },
+    current: { ...b, changed: mark(b.rows, counts(a.rows)) },
   };
 }

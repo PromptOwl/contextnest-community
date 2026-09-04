@@ -38,6 +38,8 @@ import {
   nestCensus,
   RUNNABLE_NODE_TYPES,
   createNode,
+  createEmptyFolder,
+  isDerivedAnnotationsNode,
 } from "./service.js";
 import { matchDocuments, toSearchHit, discoverForSearch } from "./search.js";
 import { getDb } from "../db/client.js";
@@ -560,7 +562,9 @@ queryRoutes.get("/search", async (c) => {
 
   const nestId = c.req.param("nestId")!;
   const { storage } = await engineCache.get(nestId);
-  const matches = matchDocuments(await discoverForSearch(storage), q);
+  const matches = matchDocuments(await discoverForSearch(storage), q).filter(
+    (n) => !isDerivedAnnotationsNode(n.id),
+  );
 
   const userId = c.get("userId");
   const userEmail = await resolveCallerEmail(userId);
@@ -576,7 +580,11 @@ queryRoutes.get("/search", async (c) => {
 // GET /nests/:nestId/overview
 queryRoutes.get("/overview", async (c) => {
   const { storage } = await engineCache.get(c.req.param("nestId")!);
-  const documents = await storage.discoverDocuments();
+  // Derived annotation projections stay out of the counts and — because this
+  // is where the tag facet comes from — out of tag filtering too.
+  const documents = (await storage.discoverDocuments()).filter(
+    (d) => !isDerivedAnnotationsNode(d.id),
+  );
 
   const types: Record<string, number> = {};
   const tags: Record<string, number> = {};
@@ -627,6 +635,23 @@ queryRoutes.get("/folders", async (c) => {
     ...(q.recursive === "0" || q.recursive === "false" ? { recursive: false } : {}),
   });
   return c.json({ folders });
+});
+
+// POST /nests/:nestId/folders  { "folder": "gtm/deals" }
+//
+// Create a folder with nothing in it. Folders are path-derived, so this
+// records the path instead of seeding a placeholder document that would then
+// count as real content everywhere (CU-wdqcpzzzut). Write tier, like any
+// other POST under a nest.
+queryRoutes.post("/folders", async (c) => {
+  const body = await c.req
+    .json<{ folder?: string }>()
+    .catch(() => ({}) as { folder?: string });
+  if (typeof body.folder !== "string" || !body.folder.trim()) {
+    throw new ValidationError('folder (a string like "gtm/deals") is required');
+  }
+  const folder = await createEmptyFolder(c.req.param("nestId")!, body.folder);
+  return c.json({ folder }, 201);
 });
 
 // POST /nests/:nestId/reindex

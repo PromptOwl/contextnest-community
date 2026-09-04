@@ -68,7 +68,7 @@ describe("public-nest reviewer steward: review-queue canReview", () => {
       app,
       "PATCH",
       `/nests/${nestId}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       owner.apiKey,
     );
 

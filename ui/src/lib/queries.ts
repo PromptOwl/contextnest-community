@@ -271,6 +271,10 @@ const NEST_WRITE_SCOPES: Array<{
   // off), so the document listing and everything gated with it change too.
   { match: /^\/settings/, affects: (n) => [keys.nest(n)] },
   { match: /^\/visibility/, affects: (n) => [keys.nest(n), keys.nestList()] },
+  // Reader mode changes what GET /nests/:id returns (reader_mode /
+  // reader_home_node) and, for read-only callers, flips the whole presentation
+  // to the docs reader — so the nest payload must refetch.
+  { match: /^\/reader-mode/, affects: (n) => [keys.nest(n), keys.nestList()] },
   { match: /^\/definitions/, affects: (n) => [keys.definitions(n)] },
   { match: /^\/edges/, affects: (n) => [keys.edges(n), keys.graph(n)] },
   { match: /^\/edge-types/, affects: (n) => [keys.edgeTypes(n), keys.edges(n)] },

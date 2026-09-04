@@ -20,6 +20,9 @@ export default defineConfig({
   server: {
     proxy: {
       "/auth": "http://localhost:3838",
+      // Published documents are server-rendered, not SPA routes — without this
+      // /p/<slug> resolves to the app shell in dev.
+      "/p": "http://localhost:3838",
       "/nests": "http://localhost:3838",
       "/health": "http://localhost:3838",
     },

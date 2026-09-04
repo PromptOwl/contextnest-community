@@ -266,7 +266,7 @@ describe("sharing in key mode", () => {
       app,
       "PATCH",
       `/nests/${nestId}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       owner.apiKey,
     );
 
@@ -345,7 +345,7 @@ describe("sharing in key mode", () => {
       app,
       "PATCH",
       `/nests/${nestId}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       owner.apiKey,
     );
   });

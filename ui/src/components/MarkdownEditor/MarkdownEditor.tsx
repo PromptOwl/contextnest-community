@@ -45,13 +45,30 @@ import { Markdown, type MarkdownStorage } from "tiptap-markdown";
 // `parseHTML`, so color survives save + reopen without any custom code here.
 
 // Unescape `\[\[ \]\]` — prosemirror-markdown escapes `[`/`]` as link syntax.
+// Same escaping kills GFM footnotes (`\[^1\]`), so restore those too — and
+// LaTeX inside `$…$`, where the same escaping hides the command from KaTeX.
 function getEditorMarkdown(editor: Editor): string {
   const storage = editor.storage as unknown as { markdown: MarkdownStorage };
   const md = storage.markdown.getMarkdown();
-  return md
-    .replace(/\\\[\\\[/g, "[[")
-    .replace(/\\\]\\\]/g, "]]");
+  return unescapeMathSpans(
+    md
+      .replace(/\\\[\\\[/g, "[[")
+      .replace(/\\\]\\\]/g, "]]")
+      .replace(/\\\[\^([^\]\\\s]+)\\?\]/g, "[^$1]"),
+  );
 }
+
+/** Heading levels the schema accepts, and the icon each one shows. Kept
+ *  together so the toolbar and the StarterKit config can't drift apart. */
+const HEADING_LEVELS = [1, 2, 3, 4, 5, 6] as const;
+const HEADING_ICONS = {
+  1: Heading1,
+  2: Heading2,
+  3: Heading3,
+  4: Heading4,
+  5: Heading5,
+  6: Heading6,
+} as const;
 
 // Engine ids: `nodes/<slug>`. Slug = on-disk filename.
 export function slugFromNodeId(id: string): string {
@@ -138,6 +155,9 @@ import {
   Heading1,
   Heading2,
   Heading3,
+  Heading4,
+  Heading5,
+  Heading6,
   List,
   ListOrdered,
   CheckSquare,
@@ -176,6 +196,7 @@ import {
   type Delimiter,
 } from "@/lib/csv-table";
 import { cn } from "@/lib/utils";
+import { unescapeMathSpans } from "@/lib/markdown-math";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -207,6 +228,7 @@ import {
   clearSearch,
   type SearchState,
 } from "./extensions/SearchReplace";
+import { DocumentViewer } from "../DocumentViewer";
 import "./editor-styles.css";
 
 export interface MarkdownEditorHandle {
@@ -267,11 +289,13 @@ export const MarkdownEditor = forwardRef<
   }: MarkdownEditorProps,
   ref: ForwardedRef<MarkdownEditorHandle>,
 ) {
-  // Preview mode keeps the same TipTap instance mounted (so wiki-link,
-  // task-checkbox, and mention decorations render identically) but
-  // flips the doc to read-only — gives the user a true preview of what
-  // a reader will see without having to leave the editor.
+  // Preview renders the markdown through the same reader the view and
+  // comment modes use, not a read-only TipTap — TipTap shows its own editing
+  // model, so anything it has no node for (math, footnotes) stayed as raw
+  // source and the preview lied about how the document would render.
+  // The editor stays mounted, hidden, so toggling back keeps caret and undo.
   const [previewing, setPreviewing] = useState(false);
+  const [previewMarkdown, setPreviewMarkdown] = useState("");
   const qc = useQueryClient();
   const effectiveEditable = editable && !previewing;
 
@@ -393,7 +417,10 @@ export const MarkdownEditor = forwardRef<
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
-        heading: { levels: [1, 2, 3] },
+        // Every markdown heading level. Capped at 3, `#### x` stayed literal
+        // text both when typed and when a document written elsewhere was
+        // loaded — its deeper headings were flattened on the way in.
+        heading: { levels: [...HEADING_LEVELS] },
         link: false,
         // Replaced by the lowlight code block (syntax highlight + picker + copy).
         codeBlock: false,
@@ -1170,7 +1197,12 @@ export const MarkdownEditor = forwardRef<
             }
             uploading={uploading}
             previewing={previewing}
-            onTogglePreview={() => setPreviewing((p) => !p)}
+            onTogglePreview={() =>
+              setPreviewing((p) => {
+                if (!p && editor) setPreviewMarkdown(getEditorMarkdown(editor));
+                return !p;
+              })
+            }
           />
         </div>
       )}
@@ -1362,12 +1394,19 @@ export const MarkdownEditor = forwardRef<
         </BubbleMenu>
       )}
 
+      {previewing && (
+        <DocumentViewer
+          content={previewMarkdown}
+          onWikiLinkClick={(title) => onWikiLinkClick?.(title, null)}
+        />
+      )}
+
       <EditorContent
         ref={scrollRef}
         editor={editor}
         className={cn(
           "min-h-[60vh] max-h-[60vh] overflow-y-auto",
-          previewing && "bg-muted/20",
+          previewing && "hidden",
         )}
         // Click the empty area below the last block → caret to doc end.
         // The ProseMirror node only grows to its content height, so clicks
@@ -1908,6 +1947,7 @@ function Toolbar({
           active
           onClick={onTogglePreview}
           title="Back to editing"
+          label="Edit"
         >
           <Pencil className="h-3.5 w-3.5" />
         </ToolbarButton>
@@ -1952,33 +1992,22 @@ function Toolbar({
 
       <Divider />
 
-      <ToolbarButton
-        active={editor.isActive("heading", { level: 1 })}
-        onClick={() =>
-          editor.chain().focus().toggleHeading({ level: 1 }).run()
-        }
-        title="Heading 1"
-      >
-        <Heading1 className="h-3.5 w-3.5" />
-      </ToolbarButton>
-      <ToolbarButton
-        active={editor.isActive("heading", { level: 2 })}
-        onClick={() =>
-          editor.chain().focus().toggleHeading({ level: 2 }).run()
-        }
-        title="Heading 2"
-      >
-        <Heading2 className="h-3.5 w-3.5" />
-      </ToolbarButton>
-      <ToolbarButton
-        active={editor.isActive("heading", { level: 3 })}
-        onClick={() =>
-          editor.chain().focus().toggleHeading({ level: 3 }).run()
-        }
-        title="Heading 3"
-      >
-        <Heading3 className="h-3.5 w-3.5" />
-      </ToolbarButton>
+      {/* Every level the schema accepts gets a button: markdown shortcuts
+          reach H6, so stopping the toolbar at H3 left three levels that could
+          be typed but never clicked (CU-wdqcpzzuv6). */}
+      {HEADING_LEVELS.map((level) => {
+        const Icon = HEADING_ICONS[level];
+        return (
+          <ToolbarButton
+            key={level}
+            active={editor.isActive("heading", { level })}
+            onClick={() => editor.chain().focus().toggleHeading({ level }).run()}
+            title={`Heading ${level}`}
+          >
+            <Icon className="h-3.5 w-3.5" />
+          </ToolbarButton>
+        );
+      })}
 
       <Divider />
 
@@ -2115,9 +2144,13 @@ function Toolbar({
 
       <Divider />
 
+      {/* Labelled, not icon-only: math and footnotes stay raw source in the
+          editor, so a reader who can't find the rendered view assumes they
+          aren't supported (CU-wdqcq00x8v). */}
       <ToolbarButton
         onClick={onTogglePreview}
         title="Preview — see how it will render"
+        label="Preview"
       >
         <Eye className="h-3.5 w-3.5" />
       </ToolbarButton>
@@ -2136,12 +2169,15 @@ function ToolbarButton({
   onClick,
   disabled,
   title,
+  label,
   children,
 }: {
   active?: boolean;
   onClick: () => void;
   disabled?: boolean;
   title: string;
+  /** Visible text beside the icon — for controls a tooltip alone won't teach. */
+  label?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -2159,11 +2195,12 @@ function ToolbarButton({
       disabled={disabled}
       title={title}
       className={cn(
-        "h-7 w-7 p-0",
+        label ? "h-7 gap-1 px-2" : "h-7 w-7 p-0",
         active && "bg-muted text-foreground",
       )}
     >
       {children}
+      {label && <span className="text-xs">{label}</span>}
     </Button>
   );
 }

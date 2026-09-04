@@ -10,6 +10,7 @@ import type { ContextNode } from "@promptowl/contextnest-engine";
 import { resolveNestPath, isImportedNest } from "../nests/service.js";
 import { FlatNestStorage } from "./flat-storage.js";
 import { syncIndexedNode, markIndexStale } from "./node-index.js";
+import { isMetaFile } from "./meta-files.js";
 
 /**
  * How long a nest's discovered-document set stays cached, in ms.
@@ -34,19 +35,10 @@ const DISCOVERY_TTL_MS = 30_000;
 /** The engine's own end-of-crawl filter for the default (non-retired) set. */
 const isLive = (node: ContextNode) => node.frontmatter.status !== "rejected";
 
-/**
- * Vault files discovery already ignores. Writing one cannot change which
- * documents come back, so it must not cost the next reader a re-crawl —
- * `regenerateIndex` writes several of them after every single mutation.
- */
-const DERIVED_VAULT_FILES = new Set([
-  "INDEX.md",
-  "CONTEXT.md",
-  "CLAUDE.md",
-  "GEMINI.md",
-  "AGENTS.md",
-  "README.md",
-]);
+// Derived vault files (INDEX.md, CONTEXT.md, agent configs) are never
+// documents — see isMetaFile. Writing one cannot change which documents come
+// back, so it must not cost the next reader a re-crawl: `regenerateIndex`
+// writes several of them after every single mutation.
 
 /**
  * Memoize `discoverDocuments` on one storage instance and keep it in step with
@@ -72,7 +64,14 @@ function withDiscoveryCache<S extends NestStorage>(
   // per key, because a crawl produces both sets.
   let inflight: Promise<{ all: ContextNode[]; live: ContextNode[] }> | null =
     null;
-  const discover = storage.discoverDocuments.bind(storage);
+  const rawDiscover = storage.discoverDocuments.bind(storage);
+  // Derived files never list as documents. FlatNestStorage drops them during
+  // its own crawl, but the engine's storage keeps a nested CONTEXT.md (its
+  // exclusion is root-only) and would surface it as an editable node that the
+  // next `regenerateIndex` overwrites. One filter here covers every listing,
+  // search, folder count and index rebuild.
+  const discover: typeof rawDiscover = async (options) =>
+    (await rawDiscover(options)).filter((d) => !isMetaFile(d.id));
   const readDoc = storage.readDocument.bind(storage);
   // FlatNestStorage discovers an imported folder wholesale and honours no
   // options, so for it the two key sets are the same crawl and must not be
@@ -177,6 +176,8 @@ function withDiscoveryCache<S extends NestStorage>(
    * can get relative to another instance.
    */
   const patch = async (id: string): Promise<void> => {
+    // A derived file is never in the set — nothing to fold in.
+    if (isMetaFile(id)) return;
     // Same guard as invalidate(): a crawl already in flight predates this
     // write, so its result must neither be cached nor handed to a reader that
     // joins it after the fact.
@@ -242,8 +243,7 @@ function withDiscoveryCache<S extends NestStorage>(
     // Derived files (INDEX.md, context.yaml, agent configs) are outside
     // discovery; anything else written through this path could be a document.
     const rel = String(args[0] ?? "");
-    const base = rel.split(/[/\\]/).pop() || "";
-    if (rel.endsWith(".md") && !DERIVED_VAULT_FILES.has(base)) return desync();
+    if (rel.endsWith(".md") && !isMetaFile(rel)) return desync();
   });
 
   // Two invalidators, deliberately. `invalidate` (memory only) is what a

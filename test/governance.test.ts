@@ -265,7 +265,7 @@ tags:
       app,
       "PATCH",
       `/nests/${nestId}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       admin.apiKey,
     );
 

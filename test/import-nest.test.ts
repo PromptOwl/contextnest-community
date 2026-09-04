@@ -338,6 +338,11 @@ describe("imported vault: discovery + registration", () => {
     mdFile("CLAUDE.md", "title: Claude", "agent config"),
     mdFile("CONTEXT.md", "title: Context", "vault identity"),
     mdFile("INDEX.md", "title: Root Index", "root index"),
+    // Nested derived copies + a README: the engine excludes CONTEXT.md at the
+    // vault root only, and README.md nowhere, so these used to list as docs.
+    mdFile("engineering/CONTEXT.md", "title: Eng Context", "folder preamble"),
+    mdFile("engineering/GEMINI.md", "title: Eng Gemini", "agent config"),
+    mdFile("README.md", "title: Readme", "repo readme"),
     // Engine history — copied through, but skipped by discovery.
     mdFile(".versions/checking-approval-history/v1.md", "title: v1", "old version"),
   ];

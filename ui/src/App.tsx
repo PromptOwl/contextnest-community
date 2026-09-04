@@ -13,12 +13,17 @@ import { GuidePage } from "./components/GuidePage";
 import { LicenseSetupPage } from "./components/LicenseSetupPage";
 import { getLicenseStatus, getNest, changePassword, getAdminSettings, updateAdminSettings, type LicenseStatus, type AdminSettings } from "./lib/api";
 import { QuickOpen, type QuickOpenResult } from "./components/QuickOpen";
+import { ShortcutsDialog } from "./components/ShortcutsDialog";
 import { useQueryClient } from "@tanstack/react-query";
 import { reads } from "./lib/queries";
 import { ANON_USER_ID } from "./lib/constants";
-import { deriveNestCaps } from "./lib/nest-caps";
+import {
+  deriveNestCaps,
+  isReaderHiddenView,
+  isViewBlockedInReaderMode,
+} from "./lib/nest-caps";
 import hootieIcon from "./assets/hootie.svg";
-import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText } from "lucide-react";
+import { Shield, Info, Users, ChevronDown, LogOut, KeyRound, Eye, EyeOff, Network, Workflow, BookOpen, ScrollText, BookMarked, Activity, Search, LayoutGrid, FileText, Keyboard } from "lucide-react";
 import { OntologyGraphView } from "./components/OntologyGraphView";
 import { AgentDocsPage } from "./components/AgentDocsPage";
 import { ActivityTracePage } from "./components/ActivityTracePage";
@@ -76,6 +81,10 @@ type View =
       /** Which of NestView's own tabs is open, mirrored to ?tab= so a link
        *  to the Review Queue lands on the Review Queue. Absent = overview. */
       tab?: string;
+      /** Public Docs Reader Mode is on for this nest AND the caller is
+       *  read-only — the shell hides the board/graph/definitions tabs and
+       *  NestView renders the stripped ReaderView. */
+      readerMode?: boolean;
     }
   | {
       page: "document";
@@ -108,6 +117,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       page: "workflows";
@@ -115,6 +125,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       page: "definitions";
@@ -122,6 +133,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       page: "board";
@@ -129,6 +141,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     }
   | {
       /** Nest-scoped activity trace (owner/nest-admin) — ActivityTracePage
@@ -138,6 +151,7 @@ type View =
       nestName: string;
       isOwner: boolean;
       isAnonOwned: boolean;
+      readerMode?: boolean;
     };
 
 /** The views of a single nest, in switcher order. "Nest" (not "Documents")
@@ -188,11 +202,15 @@ export default function App() {
   const [view, setView] = useState<View>({ page: "dashboard" });
   const [showAdminLogin, setShowAdminLogin] = useState(false);
   // ?nest=<id> deep-link probe; 200 → skip Login, mount NestView.
+  // "missing" is "no ?nest to open"; "unreachable" is "there was one and it
+  // didn't resolve" — a deleted nest, a typo'd id, or access that was revoked.
+  // They render differently: only the second one owes the user an explanation.
   const [deepLinkProbe, setDeepLinkProbe] = useState<
     | { status: "idle" }
     | { status: "loading" }
     | { status: "ok"; nestId: string; nestName: string }
     | { status: "missing" }
+    | { status: "unreachable" }
   >(() => {
     if (typeof window === "undefined") return { status: "idle" };
     const params = new URLSearchParams(window.location.search);
@@ -290,6 +308,27 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [canQuickOpen]);
 
+  // `?` opens the shortcut cheatsheet — but only when it isn't a character
+  // being typed, so it never eats a question mark in a document or a field.
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "?" || e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (
+        el?.isContentEditable ||
+        el?.tagName === "INPUT" ||
+        el?.tagName === "TEXTAREA" ||
+        el?.tagName === "SELECT"
+      )
+        return;
+      e.preventDefault();
+      setShowShortcuts(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const confirmLogout = useCallback(async () => {
     setLogoutPending(true);
     try {
@@ -334,13 +373,24 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const { nest, permission } = await getNest(nestId);
+        const { nest, permission, roles, myStewards } = await getNest(nestId);
         if (cancelled) return;
         // Deep-link / refresh nav has no is_owner from a nest-list row, so
         // derive it from the authoritative permission — resolveNestPermission
         // returns "owner" only for the real owner. Hardcoding false here hid
         // owner-only UI (Nest settings) after a refresh, even for the owner.
         const isOwner = permission === "owner";
+        // Public Docs Reader Mode strips the shell tabs (board/graph/
+        // definitions) and swaps NestView for the docs reader — but ONLY for a
+        // read-only caller. Owners/editors/reviewers/admins keep authoring.
+        const readerMode = deriveNestCaps({
+          roles: roles ?? [],
+          permission,
+          myStewards: (myStewards ?? []) as any,
+          isOwner,
+          isAdmin,
+          readerMode: !!nest.reader_mode,
+        }).isReaderView;
         setDeepLinkProbe({
           status: "ok",
           nestId: nest.id,
@@ -373,6 +423,21 @@ export default function App() {
           : sub === "board" ? "board"
           : sub === "trace" ? "nest-trace"
           : null;
+        // In reader mode the board / ontology-graph / definitions pages are
+        // hidden — a deep link into one must not enter it (the tab is gone, but
+        // the page state is top-level and would otherwise render the full
+        // authoring view). Fall back to the nest page, same as an unknown ?tab.
+        if (subPage && isViewBlockedInReaderMode(subPage, readerMode)) {
+          setView({
+            page: "nest",
+            nestId: nest.id,
+            nestName: nest.name,
+            isOwner,
+            isAnonOwned: false,
+            readerMode,
+          });
+          return;
+        }
         if (subPage) {
           setView({
             page: subPage,
@@ -380,6 +445,7 @@ export default function App() {
             nestName: nest.name,
             isOwner,
             isAnonOwned: false,
+            readerMode,
           });
           return;
         }
@@ -389,6 +455,7 @@ export default function App() {
           nestName: nest.name,
           isOwner,
           isAnonOwned: false,
+          readerMode,
           // ?tab=<slug> → open on that NestView tab. Unknown slugs are
           // dropped rather than passed through, so a stale link can't leave
           // Radix with a value that matches no trigger (blank content area).
@@ -397,7 +464,7 @@ export default function App() {
             : undefined,
         });
       } catch {
-        if (!cancelled) setDeepLinkProbe({ status: "missing" });
+        if (!cancelled) setDeepLinkProbe({ status: "unreachable" });
       }
     })();
     return () => {
@@ -413,6 +480,10 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (deepLinkProbe.status === "loading") return;
+    // An unresolved ?nest stays in the URL while its error screen is up, so
+    // "Try again" (and a plain refresh) has an id to re-probe. Going back to
+    // the dashboard flips the probe to "missing" and this clears it then.
+    if (deepLinkProbe.status === "unreachable") return;
     const params = new URLSearchParams(window.location.search);
     if (view.page === "document") {
       params.set("nest", view.nestId);
@@ -475,6 +546,38 @@ export default function App() {
     }
   }, [view, deepLinkProbe.status]);
 
+  // Reader mode is a property of the nest and the caller, not of how the user
+  // navigated here. The deep-link probe seeds view.readerMode for the first
+  // paint; the nest-scoped fetch below resolves it for every other entry point
+  // (dashboard, back arrow, wiki-link nav), which never carried it.
+  const [nestIsReaderView, setNestIsReaderView] = useState<boolean | null>(null);
+  const readerMode = isNestScoped(view)
+    ? (nestIsReaderView ?? view.readerMode ?? false)
+    : false;
+
+  // Reader-mode render guard: the board / ontology-graph / definitions pages
+  // are hidden in reader mode, but they are top-level view.page states, so a
+  // reader who reaches one another way (a stale in-app link, a restored state)
+  // would otherwise land on the full authoring page. Redirect to the nest page
+  // — the deep-link probe already blocks the URL entry point; this closes the
+  // remaining paths. The render conditionals also require !readerMode, so
+  // the hidden page never paints for the frame before this effect corrects it.
+  useEffect(() => {
+    if (
+      isNestScoped(view) &&
+      isViewBlockedInReaderMode(view.page, readerMode)
+    ) {
+      setView({
+        page: "nest",
+        nestId: view.nestId,
+        nestName: view.nestName,
+        isOwner: view.isOwner,
+        isAnonOwned: view.isAnonOwned,
+        readerMode,
+      });
+    }
+  }, [view, readerMode]);
+
   // Caller's write access on the nest currently in view, for gating the
   // Workflows tab (an execution plane — every action inside it mutates).
   // null = not resolved yet; the tab stays hidden until we know, so a viewer
@@ -483,26 +586,28 @@ export default function App() {
   const nestScopedIsOwner = isNestScoped(view) ? view.isOwner : false;
   const [nestCanEdit, setNestCanEdit] = useState<boolean | null>(null);
   useEffect(() => {
-    if (!nestScopedId) {
-      setNestCanEdit(null);
-      return;
-    }
+    setNestCanEdit(null);
+    setNestIsReaderView(null);
+    if (!nestScopedId) return;
     let cancelled = false;
     getNest(nestScopedId)
       .then((meta: any) => {
         if (cancelled) return;
-        setNestCanEdit(
-          deriveNestCaps({
-            roles: meta?.roles ?? [],
-            permission: meta?.permission ?? null,
-            myStewards: meta?.myStewards ?? [],
-            isOwner: nestScopedIsOwner,
-            isAdmin,
-          }).canEditDocs,
-        );
+        const caps = deriveNestCaps({
+          roles: meta?.roles ?? [],
+          permission: meta?.permission ?? null,
+          myStewards: meta?.myStewards ?? [],
+          isOwner: nestScopedIsOwner,
+          isAdmin,
+          readerMode: !!meta?.nest?.reader_mode,
+        });
+        setNestCanEdit(caps.canEditDocs);
+        setNestIsReaderView(caps.isReaderView);
       })
       .catch(() => {
-        if (!cancelled) setNestCanEdit(false);
+        if (cancelled) return;
+        setNestCanEdit(false);
+        setNestIsReaderView(false);
       });
     return () => {
       cancelled = true;
@@ -652,8 +757,14 @@ export default function App() {
     deepLinkProbe.status === "loading"
   ) {
     return (
+      // Branded, and worded as loading: a bare "Connecting..." on a blank page
+      // read as a connection fault rather than a normal boot (CU-wdqcpzzzrr).
       <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-pulse text-muted-foreground">Connecting...</div>
+        <div className="flex flex-col items-center gap-3 animate-pulse">
+          <img src={logoUrl ?? hootieIcon} alt="" className="h-10 w-10" />
+          <span className="text-sm font-medium">ContextNest</span>
+          <span className="text-xs text-muted-foreground">Loading your nests…</span>
+        </div>
       </div>
     );
   }
@@ -710,13 +821,32 @@ export default function App() {
         onClose={() => setShowChangePassword(false)}
       />
 
-      {showQuickOpen &&
-        (view.page === "nest" || view.page === "document") && (
-          <QuickOpen
-            nestId={view.nestId}
-            onClose={() => setShowQuickOpen(false)}
-            onSelect={(nodeId) => {
-              setShowQuickOpen(false);
+      {/* One palette for both scopes: inside a nest it starts scoped to that
+          nest and can widen to every nest, so the pick has to open whichever
+          nest the row came from — openSearchHit does that for both. */}
+      {showQuickOpen && canQuickOpen && (
+        <QuickOpen
+          nestId={
+            view.page === "nest" || view.page === "document"
+              ? view.nestId
+              : undefined
+          }
+          nestName={
+            view.page === "nest" || view.page === "document"
+              ? view.nestName
+              : undefined
+          }
+          onClose={() => setShowQuickOpen(false)}
+          onSelect={(nodeId, result) => {
+            setShowQuickOpen(false);
+            // A hit in the nest you are already in keeps the standing you were
+            // admitted with (a public deep link isn't in the nest list, so
+            // re-resolving it there would drop those capabilities).
+            if (
+              (view.page === "nest" || view.page === "document") &&
+              result.kind === "node" &&
+              (result.nest_id ?? view.nestId) === view.nestId
+            ) {
               setView({
                 page: "document",
                 nestId: view.nestId,
@@ -725,19 +855,16 @@ export default function App() {
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
               });
-            }}
-          />
-        )}
-
-      {/* Dashboard palette: no nestId, so it searches every nest. */}
-      {showQuickOpen && view.page === "dashboard" && (
-        <QuickOpen
-          onClose={() => setShowQuickOpen(false)}
-          onSelect={(_id, result) => {
-            setShowQuickOpen(false);
+              return;
+            }
             void openSearchHit(result);
           }}
         />
+      )}
+      {/* Sits with the other always-mounted chrome so `?` works on every
+          screen, not only inside a nest (CU-wdqcpzzzvk). */}
+      {showShortcuts && (
+        <ShortcutsDialog onClose={() => setShowShortcuts(false)} />
       )}
     </>
   );
@@ -747,6 +874,42 @@ export default function App() {
     return (
       <>
         <Login />
+        {logoutChrome}
+      </>
+    );
+  }
+
+  // A ?nest link that didn't resolve. Falling through to the dashboard made a
+  // stale bookmark look like it had simply opened the app, leaving no way to
+  // tell "deleted" from "no access" from "bad link" (CU-wdqcpzzzrm).
+  if (deepLinkProbe.status === "unreachable") {
+    return (
+      <>
+        <div className="min-h-screen flex items-center justify-center px-4">
+          <div className="text-center">
+            <p className="text-lg font-medium">
+              This nest doesn't exist or you don't have access.
+            </p>
+            <p className="text-sm text-muted-foreground mt-1">
+              It may have been deleted, the link may be out of date, or the
+              request may simply have failed.
+            </p>
+            <div className="mt-4 flex items-center justify-center gap-2">
+              {/* A dropped request looks the same as a deleted nest from here,
+                  so offer the re-probe rather than making a network blip a
+                  permanent verdict. */}
+              <Button
+                variant="outline"
+                onClick={() => setDeepLinkProbe({ status: "loading" })}
+              >
+                Try again
+              </Button>
+              <Button onClick={() => setDeepLinkProbe({ status: "missing" })}>
+                Back to dashboard
+              </Button>
+            </div>
+          </div>
+        </div>
         {logoutChrome}
       </>
     );
@@ -781,18 +944,24 @@ export default function App() {
           </button>
 
           <div className="flex items-center gap-2">
-            {/* Prominent search entry — pulls full-text search out of the
-                buried Documents filter bar. Opens the same QuickOpen palette
-                as ⌘K. Shown wherever QuickOpen is available (nest/document). */}
-            {(view.page === "nest" || view.page === "document") && (
+            {/* The ONE search entry point, on every page the palette works on
+                — the Dashboard used to carry its own field-styled button, so
+                the same feature looked like two (CU-wdqcq012uv). What differs
+                between pages is scope, and the palette states that itself. */}
+            {canQuickOpen && (
               <button
                 onClick={() => setShowQuickOpen(true)}
-                title="Search this nest (⌘K)"
-                className="hidden sm:flex items-center gap-2 h-8 pl-2.5 pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                title={
+                  view.page === "dashboard"
+                    ? "Search nests and documents (⌘K)"
+                    : "Search this nest (⌘K)"
+                }
+                className="flex items-center gap-2 h-8 pl-2.5 pr-2 rounded-md border border-input bg-background text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+                data-testid="global-search-trigger"
               >
                 <Search className="h-3.5 w-3.5" />
                 <span>Search</span>
-                <kbd className="ml-1 text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
+                <kbd className="ml-1 hidden sm:inline text-[10px] font-mono bg-muted text-muted-foreground px-1 py-0.5 rounded border border-border">
                   ⌘K
                 </kbd>
               </button>
@@ -839,6 +1008,7 @@ export default function App() {
                 onTeams={() => setView({ page: "teams" })}
                 onSettings={() => setView({ page: "settings" })}
                 onGuide={() => setView({ page: "guide" })}
+                onShortcuts={() => setShowShortcuts(true)}
                 onTrace={() => setView({ page: "trace" })}
                 onChangePassword={() => setShowChangePassword(true)}
                 onLogout={requestLogout}
@@ -875,6 +1045,7 @@ export default function App() {
                   nestName: view.nestName,
                   isOwner: view.isOwner,
                   isAnonOwned: view.isAnonOwned,
+                  readerMode,
                 } as View)
               }
             >
@@ -883,7 +1054,12 @@ export default function App() {
                   (v) =>
                     v.page !== "workflows" ||
                     (workflowPlaneEnabled && nestCanEdit === true),
-                ).map((v) => {
+                )
+                  // Public Docs Reader Mode presents a clean, read-only docs
+                  // view — the board, ontology graph and definitions authoring
+                  // surfaces are hidden so a public reader sees only the docs.
+                  .filter((v) => !readerMode || !isReaderHiddenView(v.page))
+                  .map((v) => {
                   const Icon = v.icon;
                   return (
                     <TabsTrigger key={v.page} value={v.page} className="gap-1.5">
@@ -910,7 +1086,6 @@ export default function App() {
       <main className={`${shellWidth} mx-auto px-4 py-4 min-w-0 overflow-x-clip`}>
         {view.page === "dashboard" && (
           <Dashboard
-            onOpenSearch={() => setShowQuickOpen(true)}
             onManageKeys={() => setView({ page: "api-keys" })}
             onSelectNest={(id, name, isOwner, isAnonOwned) =>
               setView({
@@ -1116,14 +1291,16 @@ export default function App() {
             />
           );
         })()}
-        {view.page === "definitions" && (
+        {view.page === "definitions" &&
+          !isViewBlockedInReaderMode(view.page, readerMode) && (
           <DefinitionsPage
             nestId={view.nestId}
             nestName={view.nestName}
             onBack={leaveNest}
           />
         )}
-        {view.page === "board" && (
+        {view.page === "board" &&
+          !isViewBlockedInReaderMode(view.page, readerMode) && (
           <MaturityBoard
             nestId={view.nestId}
             nestName={view.nestName}
@@ -1164,7 +1341,8 @@ export default function App() {
         {view.page === "docs" && (
           <AgentDocsPage onBack={() => setView({ page: "dashboard" })} />
         )}
-        {view.page === "ontology-graph" && (
+        {view.page === "ontology-graph" &&
+          !isViewBlockedInReaderMode(view.page, readerMode) && (
           <OntologyGraphView
             nestId={view.nestId}
             nestName={view.nestName}
@@ -1176,6 +1354,16 @@ export default function App() {
                 isOwner: view.isOwner,
                 isAnonOwned: view.isAnonOwned,
                 initialTags: [tag],
+              })
+            }
+            onOpenDocument={(nodeId) =>
+              setView({
+                page: "document",
+                nestId: view.nestId,
+                nestName: view.nestName,
+                nodeId,
+                isOwner: view.isOwner,
+                isAnonOwned: view.isAnonOwned,
               })
             }
             onBack={leaveNest}
@@ -1218,6 +1406,7 @@ interface UserMenuProps {
   onTeams: () => void;
   onSettings: () => void;
   onGuide: () => void;
+  onShortcuts: () => void;
   onTrace: () => void;
   onChangePassword: () => void;
   onLogout: () => void;
@@ -1231,6 +1420,7 @@ function UserMenu({
   onTeams,
   onSettings,
   onGuide,
+  onShortcuts,
   onTrace,
   onChangePassword,
   onLogout,
@@ -1312,6 +1502,10 @@ function UserMenu({
         <DropdownMenuItem onSelect={onGuide} className="cursor-pointer">
           <BookOpen className="h-3.5 w-3.5 mr-2" />
           How it works
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={onShortcuts} className="cursor-pointer">
+          <Keyboard className="h-3.5 w-3.5 mr-2" />
+          Keyboard shortcuts
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
