@@ -1,5 +1,246 @@
 # @promptowl/contextnest-community
 
+## 1.20.0
+
+### Minor Changes
+
+- 1d65b12: Agent SSO: exchange an IdP ID token for a short-lived MCP bearer.
+
+  `POST /auth/token-exchange` (RFC 8693-shaped) lets an external agent, acting for
+  a user your IdP (Microsoft Entra / Google) has already authenticated, trade that
+  IdP's ID token for a scoped MCP bearer — no second login, no static API key.
+  **Off by default**, and it stays off until a superadmin enables it in
+  Settings → Single sign-on → Agent SSO (or sets the env vars).
+
+  Because the endpoint trusts a token minted elsewhere and hands back access, the
+  verification is the feature. The inbound `subject_token` is checked for
+  signature (the provider's JWKS, `RS256` pinned), issuer (exact per provider —
+  the tenant-scoped Entra issuer or Google's), audience (your configured client
+  id, so a token minted for another application cannot be replayed here), and
+  expiry, then the same `email_verified` + domain-allowlist policy as browser
+  login before the user is resolved or JIT-provisioned.
+
+  Provisioning **fails closed**: auto-provision with an empty
+  `OIDC_ALLOWED_DOMAINS` is refused at mint time (`no_account`) and refused at
+  save time by `/admin/settings`, because that combination would otherwise let
+  anyone with an account at a public IdP sign themselves up and walk away with a
+  bearer.
+
+  Minted bearers are signed with a dedicated `MCP_SIGNING_SECRET`, distinct from
+  the PromptOwl shared secret, so self-hosted deployments can issue their own; the
+  `/index` and `/mcp` acceptor verifies a ticket signed with either secret via
+  independent constant-time checks. Clearing that secret revokes every outstanding
+  bearer — turning the master flag off only stops minting.
+
+  Unlike the browser flow there is no session to bind, so the OIDC `nonce` binding
+  is deliberately dropped; trust rests on signature + issuer + audience + expiry +
+  `email_verified`. `scope: "mcp"` is a route allowlist, not a reduced permission
+  set — the bearer carries the user's full stewardship rights, so keep
+  `MCP_TOKEN_TTL_SECONDS` short. Both tradeoffs are written up in
+  `CONFIGURATION.md → Agent SSO (token exchange)`.
+
+  Alongside it: the OIDC discovery cache holds one entry per issuer instead of one
+  entry total, so OIDC login and the two token-exchange providers no longer evict
+  each other and refetch JWKS on every alternating request.
+
+- 6f0be95: Public Docs Reader Mode, and an acknowledgement before a nest goes public.
+
+  **Reader Mode** is a superadmin switch (`PATCH /nests/:id/reader-mode`) that
+  changes how a nest reads for people who can only read it. With it on, a viewer
+  gets a clean three-pane docs reader — navigation, the document, and a persistent
+  home pane — instead of the authoring shell, and the board, ontology graph and
+  definitions tabs disappear. Owners, editors, reviewers and admins are unaffected
+  and keep the full tabbed UI, so the same nest is a docs site to its readers and a
+  workspace to its stewards. An optional home node names the landing document;
+  unset, it resolves by convention.
+
+  Reader Mode is presentation only. It hides authoring surfaces from people who
+  already could not use them — it grants nothing and gates nothing, and access
+  control is unchanged.
+
+  **Making a nest public now takes an explicit acknowledgement.**
+  `PATCH /nests/:id/visibility` with `visibility: "public"` returns `409
+requires_acknowledgement` unless the request also carries `acknowledge_public:
+true`; the UI asks first, in the same words the server answers with — the nest
+  becomes readable by anyone on the internet, outside your organization. Going back
+  to private is unguarded.
+
+  **Breaking, for API callers:** an existing integration that flips a nest to
+  public with `{ "visibility": "public" }` alone now gets a `409` and no change.
+  Add `"acknowledge_public": true` to that request. Reads, private-visibility
+  calls, and every other nest endpoint are untouched.
+
+- 17627f5: Publish: host one document as a standalone page at a gated `/p/<slug>` link.
+
+  A **Publish** action on any document (owner/admin, from the document menu or the
+  editor) mints a stable, unguessable link that serves that document full-screen
+  to people with no account. Distinct from nest visibility, which opens a whole
+  nest, and from grants, which share with an authenticated user: a publish exposes
+  exactly one node and no other, and the public surface is mounted outside the
+  `/nests` auth chain so no node API is reachable from it.
+
+  Four gates. **Public** serves immediately. **Passcode** takes one shared code —
+  bcrypt-hashed, because a human-chosen secret gets the password treatment rather
+  than the fast hash reserved for high-entropy tokens — with a show/hide toggle on
+  the field, since a code read off a slide is easy to mistype. **Email** and
+  **invite** mail a one-time link; invite additionally holds an allow-list. Both
+  issue an `HttpOnly` session cookie scoped to `Path=/p/<slug>`, so clearing one
+  link's gate never opens another.
+
+  **Only the approved version is ever served.** The page reads through the same
+  snapshot reader the hosted artifact viewer uses, so an in-progress edit does not
+  reach the open web the moment it is saved, and a document that has never been
+  approved 404s rather than exposing its draft. That is the point of publishing
+  from a governance product rather than a file host.
+
+  Per-link overlays: **expiry** and **revoke** (both enforced on every route, so
+  revoking kills live sessions, not just new ones), **watermark**, which stamps
+  the viewer's email across the page, and **no-download**, which blocks copy,
+  cut, right-click, drag, printing and the save/print/copy/view-source shortcuts.
+  Those last two are deterrents and are labelled as such in the UI: the document
+  has already been delivered to the reader's machine, so screenshots, developer
+  tools and `curl` still return it. Watermarking is a no-op on the public and
+  passcode gates, which identify nobody — attribution is the lever that actually
+  deters, which is why it needs an identified viewer.
+
+  **Comments**, per link. A reader opens a modal on the page itself and posts
+  without navigating away; the comment lands as an unanchored annotation thread on
+  the document, in the same list stewards already read, and never renders on the
+  published page. Every comment carries an identifying email — the gated viewer's
+  where one exists, otherwise one they supply, which is self-asserted on public and
+  passcode links. Because the document runs under the artifact sandbox, which
+  blocks forms and network calls and propagates those restrictions to any popup it
+  opens, the comment UI cannot live inside it: the page frames the document in a
+  same-origin iframe and keeps the controls on the outer shell, leaving the
+  document's sandbox intact.
+
+  Markdown documents are rendered server-side, so a published note reads like the
+  editor instead of showing its own `##` and `**` source.
+
+  On the security posture: slugs are 64 bits of randomness behind a unique index;
+  magic-link tokens are single-use, stored hashed, and re-checked against the
+  allow-list when redeemed rather than only when sent; the gate answers an invited
+  and an uninvited address with the same page _and_ the same database work, so it
+  cannot be timed into an allow-list oracle; the gate is rate limited per link per
+  IP; and a revoked, expired or unknown slug all produce one identical notice,
+  which never confirms that a given slug was real.
+
+  Email and invite links are refused on a server with no mail transport
+  configured, and the dialog disables those two gates, because their only way in
+  is a link that could never be sent. **Set `PUBLIC_BASE_URL` on any deployment
+  using them** — unset, the mailed link is built from the request's `Host`, so a
+  proxy forwarding an attacker-supplied host would send the recipient a one-time
+  access token pointing somewhere else.
+
+  Every served view is logged with the viewer's email where the gate identifies
+  one, visible to the owner in the dialog's "who viewed" panel.
+
+- Bulk approve/reject, in the review queue and in the cross-nest inbox.
+
+  Clearing a folder import meant opening, deciding and going back once per document — which is what keeps queues from being cleared. `POST /nests/:id/review-queue/bulk` takes up to 50 node ids and runs each one through the same approve/reject the single-document routes use: same permission resolution, same state validation, same history and notifications, no override path. It reports per item, so a refusal on one leaves the rest applied.
+
+  Both surfaces get the selection. The in-nest review queue grows a checkbox per reviewable row, a select-all bar, and a confirmation that demands a reason for a rejection exactly as the single flow does. The cross-nest inbox — where a reviewer actually meets a batch — gets the same, with deletion rows left out since they carry their own two-way decision. An inbox selection can span nests while the endpoint is per-nest, so it is grouped by nest and each nest gets one call; different vaults, so those run together, while items inside a nest stay sequential. Whatever failed stays selected for a retry.
+
+  **The batch path is a steward action, not a write.** The nest middleware bumps every non-GET to `write` unless the path is on the steward-action allow-list — approve, reject, submit-review and cancel-review are on it precisely because a reviewer normally holds `read` collaborator access plus a reviewer steward row. The new path was not, so single-row approve worked while the batch answered `your permission: 'read'`. It joins that list and grants nothing extra.
+
+  Selection state is pruned rather than trusted: it is dropped as the inbox reloads (a page turn or a row that resolved on its own otherwise left the bar counting rows the batch would find nothing to act on, then reporting "0 approved" as success), and reset when the nest changes, since the nest view is reused rather than remounted and could have carried one nest's ids into another nest's batch. The 50-item cap is enforced where the selection is made as well as on the server, and batch ids pass through the same node-id containment guard every other id-taking route uses.
+
+### Patch Changes
+
+- App shell: an honest boot, an honest empty nest, and a dead link that explains itself.
+
+  **The boot screen is branded.** A full reload showed a bare "Connecting…" on an empty page, which reads as a connection fault rather than a normal boot; it now shows the nest logo, the product name, and a loading line. Opening a document also flashed "Untitled" in the header and title while the fetch was in flight — that placeholder is a fact about a saved document, so it only appears once loading has finished.
+
+  **An unresolvable `?nest` link explains itself.** A deleted nest, a mistyped id, or access that was revoked all landed silently on the Dashboard, so a stale bookmark looked like it had simply opened the app. The deep-link probe now separates "no nest requested" from "the requested nest didn't resolve"; the second renders an explicit message with a retry and a way back to the Dashboard, which clears the dead parameter from the URL. An unauthenticated visitor still sees Login, unchanged.
+
+  **An empty nest reads as empty, not as governed.** With zero documents the Overview still subtitled Total Documents "Auto-approved, AI-ready" and the AI Ready card "Approved for AI", implying governed content that does not exist; both now read neutrally. The graph's coverage panel showed the amber warning icon beside "No documents yet" for the same reason — it is informational while the graph is empty, and the warning stays for real gaps such as unstewarded categories and orphans.
+
+  **Stewardship guidance follows the setting.** Share and Collaborators told people to assign stewards, but the Stewards tab only exists once Stewardship & Approval Workflow is enabled — and new nests default it off, so the guidance sent readers looking for a surface that isn't rendered. Both now name the setting that unlocks stewards when the workflow is off, and point at the Stewards tab when it is on.
+
+  **New Nest opens as a modal**, like Import Folder, so Escape, the backdrop and Cancel behave identically across two actions that do the same kind of thing. The create handler and its validation are untouched.
+
+  **Keyboard shortcuts are documented.** `?` was inert and the account menu had no reference. A shortcuts dialog lists the global, search-palette and editor bindings, opened with `?` or from the account menu; the handler ignores the key while an input, textarea or the editor has focus, and the modifier label follows the platform.
+
+- bbbeb18: Six Community bug fixes across stewards, tables, annotations and definitions.
+
+  **Assign Steward no longer opens on an unsubmittable form.** In a nest with no tags the dialog defaulted to the tag scope, whose picker had nothing to offer — the only way through was to discover the scope selector. It now falls back to the nest-wide scope once the tag list comes back empty, and the tag scope is unselectable while there are no tags.
+
+  **Commenting on an artifact is no longer authoring a document.** The annotation projection an artifact comment mints counted as a first-class document everywhere: documents list, board, graph, search, tag facets and the nest's total. It is still a real node — that is how an agent reads the feedback back on the next iteration — but every user-facing surface now leaves it out. MCP still sees it.
+
+  **Replacing a definition keeps its linked tag.** Re-defining an existing term from the add form also cleared the tag it already carried, because an empty tag box was sent as an explicit "remove". Blank now means "not specified" when replacing, and still means "remove" when editing a row whose tag field was prefilled.
+
+  **Typed table columns are checked.** The CSV preview rendered duplicate `:key` values and non-numeric `:number` cells as ordinary rows, so a typed header looked enforced when nothing checked it. The preview now says what disagrees with the header. Advisory rather than a save gate: a human-maintained fact store with one bad cell is still worth saving, and blocking would break saving already-imported tables.
+
+  **Version compare renders a table as a table.** In Rendered mode a table document's CSV went through the markdown renderer and collapsed into a single run-on paragraph with no sign of what changed. Each version now renders as the grid the reader sees, with the rows the other version lacks tinted.
+
+  **The documents type filter reads in title case.** The newer table and tool types had no display label and fell through to the raw type name, in both the dropdown and the active filter chip.
+
+- 666585d: Eight Community improvements across the markdown renderer, the inbox, reviews, the graph, search, sharing and folders.
+
+  **Math and footnotes render.** `$…$` and `$$…$$` are typeset with KaTeX, and inline math that starts or ends with whitespace is left as text so prose like "costs $5 and $10" is unaffected. Footnotes already parsed, but the editor escaped the reference bracket on save, storing `[^1]` as `\[^1\]` — that escape is now undone alongside the wikilink one.
+
+  **Notifications can be cleared one at a time.** The inbox only offered "Mark all read"; each row now carries its own mark-as-read control.
+
+  **A pending submission can be withdrawn.** Review rows under "Waiting on others" offer Withdraw, cancelling the review and returning the document to Draft — previously the only exit was Delete. The endpoint existed but was unreachable and unauthorized; it now admits the submitter, and otherwise requires approve rights.
+
+  **The graph navigates.** Coverage-gaps orphan entries open their document, the selected-node panel gains an Open document action, and double-clicking a document node opens it. Single click still selects the node, so the neighborhood highlight and copyable query are unchanged.
+
+  **An empty nest no longer looks fully governed.** With no documents, Coverage gaps showed "Every category has a steward" and "No orphans" — vacuously true. It now says there is nothing to evaluate yet.
+
+  **Search says what it is searching.** The ⌘K palette searched one nest or every nest depending on where it was opened, with nothing indicating which. It now names its scope and, inside a nest, offers This nest / All nests.
+
+  **Nest access is one surface.** The Collaborators tab and the Share dialog duplicated each other, with the tab sending users to the dialog for visibility. Visibility moves into a control both render, the tab now covers visibility, people and teams, and the nest's Share button opens that tab.
+
+  **New folders start empty.** Creating a folder seeded a real "Overview" document that then counted as content everywhere, including the AI-eligible set of an auto-approved nest. A folder is a directory in the vault, so creating one now creates that directory with only the generated INDEX.md in it; folder listings merge the vault's directory shape with the index's counts, and deleting a folder removes its directory.
+
+- Documents, viewer and team sharing.
+
+  **A filtered document list shows only the folders that matched.** A filter matching a single document still rendered every folder in the nest above it, one indented row per level. The tree is seeded with all known folders so a folder whose documents were never fetched still has a row to expand — but a filtered list is answered from the whole nest, so that seeding only added folders holding no match and suppressed the component's own chain compaction. The seed is dropped while a filter is on, leaving the folders that actually matched, each deep chain reading as one `Content / Drafts / Blog` row. Unfiltered browsing keeps its lazy expansion unchanged.
+
+  **Wiki links render as «Title».** They were distinguishable only by link colour; the display text is now wrapped in guillemets, matching Hootie's renderer, so a wiki link is recognisable at a glance and in a screenshot. The click target and hover preview still use the bare title.
+
+  **Sharing a team notifies its members in the app.** A direct collaborator invite already dropped a `nest_invite` row in the invitee's inbox, but sharing a team onto a nest only sent email — members had no in-app signal. The team-share fan-out now writes the same inbox row per member, naming the team the access came through and the role in collaborator terms (Viewer/Editor/Admin), never the raw permission. The person doing the sharing is skipped, as on the direct path.
+
+- Editor: the preview shows what the reader sees, and markdown survives the round trip.
+
+  **Preview renders the reader view.** The preview toggle only locked the editor and collapsed the toolbar, so the body stayed in TipTap's own editing model — anything TipTap has no node for (math, footnotes) showed as raw source and the preview misrepresented the document. It now renders the current markdown through the same reader the view and comment modes use. The editor stays mounted behind it, so toggling back keeps caret position and undo history.
+
+  **The preview toggle is labelled.** It was an unlabelled eye icon, so math and footnotes — which stay raw source in the editor — looked unsupported to anyone who never found it. The control now reads "Preview", and its counterpart in preview mode reads "Edit"; the rest of the toolbar strip stays icon-only.
+
+  **LaTeX commands survive the serializer.** `prosemirror-markdown` escapes backslashes and underscores in every text node, so a saved `$\frac{1}{2}$` reached KaTeX as `\` + `frac` — a line break followed by a bare word, rendering "frac12". Markdown specials inside math spans are now unescaped on the way out of the editor, alongside the existing wiki-link and footnote unescapes, so fractions, roots, integrals, sums and Greek letters render. Documents saved before this land correctly on their next save.
+
+  **Every heading level round-trips.** The editor schema capped headings at H3, so `#### Heading Four` stayed literal text when typed, and was silently flattened when a document written elsewhere was opened. The schema accepts H1–H6, and the toolbar renders one button per accepted level — driven by the same level list the editor is configured with, so the two cannot drift.
+
+  **The markdown-source toggle sits on the Content label.** Switching between the rich editor and raw markdown is something you do while writing, so it sat oddly in the header's overflow menu among document actions (version history, sharing, delete) and took two clicks to reach. It is now a small labelled button naming the mode you switch to, and is gone from the overflow menu. Tool and table nodes, which have no rich editor, still show no toggle.
+
+- Folder import and nest names.
+
+  **Derived vault files stay out of the document list.** `INDEX.md`, `CONTEXT.md`, the agent configs and `README.md` are regenerated on every write, so an edit to one is thrown away by the next mutation — yet they listed as editable documents: the engine excludes `CONTEXT.md` at the vault root only, so a nested copy read as a real document, and `README.md` was excluded nowhere on imported nests. One shared `isMetaFile()` replaces the three drifting copies of that list, applied at the discovery cache — the chokepoint every listing, search, folder count, graph query, index rebuild and import registration reads through. The files still sync to disk verbatim; only their visibility changes.
+
+  **One oversized file no longer kills an import.** The uploader splits between files, never inside one, so a file over the chunk budget shipped alone in a body the server answered `413` to — aborting the whole import and deleting the half-built nest. Such a file is now skipped and reported by name alongside the paths the server refused, and the rest of the folder lands.
+
+  **Nest names are stored as plain text.** A name went to the database exactly as typed, so `<img src=x onerror=alert(1)>` was accepted with `201` and stored verbatim. The list renders it escaped, but any surface that does not — export, email — would inherit the markup. Tag-shaped markup is stripped in the one helper the create, rename and import paths share. Because stripping leaves an empty string, a name that is nothing but markup used to come back as "Name cannot be empty" — accurate about the stripped value, confusing about what to do; the refusal now names the real problem, in the client mirror that gates the submit button and on the server, which keeps refusing the same names for callers that skip the UI.
+
+  **The submit-for-review dialog keeps its space.** JSX drops the whitespace of a line break following an expression, so the confirmation read "Version 1will move to pending review".
+
+- Search: one entry point, grouped results, and a scope you can reach from the keyboard.
+
+  **One control, everywhere.** The Dashboard carried its own field-styled "Search nests & documents" button while every other page used the header's Search control, so one feature read as two. The header control now shows wherever the palette works, the Dashboard duplicate is gone, and the tooltip names the scope for that page. It no longer hides on small screens either — only the ⌘K hint does.
+
+  **Results are grouped.** Nest and document matches shared one undivided list, so telling them apart meant reading the small icon or the right-hand label. Results already arrive nests-first, so a header before each run labels them without reordering rows or disturbing the keyboard selection index.
+
+  **The dead end offers the way out.** A scoped search that found nothing said only "No matches", which reads as "that document does not exist" even when it lives in another nest. The empty state now names the nest that was searched and carries a "Search all nests" action.
+
+  **The scope is keyboard-reachable.** Switching between This nest and All nests needed the mouse, in a palette that is otherwise keyboard-first. Tab flips the scope from the query field — there is one input, so nothing else was worth tabbing to — the scope row shows the key, the tabs take a visible focus ring when focused directly, and Escape closes the palette from anywhere in it rather than only from the input. Shift+Tab stays inside the palette instead of escaping to the page behind it.
+
+- Tags: the field stops promising what the store will not keep.
+
+  **Each tag is capped at the real limit.** The Tags field accepted 120 characters while a tag is truncated to 40 on commit, so users typed characters that were silently discarded. The cap applies per whitespace/comma-separated token rather than to the whole field, which keeps a multi-tag paste (`api, v2, docs`) intact while stopping any single tag from growing past what will be stored.
+
+  **`#bug` and `bug` collapse.** Duplicate detection compared a normalized candidate against the raw stored value, so a legacy `#bug` and a newly typed `bug` coexisted on one document with inconsistent chips. Both sides now key through the same normalizer, and the editor canonicalises a document's tags on load — chips read consistently and the next save migrates the legacy values.
+
+  **A paste that normalizes several tags says so once.** Committing a pasted multi-tag value fired one transient toast per rewrite, so the feedback scrolled past before it could be read. The batch is summarized in a single longer-lived toast naming every affected value; a lone rewrite still reads as its own message.
+
 ## 1.19.0
 
 ### Minor Changes
