@@ -33,6 +33,26 @@ export async function isImportedNest(nestId: string): Promise<boolean> {
   return !!row?.is_imported;
 }
 
+/**
+ * Nest names are plain text. Strip tag-shaped markup before it is stored so no
+ * downstream surface that renders unescaped (exports, email) inherits it.
+ *
+ * A name that was nothing but markup strips to "" — reporting that as an empty
+ * name is confusing, since the user did type something, so it gets its own
+ * message naming the actual problem.
+ */
+function plainName(name: string, emptyMessage = "Name cannot be empty"): string {
+  const typed = (name ?? "").trim();
+  if (!typed) throw new ValidationError(emptyMessage);
+  const stripped = typed.replace(/<[^>]*>/g, "").trim();
+  if (!stripped) {
+    throw new ValidationError(
+      "That's not a valid nest name — it's only HTML markup. Use plain text.",
+    );
+  }
+  return stripped;
+}
+
 function toSlug(name: string): string {
   return name
     .toLowerCase()
@@ -274,8 +294,7 @@ export async function renameNest(
   const params: any[] = [];
 
   if (patch.name !== undefined) {
-    const trimmed = patch.name.trim();
-    if (!trimmed) throw new ValidationError("Name cannot be empty");
+    const trimmed = plainName(patch.name);
     const slug = toSlug(trimmed);
     if (!slug) throw new ValidationError("Name must contain at least one alphanumeric character");
     const conflict = (await db.get(
@@ -317,8 +336,7 @@ export async function createNest(
   const id = uuid();
   const db = getDb();
 
-  const trimmed = name.trim();
-  if (!trimmed) throw new ValidationError("Name cannot be empty");
+  const trimmed = plainName(name);
   const slug = toSlug(trimmed);
   if (!slug) {
     throw new ValidationError(
@@ -375,10 +393,7 @@ export async function createNest(
  * nest lists as real with silently missing documents.
  */
 export async function importNest(userId: string, name: string): Promise<Nest> {
-  const nm = (name || "").trim();
-  if (!nm) {
-    throw new ValidationError("name is required");
-  }
+  const nm = plainName(name || "", "name is required");
 
   const db = getDb();
   const id = uuid();

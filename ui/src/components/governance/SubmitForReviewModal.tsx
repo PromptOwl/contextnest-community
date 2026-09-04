@@ -72,7 +72,7 @@ export function SubmitForReviewModal({
         <DialogHeader>
           <DialogTitle>Publish &ldquo;{documentTitle}&rdquo; (requires approval)</DialogTitle>
           <DialogDescription>
-            Publishing in this nest goes through stewardship. Version {currentVersion}
+            Publishing in this nest goes through stewardship. Version {currentVersion}{" "}
             will move to <strong>pending review</strong>; once a steward approves it,
             this version becomes the AI-readable copy.
           </DialogDescription>
