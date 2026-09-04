@@ -41,6 +41,7 @@ import {
   updateNode,
   moveNode,
   deleteNode,
+  discardDraft,
   listNodesForCaller,
   nestCensus,
   getNodeForCaller,
@@ -225,6 +226,27 @@ nodeRoutes.get("/:nodeId{.+}/reviews", async (c) => {
   const { getReviewHistory } = await import("../governance/review-service.js");
   const history = await getReviewHistory(nestId, nodeId);
   return c.json({ reviews: history });
+});
+
+// POST /nests/:nestId/nodes/:nodeId/discard — throw away the unreviewed work on
+// a node: the file goes back to its last sealed version and the draft rows above
+// it are dropped. A node that was never published is deleted outright (nothing
+// to fall back to) — the response says which happened. POST suffix route.
+nodeRoutes.post("/:nodeId{.+}/discard", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const nodeId = c.req.param("nodeId")!;
+
+  const userId = c.get("userId");
+  const userEmail = await resolveCallerEmail(userId);
+  if (!(await canReadNode(nestId, nodeId, userId, userEmail))) {
+    return c.json(
+      { error: "Access denied — no steward assignment for this node" },
+      403,
+    );
+  }
+
+  const result = await discardDraft(nestId, nodeId, userEmail);
+  return c.json({ ok: true, ...result });
 });
 
 // GET /nests/:nestId/nodes/:nodeId{.+} — read a single node (catch-all, must be LAST)

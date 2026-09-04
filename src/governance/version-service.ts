@@ -234,6 +234,88 @@ export async function setApprovedVersion(
   await db.run(sql, [nestId, nodeId, version, approvedBy]);
 }
 
+/**
+ * The newest version this node has SEALED — the approved pin, else the newest
+ * published/approved row. Drafts never seal (they no longer reach the engine's
+ * hash chain), so this is the version a discard restores to. Null means the
+ * node has never been published: there is nothing to fall back to.
+ */
+export async function getSealedVersion(
+  nestId: string,
+  nodeId: string,
+): Promise<number | null> {
+  const approved = await getApprovedVersion(nestId, nodeId);
+  if (approved != null) return approved;
+  const db = getDb();
+  const row = (await db.get(
+    `SELECT MAX(version) as v FROM node_versions
+      WHERE nest_id = ? AND node_id = ? AND status IN ('published', 'approved')`,
+    [nestId, nodeId],
+  )) as { v: number | null } | undefined;
+  return row?.v ?? null;
+}
+
+/**
+ * Drop the draft rows a newer draft supersedes.
+ *
+ * A draft revision is not a release: it is never appended to the engine's hash
+ * chain, so the only place its bytes exist is the live file, and the row left
+ * behind describes content nothing can reconstruct. Keeping one row per node
+ * (the current one) is what stops a drafting session from filling the version
+ * panel with entries that render "(no content)".
+ *
+ * Status is the whole guard — a published/approved/pending_review row is sealed
+ * or under review and is never touched, whatever its version number.
+ */
+export async function deleteSupersededDrafts(
+  nestId: string,
+  nodeId: string,
+  belowVersion: number,
+): Promise<void> {
+  const db = getDb();
+  await db.run(
+    `DELETE FROM node_versions
+      WHERE nest_id = ? AND node_id = ? AND status = 'draft' AND version < ?`,
+    [nestId, nodeId, belowVersion],
+  );
+}
+
+/** Every unsealed row above `sealedVersion` — what discarding a draft throws
+ *  away. Sealed rows at or below the pin are left alone. */
+export async function deleteUnsealedVersions(
+  nestId: string,
+  nodeId: string,
+  sealedVersion: number,
+): Promise<void> {
+  const db = getDb();
+  await db.run(
+    `DELETE FROM node_versions
+      WHERE nest_id = ? AND node_id = ? AND version > ?
+        AND status IN ('draft', 'rejected', 'pending_review')`,
+    [nestId, nodeId, sealedVersion],
+  );
+}
+
+/** True when the node's newest row is an unsealed revision — i.e. the live file
+ *  is somebody's working copy, not the last published bytes. */
+export async function hasUnsealedDraft(
+  nestId: string,
+  nodeId: string,
+): Promise<boolean> {
+  const db = getDb();
+  const row = (await db.get(
+    `SELECT status FROM node_versions
+      WHERE nest_id = ? AND node_id = ?
+      ORDER BY version DESC LIMIT 1`,
+    [nestId, nodeId],
+  )) as { status: string } | undefined;
+  return (
+    row?.status === "draft" ||
+    row?.status === "rejected" ||
+    row?.status === "pending_review"
+  );
+}
+
 // ─── Conflict Detection ─────────────────────────────────────────────────
 
 export interface ConflictCheckResult {
@@ -454,12 +536,22 @@ export interface MyDraft {
  *
  * Paginated at the SQL level — `total` counts every matching row, the returned
  * page is `limit`/`offset` of them.
+ *
+ * `q` and `sort: "title"` are the exception: a draft's title lives on disk, not
+ * in SQL (buildTitleMap resolves it), so neither can be expressed in the query.
+ * Those two read the whole matching set — capped, and a person's own drafts are
+ * a bounded list — then filter, sort and slice the page in memory.
  */
 export async function listMyDrafts(params: {
   authorEmail: string;
   nestIds: string[];
   limit?: number;
   offset?: number;
+  /** Free text matched against title, nest name and node id (case-insensitive). */
+  q?: string;
+  sort?: "updated" | "title";
+  /** Nest id → display name, so `q` can match the nest a draft lives in. */
+  nestNames?: Map<string, string>;
 }): Promise<{ drafts: MyDraft[]; total: number }> {
   if (params.nestIds.length === 0) return { drafts: [], total: 0 };
   const db = getDb();
@@ -483,27 +575,38 @@ export async function listMyDrafts(params: {
              AND r.status = 'pending')`;
   const args = [params.authorEmail.toLowerCase(), ...params.nestIds];
 
+  const limit = Math.min(Math.max(params.limit ?? 25, 1), 100);
+  const offset = Math.max(params.offset ?? 0, 0);
+  const q = params.q?.trim().toLowerCase() || "";
+  // Title lives on disk, so neither a title search nor a title sort can be
+  // pushed into SQL — those read the whole set and page it in memory.
+  const inMemory = q !== "" || params.sort === "title";
+  // Ceiling on the in-memory path: one person's own unsubmitted drafts, not a
+  // nest's documents. A list past this is already telling them to clean up.
+  const SCAN_CAP = 500;
+
   // Number(): Postgres returns COUNT(*) as a bigint string.
   // Counted before the existence filter below, so a draft deleted outside the
   // app (leaving orphan version rows) can inflate this by a row — the page it
   // sits on is simply one shorter. Not worth a second pass over every row.
-  const total = Number(
-    (
-      (await db.get(
-        `SELECT COUNT(*) as c FROM node_versions v ${where}`,
-        args,
-      )) as { c: number }
-    ).c,
-  );
+  // The in-memory path counts what survives the filter instead, which is exact.
+  const sqlTotal = inMemory
+    ? 0
+    : Number(
+        (
+          (await db.get(
+            `SELECT COUNT(*) as c FROM node_versions v ${where}`,
+            args,
+          )) as { c: number }
+        ).c,
+      );
 
-  const limit = Math.min(Math.max(params.limit ?? 25, 1), 100);
-  const offset = Math.max(params.offset ?? 0, 0);
   const rows = (await db.all(
     `SELECT v.nest_id, v.node_id, v.status, v.version, v.created_at
        FROM node_versions v ${where}
       ORDER BY v.created_at DESC
       LIMIT ? OFFSET ?`,
-    [...args, limit, offset],
+    inMemory ? [...args, SCAN_CAP, 0] : [...args, limit, offset],
   )) as Array<{
     nest_id: string;
     node_id: string;
@@ -526,7 +629,7 @@ export async function listMyDrafts(params: {
     ),
   );
 
-  const drafts = rows
+  let drafts = rows
     // Deleting a document leaves its version rows behind (only nest deletion
     // clears the table), so the title map doubles as the existence check —
     // without it the list fills with ghosts of deleted drafts.
@@ -542,7 +645,19 @@ export async function listMyDrafts(params: {
       updatedAt: r.created_at,
     }));
 
-  return { drafts, total };
+  if (!inMemory) return { drafts, total: sqlTotal };
+
+  if (q) {
+    drafts = drafts.filter((d) =>
+      [d.title, params.nestNames?.get(d.nestId) ?? "", d.nodeId].some((s) =>
+        s.toLowerCase().includes(q),
+      ),
+    );
+  }
+  if (params.sort === "title") {
+    drafts.sort((a, b) => a.title.localeCompare(b.title));
+  }
+  return { drafts: drafts.slice(offset, offset + limit), total: drafts.length };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────

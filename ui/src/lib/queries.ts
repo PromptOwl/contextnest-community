@@ -105,8 +105,8 @@ export const keys = {
   me: ["me"] as const,
   myWork: (limit?: number, offset?: number) =>
     [...keys.me, "work", limit ?? null, offset ?? null] as const,
-  myDrafts: (limit?: number, offset?: number) =>
-    [...keys.me, "drafts", limit ?? null, offset ?? null] as const,
+  myDrafts: (limit?: number, offset?: number, q?: string, sort?: string) =>
+    [...keys.me, "drafts", limit ?? null, offset ?? null, q ?? null, sort ?? null] as const,
 
   health: ["health"] as const,
 
@@ -689,9 +689,14 @@ export const reads = {
       queryFn: () => api.getMyWork(opts),
       staleTime: STALE.governance,
     }),
-  myDrafts: (opts?: { limit?: number; offset?: number }) =>
+  myDrafts: (opts?: {
+    limit?: number;
+    offset?: number;
+    q?: string;
+    sort?: "updated" | "title";
+  }) =>
     queryOptions({
-      queryKey: keys.myDrafts(opts?.limit, opts?.offset),
+      queryKey: keys.myDrafts(opts?.limit, opts?.offset, opts?.q, opts?.sort),
       queryFn: () => api.getMyDrafts(opts),
       staleTime: STALE.governance,
     }),

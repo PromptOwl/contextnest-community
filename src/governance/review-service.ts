@@ -79,6 +79,40 @@ export async function submitForReview(params: {
     [params.nestId, params.nodeId, params.version],
   );
 
+  // Seal the submitted bytes into the engine's history chain. Draft saves no
+  // longer do this (see the draft branch of updateNode) precisely so they stay
+  // discardable — but handing work to a reviewer is not a draft save. From here
+  // the exact reviewed version is reconstructable, which is what the review
+  // panel, the version list and the audit trail all read.
+  //
+  // Best-effort: a broken chain must not cost someone their submission, and the
+  // reviewer reads the live file either way.
+  try {
+    const { storage, versions: versionManager } = await engineCache.get(
+      params.nestId,
+    );
+    const node = await storage.readDocument(params.nodeId);
+    const history = await versionManager.getHistory(params.nodeId);
+    // Resubmitting without editing (a rejection bounced straight back) leaves
+    // the version where it was — already sealed, and appending it twice would
+    // put a duplicate number in the chain.
+    const alreadySealed = (history?.versions ?? []).some(
+      (v) => v.version === (node.frontmatter.version ?? 1),
+    );
+    if (!alreadySealed) {
+      await versionManager.createVersion(node, params.requestedBy, {
+        note: params.note || "Submitted for review",
+      });
+    }
+  } catch (err) {
+    console.error(
+      "VersionManager.createVersion failed (submit for review)",
+      params.nestId,
+      params.nodeId,
+      err,
+    );
+  }
+
   const reviewCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
   void dispatchEvent({
     kind: "review_requested",

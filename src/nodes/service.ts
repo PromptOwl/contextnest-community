@@ -1292,7 +1292,7 @@ async function createNodeOnce(
   input: CreateNodeInput,
   userEmail: string
 ): Promise<NodeMutationResult> {
-  const { storage, versions: versionManager } = await engineCache.get(nestId);
+  const { storage } = await engineCache.get(nestId);
 
   assertTitleLength(input.title);
   assertTitleReadable(input.title);
@@ -1480,16 +1480,9 @@ async function createNodeOnce(
       });
       await versions.setApprovedVersion(nestId, id, savedVersion, userEmail);
     } else {
-      // Seed the engine history only for a genuine draft. A publish that failed
-      // above already wrote history entries; re-seeding would graft a second
-      // chain onto them.
-      if (publishReason === null) {
-        try {
-          await versionManager.createVersion(node, userEmail);
-        } catch (err) {
-          console.error("VersionManager.createVersion failed (node create)", err);
-        }
-      }
+      // No history entry for a genuine draft — same rule as the draft branch of
+      // updateNode: the chain records releases, not unreviewed work. The first
+      // publish seals v1 of the chain from whatever the file says then.
       await versions.createVersion({
         nestId,
         nodeId: id,
@@ -1860,21 +1853,17 @@ export async function updateNode(
         node = await storage.readDocument(nodeId);
         await syncNodeTags(nestId, nodeId, currentTags);
 
-        // Persist to the engine history FIRST, then mirror into the DB. If the
-        // engine append fails (e.g. a broken diff chain), rethrow so we DON'T
-        // record a DB version the engine never stored — that silent swallow is
-        // what let node_versions drift ahead of history.yaml (DB v19 vs v15).
-        try {
-          await versionManager.createVersion(node, userEmail, {
-            note: patch.changeNote,
-          });
-        } catch (err) {
-          console.error(
-            "VersionManager.createVersion failed (node patch)",
-            err
-          );
-          throw err;
-        }
+        // A draft revision is NOT appended to the engine's history chain. That
+        // chain is append-only and hash-linked, so anything recorded in it can
+        // never be taken back — which is exactly why drafts used to be
+        // impossible to throw away, and why a drafting session left a keyframe
+        // or diff on disk per save. Unreviewed work now lives in the file (the
+        // working copy) plus the governance row below; only submitting or
+        // publishing seals a version. discardDraft is the other half.
+        //
+        // Only the newest draft row is kept: with no chain entry behind it, a
+        // superseded row describes bytes nothing can reconstruct.
+        await versions.deleteSupersededDrafts(nestId, nodeId, newVersion);
         await versions.createVersion({
           nestId,
           nodeId,
@@ -1962,7 +1951,7 @@ async function assertNotReviewLocked(
   nestId: string,
   nodeId: string,
   userEmail: string,
-  action: "moving" | "deleting",
+  action: "moving" | "deleting" | "discarding",
 ): Promise<void> {
   if (!(await isStewardshipEnabled(nestId))) return;
   if (!(await getPendingReview(nestId, nodeId))) return;
@@ -2227,6 +2216,73 @@ export async function moveNode(
  * app.ts; MCP: the per-tool canUserEdit check). This function enforces only
  * the stewardship lock and does the cleanup.
  */
+/**
+ * Throw away the unreviewed work on a node and put the file back to its last
+ * sealed version.
+ *
+ * This is the other half of drafts staying out of the hash chain (see the draft
+ * branch of updateNode): nothing was appended, so nothing has to be unwound —
+ * restoring is a plain write of bytes the chain still holds, and the governance
+ * rows above the seal are simply dropped. `ctx verify` is unaffected either way.
+ *
+ * A node that was never published has no earlier state to fall back to, so
+ * discarding its draft means deleting the document — the same thing the "…" →
+ * Delete menu already did, one step instead of two.
+ */
+export async function discardDraft(
+  nestId: string,
+  nodeId: string,
+  userEmail: string,
+): Promise<{ deleted: boolean; version: number | null }> {
+  return withNodeWriteLock(nodeWriteKey(nestId, nodeId), async () => {
+    await assertNotReviewLocked(nestId, nodeId, userEmail, "discarding");
+
+    const sealed = await versions.getSealedVersion(nestId, nodeId);
+    if (sealed == null) {
+      await deleteNode(nestId, nodeId, userEmail);
+      return { deleted: true, version: null };
+    }
+
+    const { storage, versions: versionManager } = await engineCache.get(nestId);
+    let raw: string;
+    try {
+      raw = await versionManager.reconstructVersion(nodeId, sealed);
+    } catch (err) {
+      console.error(
+        "reconstructVersion failed (discard draft)",
+        nestId,
+        nodeId,
+        sealed,
+        err,
+      );
+      throw new ValidationError(
+        `Can't restore version ${sealed} of this document — its history no longer replays. Delete the document instead.`,
+      );
+    }
+
+    // Written back verbatim rather than patched through context_update: the
+    // reconstructed bytes carry the checksum they were published with, so the
+    // file matches its own frontmatter again and the drift scanner stays quiet.
+    // Same move rejectSuggestion makes, and for the same reason — a discard
+    // must not cost a version.
+    await storage.writeDocument(nodeId, raw);
+    await storage.regenerateIndex();
+
+    // Tags travel in frontmatter, so a draft that added or removed one has to
+    // be undone in the tag index too — steward resolution reads it.
+    const restored = parseDocument(`${nodeId}.md`, raw, nodeId);
+    await syncNodeTags(
+      nestId,
+      nodeId,
+      ((restored.frontmatter.tags as string[]) || []).map(normalizeTag),
+    );
+
+    await versions.deleteUnsealedVersions(nestId, nodeId, sealed);
+    await trackEvent("node.discard_draft", { nestId, nodeId, version: sealed });
+    return { deleted: false, version: sealed };
+  });
+}
+
 export async function deleteNode(
   nestId: string,
   nodeId: string,
