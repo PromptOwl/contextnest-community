@@ -206,7 +206,7 @@ describe("access resolution via team membership", () => {
   });
 
   it("admin member can perform an admin action (change visibility)", async () => {
-    const res = await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`, { visibility: "public" }, adminU.apiKey);
+    const res = await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`, { visibility: "public", acknowledge_public: true }, adminU.apiKey);
     expect(res.status).toBe(200);
     // restore
     await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`, { visibility: "private" }, owner.apiKey);
@@ -265,7 +265,7 @@ describe("cascade revocation + rename", () => {
     expect(del.status).toBe(200);
     const list = await jsonRequest(app, "GET", `/nests/${nestId}/teams`, undefined, owner.apiKey);
     expect(list.data.teams.map((t: any) => t.teamId)).not.toContain(teamId);
-    const act = await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`, { visibility: "public" }, adminU.apiKey);
+    const act = await jsonRequest(app, "PATCH", `/nests/${nestId}/visibility`, { visibility: "public", acknowledge_public: true }, adminU.apiKey);
     expect([403, 404]).toContain(act.status);
   });
 });

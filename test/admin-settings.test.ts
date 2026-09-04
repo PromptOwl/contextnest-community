@@ -353,3 +353,58 @@ describe("/admin/settings — sign-in method gates", () => {
     expect(res.data.settings.promptowl_sign_in_gate).toBe("admin-only");
   });
 });
+
+describe("/admin/settings — agent SSO (token exchange) guard", () => {
+  it("refuses to enable a provider while auto-provision has no domain allowlist", async () => {
+    const app = await createTestApp("key", { ownerEmail: OWNER_EMAIL });
+    const admin = await registerUser(app, OWNER_EMAIL);
+
+    // Auto-provision defaults ON, allowlist defaults empty — enabling a
+    // provider here would let any account at that IdP self-provision and mint
+    // a bearer, so the save is refused.
+    const blocked = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      { google_token_exchange_enabled: true, google_client_id: "gid" },
+      admin.apiKey,
+    );
+    expect(blocked.status).toBe(400);
+    expect(blocked.data.fieldErrors.google_token_exchange_enabled).toMatch(
+      /allowed email domains/i,
+    );
+    // Rejected request applies NOTHING — not even the valid client id.
+    expect(await persistedSetting("GOOGLE_CLIENT_ID")).toBeUndefined();
+
+    // Same request WITH the allowlist in the same body is accepted.
+    const ok = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      {
+        google_token_exchange_enabled: true,
+        google_client_id: "gid",
+        oidc_allowed_domains: "example.com",
+      },
+      admin.apiKey,
+    );
+    expect(ok.status).toBe(200);
+    expect(await persistedSetting("GOOGLE_TOKEN_EXCHANGE_ENABLED")).toBe("true");
+
+    // Turning auto-provision off is the other accepted way out.
+    const viaAutoProvisionOff = await jsonRequest(
+      app,
+      "PATCH",
+      "/admin/settings",
+      {
+        ms_token_exchange_enabled: true,
+        ms_client_id: "cid",
+        ms_tenant_id: "tid",
+        oidc_allowed_domains: "",
+        oidc_auto_provision: false,
+      },
+      admin.apiKey,
+    );
+    expect(viaAutoProvisionOff.status).toBe(200);
+  });
+});

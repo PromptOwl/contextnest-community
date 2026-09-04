@@ -14,8 +14,10 @@ import { reads } from "../lib/queries";
 import { readDraft, writeDraft, clearDraft } from "../lib/draft";
 import { MAX_FOLDER_DEPTH } from "../lib/constants";
 import {
+  clampTagInput,
   newTags,
   normalizeTagInput,
+  tagKey,
   TAG_INPUT_MAX_LENGTH,
 } from "../lib/tag-policy";
 import { relTime, formatServerDate } from "../lib/dates";
@@ -62,6 +64,7 @@ import {
   Check,
   Copy,
   Star,
+  Undo2,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { OverflowMenu, type OverflowAction } from "@/components/ui/overflow-menu";
@@ -73,11 +76,13 @@ import {
 } from "./MarkdownEditor";
 import { DocumentViewer } from "./DocumentViewer";
 import { AuthorshipChips } from "./AuthorshipChips";
-import { TableViewer } from "./TableViewer";
+import { TableViewer, TableGrid } from "./TableViewer";
+import { tableDiffSides } from "../lib/csv-table";
 import { TableSourceEditor } from "./TableSourceEditor";
 import { ArtifactViewer, ARTIFACT_NODE_TYPE } from "./ArtifactViewer";
 import { CodeHighlight } from "./CodeHighlight";
 import { ShareNestDialog } from "./ShareNestDialog";
+import { PublishDialog } from "./PublishDialog";
 import { ShareTargetDialog } from "./ShareTargetDialog";
 import { AnnotationsPanel } from "./AnnotationsPanel";
 import {
@@ -211,6 +216,7 @@ export function DocumentEditor({
   // looking at a real nest the caller can administer.
   const canShare = isOwner || isAdmin;
   const [showShare, setShowShare] = useState(false);
+  const [showPublish, setShowPublish] = useState(false);
   // Share THIS document with one person (a grant), as opposed to the whole
   // nest above. Same owner/admin gate the /grants routes enforce.
   const [showShareDoc, setShowShareDoc] = useState(false);
@@ -690,6 +696,24 @@ export function DocumentEditor({
   const [nestNodes, setNestNodes] = useState<
     Array<{ id: string; title: string; content?: string; tags?: string[] }>
   >([]);
+  // The nest's folders, including any holding no document. Same cached census
+  // the nest views read, so this costs no extra request in practice.
+  const [nestFolders, setNestFolders] = useState<string[]>([]);
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { census } = await qc.fetchQuery(reads.census(nestId));
+        if (!cancelled) setNestFolders(census.folders.map((f) => f.path));
+      } catch {
+        /* best-effort: the picker still offers document-derived folders */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loading, nestId, qc]);
   useEffect(() => {
     // New docs need the list too — the folder picker derives its
     // suggestions from existing node ids.
@@ -717,17 +741,18 @@ export function DocumentEditor({
     };
   }, [isNew, loading, nestId]);
 
-  // Every folder prefix in use (ids minus the nodes/ root and the leaf),
-  // so the folder picker suggests existing paths at each depth.
+  // Every folder the picker can offer: the prefixes documents sit under, plus
+  // the nest's folder list — a folder created empty holds no document to
+  // derive it from, so ids alone would hide it (CU-wdqcpzzzut).
   const folderOptions = useMemo(() => {
-    const opts = new Set<string>();
+    const opts = new Set<string>(nestFolders);
     for (const n of nestNodes) {
       const rel = n.id.startsWith("nodes/") ? n.id.slice(6) : n.id;
       const segs = rel.split("/").slice(0, -1);
       for (let i = 1; i <= segs.length; i++) opts.add(segs.slice(0, i).join("/"));
     }
     return [...opts].sort();
-  }, [nestNodes]);
+  }, [nestNodes, nestFolders]);
 
   // Folder path this doc lives under (id minus the "nodes/" root and the leaf
   // slug), prettified for the header breadcrumb so users see where a nested
@@ -878,8 +903,12 @@ export function DocumentEditor({
       // number, and `title.trim()` later would throw "trim is not a function".
       const loadedTitle = node?.title == null ? "" : String(node.title);
       const loadedContent = node?.content == null ? "" : String(node.content);
+      // Legacy tags were stored raw (leading #, mixed case), so they render
+      // and compare differently from anything typed today. Canonicalise on load:
+      // chips read consistently, the duplicate guard sees one key per tag, and
+      // the next save migrates the document (CU-wdqcq00x8e).
       const loadedTags = Array.isArray(node?.tags)
-        ? node.tags.map((t: unknown) => String(t))
+        ? newTags([], node.tags.map((t: unknown) => tagKey(String(t))))
         : [];
       setTitle(loadedTitle);
       setContent(loadedContent);
@@ -1087,7 +1116,15 @@ export function DocumentEditor({
 
   const addTag = useCallback(() => {
     const { tags: accepted, notes } = tagPreview;
-    for (const note of notes) toast.warning(note);
+    // A paste commits several tags at once, and one transient toast per
+    // rewrite is unreadable — stack them into a single summary and leave the
+    // per-tag detail to the persistent preview above (CU-wdqcq00x8h).
+    if (notes.length === 1) toast.warning(notes[0]);
+    else if (notes.length > 1)
+      toast.warning(`${notes.length} tags normalized`, {
+        description: notes.join(" "),
+        duration: 8000,
+      });
     if (accepted.length === 0) {
       setTagInput("");
       return;
@@ -1294,6 +1331,19 @@ export function DocumentEditor({
     if (isNew) return;
     await api.rejectNode(nestId, nodeId, note);
     await loadNode();
+  };
+  // Cancel your own pending review from the document itself — back to Draft,
+  // rather than Delete being the only exit (CU-wdqcq007pe).
+  const handleWithdrawSubmission = async () => {
+    if (isNew) return;
+    try {
+      await api.cancelReview(nestId, nodeId);
+      toast.success("Submission withdrawn — back to Draft");
+      await loadNode();
+    } catch (err: any) {
+      console.error("[DocumentEditor] cancelReview failed", nestId, nodeId, err);
+      toast.error(err?.message || "Failed to withdraw submission");
+    }
   };
   // Flag this doc for deletion — for callers without delete permission. Errors
   // stay inside the dialog (it keeps the typed reason); success closes it.
@@ -1532,7 +1582,10 @@ export function DocumentEditor({
               title={title || undefined}
               data-testid="document-editor-header-title"
             >
-              {title || (isNew ? "New document" : "Untitled")}
+              {/* "Untitled" is a fact about a saved document, not about one
+                  still loading — while the fetch is in flight say so instead
+                  of flashing it (CU-wdqcpzzzrr). */}
+              {title || (isNew ? "New document" : loading ? "Loading…" : "Untitled")}
             </h3>
             {!isNew && status && <StatusBadge status={status} />}
             {/* Pending only. A DECLINED flag is a past event, not a state of
@@ -1702,8 +1755,8 @@ export function DocumentEditor({
             </DropdownMenu>
           )}
           {/* Secondary actions collapse into one ⋮ menu to keep the header
-              uncluttered. Grouped by use: version history + markdown-source
-              view toggle, then sharing (copy link, share nest). Compare stays
+              uncluttered. Grouped by use: version history, then sharing
+              (copy link, share nest). Compare stays
               a visible button because it carries active "Comparing vN" state
               the flat menu can't surface. */}
           {(() => {
@@ -1715,16 +1768,8 @@ export function DocumentEditor({
                 testId: "document-editor-history",
                 onSelect: openVersions,
               });
-            // Tool/table nodes ALWAYS edit as raw source (no rich editor
-            // exists for them), so there's nothing to toggle.
-            if (!isSourceOnly)
-              moreActions.push({
-                // Toggle: the label names the mode you switch TO.
-                label: rawMode ? "Rich editor" : "Markdown source",
-                icon: Code2,
-                testId: "document-editor-markdown-toggle",
-                onSelect: () => setRawMode((v) => !v),
-              });
+            // The markdown-source toggle lives on the Content label instead —
+            // it is a writing control, not a document action.
             if (!isNew)
               moreActions.push({
                 label: "Copy link",
@@ -1762,6 +1807,15 @@ export function DocumentEditor({
                 separatorBefore: !isNew ? false : true,
                 testId: "document-editor-share",
                 onSelect: () => setShowShare(true),
+              });
+            // Publishing hosts THIS document on the open web, so it sits with
+            // sharing rather than with the editing actions above.
+            if (canShare && !isNew)
+              moreActions.push({
+                label: "Publish",
+                icon: Share2,
+                testId: "document-editor-publish",
+                onSelect: () => setShowPublish(true),
               });
             // Below admin only: this opens the REQUEST dialog, not a delete.
             // Admins delete from the nest list — this page has never carried a
@@ -1867,10 +1921,25 @@ export function DocumentEditor({
           {isOwnPendingReview && (
             <Alert>
               <AlertCircle className="h-4 w-4" />
-              <AlertDescription>
-                This is still under review. Your edits update the same pending
-                submission — no need to withdraw and resubmit — and the steward
-                reviews your latest version.
+              <AlertDescription className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className="flex-1 min-w-[16rem]">
+                  This is still under review. Your edits update the same pending
+                  submission — no need to withdraw and resubmit — and the steward
+                  reviews your latest version.
+                </span>
+                {/* Withdraw belongs with the sentence explaining the state, not
+                    in the header's action row (CU-wdqcq007pe). */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={() => void handleWithdrawSubmission()}
+                  data-testid="document-editor-withdraw"
+                  title="Withdraw this submission and return the document to Draft"
+                >
+                  <Undo2 className="h-3.5 w-3.5 mr-1.5" />
+                  Withdraw
+                </Button>
               </AlertDescription>
             </Alert>
           )}
@@ -1882,7 +1951,7 @@ export function DocumentEditor({
                 className="text-3xl font-bold leading-tight text-foreground"
                 data-testid="document-editor-title"
               >
-                {title || "Untitled"}
+                {title || (loading ? "Loading…" : "Untitled")}
               </h1>
             ) : (
               // Labeled, outlined title field — required like Content, and
@@ -2104,7 +2173,7 @@ export function DocumentEditor({
                   <div className="flex items-center gap-2">
                     <Input
                       value={tagInput}
-                      onChange={(e) => setTagInput(e.target.value)}
+                      onChange={(e) => setTagInput(clampTagInput(e.target.value))}
                       onKeyDown={(e) => {
                         // Space/comma/Enter all commit (pasted "#one #two" or "tag, tag").
                         if (e.key === "Enter" || e.key === "," || e.key === " ") {
@@ -2532,16 +2601,41 @@ export function DocumentEditor({
                   }
                 }}
               >
-                <label className="block text-sm font-medium mb-1">
-                  {isArtifactDraft
-                    ? "Artifact HTML"
-                    : effectiveType === "tool"
-                      ? "Tool source (code)"
-                      : effectiveType === "table"
-                        ? "Table data (CSV)"
-                        : "Content"}
-                  {canEditContent && <span className="text-destructive"> *</span>}
-                </label>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="block text-sm font-medium">
+                    {isArtifactDraft
+                      ? "Artifact HTML"
+                      : effectiveType === "tool"
+                        ? "Tool source (code)"
+                        : effectiveType === "table"
+                          ? "Table data (CSV)"
+                          : "Content"}
+                    {canEditContent && <span className="text-destructive"> *</span>}
+                  </label>
+                  {/* Rich editor ↔ raw markdown. It belongs on the field it
+                      switches, not buried in the header's ⋮ menu — it is used
+                      while writing, and the label names the mode you get. The
+                      click must not reach the wrapper, which enters edit mode. */}
+                  {!isSourceOnly && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setRawMode((v) => !v);
+                      }}
+                      className="inline-flex items-center gap-1 rounded border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                      title={
+                        rawMode
+                          ? "Back to the rich editor"
+                          : "Edit the raw markdown source"
+                      }
+                      data-testid="document-editor-markdown-toggle"
+                    >
+                      <Code2 className="h-3 w-3" />
+                      {rawMode ? "Rich editor" : "Markdown source"}
+                    </button>
+                  )}
+                </div>
                 {compareVersion != null ? (
                   /* Ever-present inline diff: current vs a chosen past version. */
                   <div data-testid="document-editor-inline-diff">
@@ -2598,22 +2692,46 @@ export function DocumentEditor({
                         );
                       }
                       if (diffRendered) {
+                        // A table's body is CSV: rendered as markdown it
+                        // collapses into one run-on paragraph, so each side
+                        // gets the same grid the reader sees, with the rows
+                        // the other version doesn't have tinted.
+                        const tableSides =
+                          effectiveType === "table"
+                            ? tableDiffSides(past.content || "", content)
+                            : null;
+                        const renderPane = (
+                          side: "past" | "current",
+                          body: string,
+                        ) =>
+                          tableSides ? (
+                            <TableGrid
+                              columns={tableSides[side].columns}
+                              rows={tableSides[side].rows}
+                              rowClassName={(i) =>
+                                tableSides[side].changed[i]
+                                  ? side === "past"
+                                    ? "bg-red-50 dark:bg-red-950/30"
+                                    : "bg-emerald-50 dark:bg-emerald-950/30"
+                                  : ""
+                              }
+                            />
+                          ) : (
+                            <DocumentViewer content={body} className="px-4 py-3" />
+                          );
                         return (
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div className="border rounded-lg overflow-hidden">
                               <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
                                 v{compareVersion}
                               </div>
-                              <DocumentViewer
-                                content={past.content || ""}
-                                className="px-4 py-3"
-                              />
+                              {renderPane("past", past.content || "")}
                             </div>
                             <div className="border rounded-lg overflow-hidden">
                               <div className="bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground border-b">
                                 current (v{versionData?.currentVersion ?? baseVersion ?? "?"})
                               </div>
-                              <DocumentViewer content={content} className="px-4 py-3" />
+                              {renderPane("current", content)}
                             </div>
                           </div>
                         );
@@ -3080,11 +3198,20 @@ export function DocumentEditor({
         <ShareNestDialog
           nestId={nestId}
           nestName={nestName}
+          stewardshipEnabled={stewardshipEnabled}
           onClose={() => setShowShare(false)}
           onChanged={() => {
             /* Sharing changes don't alter this document's content; nothing
                to reload here. The nest list re-reads on next visit. */
           }}
+        />
+      )}
+      {showPublish && (
+        <PublishDialog
+          nestId={nestId}
+          nodeId={nodeId}
+          nodeTitle={title || nodeId}
+          onClose={() => setShowPublish(false)}
         />
       )}
       {leaveIntent && (

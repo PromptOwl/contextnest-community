@@ -9,6 +9,7 @@
 import { Hono } from "hono";
 import type { AuthEnv } from "../auth/middleware.js";
 import { ValidationError, ConflictError } from "../shared/errors.js";
+import { assertSafeNodeId } from "../shared/node-id.js";
 import { requestBaseUrl } from "../shared/base-url.js";
 import { getDb } from "../db/client.js";
 import * as stewardship from "./stewardship-service.js";
@@ -206,6 +207,87 @@ governanceRoutes.get("/review-queue", async (c) => {
   }
 
   return c.json({ ...result, requests });
+});
+
+/**
+ * POST /nests/:nestId/review-queue/bulk — approve or reject several pending
+ * documents in one call.
+ *
+ * A wrapper over the single-document operations, never a parallel one: each
+ * item runs through the same `approve`/`reject` the one-at-a-time flow uses,
+ * so permission resolution, state validation, history and notifications are
+ * identical per document. Partial success is the normal outcome — one item's
+ * refusal (not a steward for it, already resolved, changed since the queue was
+ * loaded) must not roll back or block the rest, so every item is reported.
+ *
+ * Sequential on purpose: these writes land in one vault, and firing them
+ * together would just contend for the same write lock.
+ */
+const BULK_REVIEW_LIMIT = 50;
+
+governanceRoutes.post("/review-queue/bulk", async (c) => {
+  const nestId = c.req.param("nestId")!;
+  const body = await c.req.json<{
+    nodeIds?: string[];
+    action?: "approve" | "reject";
+    note?: string;
+  }>();
+  // Every route that turns a caller-supplied id into a storage read goes
+  // through this chokepoint. The pending-review row lookup would refuse a
+  // traversal id anyway, but that is an implicit guard the next refactor could
+  // lose — the explicit one costs nothing here.
+  const nodeIds = [...new Set(body.nodeIds ?? [])].map(assertSafeNodeId);
+  if (nodeIds.length === 0) {
+    throw new ValidationError("Select at least one document to review");
+  }
+  if (nodeIds.length > BULK_REVIEW_LIMIT) {
+    throw new ValidationError(
+      `Up to ${BULK_REVIEW_LIMIT} documents at a time — you selected ${nodeIds.length}.`,
+    );
+  }
+  if (body.action !== "approve" && body.action !== "reject") {
+    throw new ValidationError("action must be approve or reject");
+  }
+  // Same rule as the single-document route: a rejection says why.
+  if (body.action === "reject" && !body.note) {
+    throw new ValidationError("Rejection note is required");
+  }
+
+  const userEmail = await getUserEmail(c);
+  const baseUrl = requestBaseUrl(c.req.url);
+  const results: Array<{ nodeId: string; ok: boolean; error?: string }> = [];
+  for (const nodeId of nodeIds) {
+    try {
+      if (body.action === "approve") {
+        await reviews.approve({
+          nestId,
+          nodeId,
+          approvedBy: userEmail,
+          note: body.note,
+          override: false,
+          baseUrl,
+        });
+      } else {
+        await reviews.reject({
+          nestId,
+          nodeId,
+          rejectedBy: userEmail,
+          note: body.note!,
+          baseUrl,
+        });
+      }
+      results.push({ nodeId, ok: true });
+    } catch (err: any) {
+      results.push({ nodeId, ok: false, error: err?.message || "Failed" });
+    }
+  }
+  // No override path here: forcing past a refusal is a per-document decision.
+  return c.json({
+    action: body.action,
+    succeeded: results.filter((r) => r.ok).length,
+    failed: results.filter((r) => !r.ok).length,
+    results,
+  });
 });
 
 // ─── Deletion requests ──────────────────────────────────────────────────
@@ -1022,13 +1104,16 @@ governanceNodeRoutes.post("/:nodeId{.+}/cancel-review", async (c) => {
   const nodeId = c.req.param("nodeId")!;
 
   const userEmail = await getUserEmail(c);
-  const request = await reviews.cancelReview({
-    nestId,
-    nodeId,
-    cancelledBy: userEmail,
-  });
-
-  return c.json({ review: request });
+  try {
+    const request = await reviews.cancelReview({
+      nestId,
+      nodeId,
+      cancelledBy: userEmail,
+    });
+    return c.json({ review: request });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 403);
+  }
 });
 
 // ─── Helpers ────────────────────────────────────────────────────────────

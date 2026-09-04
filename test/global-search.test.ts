@@ -106,7 +106,7 @@ describe("GET /search", () => {
       app,
       "PATCH",
       `/nests/${nestB}/visibility`,
-      { visibility: "public" },
+      { visibility: "public", acknowledge_public: true },
       owner.apiKey,
     );
     const direct = await jsonRequest(

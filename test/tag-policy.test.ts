@@ -2,7 +2,7 @@
  * Document tag policy: what the editor accepts, rewrites, or refuses.
  */
 import { describe, it, expect } from "vitest";
-import { normalizeTagInput, newTags, MAX_TAG_LENGTH } from "../ui/src/lib/tag-policy";
+import { normalizeTagInput, newTags, clampTagInput, tagKey, MAX_TAG_LENGTH } from "../ui/src/lib/tag-policy";
 
 describe("normalizeTagInput", () => {
   it("keeps a plain tag and strips a leading #", () => {
@@ -39,6 +39,7 @@ describe("normalizeTagInput", () => {
 
 describe("newTags", () => {
   it("drops a candidate already present in any casing", () => {
+    expect(newTags(["#bug"], ["bug"])).toEqual([]);
     expect(newTags(["Bug", "api"], ["bug", "v2"])).toEqual(["v2"]);
   });
 
@@ -48,5 +49,39 @@ describe("newTags", () => {
 
   it("keeps everything when nothing collides", () => {
     expect(newTags(["api"], ["v2", "infra"])).toEqual(["v2", "infra"]);
+  });
+});
+
+describe("clampTagInput", () => {
+  it("trims a single over-long tag to the tag limit", () => {
+    const long = "a".repeat(MAX_TAG_LENGTH + 30);
+    expect(clampTagInput(long)).toHaveLength(MAX_TAG_LENGTH);
+  });
+
+  it("keeps a multi-tag paste whole, capping each token", () => {
+    const long = "b".repeat(MAX_TAG_LENGTH + 5);
+    expect(clampTagInput(`api, v2 ${long}`)).toBe(
+      `api, v2 ${"b".repeat(MAX_TAG_LENGTH)}`,
+    );
+  });
+
+  it("does not count a leading # against the limit", () => {
+    const tag = "c".repeat(MAX_TAG_LENGTH);
+    expect(clampTagInput(`#${tag}`)).toBe(`#${tag}`);
+  });
+
+  it("leaves a short input untouched", () => {
+    expect(clampTagInput("api, v2 ")).toBe("api, v2 ");
+  });
+});
+
+describe("tagKey", () => {
+  it("keys a legacy '#bug' the same as a freshly typed 'bug'", () => {
+    expect(tagKey("#bug")).toBe(tagKey("bug"));
+    expect(tagKey("#Bug")).toBe("bug");
+  });
+
+  it("keeps an unusable value as its own key rather than dropping it", () => {
+    expect(tagKey("!!!")).toBe("!!!");
   });
 });

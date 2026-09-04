@@ -78,3 +78,40 @@ describe("buildFolderTree with lazily-loaded folders", () => {
     expect(tree.docs.map((d) => d.id)).toEqual(["nodes/loose"]);
   });
 });
+
+/**
+ * Filtered lists drop the `known` seed (the whole nest is already loaded), so
+ * the tree shows only what matched — and shows it compactly.
+ */
+describe("buildFolderTree for a filtered list", () => {
+  it("omits folders holding no match", () => {
+    const tree = buildFolderTree([
+      { folder: "eng/api", items: [doc("nodes/eng/api/x")] },
+    ]);
+    // No row for gtm, personal, or any other folder in the nest.
+    expect(rows(tree).map((r) => r.split("@")[0])).toEqual(["eng/api"]);
+  });
+
+  it("folds a chain of single-child folders into one labelled row", () => {
+    const tree = buildFolderTree([
+      { folder: "content/drafts/blog", items: [doc("nodes/content/drafts/blog/p")] },
+    ]);
+    expect(tree.children).toHaveLength(1);
+    expect(tree.children[0].label).toBe("Content / Drafts / Blog");
+    expect(tree.children[0].depth).toBe(0);
+    expect(tree.children[0].docs).toHaveLength(1);
+  });
+
+  it("keeps a branching folder as its own row", () => {
+    // Two children means no chain to fold — each keeps a row of its own.
+    const tree = buildFolderTree([
+      { folder: "content/drafts", items: [doc("nodes/content/drafts/a")] },
+      { folder: "content/published", items: [doc("nodes/content/published/b")] },
+    ]);
+    expect(tree.children.map((c) => c.label)).toEqual(["Content"]);
+    expect(tree.children[0].children.map((c) => c.label)).toEqual([
+      "Drafts",
+      "Published",
+    ]);
+  });
+});

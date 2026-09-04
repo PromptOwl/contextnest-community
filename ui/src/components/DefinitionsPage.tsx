@@ -128,10 +128,16 @@ export function DefinitionsPage({ nestId, nestName, onBack }: Props) {
     }
     setSaving(true);
     try {
+      // linked_tag: the server leaves it unchanged when the key is omitted and
+      // clears it on an explicit null. In edit mode the field is prefilled, so
+      // an empty box means "remove this tag". In the add form it was never
+      // filled in, so an empty box means "I didn't say" — omitting it keeps the
+      // tag a replaced definition already had instead of silently dropping it.
+      const tag = linkedTag.trim();
       await api.upsertDefinition(nestId, {
         term: term.trim(),
         definition: definition.trim(),
-        linked_tag: linkedTag.trim() || null,
+        ...(tag || editingId ? { linked_tag: tag || null } : {}),
         // Scope the write to the opened row so a rename replaces it in place
         // (server 409s if the new term already belongs to another row).
         ...(editingId ? { editing_id: editingId } : {}),

@@ -6,8 +6,12 @@
  * Two modes: given a `nestId` it searches that nest (and lists its documents
  * on an empty query); without one it searches every nest the caller can see
  * and each row names the nest it came from.
+ *
+ * The mode is stated in the header and switchable from inside a nest
+ * (CU-wdqcq0042v) — the same palette silently changing scope with the page
+ * made "No matches" read as "that document does not exist".
  */
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Database, FileText, Loader2, Search } from "lucide-react";
 import * as api from "../lib/api";
 import { useQueryClient } from "@tanstack/react-query";
@@ -63,15 +67,46 @@ function highlight(text: string, query: string) {
     );
 }
 
+function ScopeTab({
+  active,
+  onClick,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`max-w-[16rem] truncate rounded px-1.5 py-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+        active
+          ? "bg-muted font-medium text-foreground"
+          : "hover:bg-muted/60"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
 interface QuickOpenProps {
   /** Omit to search across every nest the caller can see. */
   nestId?: string;
+  /** Names the current nest on its rows, so a pick from either scope carries
+   *  the nest it belongs to. */
+  nestName?: string;
   onSelect: (id: string, result: QuickOpenResult) => void;
   onClose: () => void;
 }
 
-export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
+export function QuickOpen({ nestId, nestName, onSelect, onClose }: QuickOpenProps) {
   const [query, setQuery] = useState("");
+  // Inside a nest the palette starts scoped to it and can widen; on the
+  // dashboard there is nothing to scope to, so it is always all-nests.
+  const [allNests, setAllNests] = useState(false);
   const [results, setResults] = useState<QuickOpenResult[]>([]);
   const [selected, setSelected] = useState(0);
   const [searching, setSearching] = useState(false);
@@ -81,7 +116,7 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const qc = useQueryClient();
-  const global = !nestId;
+  const global = !nestId || allNests;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -138,9 +173,14 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
             : await qc.fetchQuery(reads.nodes(nestId!));
           setTotalDocs(data.nodes.length);
           setResults(
-            (data.nodes as QuickOpenResult[])
-              .slice(0, DOC_ROWS)
-              .map((n) => ({ ...n, kind: "node" as const })),
+            (data.nodes as QuickOpenResult[]).slice(0, DOC_ROWS).map((n) => ({
+              ...n,
+              kind: "node" as const,
+              // Stamp the nest so a picked row carries it either way — the
+              // caller opens both scopes through one handler.
+              nest_id: n.nest_id ?? nestId,
+              nest_name: n.nest_name ?? nestName,
+            })),
           );
         }
         setSelected(0);
@@ -154,7 +194,7 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
     return () => {
       if (debounce.current) clearTimeout(debounce.current);
     };
-  }, [nestId, global, query, qc]);
+  }, [nestId, nestName, global, query, qc]);
 
   const pick = (i: number) => {
     const r = results[i];
@@ -171,6 +211,11 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
       <div
         className="w-full max-w-lg rounded-lg border bg-background shadow-xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
+        // Esc closes from anywhere in the palette, not only from the input —
+        // focus may be sitting on a scope tab.
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onClose();
+        }}
       >
         <div className="flex items-center gap-2 border-b px-3">
           {searching ? (
@@ -184,6 +229,17 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape") onClose();
+              // Tab flips the scope instead of leaving the field: the palette
+              // is keyboard-first and has one input, so there is nothing else
+              // worth tabbing to, and reaching for the mouse to widen a search
+              // broke the flow (CU-wdqcq012uu). The tabs stay focusable too.
+              // Either direction: the input is the palette's first focusable
+              // element, so letting Shift+Tab through moved focus to the page
+              // behind an open modal.
+              if (e.key === "Tab" && nestId) {
+                e.preventDefault();
+                setAllNests((v) => !v);
+              }
               if (e.key === "ArrowDown") {
                 e.preventDefault();
                 setSelected((s) => Math.min(s + 1, results.length - 1));
@@ -207,6 +263,27 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
           />
           <kbd className="text-[10px] text-muted-foreground border rounded px-1">esc</kbd>
         </div>
+        {/* Scope is stated, not inferred from where the palette was opened. */}
+        <div className="flex items-center gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground">
+          <span>Searching</span>
+          {nestId ? (
+            <div className="flex items-center gap-1">
+              <ScopeTab
+                active={!allNests}
+                onClick={() => setAllNests(false)}
+                label={nestName ? `This nest — ${nestName}` : "This nest"}
+              />
+              <ScopeTab
+                active={allNests}
+                onClick={() => setAllNests(true)}
+                label="All nests"
+              />
+              <kbd className="rounded border px-1 text-[10px]">tab</kbd>
+            </div>
+          ) : (
+            <span className="font-medium text-foreground">all nests</span>
+          )}
+        </div>
         <div className="max-h-72 overflow-y-auto py-1">
           {results.length === 0 ? (
             <div className="px-4 py-6 text-center text-sm text-muted-foreground">
@@ -214,12 +291,37 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
                 ? "Searching…"
                 : global && !query.trim()
                   ? "Type to search nests and documents"
-                  : "No matches"}
+                  : !global && query.trim() ? (
+                    // A scoped miss is not "it doesn't exist" — name the nest
+                    // that was searched and offer the wider one right here,
+                    // where the dead end is (CU-wdqcq012ut).
+                    <>
+                      No matches in {nestName ?? "this nest"}.{" "}
+                      <button
+                        type="button"
+                        onClick={() => setAllNests(true)}
+                        className="font-medium text-foreground underline underline-offset-2 hover:no-underline"
+                        data-testid="quick-open-widen-scope"
+                      >
+                        Search all nests
+                      </button>
+                    </>
+                  ) : (
+                    "No matches"
+                  )}
             </div>
           ) : (
             results.map((r, i) => (
+              <Fragment key={`${r.kind}:${r.nest_id ?? ""}${r.id}`}>
+                {/* Results arrive nests-first, so a header before each run
+                    labels the two kinds without reordering or re-indexing
+                    anything the keyboard selection depends on. */}
+                {r.kind !== results[i - 1]?.kind && (
+                  <div className="px-3 pb-0.5 pt-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {r.kind === "nest" ? "Nests" : "Documents"}
+                  </div>
+                )}
               <button
-                key={`${r.kind}:${r.nest_id ?? ""}${r.id}`}
                 type="button"
                 className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm ${
                   i === selected ? "bg-muted" : "hover:bg-muted/50"
@@ -242,7 +344,7 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
                       <span className="ml-auto text-xs text-muted-foreground shrink-0">
                         Nest
                       </span>
-                    ) : r.nest_name ? (
+                    ) : global && r.nest_name ? (
                       <span className="ml-auto truncate text-xs text-muted-foreground shrink-0">
                         {r.nest_name}
                       </span>
@@ -265,6 +367,7 @@ export function QuickOpen({ nestId, onSelect, onClose }: QuickOpenProps) {
                   )}
                 </div>
               </button>
+              </Fragment>
             ))
           )}
         </div>

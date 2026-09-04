@@ -49,7 +49,7 @@ beforeAll(async () => {
   privateNest = priv.data.nest.id;
   const pub = await jsonRequest(app, "POST", "/nests", { name: "Public" }, owner.apiKey);
   publicNest = pub.data.nest.id;
-  await jsonRequest(app, "PATCH", `/nests/${publicNest}/visibility`, { visibility: "public" }, owner.apiKey);
+  await jsonRequest(app, "PATCH", `/nests/${publicNest}/visibility`, { visibility: "public", acknowledge_public: true }, owner.apiKey);
 
   await jsonRequest(app, "POST", `/nests/${privateNest}/nodes`, { title: "Doc One", content: "# one" }, owner.apiKey);
   await jsonRequest(

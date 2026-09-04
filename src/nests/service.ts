@@ -33,6 +33,26 @@ export async function isImportedNest(nestId: string): Promise<boolean> {
   return !!row?.is_imported;
 }
 
+/**
+ * Nest names are plain text. Strip tag-shaped markup before it is stored so no
+ * downstream surface that renders unescaped (exports, email) inherits it.
+ *
+ * A name that was nothing but markup strips to "" — reporting that as an empty
+ * name is confusing, since the user did type something, so it gets its own
+ * message naming the actual problem.
+ */
+function plainName(name: string, emptyMessage = "Name cannot be empty"): string {
+  const typed = (name ?? "").trim();
+  if (!typed) throw new ValidationError(emptyMessage);
+  const stripped = typed.replace(/<[^>]*>/g, "").trim();
+  if (!stripped) {
+    throw new ValidationError(
+      "That's not a valid nest name — it's only HTML markup. Use plain text.",
+    );
+  }
+  return stripped;
+}
+
 function toSlug(name: string): string {
   return name
     .toLowerCase()
@@ -90,6 +110,32 @@ export async function setStewardshipEnabled(
     enabled ? 1 : 0,
     nestId,
   ]);
+}
+
+
+/**
+ * Configure Public Docs Reader Mode for a nest (superadmin-only). Either field
+ * may be updated independently; `enabled` toggles the read-only public view and
+ * `homeNode` designates (or clears, with null) the landing/hub node.
+ */
+export async function setReaderMode(
+  nestId: string,
+  opts: { enabled?: boolean; homeNode?: string | null },
+): Promise<void> {
+  const db = getDb();
+  const sets: string[] = [];
+  const params: Array<string | number | null> = [];
+  if (opts.enabled !== undefined) {
+    sets.push("reader_mode = ?");
+    params.push(opts.enabled ? 1 : 0);
+  }
+  if (opts.homeNode !== undefined) {
+    sets.push("reader_home_node = ?");
+    params.push(opts.homeNode ?? null);
+  }
+  if (sets.length === 0) return;
+  params.push(nestId);
+  await db.run(`UPDATE nests SET ${sets.join(", ")} WHERE id = ?`, params);
 }
 
 /** Whether the nest lets a submitter approve their own version (bypass SoD). */
@@ -248,8 +294,7 @@ export async function renameNest(
   const params: any[] = [];
 
   if (patch.name !== undefined) {
-    const trimmed = patch.name.trim();
-    if (!trimmed) throw new ValidationError("Name cannot be empty");
+    const trimmed = plainName(patch.name);
     const slug = toSlug(trimmed);
     if (!slug) throw new ValidationError("Name must contain at least one alphanumeric character");
     const conflict = (await db.get(
@@ -291,8 +336,7 @@ export async function createNest(
   const id = uuid();
   const db = getDb();
 
-  const trimmed = name.trim();
-  if (!trimmed) throw new ValidationError("Name cannot be empty");
+  const trimmed = plainName(name);
   const slug = toSlug(trimmed);
   if (!slug) {
     throw new ValidationError(
@@ -349,10 +393,7 @@ export async function createNest(
  * nest lists as real with silently missing documents.
  */
 export async function importNest(userId: string, name: string): Promise<Nest> {
-  const nm = (name || "").trim();
-  if (!nm) {
-    throw new ValidationError("name is required");
-  }
+  const nm = plainName(name || "", "name is required");
 
   const db = getDb();
   const id = uuid();

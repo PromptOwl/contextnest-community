@@ -15,7 +15,7 @@
  * /visibility paths require "admin" — see src/app.ts). Non-admins who
  * reach this dialog get a friendly error rather than a silent no-op.
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -25,15 +25,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Tabs, TabsContent, TabsList, TabsTrigger,
 } from "@/components/ui/tabs";
-import { Globe, Lock, Users, Loader2, AlertCircle } from "lucide-react";
-import * as api from "../lib/api";
+import { Users, AlertCircle } from "lucide-react";
 import { CollaboratorManager } from "./CollaboratorManager";
+import { NestVisibilityControl } from "./NestVisibilityControl";
 import { TeamShareManager } from "./TeamShareManager";
 import { useAuth } from "../auth/AuthContext";
 
@@ -43,6 +41,11 @@ interface ShareNestDialogProps {
   onClose: () => void;
   /** Fired after any change so the parent can refresh its nest/list state. */
   onChanged: () => void;
+  /** Whether the nest runs the stewardship workflow. Stewards can only be
+   *  assigned when it does, so pointing at them otherwise sends the reader
+   *  looking for a tab that isn't rendered. Passed in — the caller already
+   *  holds the nest settings, and this dialog need not fetch them again. */
+  stewardshipEnabled?: boolean;
 }
 
 export function ShareNestDialog({
@@ -50,49 +53,11 @@ export function ShareNestDialog({
   nestName,
   onClose,
   onChanged,
+  stewardshipEnabled = false,
 }: ShareNestDialogProps) {
   const { adminStatus } = useAuth();
   const currentEmail = adminStatus?.me?.email?.toLowerCase() ?? "";
-  const [isPublic, setIsPublic] = useState(false);
-  const [visibilitySaving, setVisibilitySaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    // Read current visibility straight from the server so the toggle
-    // reflects truth without the parent having to thread it through.
-    api
-      .getNest(nestId)
-      .then((res) => setIsPublic(res.nest?.visibility === "public"))
-      .catch(() => {
-        /* leave default; CollaboratorManager surfaces any real error */
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nestId]);
-
-  const handleVisibilityToggle = async (next: boolean) => {
-    // Optimistic flip; revert on failure so the switch never lies about
-    // server state (same pattern as NestSettingsModal's stewardship save).
-    setIsPublic(next);
-    setVisibilitySaving(true);
-    setError(null);
-    try {
-      const result = await api.setNestVisibility(
-        nestId,
-        next ? "public" : "private",
-      );
-      if ((result.visibility === "public") !== next) {
-        setIsPublic(!next);
-        setError("Server did not accept the change. You may not have admin access to this nest.");
-        return;
-      }
-      onChanged();
-    } catch (err: any) {
-      setIsPublic(!next);
-      setError(err?.message || "Failed to change visibility");
-    } finally {
-      setVisibilitySaving(false);
-    }
-  };
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -104,9 +69,15 @@ export function ShareNestDialog({
           </DialogTitle>
           <DialogDescription>
             Sharing applies to the <strong>whole nest</strong> — every
-            document in it. To restrict who can touch an individual document,
-            assign stewards instead. Sharing grants plain access; it does not
-            make anyone a steward.
+            document in it. Sharing grants plain access; it does not make
+            anyone a steward.{" "}
+            {stewardshipEnabled ? (
+              <>To restrict who can touch an individual document, assign
+              stewards on the nest's Stewards tab instead.</>
+            ) : (
+              <>Per-document control comes from stewards, which need
+              Stewardship &amp; Approval Workflow turned on in Nest settings.</>
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -118,37 +89,12 @@ export function ShareNestDialog({
             </Alert>
           )}
 
-          {/* Visibility */}
-          <div className="rounded-lg border p-4 space-y-3">
-            <div className="flex items-start justify-between gap-4">
-              <div className="space-y-1">
-                <Label className="flex items-center gap-2 text-sm font-medium">
-                  {isPublic ? (
-                    <Globe className="h-4 w-4 text-green-600" />
-                  ) : (
-                    <Lock className="h-4 w-4" />
-                  )}
-                  {isPublic ? "Public" : "Private"}
-                </Label>
-                <p className="text-xs text-muted-foreground">
-                  {isPublic
-                    ? "Anyone on this server can read this nest. Editing still requires being added below."
-                    : "Only people added below (and the owner) can see this nest."}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                {visibilitySaving && (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                )}
-                <Switch
-                  checked={isPublic}
-                  onCheckedChange={handleVisibilityToggle}
-                  disabled={visibilitySaving}
-                  aria-label="Toggle public visibility"
-                />
-              </div>
-            </div>
-          </div>
+          {/* Visibility — same control the Collaborators tab renders. */}
+          <NestVisibilityControl
+            nestId={nestId}
+            onChanged={onChanged}
+            onError={setError}
+          />
 
           {/* People and Teams split into tabs so the dialog stays short no
               matter how many collaborators or teams a nest has. Only the
