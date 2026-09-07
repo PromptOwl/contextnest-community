@@ -285,3 +285,56 @@ describe("discarding after several draft saves", () => {
     expect(after.data.node.content).not.toContain("draft edit 3");
   });
 });
+
+/**
+ * The subtle path: a rejected draft that is edited again while its review was
+ * repointed, then resubmitted and approved.
+ *
+ * Under the no-seal-until-submit rule the repointed version is unsealed, so
+ * each submission is what puts a version in the chain — and a resubmission with
+ * no edit in between must not append the same number twice.
+ */
+describe("reject → re-edit → re-submit → approve", () => {
+  it("seals each submitted version once and approves the edited content", async () => {
+    const nodeId = await createDoc("Bounced Doc", "# b\n\nfirst try");
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${nodeId}/submit-review`, {}, editor.apiKey);
+    const sealedAtFirstSubmit = await chainVersions(nodeId);
+    expect(sealedAtFirstSubmit).toHaveLength(1);
+
+    const reject = await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes/${nodeId}/reject`,
+      { note: "needs work" },
+      owner.apiKey,
+    );
+    expect(reject.status).toBe(200);
+
+    // Resubmitting with NO edit must not append the same version again.
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${nodeId}/submit-review`, {}, editor.apiKey);
+    expect(await chainVersions(nodeId)).toEqual(sealedAtFirstSubmit);
+
+    // Author revises their own pending submission — repointPendingReview moves
+    // the open review onto the new draft, which is NOT sealed yet.
+    const edit = await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/${nodeId}`,
+      { content: "# b\n\nsecond try" },
+      editor.apiKey,
+    );
+    expect(edit.status).toBe(200);
+    expect(await chainVersions(nodeId)).toEqual(sealedAtFirstSubmit);
+
+    const approve = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${nodeId}/approve`, {}, owner.apiKey);
+    expect(approve.status).toBe(200);
+
+    // The edited content is what got approved, and the chain grew — no
+    // duplicate version numbers anywhere in it.
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${nodeId}`, undefined, editor.apiKey);
+    expect(after.data.node.content).toContain("second try");
+    const sealed = await chainVersions(nodeId);
+    expect(sealed.length).toBeGreaterThan(sealedAtFirstSubmit.length);
+    expect(new Set(sealed).size).toBe(sealed.length);
+  });
+});
