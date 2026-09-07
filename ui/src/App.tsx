@@ -1383,9 +1383,16 @@ export default function App() {
         )}
       </main>
 
-      <footer className={`${shellWidth} mx-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
-        ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
-      </footer>
+      {/* Hidden on the document page: its editor ends in a sticky action bar,
+          and anything rendered after <main> sits BELOW that bar's containing
+          block — so the version line held Save and Discard off the bottom of
+          the window at full scroll. The build version is a footnote; a write
+          action reaching the edge of the screen is not. */}
+      {view.page !== "document" && (
+        <footer className={`${shellWidth} mx-auto px-4 py-4 text-xs text-muted-foreground text-center`}>
+          ContextNest Community{serverVersion ? ` v${serverVersion}` : ""}
+        </footer>
+      )}
 
       {showAdminLogin && (
         <AdminLoginModal
