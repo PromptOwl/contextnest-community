@@ -709,6 +709,23 @@ export const useNodes = (nestId: string | undefined) =>
   useQuery({ ...reads.nodes(nestId ?? ""), enabled: !!nestId });
 export const useCollaborators = (nestId: string | undefined) =>
   useQuery({ ...reads.collaborators(nestId ?? ""), enabled: !!nestId });
+// The three reads that decide what a caller may do to a document. Subscribed,
+// not fetched once: a steward assignment, a collaborator change or a
+// stewardship toggle already invalidates these (see invalidateForPath), and a
+// screen that snapshotted them into state would keep showing the permissions
+// the caller had when it mounted.
+export const useNestMeta = (nestId: string | undefined) =>
+  useQuery({ ...reads.nest(nestId ?? ""), enabled: !!nestId });
+export const useNestSettings = (nestId: string | undefined) =>
+  useQuery({ ...reads.settings(nestId ?? ""), enabled: !!nestId });
+export const useNodeStewards = (
+  nestId: string | undefined,
+  nodeId: string | undefined,
+) =>
+  useQuery({
+    ...reads.nodeStewards(nestId ?? "", nodeId ?? ""),
+    enabled: !!nestId && !!nodeId,
+  });
 export const useTeams = () => useQuery(reads.teamList());
 export const useTeam = (teamId: string | undefined) =>
   useQuery({ ...reads.team(teamId ?? ""), enabled: !!teamId });
