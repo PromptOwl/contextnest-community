@@ -14,6 +14,31 @@ import { listNestPeople } from "../nests/people-service.js";
 import { newMentions, resolveMention } from "../shared/mentions.js";
 import { describeNode } from "./title-resolver.js";
 import { canReadNode } from "./access-guard.js";
+import { resolveNestAccess } from "../shared/access.js";
+import { resolveNodeGrant } from "./grants-service.js";
+
+/**
+ * Can this person open this document at all?
+ *
+ * canReadNode is an open read on a nest without stewardship, which is right
+ * for a member but wrong for someone whose only way in is a share grant: their
+ * scoping lives in the request middleware (resolveNodeGrant per node), not in
+ * that helper. So a grant holder is checked against their grants directly —
+ * otherwise a mention would announce a document, and its title, to someone
+ * granted a different one.
+ */
+async function canOpenNode(
+  nestId: string,
+  nodeId: string,
+  userId: string,
+  email: string,
+): Promise<boolean> {
+  const access = await resolveNestAccess(nestId, userId);
+  if (access.permission === "none") {
+    return (await resolveNodeGrant(nestId, userId, nodeId)) !== null;
+  }
+  return canReadNode(nestId, nodeId, userId, email);
+}
 
 /**
  * Drop an inbox row for everyone newly mentioned in a document body.
@@ -58,7 +83,7 @@ export async function notifyMentions(params: {
     const db = getDb();
     let created = 0;
     for (const { email, userId } of recipients.values()) {
-      if (!(await canReadNode(nestId, nodeId, userId, email))) continue;
+      if (!(await canOpenNode(nestId, nodeId, userId, email))) continue;
       await db.run(
         `INSERT INTO notifications (id, nest_id, user_email, kind, subject_id, message, created_at)
          VALUES (?, ?, ?, 'mention', ?, ?, ?)`,

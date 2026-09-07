@@ -52,6 +52,13 @@ export interface MentionablePerson {
  * The person an `@name` refers to, or undefined when it names nobody. Accepts
  * the full email, its local part, or the display name — the three forms the
  * editor's picker and its unresolved styling recognize.
+ *
+ * A full email is unique, so it always wins. A local part or display name is
+ * not: two collaborators can be `john@acme.com` and `john@other.com`, and
+ * picking whichever came first would notify the wrong John with nothing to
+ * show for it. An ambiguous name resolves to nobody, which the editor already
+ * draws as unresolved — the writer sees the mention didn't land and can write
+ * the full address (what the picker inserts anyway).
  */
 export function resolveMention<T extends MentionablePerson>(
   people: T[],
@@ -59,10 +66,12 @@ export function resolveMention<T extends MentionablePerson>(
 ): T | undefined {
   const n = name.trim().toLowerCase();
   if (!n) return undefined;
-  return people.find((p) => {
-    const email = p.email.toLowerCase();
-    return (
-      email === n || email.split("@")[0] === n || (p.name || "").toLowerCase() === n
-    );
-  });
+  const exact = people.find((p) => p.email.toLowerCase() === n);
+  if (exact) return exact;
+  const matches = people.filter(
+    (p) =>
+      p.email.toLowerCase().split("@")[0] === n ||
+      (p.name || "").toLowerCase() === n,
+  );
+  return matches.length === 1 ? matches[0] : undefined;
 }

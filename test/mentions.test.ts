@@ -40,6 +40,14 @@ describe("mention parsing", () => {
     expect(resolveMention(people, "Grace Hopper")?.email).toBe("grace@acme.com");
     expect(resolveMention(people, "Editor")).toBeUndefined();
   });
+
+  it("resolves a local part shared by two people to neither", () => {
+    const people = [{ email: "john@acme.com" }, { email: "john@other.com" }];
+    // Guessing one of them would notify the wrong John, silently.
+    expect(resolveMention(people, "john")).toBeUndefined();
+    // The full address is unambiguous and still resolves.
+    expect(resolveMention(people, "john@other.com")?.email).toBe("john@other.com");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -127,6 +135,56 @@ describe("mention notifications", () => {
       owner.apiKey,
     );
     expect((await inbox(editor)).filter((n) => n.kind === "mention")).toHaveLength(1);
+  });
+
+  it("stays quiet for someone granted a different document", async () => {
+    // A grantee is on the nest's people (they can be mentioned in what they
+    // were shared) but must never learn a document exists from a mention of
+    // them in it. Their scoping lives in the request middleware, so this is
+    // the one recipient canReadNode alone would wave through.
+    const guest = await registerUser(app, "guest@acme.com", "Guest");
+    await resetAuthRateLimit();
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/nodes`,
+      { title: "Shared With Guest", content: "for the guest" },
+      owner.apiKey,
+    );
+    await jsonRequest(
+      app,
+      "POST",
+      `/nests/${nestId}/grants`,
+      {
+        target_type: "document",
+        target: "nodes/shared-with-guest",
+        email: "guest@acme.com",
+        role: "read",
+      },
+      owner.apiKey,
+    );
+
+    // Mentioned in a document they hold no grant on → nothing.
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/nodes/ghosts`,
+      { content: "cc @guest@acme.com" },
+      owner.apiKey,
+    );
+    expect((await inbox(guest)).filter((n) => n.kind === "mention")).toHaveLength(0);
+
+    // Mentioned in the document they were granted → notified.
+    await jsonRequest(
+      app,
+      "PATCH",
+      `/nests/${nestId}/nodes/nodes/shared-with-guest`,
+      { content: "cc @guest@acme.com" },
+      owner.apiKey,
+    );
+    const rows = (await inbox(guest)).filter((n) => n.kind === "mention");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].node_id).toBe("nodes/shared-with-guest");
   });
 
   it("notifies the newly named person, and never the author", async () => {

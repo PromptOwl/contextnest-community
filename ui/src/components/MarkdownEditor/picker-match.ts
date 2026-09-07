@@ -66,10 +66,14 @@ export function matchMembers<T extends MentionMember>(
 }
 
 /**
- * Does an `@name` written in the document resolve to a real member? Accepts
+ * Does an `@name` written in the document resolve to ONE real member? Accepts
  * the full email, its local part, or the display name (`@(Name With Spaces)`).
  * Used to style unresolved mentions differently instead of passing off any
  * typed text as a valid mention.
+ *
+ * A bare local part shared by two people (`john@acme.com`, `john@other.com`)
+ * names neither, and the server won't notify on it — so it styles as
+ * unresolved here too, rather than promising a delivery that never happens.
  */
 export function isMemberName(
   members: MentionMember[],
@@ -77,5 +81,8 @@ export function isMemberName(
 ): boolean {
   const n = name.trim().toLowerCase();
   if (!n) return false;
-  return members.some((m) => candidates(m).includes(n));
+  if (members.some((m) => m.email.toLowerCase() === n)) return true;
+  return (
+    members.filter((m) => candidates(m).includes(n)).length === 1
+  );
 }

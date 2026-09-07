@@ -200,4 +200,3 @@ export async function addCollaborator(params: {
     [collabId],
   )) as NestCollaborator;
 }
-

@@ -69,3 +69,16 @@ describe("isMemberName", () => {
     expect(isMemberName(members, "")).toBe(false);
   });
 });
+
+describe("ambiguous names", () => {
+  const johns = [{ email: "john@acme.com" }, { email: "john@other.com" }];
+
+  it("treats a local part two people share as unresolved", () => {
+    expect(isMemberName(johns, "john")).toBe(false);
+    expect(isMemberName(johns, "john@acme.com")).toBe(true);
+  });
+
+  it("still offers both in the picker, where the writer chooses", () => {
+    expect(matchMembers(johns, "john")).toHaveLength(2);
+  });
+});
