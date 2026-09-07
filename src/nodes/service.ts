@@ -39,6 +39,7 @@ import {
 } from "../nests/service.js";
 import { isPrimeDocument, documentPrimeFlag } from "../governance/prime-service.js";
 import { getPendingReview, repointPendingReview } from "../governance/review-service.js";
+import { notifyMentions } from "../governance/mention-notify.js";
 import { resolveUserRoles } from "../governance/stewardship-service.js";
 import { canApproveWith } from "../governance/roles.js";
 import {
@@ -1495,6 +1496,14 @@ async function createNodeOnce(
     }
 
     await trackEvent("node.create", { nestId, nodeId: id });
+    // Everything a new document mentions is new.
+    await notifyMentions({
+      nestId,
+      nodeId: id,
+      previousBody: "",
+      nextBody: node.body || "",
+      actorEmail: userEmail,
+    });
     return { node, version: savedVersion };
   });
 }
@@ -1712,6 +1721,9 @@ export async function updateNode(
       } catch {
         throw new NotFoundError(`Node not found: ${nodeId}`);
       }
+      // Kept for the mention fan-out at the end: only names this save ADDS
+      // notify, so the same @name surviving many saves is one event.
+      const previousBody = node.body || "";
 
       // Assemble the op's input alongside a local projection of the patched
       // node. The projection is what governance reads (auto-publish gate, tag
@@ -1925,6 +1937,16 @@ export async function updateNode(
         );
         responseVersion = publishedVersion;
       }
+
+      // Awaited, like the other inbox fan-outs: it swallows its own failures,
+      // and a local insert is cheaper than a save that returns before it lands.
+      await notifyMentions({
+        nestId,
+        nodeId,
+        previousBody,
+        nextBody: node.body || "",
+        actorEmail: userEmail,
+      });
 
       return { node, version: responseVersion };
     } catch (err) {

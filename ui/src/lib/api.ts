@@ -1783,7 +1783,17 @@ export async function revokePublication(nestId: string, publishId: string) {
 // ─── Sharing ────────────────────────────────────────────────────────────
 
 export async function listCollaborators(nestId: string) {
-  return request<{ collaborators: any[] }>(`/nests/${nestId}/collaborators`);
+  // `collaborators` is the manageable roster; `people` is everyone who can
+  // reach the nest (owner, shared teams, stewards, grant holders included) —
+  // what the editor's @mention picker offers and validates against.
+  return request<{
+    collaborators: any[];
+    people?: Array<{
+      email: string;
+      name: string | null;
+      source: "owner" | "collaborator" | "team" | "steward" | "grant";
+    }>;
+  }>(`/nests/${nestId}/collaborators`);
 }
 
 export async function addCollaborator(
