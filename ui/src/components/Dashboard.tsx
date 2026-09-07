@@ -1097,24 +1097,41 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                 aria-label="Search your drafts"
                 data-testid="drafts-search"
               />
-              <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                <span className="mr-1">Sort</span>
-                <Button
-                  size="sm"
-                  variant={draftSort === "updated" ? "secondary" : "ghost"}
-                  className="h-7 px-2"
-                  onClick={() => setDraftSort("updated")}
+              {/* Segmented control, not three look-alike words. The label is
+                  muted and carries its colon; both options sit inside one
+                  bordered group so each reads as a control whether or not it is
+                  the selected one, and the selection is the filled pill. */}
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-muted-foreground">
+                  Sort:
+                </span>
+                <div
+                  className="inline-flex items-center rounded-md border bg-muted/40 p-0.5"
+                  role="group"
+                  aria-label="Sort drafts"
                 >
-                  Recently edited
-                </Button>
-                <Button
-                  size="sm"
-                  variant={draftSort === "title" ? "secondary" : "ghost"}
-                  className="h-7 px-2"
-                  onClick={() => setDraftSort("title")}
-                >
-                  Title
-                </Button>
+                  {(
+                    [
+                      ["updated", "Recently edited"],
+                      ["title", "Title"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={draftSort === value}
+                      onClick={() => setDraftSort(value)}
+                      className={`h-6 rounded px-2 text-xs transition-colors ${
+                        draftSort === value
+                          ? "bg-background font-medium text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      data-testid={`drafts-sort-${value}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
             {draftsLoading ? (
