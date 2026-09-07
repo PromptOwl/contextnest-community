@@ -258,3 +258,30 @@ describe("My Drafts search and sort", () => {
     ]);
   });
 });
+
+describe("discarding after several draft saves", () => {
+  it("serves the approved body on the next read, not the last draft", async () => {
+    const nodeId = await createDoc("Multi Save Doc", "# m\n\napproved body");
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${nodeId}/submit-review`, {}, editor.apiKey);
+    await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${nodeId}/approve`, {}, owner.apiKey);
+
+    for (const n of [1, 2, 3]) {
+      const r = await jsonRequest(
+        app,
+        "PATCH",
+        `/nests/${nestId}/nodes/${nodeId}`,
+        { content: `# m\n\ndraft edit ${n}` },
+        editor.apiKey,
+      );
+      expect(r.status).toBe(200);
+    }
+
+    const discard = await jsonRequest(app, "POST", `/nests/${nestId}/nodes/${nodeId}/discard`, {}, editor.apiKey);
+    expect(discard.status).toBe(200);
+    expect(discard.data.deleted).toBe(false);
+
+    const after = await jsonRequest(app, "GET", `/nests/${nestId}/nodes/${nodeId}`, undefined, editor.apiKey);
+    expect(after.data.node.content).toContain("approved body");
+    expect(after.data.node.content).not.toContain("draft edit 3");
+  });
+});

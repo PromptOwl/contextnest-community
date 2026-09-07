@@ -1005,10 +1005,9 @@ export function DocumentEditor({
     if (!ok) return;
     setDiscarding(true);
     try {
+      // api.discardDraft clears the parked localStorage draft itself, so every
+      // entry point gets that, not just this one.
       const res = await api.discardDraft(nestId, nodeId);
-      // Local edits parked in localStorage describe a body that no longer
-      // exists — leaving them would resurrect the draft on the next open.
-      clearDraft(nestId, nodeId);
       if (res.deleted) {
         toast.success("Never approved — document deleted");
         onBack();
