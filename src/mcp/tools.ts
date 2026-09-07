@@ -707,20 +707,58 @@ export const TOOL_DEFINITIONS = [
 // on-disk body is fine (every save is auto-approved). Returns null
 // when stewardship is on but the node has no approved version yet, so
 // callers can skip it instead of leaking draft content.
+/**
+ * What a caller that has ALREADY gated a whole list can hand resolveLlmBody so
+ * it does no per-node lookups of its own. `filterAccessible` is the batched
+ * form of `canReadNode` (same resolution, one query set for the list), so a
+ * node that came out of it needs no second check; the nest's stewardship flag
+ * and its approved-version map are one read each for the whole nest. Build
+ * with `batchedBodyGate`.
+ */
+interface BatchedBodyGate {
+  /** The node passed filterAccessible for this caller. */
+  accessChecked: true;
+  stewardshipEnabled: boolean;
+  /** node id → approved version; null when stewardship is off. */
+  approvedVersions: Map<string, number> | null;
+}
+
+async function batchedBodyGate(nestId: string): Promise<BatchedBodyGate> {
+  const stewardshipEnabled = await isStewardshipEnabled(nestId);
+  return {
+    accessChecked: true,
+    stewardshipEnabled,
+    approvedVersions: stewardshipEnabled
+      ? await versions.getApprovedVersions(nestId)
+      : null,
+  };
+}
+
 async function resolveLlmBody(
   ctx: McpToolContext,
   node: ContextNode,
+  gate?: BatchedBodyGate,
 ): Promise<string | null> {
   // Enforce the SAME per-node access gate as the REST retrieval path. This was
   // missing here — MCP callers bypassed canUserAccess and could read every
   // approved node's body regardless of document/tag/steward scope. Route through
   // canReadNode (the REST helper); deny → return null so callers skip the node
   // instead of leaking it. Strictly more restrictive; can only remove access.
-  if (!(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail))) {
+  // A caller that already ran the list through filterAccessible (the batched
+  // form of the same check) says so with `gate`, and skips the per-node query.
+  if (
+    !gate?.accessChecked &&
+    !(await canReadNode(ctx.nestId, node.id, ctx.userId, ctx.userEmail))
+  ) {
     return null;
   }
-  if (!(await isStewardshipEnabled(ctx.nestId))) return node.body || "";
-  const approved = await versions.getApprovedVersion(ctx.nestId, node.id);
+  const stewardship = gate
+    ? gate.stewardshipEnabled
+    : await isStewardshipEnabled(ctx.nestId);
+  if (!stewardship) return node.body || "";
+  const approved = gate
+    ? (gate.approvedVersions?.get(node.id) ?? null)
+    : await versions.getApprovedVersion(ctx.nestId, node.id);
   if (approved == null) return null;
   try {
     return await ctx.versionManager.reconstructVersion(node.id, approved);
@@ -926,11 +964,15 @@ async function runTool(
         };
       // Bodies stay gated exactly as before: under stewardship the LLM only
       // ever sees the approved version, and a hit with no approved version
-      // yet is listed (REST lists it) but carries no body.
+      // yet is listed (REST lists it) but carries no body. The hits are
+      // already access-checked (filterAccessible, above), so the page shares
+      // one gate — nest flag + approved-version map — instead of re-running
+      // canReadNode and getApprovedVersion per returned node.
+      const gate = await batchedBodyGate(nestId);
       const page = await Promise.all(
         accessible.slice(0, limit).map(async (node) => ({
           node,
-          body: await resolveLlmBody(ctx, node),
+          body: await resolveLlmBody(ctx, node, gate),
         })),
       );
       const results = page

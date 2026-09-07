@@ -155,7 +155,41 @@ beforeAll(async () => {
     );
     expect(res.status).toBe(201);
   }
+  // A rejected (retired) document: engine discovery drops it by default, REST
+  // search deliberately keeps it (see discoverForSearch), so the tool does too.
+  const rejected = await jsonRequest(
+    app,
+    "POST",
+    `/nests/${nestId}/nodes`,
+    {
+      title: "Widget Rejected Note",
+      content: "# Widget Rejected Note\n\nrejected widget body",
+      status: "rejected",
+    },
+    owner.apiKey,
+  );
+  expect(rejected.status).toBe(201);
 }, 120_000);
+
+/** Count SQL statements issued through the app's DB adapter while `fn` runs. */
+async function countQueries<T>(fn: () => Promise<T>): Promise<{ out: T; queries: number }> {
+  const { getDb } = await import("../src/db/client.js");
+  const db = getDb() as any;
+  const originals = { get: db.get, all: db.all, run: db.run };
+  let queries = 0;
+  for (const m of ["get", "all", "run"] as const) {
+    db[m] = function (...a: any[]) {
+      queries++;
+      return originals[m].apply(this, a);
+    };
+  }
+  try {
+    const out = await fn();
+    return { out, queries };
+  } finally {
+    Object.assign(db, originals);
+  }
+}
 
 afterAll(() => env.cleanup());
 
@@ -206,8 +240,8 @@ describe("context_search parity with GET /search", () => {
   it("a public reader sees approved hits only — same set as REST", async () => {
     const rest = await restSearch(outsider.apiKey);
     const ownerRest = await restSearch(owner.apiKey);
-    expect(rest.count).toBe(ownerRest.count - 2);
-    expect(rest.nodes.some((n: any) => /Widget Draft/.test(n.title))).toBe(false);
+    expect(rest.count).toBe(ownerRest.count - 3);
+    expect(rest.nodes.some((n: any) => /Widget Draft|Widget Rejected/.test(n.title))).toBe(false);
 
     const mcp = await mcpSearch(outsider.apiKey, { query: QUERY, limit: 500 });
     expect(mcp.data.count).toBe(rest.count);
@@ -215,6 +249,46 @@ describe("context_search parity with GET /search", () => {
       rest.nodes.map((n: any) => n.id),
     );
     expect(mcp.text).not.toContain("Widget Draft");
+  });
+
+  it("lists a rejected document by title, with its body withheld (parity with REST)", async () => {
+    const rest = await restSearch(owner.apiKey, "rejected");
+    expect(rest.nodes.map((n: any) => n.title)).toEqual(["Widget Rejected Note"]);
+
+    const mcp = await mcpSearch(owner.apiKey, { query: "rejected" });
+    expect(mcp.data.count).toBe(1);
+    expect(mcp.data.results.map((r: any) => r.id)).toEqual(rest.nodes.map((n: any) => n.id));
+    expect(mcp.data.results[0].title).toBe("Widget Rejected Note");
+    // No approved version → the stewardship gate withholds the body.
+    expect(mcp.data.results[0].body).toBeUndefined();
+    expect(mcp.text).toContain("Widget Rejected Note");
+    expect(mcp.text).not.toContain("rejected widget body");
+  });
+
+  it("an empty query matches nothing (REST 400s; the tool answers count 0)", async () => {
+    const mcp = await mcpSearch(owner.apiKey, { query: "" });
+    expect(mcp.data).toEqual({ results: [], count: 0 });
+    const blank = await mcpSearch(owner.apiKey, { query: "   " });
+    expect(blank.data).toEqual({ results: [], count: 0 });
+  });
+
+  it("gates the page once, not once per hit: DB work does not grow with `limit`", async () => {
+    // filterAccessible already batched the caller's read check over every
+    // hit. Resolving the page's bodies must not re-run a per-node permission
+    // lookup (or a per-node approved-version read) on top of that — at
+    // limit=200 that was up to 200 extra permission checks per search.
+    const one = await countQueries(() => mcpSearch(owner.apiKey, { query: QUERY, limit: 1 }));
+    const full = await countQueries(() => mcpSearch(owner.apiKey, { query: QUERY, limit: 200 }));
+    expect(full.out.data.results.length).toBeGreaterThan(50);
+    expect(full.out.data.count).toBe(one.out.data.count);
+    const rest = await restSearch(owner.apiKey);
+    expect(full.out.data.results.map((r: any) => r.id)).toEqual(rest.nodes.map((n: any) => n.id));
+    // Same fixed overhead (auth, nest lookup, the batched gate, trace log) —
+    // not one lookup per returned node.
+    expect(
+      full.queries - one.queries,
+      `limit=200 issued ${full.queries} queries vs ${one.queries} at limit=1`,
+    ).toBeLessThan(10);
   });
 
   it("says so when nothing matches", async () => {

@@ -188,7 +188,9 @@ const CASES: Case[] = [
         "the total number of hits, of which `results` is the first `limit` " +
         "(default 20). REST GET /search reports the same `count`; without it " +
         "a capped page reads as the whole answer. The catalog input already " +
-        "takes `limit`, so the output needs the total — propose upstream.",
+        "takes `limit`, so the output needs the total — proposed upstream as " +
+        "PromptOwl/ContextNest#103; drop this entry once the pinned engine " +
+        "ships it.",
     },
   },
   {
