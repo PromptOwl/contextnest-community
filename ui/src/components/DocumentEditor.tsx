@@ -988,6 +988,40 @@ export function DocumentEditor({
     await loadVersions();
   }, [loadVersions]);
 
+  // Throw away the unreviewed edits on this document.
+  //
+  // The outcome depends on the document and only the server can tell which:
+  // one that was published before goes back to that version, one that never
+  // was is deleted (there is nothing to fall back to). So the confirm names
+  // both, and a delete navigates out rather than leaving the editor pointed at
+  // a document that no longer exists.
+  const [discarding, setDiscarding] = useState(false);
+  const handleDiscardDraft = useCallback(async () => {
+    const ok = window.confirm(
+      `Discard the draft of "${title || nodeId}"?\n\n` +
+        "The document goes back to its last approved version. If it was never " +
+        "approved, it is deleted instead. This can't be undone.",
+    );
+    if (!ok) return;
+    setDiscarding(true);
+    try {
+      // api.discardDraft clears the parked localStorage draft itself, so every
+      // entry point gets that, not just this one.
+      const res = await api.discardDraft(nestId, nodeId);
+      if (res.deleted) {
+        toast.success("Never approved — document deleted");
+        onBack();
+        return;
+      }
+      toast.success(`Draft discarded — back to version ${res.version}`);
+      await Promise.all([loadNode(), loadVersions()]);
+    } catch (e: any) {
+      toast.error(e?.message || "Discard failed");
+    } finally {
+      setDiscarding(false);
+    }
+  }, [nestId, nodeId, title, onBack, loadNode, loadVersions]);
+
   // Load versions on demand when the Compare dropdown opens, so the list is
   // populated without forcing the user through the history modal first.
   const ensureVersions = useCallback(async () => {
@@ -1576,17 +1610,10 @@ export function DocumentEditor({
                 </button>
               </Fragment>
             ))}
-            <span className="text-muted-foreground shrink-0">›</span>
-            <h3
-              className="text-sm font-bold text-foreground truncate max-w-[320px] mb-0 leading-none"
-              title={title || undefined}
-              data-testid="document-editor-header-title"
-            >
-              {/* "Untitled" is a fact about a saved document, not about one
-                  still loading — while the fetch is in flight say so instead
-                  of flashing it (CU-wdqcpzzzrr). */}
-              {title || (isNew ? "New document" : loading ? "Loading…" : "Untitled")}
-            </h3>
+            {/* The document's own name is deliberately NOT repeated here: the
+                Title field sits directly below (an <h1> in view mode), so the
+                trail ended in the same string the next line already shows. The
+                crumbs answer "where am I", the field answers "what is this". */}
             {!isNew && status && <StatusBadge status={status} />}
             {/* Pending only. A DECLINED flag is a past event, not a state of
                 the document — badging it forever nags everyone who opens a doc
@@ -1611,30 +1638,16 @@ export function DocumentEditor({
                 Auto-published
               </span>
             )}
-            {isDirty && (
-              <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
-                title="These edits are parked locally and not yet saved to the nest."
-                data-testid="document-editor-dirty-badge"
-              >
-                <Pencil className="h-3 w-3" />
-                Unsaved changes
-              </span>
-            )}
+            {/* "Unsaved changes" moved to the sticky action bar at the bottom,
+                where it sits beside the Save button it is about. */}
           </div>
         </div>
+        {/* Save, Submit for review and Discard live in the sticky footer at the
+            bottom of this page — the write actions belong at the end of the
+            form the user is filling in, not above it. What stays here is what
+            is ABOUT the document rather than a change to it: the review verdict,
+            the comparison picker, and the secondary menu. */}
         <div className="flex items-center gap-2 shrink-0">
-          {!isViewOnly && canSubmitForReview && (
-            <Button
-              variant="outline"
-              onClick={() => setShowSubmitModal(true)}
-              data-testid="document-editor-submit"
-              title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
-            >
-              <Send className="h-4 w-4 mr-2" />
-              Submit for review
-            </Button>
-          )}
           {/* NOT gated on isViewOnly: that flag answers "may this caller
               author?", and a reviewer-only steward is view-only by definition
               yet is exactly the person meant to act here. Gating approval on it
@@ -1648,42 +1661,6 @@ export function DocumentEditor({
               onApprove={handleApprove}
               onReject={handleReject}
             />
-          )}
-          {!isViewOnly && !isReviewerOnly && !isLocked && (
-            mode === "edit" ? (
-              <Button
-                // Keep focus in the editor field so clicking Save doesn't fire
-                // the field's blur (which would trigger a second, concurrent
-                // save alongside this click). One save per click.
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={handleSave}
-                disabled={!canSave}
-                data-testid="document-editor-save"
-              >
-                {saving ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : justSaved && !isDirty ? (
-                  <Check className="h-4 w-4 mr-2 text-green-600" />
-                ) : (
-                  <Save className="h-4 w-4 mr-2" />
-                )}
-                {saving
-                  ? "Saving…"
-                  : justSaved && !isDirty
-                    ? "Saved"
-                    : isNew
-                      ? "Create"
-                      : "Save"}
-              </Button>
-            ) : (
-              <Button
-                onClick={() => setMode("edit")}
-                data-testid="document-editor-start-edit"
-              >
-                <Pencil className="h-4 w-4 mr-2" />
-                Start Editing
-              </Button>
-            )
           )}
           {/* Compare ▾ — pick a past version; the doc area renders an
               ever-present current↔vN diff inline (no modal). */}
@@ -3065,6 +3042,21 @@ export function DocumentEditor({
                 }
               }
           }
+          onDiscard={
+            // Same gate as revert — throwing the draft away rewrites the
+            // document, so it is the author's call, not a reviewer's.
+            !canEditContent
+              ? undefined
+              : async () => {
+                try {
+                  const { version } = await api.discardDraft(nestId, nodeId);
+                  toast.success(`Draft discarded — back to version ${version}`);
+                  await Promise.all([loadNode(), loadVersions()]);
+                } catch (e: any) {
+                  toast.error(e?.message || "Discard failed");
+                }
+              }
+          }
         />
       )}
 
@@ -3287,6 +3279,108 @@ export function DocumentEditor({
         </Dialog>
       )}
 
+      {/* Sticky action bar. The write actions sit at the END of the form the
+          user is filling in and stay reachable at any scroll depth — this
+          document is long, and Save used to scroll off the top of a page that
+          takes minutes to fill in. `-mx-4 px-4` spans the padding <main> owns
+          so the bar reads as a bar rather than an indented box. */}
+      {(() => {
+        const canWrite = !isViewOnly && !isReviewerOnly && !isLocked;
+        const showSubmit = !isViewOnly && canSubmitForReview;
+        // Discard only where there is unreviewed work to throw away — which is
+        // exactly what a draft or rejected status means.
+        const showDiscard =
+          canWrite &&
+          !isNew &&
+          canEditContent &&
+          (status === "draft" || status === "rejected");
+        if (!canWrite && !showSubmit) return null;
+        return (
+          <div
+            // -mb-4 cancels the py-4 <main> puts below every page, so at full
+            // scroll the bar ends flush with the window instead of floating
+            // above a strip of padding.
+            className="sticky bottom-0 z-20 -mx-4 -mb-4 mt-6 px-4 py-3 border-t bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 flex items-center gap-2"
+            data-testid="document-editor-actions"
+          >
+            {isDirty && (
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900"
+                title="These edits are parked locally and not yet saved to the nest."
+                data-testid="document-editor-dirty-badge"
+              >
+                <Pencil className="h-3 w-3" />
+                Unsaved changes
+              </span>
+            )}
+            <div className="ml-auto flex items-center gap-2">
+              {showDiscard && (
+                <Button
+                  variant="ghost"
+                  onClick={() => void handleDiscardDraft()}
+                  disabled={discarding}
+                  className="text-muted-foreground hover:text-destructive"
+                  title="Throw away the unreviewed edits and go back to the last approved version"
+                  data-testid="document-editor-discard"
+                >
+                  {discarding ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4 mr-2" />
+                  )}
+                  Discard draft
+                </Button>
+              )}
+              {showSubmit && (
+                <Button
+                  variant="outline"
+                  onClick={() => setShowSubmitModal(true)}
+                  data-testid="document-editor-submit"
+                  title="Requires steward approval — with stewardship on, publishing in this nest submits the document for steward review."
+                >
+                  <Send className="h-4 w-4 mr-2" />
+                  Submit for review
+                </Button>
+              )}
+              {canWrite &&
+                (mode === "edit" ? (
+                  <Button
+                    // Keep focus in the editor field so clicking Save doesn't
+                    // fire the field's blur (which would trigger a second,
+                    // concurrent save alongside this click). One save per click.
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={handleSave}
+                    disabled={!canSave}
+                    data-testid="document-editor-save"
+                  >
+                    {saving ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : justSaved && !isDirty ? (
+                      <Check className="h-4 w-4 mr-2 text-green-600" />
+                    ) : (
+                      <Save className="h-4 w-4 mr-2" />
+                    )}
+                    {saving
+                      ? "Saving…"
+                      : justSaved && !isDirty
+                        ? "Saved"
+                        : isNew
+                          ? "Create"
+                          : "Save"}
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={() => setMode("edit")}
+                    data-testid="document-editor-start-edit"
+                  >
+                    <Pencil className="h-4 w-4 mr-2" />
+                    Start Editing
+                  </Button>
+                ))}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

@@ -4803,6 +4803,17 @@ export function NestView({
               toast.error(e?.message || "Revert failed");
             }
           }}
+          onDiscard={async () => {
+            if (!versionNode) return;
+            try {
+              const { version } = await api.discardDraft(nestId, versionNode.id);
+              toast.success(`Draft discarded — back to version ${version}`);
+              await openVersions(versionNode);
+              fetchData();
+            } catch (e: any) {
+              toast.error(e?.message || "Discard failed");
+            }
+          }}
         />
       )}
     </div>

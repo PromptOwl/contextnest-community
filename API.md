@@ -621,7 +621,21 @@ Restore an earlier version by writing its content as a **new** version (history 
 ```json
 { "targetVersion": 3 }
 ```
-Response: `{ "ok": true, "version": <new>, "node": { ... } }`. `400` without a valid `targetVersion`; `404` if that version doesn't exist.
+Response: `{ "ok": true, "version": <new>, "node": { ... } }`. `400` without a valid `targetVersion`; `404` if that version doesn't exist. Only **sealed** versions can be reverted to — a draft revision is not in the version chain (see below).
+
+### POST `/nests/:nestId/nodes/:nodeId/discard`
+
+Throw away the unreviewed work on a document. No body.
+
+Response: `{ "ok": true, "deleted": <bool>, "version": <sealed|null> }`.
+
+Two outcomes, and which one you get depends on the document:
+- It was published before → the file goes back to that version and the draft rows above it are dropped. `deleted: false`, `version` names the version restored.
+- It was **never** published → there is nothing to fall back to, so the document is deleted, exactly as `DELETE /nodes/:nodeId` would. `deleted: true`.
+
+Costs no version either way. A draft save is never appended to the engine's history chain — that chain is append-only and hash-linked, so anything recorded in it can never be taken back. Unreviewed work lives in the file plus one governance row; a version is sealed when the draft is **submitted for review**, and again when it is published. That is what makes discarding cheap, and why `ctx verify` is unaffected by it.
+
+`423` while a review is pending — discarding would pull the document out from under the reviewer. Reject the review first. `400` if the sealed version can no longer be reconstructed from the chain (delete the document instead).
 
 ### PATCH `/nests/:nestId/nodes/:nodeId`
 Headers (optional): `X-Base-Version: 3` — server returns 409 on conflict.
@@ -951,7 +965,9 @@ The UI deep-links a comment item to its document with the thread focused via
 
 ### GET `/me/drafts`
 
-Query: `?limit=25&offset=0` (limit clamps to 1–100, offset to ≥ 0)
+Query: `?limit=25&offset=0&q=&sort=updated|title` (limit clamps to 1–100, offset to ≥ 0)
+
+`q` matches the title, the nest name and the node id, case-insensitively. `sort` defaults to `updated` (newest first). A title lives on disk rather than in SQL, so `q` and `sort=title` read the whole matching set (capped at 500 rows) and page it in memory — on those two, `total` counts what survives the filter and is exact.
 
 Every document **you** left unsubmitted, across every nest you can see. A draft
 that was never submitted has no `review_requests` row, so it appears in no

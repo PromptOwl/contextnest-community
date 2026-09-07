@@ -179,6 +179,18 @@ async function scanDocumentForDriftInternal(
     return null;
   }
 
+  // Same call, made where history can't answer it: a draft revision is not
+  // appended to the chain, so an author's unreviewed working copy matches NO
+  // version in history.yaml and would otherwise be staged as somebody else's
+  // out-of-band edit. An unsealed row on top says the divergence is a draft in
+  // progress — that is the app's own write, by definition.
+  // Imported the way recordApproval imports its siblings — version-service and
+  // this module reach for each other.
+  const { hasUnsealedDraft } = await import("./version-service.js");
+  if (await hasUnsealedDraft(nestId, documentId)) {
+    return null;
+  }
+
   // Match the chain head the engine will read on approveSuggestion.
   // The engine calls `reconstructVersion(latest)`, which returns the live
   // post-publish bytes (frontmatter with status:published, version, and

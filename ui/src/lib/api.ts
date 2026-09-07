@@ -12,6 +12,8 @@
  * /auth/keys and shown to the user once via the Connect modal.
  */
 
+import { clearDraft } from "./draft";
+
 const API_BASE = "";
 const STALE_LOCAL_STORAGE_KEY = "cnst_token";
 
@@ -2152,14 +2154,44 @@ export interface MyDraft {
   updated_at: string;
 }
 
-export async function getMyDrafts(opts?: { limit?: number; offset?: number }) {
+export async function getMyDrafts(opts?: {
+  limit?: number;
+  offset?: number;
+  /** Matched against title, nest name and node id. */
+  q?: string;
+  sort?: "updated" | "title";
+}) {
   const q = new URLSearchParams();
   if (opts?.limit != null) q.set("limit", String(opts.limit));
   if (opts?.offset != null) q.set("offset", String(opts.offset));
+  if (opts?.q) q.set("q", opts.q);
+  if (opts?.sort && opts.sort !== "updated") q.set("sort", opts.sort);
   const qs = q.toString();
   return request<{ drafts: MyDraft[]; pagination: WorkPagination }>(
     `/me/drafts${qs ? `?${qs}` : ""}`,
   );
+}
+
+/**
+ * Throw away the unreviewed work on a node. A document that was published
+ * before goes back to that version; one that never was is deleted outright —
+ * `deleted` says which happened.
+ *
+ * Clearing the locally parked draft is part of the operation, not something
+ * callers remember to do. Those edits describe a body the server no longer
+ * holds, and the editor re-applies a parked draft whenever its `baseVersion`
+ * matches the version it just loaded — which a discard can walk the document
+ * straight back onto, resurrecting the edits the user just threw away. Doing it
+ * here means every entry point (My Drafts, the version panel, the editor's own
+ * button) is covered by construction.
+ */
+export async function discardDraft(nestId: string, nodeId: string) {
+  const res = await request<{ ok: true; deleted: boolean; version: number | null }>(
+    `/nests/${nestId}/nodes/${nodeId}/discard`,
+    { method: "POST" },
+  );
+  clearDraft(nestId, nodeId);
+  return res;
 }
 
 export async function approveReview(nestId: string, nodeId: string, note?: string) {

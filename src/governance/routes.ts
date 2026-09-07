@@ -713,11 +713,22 @@ governanceNodeRoutes.get("/:nodeId{.+}/versions/:version{[0-9]+}", async (c) => 
     );
   }
 
-  const { versions: versionManager } = await engineCache.get(nestId);
+  const { storage, versions: versionManager } = await engineCache.get(nestId);
   try {
     const raw = await versionManager.reconstructVersion(nodeId, version);
     return c.json({ version, content: bodyOnly(nodeId, raw) });
   } catch (err) {
+    // The unreviewed draft on top is never in the chain (see the draft branch
+    // of updateNode) — its bytes are the live file, so serve those. This is the
+    // one version reconstruct can't answer for that still has content.
+    try {
+      const node = await storage.readDocument(nodeId);
+      if ((node.frontmatter.version ?? 1) === version) {
+        return c.json({ version, content: node.body ?? "" });
+      }
+    } catch {
+      /* fall through to the no-content answer below */
+    }
     // A version whose chain no longer replays is a real state, not a 500 —
     // the panel renders "(no content)" for it and Restore stays disabled.
     console.error("reconstructVersion failed", nestId, nodeId, version, err);

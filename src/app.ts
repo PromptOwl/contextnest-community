@@ -1435,11 +1435,15 @@ export function createApp(): Hono<AuthEnv> {
       nestName.set(n.id, n.name ?? n.id);
     const limit = Math.min(Math.max(Number(c.req.query("limit")) || 25, 1), 100);
     const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+    const sort = c.req.query("sort") === "title" ? "title" : "updated";
     const { drafts, total } = await listMyDrafts({
       authorEmail: me,
       nestIds: [...nestName.keys()],
       limit,
       offset,
+      q: c.req.query("q") ?? undefined,
+      sort,
+      nestNames: nestName,
     });
     return c.json({
       drafts: drafts.map((d) => ({

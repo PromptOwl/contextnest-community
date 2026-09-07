@@ -47,58 +47,117 @@ export async function submitForReview(params: {
 }): Promise<ReviewRequest> {
   const db = getDb();
 
-  // Check no pending review already exists for this node
-  const existing = (await db.get(
-    "SELECT id FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending'",
-    [params.nestId, params.nodeId],
-  )) as { id: string } | undefined;
+  // Everything that decides WHICH version goes to review — and the chain append
+  // that seals it — runs under the same per-node lock approve/reject take, and
+  // that updateNode takes for a draft save. Submitting is the one moment a
+  // draft reaches the engine's append-only history, so an unguarded append here
+  // is the exact drift `version-chain-graft.test.ts` exists to catch: an author
+  // save landing between the read below and the seal would let the chain be
+  // appended against a version that had already moved.
+  const { id, version } = await withNodeWriteLock(
+    nodeWriteKey(params.nestId, params.nodeId),
+    async () => {
+      // Check no pending review already exists for this node
+      const existing = (await db.get(
+        "SELECT id FROM review_requests WHERE nest_id = ? AND node_id = ? AND status = 'pending'",
+        [params.nestId, params.nodeId],
+      )) as { id: string } | undefined;
 
-  if (existing) {
-    throw new Error("A review is already pending for this node");
-  }
+      if (existing) {
+        throw new Error("A review is already pending for this node");
+      }
 
-  const id = uuid();
-  await db.run(
-    `INSERT INTO review_requests
+      // Read INSIDE the lock, for the reason approve does: the caller's
+      // `version` was read before the lock and an author save may have moved
+      // the document since. The review row, the status flip and the seal below
+      // must all name the same version, and it must be the current one.
+      const version =
+        (await versions.getCurrentVersion(params.nestId, params.nodeId)) ||
+        params.version;
+
+      const id = uuid();
+      await db.run(
+        `INSERT INTO review_requests
      (id, nest_id, node_id, version, requested_by, request_note, priority)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id,
-      params.nestId,
-      params.nodeId,
-      params.version,
-      params.requestedBy,
-      params.note || null,
-      params.priority || "normal",
-    ],
+        [
+          id,
+          params.nestId,
+          params.nodeId,
+          version,
+          params.requestedBy,
+          params.note || null,
+          params.priority || "normal",
+        ],
+      );
+
+      // Update node version status to pending_review
+      await db.run(
+        "UPDATE node_versions SET status = 'pending_review' WHERE nest_id = ? AND node_id = ? AND version = ?",
+        [params.nestId, params.nodeId, version],
+      );
+
+      // Seal the submitted bytes into the engine's history chain. Draft saves
+      // no longer do this (see the draft branch of updateNode) precisely so
+      // they stay discardable — but handing work to a reviewer is not a draft
+      // save. From here the exact reviewed version is reconstructable, which is
+      // what the review panel, the version list and the audit trail all read.
+      //
+      // Best-effort: a broken chain must not cost someone their submission, and
+      // the reviewer reads the live file either way.
+      try {
+        const { storage, versions: versionManager } = await engineCache.get(
+          params.nestId,
+        );
+        const node = await storage.readDocument(params.nodeId);
+        const history = await versionManager.getHistory(params.nodeId);
+        // Resubmitting without editing (a rejection bounced straight back)
+        // leaves the version where it was — already sealed, and appending it
+        // twice would put a duplicate number in the chain.
+        const alreadySealed = (history?.versions ?? []).some(
+          (v) => v.version === (node.frontmatter.version ?? 1),
+        );
+        if (!alreadySealed) {
+          await versionManager.createVersion(node, params.requestedBy, {
+            note: params.note || "Submitted for review",
+          });
+        }
+      } catch (err) {
+        console.error(
+          "VersionManager.createVersion failed (submit for review)",
+          params.nestId,
+          params.nodeId,
+          err,
+        );
+      }
+
+      return { id, version };
+    },
   );
 
-  // Update node version status to pending_review
-  await db.run(
-    "UPDATE node_versions SET status = 'pending_review' WHERE nest_id = ? AND node_id = ? AND version = ?",
-    [params.nestId, params.nodeId, params.version],
-  );
-
+  // Notifications run OUTSIDE the lock: they are I/O against Slack, Teams and
+  // SMTP, and holding a node's write lock across them would block the author's
+  // next save on someone else's mail server.
   const reviewCtx = await buildDocContext(params.nestId, params.nodeId, params.baseUrl);
   void dispatchEvent({
     kind: "review_requested",
     nestId: params.nestId,
     subjectId: params.nodeId,
     actor: params.requestedBy,
-    message: `Review requested on *${reviewCtx.label}* (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
+    message: `Review requested on *${reviewCtx.label}* (v${version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
   });
   // SLACK_WEBHOOK_URL + email connector (digest-batched). Complements the
   // connector-table dispatch above; email is the piece connectors don't cover.
   void notifyNestEvent(
     params.nestId,
-    `:memo: Review requested on *${reviewCtx.label}* (v${params.version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
+    `:memo: Review requested on *${reviewCtx.label}* (v${version}) by ${params.requestedBy}${params.note ? ` — "${params.note}"` : ""}`,
     {
       status: "pending_review",
       docTitle: reviewCtx.docTitle,
       path: reviewCtx.path,
       link: reviewCtx.link,
       actor: params.requestedBy,
-      version: params.version,
+      version,
       note: params.note || null,
     },
   );
@@ -131,7 +190,7 @@ export async function submitForReview(params: {
         path: reviewCtx.path,
         link: reviewCtx.link,
         actor: params.requestedBy,
-        version: params.version,
+        version,
         note: params.note || null,
       });
     }
@@ -148,12 +207,18 @@ export async function submitForReview(params: {
 }
 
 // ─── Repoint pending review ─────────────────────────────────────────────
-// The author edited their own pending submission. The engine appended a new
-// draft version (N+1) via its normal hash-chain append — we do NOT touch
-// history.yaml here. Just move the open review request onto the new version
-// so the steward approves the edited content, keeping the SAME review row
-// (no restart, no re-notify, no duplicate submission). The old version drops
-// back to draft; the new one carries the pending_review flag.
+// The author edited their own pending submission, so updateNode drafted a new
+// version (N+1). That revision is NOT in the engine's hash chain — draft saves
+// stopped appending to it, and only submitting or publishing seals one — so the
+// version this repoints onto is unsealed until the review resolves. Approving
+// publishes it and seals it then; rejecting leaves it as the discardable draft
+// it already was.
+//
+// All this does is move the open review request onto the new version so the
+// steward approves the edited content, keeping the SAME review row (no restart,
+// no re-notify, no duplicate submission). The old version drops back to draft;
+// the new one carries the pending_review flag. history.yaml is untouched here,
+// as it always was.
 export async function repointPendingReview(params: {
   nestId: string;
   nodeId: string;

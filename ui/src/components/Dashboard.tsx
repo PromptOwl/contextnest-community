@@ -83,6 +83,14 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   // Draft awaiting the submit dialog (priority + note) — same modal the editor
   // uses, so submitting from here isn't a second, weaker path.
   const [submitTarget, setSubmitTarget] = useState<api.MyDraft | null>(null);
+  // Find/sort/select for the drafts list. Search and sort are server-side (the
+  // list spans pages, so filtering the page in hand would lie); `draftSearch`
+  // is the debounced value actually sent.
+  const [draftQuery, setDraftQuery] = useState("");
+  const [draftSearch, setDraftSearch] = useState("");
+  const [draftSort, setDraftSort] = useState<"updated" | "title">("updated");
+  const [draftsSelected, setDraftsSelected] = useState<Set<string>>(new Set());
+  const [draftsBusy, setDraftsBusy] = useState(false);
   // Deletion flag being resolved from the inbox, and which dialog it opens.
   const [deletionTarget, setDeletionTarget] = useState<api.WorkItem | null>(null);
   const [deletionAction, setDeletionAction] = useState<"delete" | "decline">("delete");
@@ -202,7 +210,15 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
   const goToDraftsPage = async (offset: number) => {
     setDraftsLoading(true);
     try {
-      const next = await qc.fetchQuery(reads.myDrafts({ offset }));
+      const next = await qc.fetchQuery(
+        reads.myDrafts({ offset, q: draftSearch || undefined, sort: draftSort }),
+      );
+      // Clearing the last page of a list leaves the offset past the end, which
+      // paints "no drafts" while the badge still counts some. Fall back to the
+      // first page rather than stranding the reader on a blank one.
+      if (next.drafts.length === 0 && offset > 0 && next.pagination.total > 0) {
+        return void (await goToDraftsPage(0));
+      }
       setDrafts(next.drafts);
       setDraftsPage(next.pagination);
     } catch (e) {
@@ -479,6 +495,80 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
     setSubmitTarget(null);
     void goToDraftsPage(draftsPage?.offset ?? 0);
     void goToWorkPage(work.pagination?.offset ?? 0);
+  };
+
+  const draftKey = (d: api.MyDraft) => `${d.nest_id}:${d.node_id}`;
+
+  // Debounced so a search is one request per pause, not one per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDraftSearch(draftQuery.trim()), 250);
+    return () => clearTimeout(t);
+  }, [draftQuery]);
+
+  // A new search or sort replaces the list from page one. Skipped on the first
+  // run — loadDashboard already fetched that page.
+  const draftFiltersReady = React.useRef(false);
+  useEffect(() => {
+    if (!draftFiltersReady.current) {
+      draftFiltersReady.current = true;
+      return;
+    }
+    setDraftsSelected(new Set());
+    void goToDraftsPage(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftSearch, draftSort]);
+
+  /**
+   * Throw drafts away. What that means per document is the server's call — a
+   * document that was approved before goes back to that version, one that never
+   * was is deleted — so the confirm names both outcomes rather than promising
+   * the wrong one.
+   */
+  const discardDrafts = async (targets: api.MyDraft[]) => {
+    if (targets.length === 0) return;
+    const what =
+      targets.length === 1 ? `"${targets[0].title}"` : `${targets.length} drafts`;
+    const ok = window.confirm(
+      `Discard ${what}?\n\n` +
+        "Each document goes back to its last approved version. A document that " +
+        "was never approved is deleted instead. This can't be undone.",
+    );
+    if (!ok) return;
+
+    setDraftsBusy(true);
+    let reverted = 0;
+    let deleted = 0;
+    const failed: string[] = [];
+    // Serial: these are writes against the same nests, and a handful of rows
+    // is the realistic batch. Each one stands alone, so a failure part-way
+    // leaves the ones before it discarded and is reported, not rolled back.
+    for (const d of targets) {
+      try {
+        const res = await api.discardDraft(d.nest_id, d.node_id);
+        if (res.deleted) deleted++;
+        else reverted++;
+      } catch (e) {
+        failed.push(d.title);
+        console.error("[Dashboard] discardDraft failed", d.node_id, e);
+      }
+    }
+    setDraftsBusy(false);
+    setDraftsSelected(new Set());
+
+    if (reverted || deleted) {
+      toast.success(
+        [
+          reverted ? `${reverted} restored to the approved version` : "",
+          deleted ? `${deleted} deleted` : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      );
+    }
+    if (failed.length) {
+      toast.error(`Couldn't discard: ${failed.join(", ")}`);
+    }
+    void goToDraftsPage(draftsPage?.offset ?? 0);
   };
 
   // Optimistic drop + reconcile, same as approveReviewItem.
@@ -991,6 +1081,38 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                 </span>
               )}
             </div>
+            {/* Find and order the list. Both run on the server: the list spans
+                pages, so filtering the page in hand would quietly search a
+                subset. */}
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <Input
+                value={draftQuery}
+                onChange={(e) => setDraftQuery(e.target.value)}
+                placeholder="Search drafts by title or nest…"
+                className="h-8 max-w-xs"
+                aria-label="Search your drafts"
+                data-testid="drafts-search"
+              />
+              <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                <span className="mr-1">Sort</span>
+                <Button
+                  size="sm"
+                  variant={draftSort === "updated" ? "secondary" : "ghost"}
+                  className="h-7 px-2"
+                  onClick={() => setDraftSort("updated")}
+                >
+                  Recently edited
+                </Button>
+                <Button
+                  size="sm"
+                  variant={draftSort === "title" ? "secondary" : "ghost"}
+                  className="h-7 px-2"
+                  onClick={() => setDraftSort("title")}
+                >
+                  Title
+                </Button>
+              </div>
+            </div>
             {draftsLoading ? (
               // Loader, not the empty state: "nothing here" while the request is
               // still in flight reads as an answer, and this list existing at
@@ -1001,10 +1123,69 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
               </div>
             ) : drafts.length === 0 ? (
               <div className="rounded-lg border bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
-                No unsubmitted drafts — everything you've written is in review or approved.
+                {draftSearch
+                  ? `No drafts match "${draftSearch}".`
+                  : "No unsubmitted drafts — everything you've written is in review or approved."}
               </div>
             ) : (
               <div className="rounded-lg border divide-y overflow-hidden">
+                {/* Batch bar — the reason this tab was unusable at 66 drafts is
+                    that every one of them had to be opened to be cleaned up. */}
+                {drafts.length > 1 && (
+                  <div className="flex flex-wrap items-center gap-2 bg-muted/40 px-4 py-2 text-sm">
+                    <Checkbox
+                      // Partial selections read as "some", not "none".
+                      checked={
+                        draftsSelected.size === 0
+                          ? false
+                          : draftsSelected.size === drafts.length
+                            ? true
+                            : "indeterminate"
+                      }
+                      onCheckedChange={(next: boolean | "indeterminate") =>
+                        setDraftsSelected(
+                          next === true ? new Set(drafts.map(draftKey)) : new Set(),
+                        )
+                      }
+                      aria-label="Select every draft on this page"
+                      data-testid="drafts-select-all"
+                    />
+                    <span className="text-muted-foreground">
+                      {draftsSelected.size > 0
+                        ? `${draftsSelected.size} selected`
+                        : `Select all ${drafts.length} on this page`}
+                    </span>
+                    {draftsSelected.size > 0 && (
+                      <div className="ml-auto flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={draftsBusy}
+                          onClick={() =>
+                            void discardDrafts(
+                              drafts.filter((d) => draftsSelected.has(draftKey(d))),
+                            )
+                          }
+                          data-testid="drafts-bulk-discard"
+                        >
+                          {draftsBusy ? (
+                            <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-3.5 w-3.5 mr-1" />
+                          )}
+                          Discard {draftsSelected.size}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setDraftsSelected(new Set())}
+                        >
+                          Clear
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
                 {drafts.map((d) => {
                   const key = `${d.nest_id}:${d.node_id}`;
                   return (
@@ -1012,6 +1193,19 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       key={key}
                       className="flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 group"
                     >
+                      {drafts.length > 1 && (
+                        <Checkbox
+                          checked={draftsSelected.has(key)}
+                          onCheckedChange={() =>
+                            setDraftsSelected((prev) => {
+                              const next = new Set(prev);
+                              next.has(key) ? next.delete(key) : next.add(key);
+                              return next;
+                            })
+                          }
+                          aria-label={`Select ${d.title}`}
+                        />
+                      )}
                       <span
                         className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide shrink-0 ${d.status === "rejected"
                             ? "bg-red-100 text-red-800 dark:bg-red-950/40 dark:text-red-300"
@@ -1047,6 +1241,19 @@ export function Dashboard({ onSelectNest, onOpenReview, onManageKeys }: Dashboar
                       >
                         <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
                         Submit for review
+                      </Button>
+                      {/* The action the list was missing: cleaning one up took
+                          opening the document and finding Delete in its menu. */}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={draftsBusy}
+                        className="shrink-0 text-muted-foreground hover:text-destructive"
+                        title="Discard this draft — back to the last approved version, or delete it if there isn't one"
+                        onClick={() => void discardDrafts([d])}
+                        data-testid="draft-discard"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                     </div>
                   );
