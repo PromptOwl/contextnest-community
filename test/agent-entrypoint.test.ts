@@ -82,6 +82,20 @@ describe("GET /llms.txt — public agent manual", () => {
     expect(text).toContain("Skip logic");
     expect(text).toContain("/mcp");
   });
+
+  it("tells the ctx CLI how to register this server and one nest as vault aliases", async () => {
+    const res = await app.request("/llms.txt");
+    const text = await res.text();
+    // Server-level alias: every nest the key can see, through /mcp.
+    expect(text).toContain("## From the ctx CLI");
+    expect(text).toMatch(/ctx vault add \S+ --url http:\/\/localhost\/mcp --bearer-env CONTEXTNEST_API_KEY/);
+    // Per-nest alias form.
+    expect(text).toMatch(/ctx vault add \S+ --url http:\/\/localhost\/nests\/<nest-id>\/mcp --bearer-env CONTEXTNEST_API_KEY/);
+    expect(text).toMatch(/ctx query "#\S+" --vault \S+/);
+    // Never a key on argv, never key material.
+    expect(text).not.toMatch(/--key\b/);
+    expect(text).not.toMatch(/cnst_[a-z0-9]{8,}/i);
+  });
 });
 
 describe("GET /index — person nest index", () => {

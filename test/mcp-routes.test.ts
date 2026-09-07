@@ -548,6 +548,7 @@ describe("MCP tools/call — structuredContent", () => {
       },
     ]);
     expect(r.structuredContent.results).toHaveLength(1);
+    expect(r.structuredContent.count).toBe(1);
     expect(r.structuredContent.results[0].id).toBe("nodes/pricing-sheet");
     expect(r.structuredContent.results[0].title).toBe("Pricing Sheet");
 
@@ -555,7 +556,7 @@ describe("MCP tools/call — structuredContent", () => {
     expect(miss.content).toEqual([
       { type: "text", text: 'No nodes matched search: "nonexistentxyz"' },
     ]);
-    expect(miss.structuredContent).toEqual({ results: [] });
+    expect(miss.structuredContent).toEqual({ results: [], count: 0 });
   });
 
   it("context_query: documents[] + traversal alongside the prose", async () => {

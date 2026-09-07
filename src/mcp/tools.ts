@@ -8,7 +8,15 @@ import * as stewardship from "../governance/stewardship-service.js";
 import * as reviews from "../governance/review-service.js";
 import * as versions from "../governance/version-service.js";
 import { loadStewardsConfig } from "../governance/stewards-parser.js";
-import { canReadNode, canRequestDeletion } from "../governance/access-guard.js";
+import {
+  canReadNode,
+  canRequestDeletion,
+  filterAccessible,
+} from "../governance/access-guard.js";
+import {
+  matchDocuments,
+  discoverForSearch,
+} from "../nodes/search.js";
 import {
   resolveNestPermission,
   permissionLevel,
@@ -33,6 +41,7 @@ import {
   listNodesForCallerByEmail,
   getNodeForCaller,
   isIdUnderFolder,
+  isDerivedAnnotationsNode,
 } from "../nodes/service.js";
 import { deleteNest } from "../nests/service.js";
 import { listThreads } from "../annotations/service.js";
@@ -48,6 +57,18 @@ const MAX_HOPS = 10;
 /** Caller-supplied traversal depth → integer in [0, MAX_HOPS], default 2.
  *  null/undefined/non-numeric all fall through to the default (some tool-calling
  *  clients serialize an unset optional arg as JSON `null` rather than omitting). */
+/** `limit` for context_search: a positive integer, defaulting to
+ *  SEARCH_DEFAULT_LIMIT and capped at SEARCH_MAX_LIMIT. External LLM callers
+ *  set this directly, so junk (NaN, negative, fractional) normalizes rather
+ *  than throwing. */
+export const SEARCH_DEFAULT_LIMIT = 20;
+export const SEARCH_MAX_LIMIT = 200;
+export function normalizeSearchLimit(raw: unknown): number {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n < 1) return SEARCH_DEFAULT_LIMIT;
+  return Math.min(n, SEARCH_MAX_LIMIT);
+}
+
 export function normalizeHops(raw: unknown): number {
   if (raw == null) return 2;
   const n = Number(raw);
@@ -164,11 +185,15 @@ export const TOOL_DEFINITIONS = [
   {
     name: "context_search",
     description:
-      "Full-text keyword search across all node content, titles, tags, and metadata.",
+      "Full-text keyword search across all node content, titles, tags, and metadata — the same index-backed match as REST GET /search. Returns `count` (everything found) and the first `limit` hits, title matches first.",
     inputSchema: {
       type: "object" as const,
       properties: {
         query: { type: "string", description: "Search terms" },
+        limit: {
+          type: "number",
+          description: "Max hits to return (default 20, max 200)",
+        },
       },
       required: ["query"],
     },
@@ -871,44 +896,66 @@ async function runTool(
     }
 
     case "context_search": {
-      const docs = await storage.discoverDocuments();
-      const terms = (args.query || "").toLowerCase().split(/\s+/).filter(Boolean);
-      // Resolve approved bodies up front so search hits only matter
-      // when they're in content the LLM is allowed to see. Under
-      // stewardship, draft text on disk is invisible to search.
-      const enriched = await Promise.all(
-        docs.map(async (n) => ({ node: n, body: await resolveLlmBody(ctx, n) })),
+      const query = String(args.query ?? "");
+      const limit = normalizeSearchLimit(args.limit);
+      // Same path as REST GET /nests/:id/search, in the same order:
+      //   1. match terms against the cached discovery set (title, body,
+      //      type, tags — matchDocuments), title hits ranked first;
+      //   2. gate the HITS with filterAccessible (public reader →
+      //      approved-only; governed nest → steward coverage or a share
+      //      grant; ungoverned → members see all, grantees their grants);
+      //   3. resolve the LLM-visible body for the page only.
+      // It used to run step 3 over EVERY document in the nest before matching
+      // anything — per node, a permission lookup plus an approved-version
+      // read plus a version-chain reconstruction, all in one Promise.all —
+      // which is what pushed `ctx search --vault <remote>` past the CLI's 30s
+      // timeout on a 444-node governed nest while REST answered at once.
+      const matches = matchDocuments(await discoverForSearch(storage), query)
+        .filter((n) => !isDerivedAnnotationsNode(n.id));
+      const accessible = await filterAccessible(
+        nestId,
+        userId,
+        userEmail,
+        matches,
       );
-      const visible = enriched.filter((e) => e.body !== null);
-      const matches = visible.filter(({ node: n, body }) => {
-        const hay = [
-          n.frontmatter.title,
-          body || "",
-          n.frontmatter.type || "",
-          ...(n.frontmatter.tags || []),
-        ]
-          .join(" ")
-          .toLowerCase();
-        return terms.every((t: string) => hay.includes(t));
-      });
-      if (!matches.length)
+      const count = accessible.length;
+      if (count === 0)
         return {
-          text: `No nodes matched search: "${args.query}"`,
-          data: { results: [] },
+          text: `No nodes matched search: "${query}"`,
+          data: { results: [], count },
         };
-      const results = matches
-        .map(
-          ({ node: n, body }, i) =>
-            `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}\n   ${(body || "").slice(0, 200).replace(/\n/g, " ")}`,
-        )
+      // Bodies stay gated exactly as before: under stewardship the LLM only
+      // ever sees the approved version, and a hit with no approved version
+      // yet is listed (REST lists it) but carries no body.
+      const page = await Promise.all(
+        accessible.slice(0, limit).map(async (node) => ({
+          node,
+          body: await resolveLlmBody(ctx, node),
+        })),
+      );
+      const results = page
+        .map(({ node: n, body }, i) => {
+          const head = `${i + 1}. **${n.frontmatter.title}** [${n.frontmatter.type || "document"}] ${(n.frontmatter.tags || []).join(" ")}`;
+          const preview =
+            body === null
+              ? "_(no approved version yet — body withheld)_"
+              : body.slice(0, 200).replace(/\n/g, " ");
+          return `${head}\n   ${preview}`;
+        })
         .join("\n\n");
+      const more =
+        count > page.length
+          ? ` (showing the first ${page.length}; pass \`limit\` for more)`
+          : "";
       return {
-        text: `Found ${matches.length} node(s) matching "${args.query}":\n\n${results}`,
-        // Same gated bodies the prose is built from — `resolveLlmBody`
-        // already refused everything this caller may not read. No `score`:
-        // this is a term-containment filter, not a ranked search.
+        text: `Found ${count} node(s) matching "${query}"${more}:\n\n${results}`,
+        // `count` is everything found (like REST); `results` is the page.
+        // Bodies are the gated ones the prose is built from. No `score`:
+        // this is a term-containment filter with title-first ordering, not
+        // a ranked search.
         data: {
-          results: matches.map(({ node: n, body }) => summarizeNode(n, body)),
+          results: page.map(({ node: n, body }) => summarizeNode(n, body)),
+          count,
         },
       };
     }
