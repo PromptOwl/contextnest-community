@@ -484,19 +484,19 @@ export function parseSharedTeams(json: string | null | undefined): SharedTeamRef
  */
 export async function listSharedTeamMembers(
   refs: SharedTeamRef[],
-): Promise<Array<{ email: string; name: string | null }>> {
+): Promise<Array<{ userId: string; email: string; name: string | null }>> {
   const ids = [...new Set(refs.map((r) => r.teamId).filter(Boolean))];
   if (ids.length === 0) return [];
   const rows = (await getDb().all(
     `SELECT members FROM teams WHERE id IN (${ids.map(() => "?").join(",")})`,
     ids,
   )) as Array<{ members?: string }>;
-  const byEmail = new Map<string, { email: string; name: string | null }>();
+  const byEmail = new Map<string, { userId: string; email: string; name: string | null }>();
   for (const row of rows) {
     for (const member of parseMembers(row.members)) {
       const key = (member.email || "").toLowerCase();
       if (!key || byEmail.has(key)) continue;
-      byEmail.set(key, { email: member.email, name: null });
+      byEmail.set(key, { userId: member.userId, email: member.email, name: null });
     }
   }
   return [...byEmail.values()];

@@ -10,7 +10,8 @@ import {
   resolveUserRoles,
   getStewardRolesForUser,
 } from "../governance/stewardship-service.js";
-import { addCollaborator, listNestPeople } from "./sharing-service.js";
+import { addCollaborator } from "./sharing-service.js";
+import { listNestPeople } from "./people-service.js";
 import { setReaderMode } from "./service.js";
 import { isServerAdminUserId } from "../shared/access.js";
 import { config } from "../config.js";
