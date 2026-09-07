@@ -265,7 +265,23 @@ const NEST_WRITE_SCOPES: Array<{
     match: /^\/collaborators/,
     affects: (n) => [keys.collaborators(n), keys.nest(n)],
   },
-  { match: /^\/teams/, affects: (n) => [keys.nestTeams(n), keys.teams] },
+  // Sharing a nest with a team, or revoking that share, changes WHO CAN REACH
+  // the nest — so it has to drop the collaborators read too. That response
+  // carries `people` (owner, collaborators, shared teams' members, stewards and
+  // grant holders), which is the roster the editor's @mention picker offers and
+  // validates against: without this, a team removed from the nest kept showing
+  // up under `@` until the page was reloaded. keys.nest(n) goes with it for the
+  // reason the /collaborators scope drops it — revoking a share can change the
+  // caller's own permission.
+  {
+    match: /^\/teams/,
+    affects: (n) => [
+      keys.nestTeams(n),
+      keys.teams,
+      keys.collaborators(n),
+      keys.nest(n),
+    ],
+  },
   // Not just the settings payload: toggling stewardship changes what the access
   // guard returns (`filterAccessible` returns every node outright while it is
   // off), so the document listing and everything gated with it change too.
