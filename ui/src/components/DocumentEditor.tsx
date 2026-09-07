@@ -92,6 +92,16 @@ import {
   clearHighlight,
   caretAt,
 } from "../lib/anchor-highlight";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { SubmitForReviewModal, ReasonDialog, ReviewActions, ExternalEditBanner, VersionHistoryModal, DiffViewer } from "./governance";
 import { unifiedDiff } from "./governance/diff-util";
 import {
@@ -996,13 +1006,9 @@ export function DocumentEditor({
   // both, and a delete navigates out rather than leaving the editor pointed at
   // a document that no longer exists.
   const [discarding, setDiscarding] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   const handleDiscardDraft = useCallback(async () => {
-    const ok = window.confirm(
-      `Discard the draft of "${title || nodeId}"?\n\n` +
-        "The document goes back to its last approved version. If it was never " +
-        "approved, it is deleted instead. This can't be undone.",
-    );
-    if (!ok) return;
+    setConfirmDiscard(false);
     setDiscarding(true);
     try {
       // api.discardDraft clears the parked localStorage draft itself, so every
@@ -3279,6 +3285,32 @@ export function DocumentEditor({
         </Dialog>
       )}
 
+      {/* Discard confirmation — the app's own dialog, like every other
+          destructive action. Names both outcomes: only the server knows whether
+          this document has an approved version to fall back to. */}
+      <AlertDialog open={confirmDiscard} onOpenChange={setConfirmDiscard}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Discard the draft of "{title || nodeId}"?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The document goes back to its last approved version. If it was
+              never approved, it is deleted instead. This can't be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => void handleDiscardDraft()}
+              data-testid="document-editor-discard-confirm"
+            >
+              Discard draft
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       {/* Sticky action bar. The write actions sit at the END of the form the
           user is filling in and stay reachable at any scroll depth — this
           document is long, and Save used to scroll off the top of a page that
@@ -3317,7 +3349,7 @@ export function DocumentEditor({
               {showDiscard && (
                 <Button
                   variant="ghost"
-                  onClick={() => void handleDiscardDraft()}
+                  onClick={() => setConfirmDiscard(true)}
                   disabled={discarding}
                   className="text-muted-foreground hover:text-destructive"
                   title="Throw away the unreviewed edits and go back to the last approved version"
