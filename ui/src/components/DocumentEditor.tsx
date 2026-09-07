@@ -1576,17 +1576,10 @@ export function DocumentEditor({
                 </button>
               </Fragment>
             ))}
-            <span className="text-muted-foreground shrink-0">›</span>
-            <h3
-              className="text-sm font-bold text-foreground truncate max-w-[320px] mb-0 leading-none"
-              title={title || undefined}
-              data-testid="document-editor-header-title"
-            >
-              {/* "Untitled" is a fact about a saved document, not about one
-                  still loading — while the fetch is in flight say so instead
-                  of flashing it (CU-wdqcpzzzrr). */}
-              {title || (isNew ? "New document" : loading ? "Loading…" : "Untitled")}
-            </h3>
+            {/* The document's own name is deliberately NOT repeated here: the
+                Title field sits directly below (an <h1> in view mode), so the
+                trail ended in the same string the next line already shows. The
+                crumbs answer "where am I", the field answers "what is this". */}
             {!isNew && status && <StatusBadge status={status} />}
             {/* Pending only. A DECLINED flag is a past event, not a state of
                 the document — badging it forever nags everyone who opens a doc
