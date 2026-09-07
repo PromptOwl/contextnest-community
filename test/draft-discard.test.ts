@@ -338,3 +338,33 @@ describe("reject → re-edit → re-submit → approve", () => {
     expect(new Set(sealed).size).toBe(sealed.length);
   });
 });
+
+/**
+ * CU-wdqcq01cb3 — the count must not change with the sort mode.
+ *
+ * Deleting a document outside the app leaves its node_versions rows behind. The
+ * count used to come from SQL for the default sort and from the on-disk
+ * existence filter for title sort/search, so the same list reported one more
+ * draft sorted by date than sorted by title.
+ */
+describe("My Drafts count is the same in every sort mode", () => {
+  it("ignores version rows whose document is gone", async () => {
+    const nodeId = await createDoc("Ghost Doc", "# g\n\nabout to vanish");
+    await createDoc("Real Doc A", "# a\n\nstays");
+    await createDoc("Real Doc B", "# b\n\nstays");
+
+    // Delete the file behind one draft, leaving its rows — exactly what an
+    // out-of-band delete does.
+    const { engineCache } = await import("../src/nodes/engine.js");
+    const { storage } = await engineCache.get(nestId);
+    await storage.deleteDocument(nodeId);
+
+    const byDate = await jsonRequest(app, "GET", "/me/drafts", undefined, editor.apiKey);
+    const byTitle = await jsonRequest(app, "GET", "/me/drafts?sort=title", undefined, editor.apiKey);
+
+    expect(byDate.data.pagination.total).toBe(byTitle.data.pagination.total);
+    // And the count matches what is actually listed — no ghost row inflating it.
+    expect(byDate.data.pagination.total).toBe(byDate.data.drafts.length);
+    expect(byDate.data.drafts.map((d: any) => d.node_id)).not.toContain(nodeId);
+  });
+});
