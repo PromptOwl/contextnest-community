@@ -3065,6 +3065,21 @@ export function DocumentEditor({
                 }
               }
           }
+          onDiscard={
+            // Same gate as revert — throwing the draft away rewrites the
+            // document, so it is the author's call, not a reviewer's.
+            !canEditContent
+              ? undefined
+              : async () => {
+                try {
+                  const { version } = await api.discardDraft(nestId, nodeId);
+                  toast.success(`Draft discarded — back to version ${version}`);
+                  await Promise.all([loadNode(), loadVersions()]);
+                } catch (e: any) {
+                  toast.error(e?.message || "Discard failed");
+                }
+              }
+          }
         />
       )}
 
